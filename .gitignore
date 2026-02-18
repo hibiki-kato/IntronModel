@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Model checkpoints
+.pt
+
+# Data
+data/
+
+# Dropbox
+.dropboxignore
+
+# vscode
+.vscode/
+
+# copilot
+copilot-instructions.md
+
+# MacOS
+.DS_Store
+# Windows
+Thumbs.db
