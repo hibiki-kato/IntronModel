@@ -6,6 +6,17 @@ from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
+PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
+    "Athal": (10.0, 39.0, 48.0, 80.0),
+    "Dmel": (40.0, 48.0, 40.0, 50.0),
+    "Mmus": (5.0, 16.0, 35.0, 45.0),
+}
+
+LEGEND_FONT_SIZE = 14
+AXIS_TICK_FONT_SIZE = 16
+AXIS_LABEL_FONT_SIZE = 18
+TITLE_FONT_SIZE = 20
+
 
 def load_class_dict(class_file: str) -> Dict[str, str]:
     class_dict: Dict[str, str] = {}
@@ -19,9 +30,9 @@ def load_class_dict(class_file: str) -> Dict[str, str]:
 def evaluate_score_file(
     class_file: str,
     score_file: str,
-    good: int = 15169,
-    total: int = 38235,
-    ref: int = 32288,
+    good: int,
+    total: int,
+    ref: int,
 ) -> List[str]:
     class_dict = load_class_dict(class_file)
 
@@ -51,7 +62,7 @@ def evaluate_score_file(
             current_total = 1
         sn = int(current_good / ref * 10000) / 100
         pr = int(current_good / current_total * 10000) / 100
-        f1 = 1 / (1 / sn + 1 / pr)
+        f1 = 0.0 if (sn + pr) == 0.0 else 2.0 * (sn * pr) / (sn + pr)
         output_lines.append(f"{tr} {score} {cl} {sn} {pr} {f1}")
 
     return output_lines
@@ -75,7 +86,9 @@ def resolve_eval_output_file(
     inferred_species = species or infer_species_from_path(score_file)
     base = os.path.splitext(os.path.basename(score_file))[0]
     out_dir = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "data", inferred_species, "eval_score")
+        os.path.join(
+            os.path.dirname(__file__), "..", "data", inferred_species, "eval_score"
+        )
     )
     os.makedirs(out_dir, exist_ok=True)
     return os.path.join(out_dir, f"{base}.txt")
@@ -91,18 +104,39 @@ def resolve_plot_output(species: str, output_png: Optional[str]) -> str:
     if output_png:
         return output_png
     return os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "data", species, "precision_sensitivity.png")
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "data",
+            species,
+            "precision_sensitivity.png",
+        )
     )
+
+
+def resolve_plot_bounds(
+    species: str,
+    x_min: Optional[float],
+    x_max: Optional[float],
+    y_min: Optional[float],
+    y_max: Optional[float],
+) -> tuple[float, float, float, float]:
+    default_bounds = PLOT_BOUNDS_BY_SPECIES.get(species, (40.0, 50.0, 40.0, 50.0))
+    resolved_x_min = default_bounds[0] if x_min is None else x_min
+    resolved_x_max = default_bounds[1] if x_max is None else x_max
+    resolved_y_min = default_bounds[2] if y_min is None else y_min
+    resolved_y_max = default_bounds[3] if y_max is None else y_max
+    return resolved_x_min, resolved_x_max, resolved_y_min, resolved_y_max
 
 
 def plot_eval_scores(
     species: str,
     output_png: Optional[str] = None,
     interactive: bool = False,
-    x_min: float = 40.0,
-    x_max: float = 50.0,
-    y_min: float = 40.0,
-    y_max: float = 50.0,
+    x_min: Optional[float] = None,
+    x_max: Optional[float] = None,
+    y_min: Optional[float] = None,
+    y_max: Optional[float] = None,
 ):
     eval_dir = resolve_eval_dir(species)
     if not os.path.isdir(eval_dir):
@@ -130,13 +164,28 @@ def plot_eval_scores(
             label=file[:-4],
         )
 
-    ax.set_xlabel("Sensitivity")
-    ax.set_ylabel("Precision")
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_title(species)
+    (
+        x_min_resolved,
+        x_max_resolved,
+        y_min_resolved,
+        y_max_resolved,
+    ) = resolve_plot_bounds(
+        species=species,
+        x_min=x_min,
+        x_max=x_max,
+        y_min=y_min,
+        y_max=y_max,
+    )
+
+    ax.set_xlabel("Sensitivity", fontsize=AXIS_LABEL_FONT_SIZE)
+    ax.set_ylabel("Precision", fontsize=AXIS_LABEL_FONT_SIZE)
+    ax.set_xlim(x_min_resolved, x_max_resolved)
+    ax.set_ylim(y_min_resolved, y_max_resolved)
+    ax.set_title(species, fontsize=TITLE_FONT_SIZE)
+    ax.tick_params(axis="both", labelsize=AXIS_TICK_FONT_SIZE)
     ax.set_aspect("equal")
-    ax.legend(markerscale=4)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(markerscale=7, fontsize=LEGEND_FONT_SIZE, loc="lower left")
 
     final_output = resolve_plot_output(species, output_png)
     out_dir = os.path.dirname(final_output)
@@ -196,11 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    eval_parser = subparsers.add_parser("eval", help="Evaluate one score TSV into eval_score txt")
+    eval_parser = subparsers.add_parser(
+        "eval", help="Evaluate one score TSV into eval_score txt"
+    )
     eval_parser.add_argument("class_file", help="Path to class file")
     eval_parser.add_argument("score_file", help="Path to score file")
     eval_parser.add_argument("--output_file", default=None, help="Path to output txt")
-    eval_parser.add_argument("--species", default=None, help="Species override for default output path")
+    eval_parser.add_argument(
+        "--species", default=None, help="Species override for default output path"
+    )
     eval_parser.add_argument("--good", type=int, default=15169)
     eval_parser.add_argument("--total", type=int, default=38235)
     eval_parser.add_argument("--ref", type=int, default=32288)
@@ -215,13 +268,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output PNG path when --visualize is true/interactive",
     )
-    eval_parser.add_argument("--x_min", type=float, default=40.0)
-    eval_parser.add_argument("--x_max", type=float, default=50.0)
-    eval_parser.add_argument("--y_min", type=float, default=40.0)
-    eval_parser.add_argument("--y_max", type=float, default=50.0)
+    eval_parser.add_argument("--x_min", type=float, default=None)
+    eval_parser.add_argument("--x_max", type=float, default=None)
+    eval_parser.add_argument("--y_min", type=float, default=None)
+    eval_parser.add_argument("--y_max", type=float, default=None)
     eval_parser.set_defaults(func=run_eval_command)
 
-    plot_parser = subparsers.add_parser("plot", help="Plot all eval_score txt files for a species")
+    plot_parser = subparsers.add_parser(
+        "plot", help="Plot all eval_score txt files for a species"
+    )
     plot_parser.add_argument(
         "species",
         nargs="?",
@@ -238,10 +293,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show the plot interactively instead of saving only",
     )
-    plot_parser.add_argument("--x_min", type=float, default=40.0)
-    plot_parser.add_argument("--x_max", type=float, default=50.0)
-    plot_parser.add_argument("--y_min", type=float, default=40.0)
-    plot_parser.add_argument("--y_max", type=float, default=50.0)
+    plot_parser.add_argument("--x_min", type=float, default=None)
+    plot_parser.add_argument("--x_max", type=float, default=None)
+    plot_parser.add_argument("--y_min", type=float, default=None)
+    plot_parser.add_argument("--y_max", type=float, default=None)
     plot_parser.set_defaults(func=run_plot_command)
 
     return parser
@@ -252,7 +307,9 @@ def build_legacy_eval_parser() -> argparse.ArgumentParser:
     parser.add_argument("class_file", help="Path to class file")
     parser.add_argument("score_file", help="Path to score file")
     parser.add_argument("--output_file", help="Path to output file", default=None)
-    parser.add_argument("--species", default=None, help="Species override for default output path")
+    parser.add_argument(
+        "--species", default=None, help="Species override for default output path"
+    )
     parser.add_argument("--good", type=int, default=15169)
     parser.add_argument("--total", type=int, default=38235)
     parser.add_argument("--ref", type=int, default=32288)
@@ -267,10 +324,10 @@ def build_legacy_eval_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output PNG path when --visualize is true/interactive",
     )
-    parser.add_argument("--x_min", type=float, default=40.0)
-    parser.add_argument("--x_max", type=float, default=50.0)
-    parser.add_argument("--y_min", type=float, default=40.0)
-    parser.add_argument("--y_max", type=float, default=50.0)
+    parser.add_argument("--x_min", type=float, default=None)
+    parser.add_argument("--x_max", type=float, default=None)
+    parser.add_argument("--y_min", type=float, default=None)
+    parser.add_argument("--y_max", type=float, default=None)
     return parser
 
 

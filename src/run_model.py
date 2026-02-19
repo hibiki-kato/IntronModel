@@ -1,0 +1,666 @@
+"""Unified pipeline CLI for training, inference, transcript scoring, and eval.
+
+This script is the single public executable for model workflows.
+It dispatches to the selected model module and runs the default pipeline:
+train -> infer -> transcript -> eval.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from typing import Mapping, Optional, Sequence
+
+from models.registry import available_models, load_model_module
+from util.data_proc import (
+    NAME_FIELD_CHOICES,
+    NAME_FIELD_LABELS,
+    default_site_output_path,
+    default_transcript_output_path,
+    infer_default_train_paths,
+    parse_name_fields,
+    project_root,
+    resolve_effective_window_lengths,
+    species_data_dirs,
+)
+from util.transcript_eval import (
+    INTRON_SCORE_OP_CHOICES,
+    TRANSCRIPT_SCORE_AGG_CHOICES,
+    aggregate_transcript_scores,
+    read_site_scores,
+    write_site_scores,
+    write_transcript_scores,
+)
+
+try:
+    from util.losses import LOSS_NAME_CHOICES
+except ModuleNotFoundError:  # pragma: no cover
+    LOSS_NAME_CHOICES = ("bce", "weighted_bce", "focal", "asymmetric_focal")
+
+
+CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "species",
+        "device",
+        "name_fields",
+        "train_pos_path",
+        "train_neg_path",
+        "test_tsv",
+        "site_score_tsv",
+        "site_output_tsv",
+        "transcript_output_tsv",
+        "metrics_json",
+        "class_file",
+        "eval_output_txt",
+        "skip_train",
+        "train_only",
+        "intron_score_op",
+        "transcript_score_agg",
+        "softmin_tau",
+        "good",
+        "total",
+        "ref",
+        "gffcompare_counts_file",
+        "visualize",
+        "output_png",
+        "x_min",
+        "x_max",
+        "y_min",
+        "y_max",
+        "donor_checkpoint_path",
+        "acceptor_checkpoint_path",
+    }
+)
+
+
+def _add_shared_common_args(parser: argparse.ArgumentParser) -> None:
+    """Register model-agnostic arguments."""
+    parser.add_argument("--model", choices=available_models(), default="cnn")
+    parser.add_argument("--species", default="Dmel")
+    parser.add_argument("--donor_len", type=int, default=None)
+    parser.add_argument("--acceptor_len", type=int, default=None)
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "mps", "cpu"],
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1337,
+        help="Global random seed for reproducible training and inference.",
+    )
+    parser.add_argument(
+        "--name_fields",
+        default="bp_avg",
+        help=(
+            "Comma-separated fields used for output filename naming. "
+            f"Supported: {', '.join(NAME_FIELD_CHOICES)}, none."
+        ),
+    )
+
+
+def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
+    """Register pipeline arguments shared across all stages."""
+    parser.add_argument("--train_pos_path", default=None)
+    parser.add_argument("--train_neg_path", default=None)
+    parser.add_argument("--test_tsv", default=None)
+    parser.add_argument("--site_score_tsv", default=None)
+    parser.add_argument("--site_output_tsv", default=None)
+    parser.add_argument("--transcript_output_tsv", default=None)
+    parser.add_argument("--metrics_json", default=None)
+    parser.add_argument("--class_file", default=None)
+    parser.add_argument("--eval_output_txt", default=None)
+    parser.add_argument(
+        "--skip_train",
+        "--skip-training",
+        action="store_true",
+        help="Skip training and use existing checkpoints.",
+    )
+    parser.add_argument(
+        "--train_only",
+        "--train-only",
+        action="store_true",
+        help=(
+            "Run only the training stage and write train summary JSON. "
+            "Inference, transcript aggregation, and eval are skipped."
+        ),
+    )
+    parser.add_argument(
+        "--intron_score_op",
+        choices=list(INTRON_SCORE_OP_CHOICES),
+        default="+",
+        help="How to combine donor and acceptor scores into intron score.",
+    )
+    parser.add_argument(
+        "--transcript_score_agg",
+        choices=list(TRANSCRIPT_SCORE_AGG_CHOICES),
+        default="min",
+        help="How to aggregate intron scores into transcript score.",
+    )
+    parser.add_argument(
+        "--softmin_tau",
+        type=float,
+        default=1.0,
+        help=(
+            "Temperature used when --transcript_score_agg is "
+            "softmin or softmin_wavg."
+        ),
+    )
+    parser.add_argument(
+        "--gffcompare_counts_file",
+        default=None,
+        help=(
+            "Path to a count file containing good/total/ref for eval. "
+            "If omitted, auto-detect from data/<species>/raw."
+        ),
+    )
+    parser.add_argument(
+        "--visualize",
+        choices=["none", "true", "interactive"],
+        default="none",
+        help="Evaluation plot mode: none, true (save), interactive (save + show).",
+    )
+    parser.add_argument("--output_png", default=None)
+    parser.add_argument("--x_min", type=float, default=40.0)
+    parser.add_argument("--x_max", type=float, default=50.0)
+    parser.add_argument("--y_min", type=float, default=40.0)
+    parser.add_argument("--y_max", type=float, default=50.0)
+
+
+def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add CNN train args without importing torch-dependent modules."""
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lightweight", action="store_true")
+    parser.add_argument("--conv_channels", type=str, default=None)
+    parser.add_argument("--kernel_size", type=int, default=7)
+    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--fc_hidden", type=int, default=128)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--eta_min_ratio", type=float, default=0.01)
+    parser.add_argument("--val_frac", type=float, default=0.1)
+    parser.add_argument("--grad_clip", type=float, default=5.0)
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--loss",
+        choices=list(LOSS_NAME_CHOICES),
+        default="weighted_bce",
+        help="Training loss type for donor/acceptor models.",
+    )
+    parser.add_argument(
+        "--pos_weight_cap",
+        type=float,
+        default=20.0,
+        help="Upper bound of positive-class weight for weighted_bce.",
+    )
+    parser.add_argument(
+        "--focal_gamma",
+        type=float,
+        default=2.0,
+        help="Gamma parameter used when --loss focal is selected.",
+    )
+    parser.add_argument(
+        "--focal_alpha_pos",
+        type=float,
+        default=None,
+        help=(
+            "Positive-class alpha for focal loss (0 < alpha < 1). "
+            "If omitted, it is inferred from class imbalance."
+        ),
+    )
+    parser.add_argument(
+        "--asym_gamma_pos",
+        type=float,
+        default=0.0,
+        help="Positive-class gamma for --loss asymmetric_focal.",
+    )
+    parser.add_argument(
+        "--asym_gamma_neg",
+        type=float,
+        default=4.0,
+        help="Negative-class gamma for --loss asymmetric_focal.",
+    )
+    parser.add_argument(
+        "--asym_alpha_pos",
+        type=float,
+        default=None,
+        help=(
+            "Positive-class alpha for --loss asymmetric_focal "
+            "(0 < alpha < 1). If omitted, inferred from class imbalance."
+        ),
+    )
+    parser.add_argument("--tag", default=None)
+
+
+def _add_cnn_fallback_infer_args(parser: argparse.ArgumentParser) -> None:
+    """Add CNN infer args without importing torch-dependent modules."""
+    parser.add_argument("--batch_size", type=int, default=512)
+
+
+def _build_parser(
+    selected_model: str,
+    skip_model_import_error: bool = False,
+) -> argparse.ArgumentParser:
+    """Build parser and inject model-specific arguments."""
+    parser = argparse.ArgumentParser(
+        description="Unified model pipeline runner for splice-site workflows.",
+        conflict_handler="resolve",
+    )
+    _add_shared_common_args(parser)
+    _add_pipeline_args(parser)
+
+    model_module = None
+    try:
+        model_module = load_model_module(selected_model)
+    except (RuntimeError, ModuleNotFoundError, ImportError):
+        if not skip_model_import_error:
+            raise
+
+    if model_module is not None:
+        model_module.add_train_args(parser)
+        model_module.add_infer_args(parser)
+    elif selected_model == "cnn":
+        _add_cnn_fallback_train_args(parser)
+        _add_cnn_fallback_infer_args(parser)
+
+    return parser
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse CLI args with model-aware two-phase parsing."""
+    is_help_mode = any(token in {"-h", "--help"} for token in argv)
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--model", default="cnn", choices=available_models())
+    probed, _ = probe.parse_known_args(argv)
+    parser = _build_parser(
+        selected_model=probed.model,
+        skip_model_import_error=is_help_mode,
+    )
+    return parser.parse_args(argv)
+
+
+def _infer_window_defaults(
+    species: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Infer effective donor/acceptor lengths for naming and preprocessing."""
+    inferred_train_len: Optional[int] = None
+    if donor_len is None or acceptor_len is None:
+        dirs = species_data_dirs(species)
+        try:
+            _, _, inferred_train_len = infer_default_train_paths(
+                train_dir=dirs["train"],
+                donor_len=donor_len,
+                acceptor_len=acceptor_len,
+            )
+        except ValueError:
+            inferred_train_len = None
+
+    resolved_donor_len, resolved_acceptor_len = resolve_effective_window_lengths(
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        inferred_train_len=inferred_train_len,
+    )
+    return resolved_donor_len, resolved_acceptor_len, inferred_train_len
+
+
+def _format_name_value(value: object) -> str:
+    """Format and sanitize one filename token value."""
+    if isinstance(value, float):
+        text = f"{value:g}"
+    else:
+        text = str(value)
+    text = text.replace("+", "plus")
+    text = text.replace("*", "x")
+    text = text.replace("-", "m")
+    text = text.replace(".", "p")
+    return re.sub(r"[^A-Za-z0-9_]", "", text)
+
+
+def _build_checkpoint_stem_from_params(
+    model_name: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    inferred_train_len: Optional[int],
+    raw_params: Mapping[str, object],
+) -> str:
+    """Build checkpoint stem from model-relevant runtime parameters."""
+    donor_len_eff = donor_len
+    acceptor_len_eff = acceptor_len
+    if donor_len_eff is None and inferred_train_len is not None:
+        donor_len_eff = inferred_train_len
+    if acceptor_len_eff is None and inferred_train_len is not None:
+        acceptor_len_eff = inferred_train_len
+
+    pieces: list[str] = []
+    if donor_len_eff is not None:
+        pieces.append(f"dlen{_format_name_value(donor_len_eff)}")
+    if acceptor_len_eff is not None:
+        pieces.append(f"alen{_format_name_value(acceptor_len_eff)}")
+
+    params = dict(raw_params)
+    for key in sorted(params):
+        if key in CHECKPOINT_NAME_EXCLUDED_FIELDS:
+            continue
+        if key in {"donor_len", "acceptor_len"}:
+            continue
+        value = params[key]
+        if value is None:
+            continue
+        label = NAME_FIELD_LABELS.get(key, key)
+        pieces.append(f"{label}{_format_name_value(value)}")
+
+    if not pieces:
+        return model_name
+    return f"{model_name}_{'_'.join(pieces)}"
+
+
+def _build_checkpoint_paths(species: str, stem: str) -> dict[str, str]:
+    """Build strict donor/acceptor checkpoint paths."""
+    root = project_root()
+    donor_path = os.path.join(root, "model", species, "donor", f"{stem}.pt")
+    acceptor_path = os.path.join(root, "model", species, "acceptor", f"{stem}.pt")
+    return {"donor": donor_path, "acceptor": acceptor_path}
+
+
+def _assert_checkpoint_paths_exist(paths: dict[str, str]) -> None:
+    """Assert donor/acceptor checkpoint files exist."""
+    for task, path in paths.items():
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{task.capitalize()} checkpoint not found: {path}")
+
+
+def _resolve_pipeline_paths(
+    args: argparse.Namespace,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    inferred_train_len: Optional[int],
+) -> tuple[str, str, str, str, str]:
+    """Resolve default paths for pipeline artifacts."""
+    dirs = species_data_dirs(args.species)
+    name_fields = parse_name_fields(args.name_fields)
+    name_params = dict(vars(args))
+
+    test_tsv = args.test_tsv or os.path.join(dirs["raw"], "transcripts.tsv")
+    class_file = args.class_file or os.path.join(dirs["raw"], "transcript_class.txt")
+    site_output_tsv = args.site_output_tsv or default_site_output_path(
+        species=args.species,
+        model_name=args.model,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        fallback_train_len=inferred_train_len,
+        name_fields=name_fields,
+        name_params=name_params,
+    )
+    transcript_output_tsv = (
+        args.transcript_output_tsv
+        or default_transcript_output_path(
+            species=args.species,
+            model_name=args.model,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+            fallback_train_len=inferred_train_len,
+            name_fields=name_fields,
+            name_params=name_params,
+        )
+    )
+
+    if args.eval_output_txt:
+        eval_output_txt = args.eval_output_txt
+    else:
+        base = os.path.splitext(os.path.basename(transcript_output_tsv))[0]
+        eval_output_txt = os.path.join(dirs["eval_score"], f"{base}.txt")
+
+    return (
+        test_tsv,
+        class_file,
+        site_output_tsv,
+        transcript_output_tsv,
+        eval_output_txt,
+    )
+
+
+def _resolve_gffcompare_counts_file(
+    species: str,
+    configured_path: Optional[str],
+) -> str:
+    """Resolve gffcompare count file path for evaluation.
+
+    Parameters
+    ----------
+    species : str
+        Species folder name under ``data``.
+    configured_path : str | None
+        Optional explicit path provided by CLI.
+
+    Returns
+    -------
+    str
+        Resolved existing path to a count file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no candidate count file exists.
+    """
+
+    if configured_path not in (None, "", "None"):
+        if os.path.exists(configured_path):
+            return configured_path
+        raise FileNotFoundError(
+            f"gffcompare counts file not found: {configured_path}"
+        )
+
+    raw_dir = species_data_dirs(species)["raw"]
+    candidates: tuple[str, ...] = (
+        os.path.join(raw_dir, "gffcompare_compare"),
+        os.path.join(raw_dir, "gffcompare_compare.txt"),
+        os.path.join(raw_dir, "gffcompare_counts.txt"),
+    )
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    raise FileNotFoundError(
+        "gffcompare counts file not found. "
+        f"Checked: {', '.join(candidates)}. "
+        "Run run/gffcompare_counts.sh first."
+    )
+
+
+def _load_eval_counts(counts_file: str) -> tuple[int, int, int]:
+    """Load good/total/ref counts from a key-value file.
+
+    Parameters
+    ----------
+    counts_file : str
+        Input file path. Each non-comment line must be ``<key><ws><value>``.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        Parsed ``(good, total, ref)``.
+
+    Raises
+    ------
+    ValueError
+        If required keys are missing, duplicated, or invalid.
+    """
+
+    values: dict[str, int] = {}
+    required_keys: tuple[str, str, str] = ("good", "total", "ref")
+    required_key_set: frozenset[str] = frozenset(required_keys)
+
+    with open(counts_file, "r") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split()
+            if len(fields) != 2:
+                raise ValueError(
+                    f"Invalid format in {counts_file}:{line_no}: {raw_line.rstrip()}"
+                )
+            key, value_text = fields
+            if key not in required_key_set:
+                continue
+            if key in values:
+                raise ValueError(
+                    f"Duplicate key '{key}' in {counts_file}:{line_no}"
+                )
+            try:
+                value = int(value_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid integer for '{key}' in {counts_file}:{line_no}"
+                ) from exc
+            if value <= 0:
+                raise ValueError(
+                    f"'{key}' must be > 0 in {counts_file}:{line_no}"
+                )
+            values[key] = value
+
+    missing = [key for key in required_keys if key not in values]
+    if missing:
+        raise ValueError(
+            f"Missing keys in {counts_file}: {', '.join(missing)}"
+        )
+
+    return values["good"], values["total"], values["ref"]
+
+
+def run_pipeline(args: argparse.Namespace) -> None:
+    """Run the model pipeline with optional stage skipping."""
+    from evaluate_scores import evaluate_score_file, plot_eval_scores
+
+    model_module = load_model_module(args.model)
+    donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
+        species=args.species,
+        donor_len=args.donor_len,
+        acceptor_len=args.acceptor_len,
+    )
+
+    checkpoint_stem = _build_checkpoint_stem_from_params(
+        model_name=args.model,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        inferred_train_len=inferred_train_len,
+        raw_params=dict(vars(args)),
+    )
+    checkpoint_paths = _build_checkpoint_paths(args.species, checkpoint_stem)
+
+    args.donor_checkpoint_path = checkpoint_paths["donor"]
+    args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
+
+    (
+        args.test_tsv,
+        class_file,
+        site_output_tsv,
+        transcript_output_tsv,
+        eval_output_txt,
+    ) = _resolve_pipeline_paths(
+        args=args,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        inferred_train_len=inferred_train_len,
+    )
+
+    if args.skip_train:
+        print("[pipeline] Skip training (--skip_train).")
+    else:
+        summary = model_module.train(common_args=args, model_args=args)
+        metrics_json = args.metrics_json
+        if metrics_json is None:
+            dirs = species_data_dirs(args.species)
+            os.makedirs(dirs["site_score"], exist_ok=True)
+            metrics_json = os.path.join(
+                dirs["site_score"],
+                f"{checkpoint_stem}.train.json",
+            )
+
+        with open(metrics_json, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Saved training summary: {metrics_json}")
+        print(f"Donor checkpoint: {summary['donor']['checkpoint']}")
+        print(f"Acceptor checkpoint: {summary['acceptor']['checkpoint']}")
+
+    if args.train_only:
+        if args.skip_train:
+            _assert_checkpoint_paths_exist(checkpoint_paths)
+            print("[pipeline] --train_only with --skip_train: checkpoints verified.")
+        print("[pipeline] --train_only requested. Stop after training stage.")
+        return
+
+    if args.site_score_tsv:
+        site_score_tsv = args.site_score_tsv
+        site_rows = read_site_scores(site_score_tsv)
+        print(f"[pipeline] Skip infer (use --site_score_tsv): {site_score_tsv}")
+    else:
+        _assert_checkpoint_paths_exist(checkpoint_paths)
+        site_rows = model_module.infer_site(common_args=args, model_args=args)
+        write_site_scores(site_output_tsv, site_rows)
+        site_score_tsv = site_output_tsv
+        print(f"Saved site scores: {site_output_tsv}")
+
+    transcript_rows = aggregate_transcript_scores(
+        site_score_rows=site_rows,
+        intron_score_op=args.intron_score_op,
+        transcript_score_agg=args.transcript_score_agg,
+        softmin_tau=args.softmin_tau,
+    )
+    write_transcript_scores(transcript_output_tsv, transcript_rows)
+    print(f"Saved transcript scores: {transcript_output_tsv}")
+    print(f"Total transcripts: {len(transcript_rows)}")
+
+    counts_file = _resolve_gffcompare_counts_file(
+        species=args.species,
+        configured_path=args.gffcompare_counts_file,
+    )
+    good, total, ref = _load_eval_counts(counts_file)
+    print(
+        "[pipeline] Evaluation counts loaded from "
+        f"{counts_file}: good={good} total={total} ref={ref}"
+    )
+
+    output_lines = evaluate_score_file(
+        class_file=class_file,
+        score_file=transcript_output_tsv,
+        good=good,
+        total=total,
+        ref=ref,
+    )
+    eval_out_dir = os.path.dirname(eval_output_txt)
+    if eval_out_dir:
+        os.makedirs(eval_out_dir, exist_ok=True)
+    with open(eval_output_txt, "w") as f:
+        f.write("\n".join(output_lines) + "\n")
+    print(f"Evaluation scores saved to {eval_output_txt}")
+
+    if args.visualize != "none":
+        plot_eval_scores(
+            species=args.species,
+            output_png=args.output_png,
+            interactive=(args.visualize == "interactive"),
+            x_min=args.x_min,
+            x_max=args.x_max,
+            y_min=args.y_min,
+            y_max=args.y_max,
+        )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """CLI main entrypoint."""
+    actual_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parse_args(actual_argv)
+    run_pipeline(args)
+
+
+if __name__ == "__main__":
+    main()

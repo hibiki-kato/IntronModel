@@ -1,0 +1,43 @@
+{
+  "connected_model_files": [
+    "cnn"
+  ],
+  "discovered_model_files": [
+    "bert",
+    "bert_drosophila",
+    "cnn",
+    "cnn_v2",
+    "reservoir"
+  ],
+  "generated_at_utc": "2026-02-19T21:16:50.488848+00:00",
+  "notes": [
+    "Unconnected model files are treated as legacy/experimental and are kept intentionally."
+  ],
+  "readme_option_mismatches": [],
+  "readme_run_scripts": [
+    "run/cnn.sh",
+    "run/eval_trans_score.sh",
+    "run/gffcompare_counts.sh",
+    "run/make_test_data.sh",
+    "run/plot_eval.sh"
+  ],
+  "registry_models": {
+    "cnn": "models.cnn"
+  },
+  "run_scripts_mentioned_but_missing": [],
+  "run_scripts_missing_from_readme": [],
+  "run_scripts_on_disk": [
+    "run/cnn.sh",
+    "run/eval_trans_score.sh",
+    "run/gffcompare_counts.sh",
+    "run/make_test_data.sh",
+    "run/plot_eval.sh"
+  ],
+  "script_default_mismatches": [],
+  "unconnected_model_files": [
+    "bert",
+    "bert_drosophila",
+    "cnn_v2",
+    "reservoir"
+  ]
+}

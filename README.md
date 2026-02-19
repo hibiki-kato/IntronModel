@@ -1,50 +1,192 @@
-Repository layout and usage
+# IntronModel
 
-Top-level directories (current):
+Splice-site modeling and transcript scoring with a unified pipeline CLI.
 
-- `src/`: training and scoring Python scripts (ML code)
-- `model/dirosophila/`: saved model files organized per-role (`acceptor`, `donar`) and per-model subdirs with `best.pt`
-- `data/Dmel/`: dataset area. Subfolders:
-	- `raw/` : raw genome / GTF files
-	- `train/` : processed training inputs
-	- `trans_score/` : transcript-level score files (flat names include window length, e.g. `cnn30bp.tsv`)
-- `evaluate/`: evaluation scripts and `evaluate/data/` for eval-only data (e.g. `transcript_class.txt`, `eval_score/`)
+## Status
 
-Design decisions
+- Supported pipeline model: `cnn`
+- Unified entrypoint: `src/run_model.py`
+- Legacy experimental modules are kept under `src/models/` but are **not**
+  connected to the unified CLI:
+  - `src/models/bert.py`
+  - `src/models/bert_drosophila.py`
+  - `src/models/cnn_v2.py`
+  - `src/models/reservoir.py`
 
-- Keep a single repository but separate concerns: `src/` for ML code, `evaluate/` for analysis/plots. Common data kept under `data/`.
-- Score files are flattened and named with the window length (e.g. `trans_score/cnn30bp.tsv`) rather than nested 30bp/50bp folders.
-- Models are provided per role and per architecture as `model/dirosophila/<role>/<arch>/best.pt` (symlinks created where needed).
+## Repository Layout
 
-Quick run examples
-
-Run CNN training + scoring (auto device selection):
-
-```bash
-# Train + score (writes transcript scores to data/Dmel/trans_score/...)
-uv run python3 src/cnn_splice_scoring.py
+```text
+.
+├── docs/
+│   ├── README.md
+│   ├── data-policy.md
+│   ├── legacy-model-status.md
+│   ├── model-integration-contract.md
+│   ├── repo-structure.md
+│   └── reports/
+├── run/
+│   ├── cnn.sh
+│   ├── eval_trans_score.sh
+│   ├── gffcompare_counts.sh
+│   ├── make_test_data.sh
+│   └── plot_eval.sh
+├── scripts/
+│   ├── fetch_reference_data.sh
+│   └── prepare_species_data.sh
+├── src/
+│   ├── evaluate_scores.py
+│   ├── gffcompare_counts.py
+│   ├── run_model.py
+│   ├── models/
+│   │   ├── registry.py
+│   │   ├── cnn.py
+│   │   └── <legacy models>
+│   └── util/
+└── tools/
+    └── scan_obsolete.py
 ```
 
-Score only (use existing model dirs):
+## Unified Pipeline CLI
+
+`src/run_model.py` executes a fixed pipeline in order:
+
+1. train
+2. infer (site-level scoring)
+3. transcript (transcript-level aggregation)
+4. eval (SN/PR/F1 output and optional plot)
+
+Automatic skipping:
+
+- `--skip_train` skips training.
+- `--site_score_tsv <path>` skips infer and consumes an external site score TSV.
+- `--train_only` runs only training and stops before infer/transcript/eval.
+
+### Main Usage
 
 ```bash
-uv run python3 src/cnn_splice_scoring.py --skip_training --donor_model_dir model/dirosophila/donar/cnn --acceptor_model_dir model/dirosophila/acceptor/cnn
+python3 src/run_model.py \
+  --model cnn \
+  --species Dmel \
+  --donor_len 100 \
+  --acceptor_len 100 \
+  --loss focal \
+  --name_fields bp_avg,loss
 ```
 
-Run evaluation scripts (in `evaluate/src`):
+### Inference-like Usage (skip training)
 
 ```bash
-uv run python3 evaluate/src/visualize.py
+python3 src/run_model.py \
+  --model cnn \
+  --species Dmel \
+  --donor_len 100 \
+  --acceptor_len 100 \
+  --loss focal \
+  --name_fields bp_avg,loss \
+  --skip_train
 ```
 
-Notes & troubleshooting
+### Training-only Usage (donor/acceptor model tuning)
 
-- If a script expects `best.pt` inside a model directory, use the per-model directory layout above, or pass the exact checkpoint path via the CLI.
-- Use `uv run` to run scripts inside the project's virtual environment (provides `torch`).
-- If you change data layout, update defaults in `src/*` or pass explicit CLI paths.
+```bash
+python3 src/run_model.py \
+  --model cnn \
+  --species Dmel \
+  --donor_len 100 \
+  --acceptor_len 100 \
+  --loss focal \
+  --epochs 5 \
+  --train_only
+```
 
-If you want, I can:
-- create small compatibility helpers (symlinks) for old `outputs/` paths, or
-- update all scripts to accept either a model checkpoint file or a model directory.
+### Use Precomputed Site Scores (skip infer)
 
+```bash
+python3 src/run_model.py \
+  --model cnn \
+  --species Dmel \
+  --site_score_tsv data/Dmel/site_score/cnn100bp_lossfocal.tsv \
+  --skip_train
+```
 
+## Transcript Aggregation Options
+
+`--intron_score_op`:
+
+- `+`
+- `*`
+- `harmonic`
+- `min`
+
+`--transcript_score_agg`:
+
+- `min`
+- `softmin`
+- `softmin_wavg`
+- `+`
+- `*`
+- `mean`
+- `avg` (alias of `mean`)
+- `median`
+- `max`
+
+`--softmin_tau` is used by `softmin` and `softmin_wavg` and must be positive.
+
+## Wrapper Scripts
+
+All wrappers are maintained but kept thin and aligned to the unified CLI.
+
+```bash
+bash run/cnn.sh --help
+bash run/gffcompare_counts.sh --help
+bash run/make_test_data.sh --help
+bash run/eval_trans_score.sh --help
+bash run/plot_eval.sh --help
+```
+
+`run/cnn.sh` now supports:
+
+```bash
+bash run/cnn.sh --site-score-tsv data/Dmel/site_score/cnn100bp_lossfocal.tsv
+```
+
+## Data Policy
+
+Large data and generated artifacts are externalized from Git tracking.
+
+- `data/` is ignored.
+- Reproducibility depends on scripts and documented procedures.
+- See `docs/data-policy.md` for details.
+
+## Environment
+
+This project targets Python 3.12+.
+
+Suggested packages:
+
+- `torch`
+- `numpy`
+- `matplotlib`
+- `pytest`
+
+For test dependencies:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+## Tests
+
+```bash
+python3 -m pytest -q
+```
+
+## Documentation Index
+
+- `docs/README.md`
+- `docs/repo-structure.md`
+- `docs/model-integration-contract.md`
+- `docs/legacy-model-status.md`
+- `docs/data-policy.md`
+- `docs/history-rewrite-playbook.md`
+- `docs/reports/repo_scan_2026-02-19.md`

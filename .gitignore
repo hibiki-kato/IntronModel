@@ -5,15 +5,16 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache
 
 # Virtual environments
 .venv
 
 # Model checkpoints
-.pt
+*.pt
 
-# Data
-data/
+# Externalized runtime data (raw/train/site_score/trans_score/eval_score)
+data
 
 # Dropbox
 .dropboxignore

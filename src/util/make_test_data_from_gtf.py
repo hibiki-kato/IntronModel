@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Generate transcript splice-site test data from genome FASTA and GTF.
+
+This script extracts donor/acceptor-centered sequence windows for introns and
+writes a transcript-level TSV suitable for downstream model scoring.
+"""
+
 import argparse
 import sys
 from dataclasses import dataclass
@@ -92,13 +98,11 @@ def main():
     ap.add_argument("--gtf", required=True, help="Annotations GTF")
     ap.add_argument("--out_tsv", required=True, help="Output TSV for model scoring")
 
-    # Defaults match your training data (inferred from your .pwm.err):
-    # donor: 15bp, GT starts at index ~3 => left=3, right=12
-    # acceptor: 30bp, AG starts at index ~25 => left=27, right=3
+    # Defaults match training data layout:
+    # donor boundary offset: left=3
+    # acceptor boundary offset: right=3
     ap.add_argument("--donor_len", type=int, default=15)
-    ap.add_argument("--donor_left", type=int, default=3)
     ap.add_argument("--acceptor_len", type=int, default=30)
-    ap.add_argument("--acceptor_right", type=int, default=3)
 
     ap.add_argument("--feature", default="exon", help="Which GTF feature to use (default: exon)")
     ap.add_argument("--limit", type=int, default=0, help="Optional: limit number of rows written (0 = no limit)")
@@ -106,8 +110,16 @@ def main():
     args = ap.parse_args()
 
     # Derived
-    donor_right = args.donor_len - args.donor_left
-    acceptor_left = args.acceptor_len - args.acceptor_right
+    donor_boundary_offset = 3
+    acceptor_boundary_offset = 3
+    if args.donor_len < donor_boundary_offset:
+        raise ValueError("--donor_len must be >= 3 for fixed donor boundary offset.")
+    if args.acceptor_len < acceptor_boundary_offset:
+        raise ValueError(
+            "--acceptor_len must be >= 3 for fixed acceptor boundary offset."
+        )
+    donor_right = args.donor_len - donor_boundary_offset
+    acceptor_left = args.acceptor_len - acceptor_boundary_offset
 
     # Index FASTA for random access (creates an index file alongside FASTA)
     genome = SeqIO.index(args.fasta, "fasta")
@@ -182,9 +194,13 @@ def main():
                 exon_start = dn.start             # first exonic base of downstream exon
 
                 # donor window around intron_start
-                d_start, d_end = donor_coords_plus(intron_start, args.donor_left, donor_right)
+                d_start, d_end = donor_coords_plus(
+                    intron_start, donor_boundary_offset, donor_right
+                )
                 # acceptor window around exon_start
-                a_start, a_end = acceptor_coords_plus(exon_start, acceptor_left, args.acceptor_right)
+                a_start, a_end = acceptor_coords_plus(
+                    exon_start, acceptor_left, acceptor_boundary_offset
+                )
 
                 # bounds check
                 chr_len = len(genome[chrom].seq)
@@ -204,8 +220,12 @@ def main():
                 # downstream exon in transcript is lower coords; transcript "starts exon" at dn.end
                 exon_start = dn.end
 
-                d_start, d_end = coords_minus(intron_start, args.donor_left, donor_right)
-                a_start, a_end = coords_minus(exon_start, acceptor_left, args.acceptor_right)
+                d_start, d_end = coords_minus(
+                    intron_start, donor_boundary_offset, donor_right
+                )
+                a_start, a_end = coords_minus(
+                    exon_start, acceptor_left, acceptor_boundary_offset
+                )
 
                 chr_len = len(genome[chrom].seq)
                 if d_start < 1 or d_end > chr_len or a_start < 1 or a_end > chr_len:

@@ -1,0 +1,279 @@
+"""Shared transcript-level aggregation utilities.
+
+This module converts site-level donor/acceptor scores into transcript-level
+summary scores and provides read/write helpers for score TSV files.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from collections import defaultdict
+from statistics import median
+from typing import Dict, Iterable, List, Sequence
+
+INTRON_SCORE_OP_CHOICES: tuple[str, ...] = ("+", "*", "harmonic", "min")
+TRANSCRIPT_SCORE_AGG_CHOICES: tuple[str, ...] = (
+    "min",
+    "softmin",
+    "softmin_wavg",
+    "+",
+    "*",
+    "mean",
+    "avg",
+    "median",
+    "max",
+)
+
+
+def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
+    """Combine donor/acceptor site scores into one intron score."""
+    if op == "+":
+        return donor_score + acceptor_score
+    if op == "*":
+        return donor_score * acceptor_score
+    if op == "harmonic":
+        denom = donor_score + acceptor_score
+        if denom == 0.0:
+            return 0.0
+        return 2.0 * donor_score * acceptor_score / denom
+    if op == "min":
+        return float(min(donor_score, acceptor_score))
+    raise ValueError(f"Unsupported intron score operation: {op}")
+
+
+def _softmin_exponential_sum(scores: Sequence[float], tau: float) -> float:
+    """Return soft minimum score as sum of negative-temperature exponentials.
+
+    Parameters
+    ----------
+    scores : Sequence[float]
+        Intron score sequence.
+    tau : float
+        Positive temperature. Smaller values approach hard minimum.
+
+    Returns
+    -------
+    float
+        Softmin exponential sum:
+        ``sum_i exp(-scores_i / tau)``.
+
+    Raises
+    ------
+    ValueError
+        If ``tau`` is not positive.
+    """
+    if tau <= 0.0:
+        raise ValueError(f"softmin_tau must be positive, got: {tau}")
+
+    min_score = min(scores)
+    # Shift by min score for numerical stability:
+    # exp(-x/tau) = exp(-min/tau) * exp(-(x-min)/tau)
+    shifted_sum = math.fsum(
+        math.exp(-(score - min_score) / tau) for score in scores
+    )
+    log_total = (-min_score / tau) + math.log(shifted_sum)
+    try:
+        return float(math.exp(log_total))
+    except OverflowError:
+        return math.inf
+
+
+def _softmin_weighted_average(scores: Sequence[float], tau: float) -> float:
+    """Return softmin-weighted average: ``sum_i w_i * scores_i``."""
+    if tau <= 0.0:
+        raise ValueError(f"softmin_tau must be positive, got: {tau}")
+
+    min_score = min(scores)
+    weights = [math.exp(-(score - min_score) / tau) for score in scores]
+    weight_sum = math.fsum(weights)
+    if weight_sum == 0.0:
+        raise ValueError("Numerical underflow while computing softmin weights")
+    weighted_sum = math.fsum(weight * score for weight, score in zip(weights, scores))
+    return float(weighted_sum / weight_sum)
+
+
+def _aggregate_transcript_score(
+    scores: Sequence[float],
+    agg: str,
+    softmin_tau: float = 1.0,
+) -> float:
+    """Aggregate intron scores into a transcript score."""
+    if not scores:
+        raise ValueError("scores must not be empty")
+    if softmin_tau <= 0.0:
+        raise ValueError(f"softmin_tau must be positive, got: {softmin_tau}")
+
+    if agg == "min":
+        return float(min(scores))
+    if agg == "softmin":
+        return _softmin_exponential_sum(scores=scores, tau=softmin_tau)
+    if agg == "softmin_wavg":
+        return _softmin_weighted_average(scores=scores, tau=softmin_tau)
+    if agg == "+":
+        return float(sum(scores))
+    if agg == "*":
+        # Stable product: sum logs of absolute values, then exponentiate.
+        # Keep sign information to support negative inputs robustly.
+        if any(score == 0.0 for score in scores):
+            return 0.0
+        negative_count = sum(1 for score in scores if score < 0.0)
+        log_sum = math.fsum(math.log(abs(score)) for score in scores)
+        magnitude = math.exp(log_sum)
+        sign = -1.0 if (negative_count % 2 == 1) else 1.0
+        return float(sign * magnitude)
+    if agg in {"mean", "avg"}:
+        return float(sum(scores) / len(scores))
+    if agg == "median":
+        return float(median(scores))
+    if agg == "max":
+        return float(max(scores))
+    raise ValueError(f"Unsupported transcript score aggregation: {agg}")
+
+
+def aggregate_transcript_scores(
+    site_score_rows: Iterable[Dict[str, object]],
+    intron_score_op: str = "+",
+    transcript_score_agg: str = "min",
+    softmin_tau: float = 1.0,
+) -> List[Dict[str, object]]:
+    """Aggregate site-level scores into transcript-level rows.
+
+    Parameters
+    ----------
+    site_score_rows : Iterable[dict[str, object]]
+        Input row format:
+        ``transcript_id``, ``intron_index``, ``site_type`` (donor/acceptor), ``score``.
+    intron_score_op : str, default="+"
+        Intron score operation. Supported: ``+``, ``*``, ``harmonic``, ``min``.
+    transcript_score_agg : str, default="min"
+        Transcript aggregation over intron scores.
+        Supported: ``min``, ``softmin``, ``softmin_wavg``, ``+``, ``*``,
+        ``mean``, ``avg``, ``median``, ``max``.
+    softmin_tau : float, default=1.0
+        Temperature for ``softmin`` and ``softmin_wavg``. Must be positive.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Transcript-level rows. For compatibility, output schema stays:
+        ``transcript_id``, ``min_intron_index``, ``Score_donor``,
+        ``Score_acceptor``, ``min_donor_plus_acceptor``.
+    """
+    if intron_score_op not in INTRON_SCORE_OP_CHOICES:
+        raise ValueError(
+            "Unsupported intron score operation: "
+            f"{intron_score_op}. Supported: {INTRON_SCORE_OP_CHOICES}"
+        )
+    if transcript_score_agg not in TRANSCRIPT_SCORE_AGG_CHOICES:
+        raise ValueError(
+            "Unsupported transcript score aggregation: "
+            f"{transcript_score_agg}. Supported: {TRANSCRIPT_SCORE_AGG_CHOICES}"
+        )
+    if softmin_tau <= 0.0:
+        raise ValueError(f"softmin_tau must be positive, got: {softmin_tau}")
+
+    transcript_introns: dict[str, dict[int, dict[str, float]]] = defaultdict(
+        lambda: defaultdict(dict)
+    )
+
+    for row in site_score_rows:
+        tid = str(row["transcript_id"])
+        iidx = int(row["intron_index"])
+        stype = str(row["site_type"])
+        score = float(row["score"])
+        transcript_introns[tid][iidx][stype] = score
+
+    results: List[Dict[str, object]] = []
+    for tid, introns in transcript_introns.items():
+        intron_scores: dict[int, tuple[float, float, float]] = {}
+        for iidx, per_site in introns.items():
+            donor_score = float(per_site.get("donor", 0.0))
+            acceptor_score = float(per_site.get("acceptor", 0.0))
+            intron_score = _combine_intron_score(
+                donor_score=donor_score,
+                acceptor_score=acceptor_score,
+                op=intron_score_op,
+            )
+            intron_scores[iidx] = (donor_score, acceptor_score, intron_score)
+
+        if not intron_scores:
+            continue
+
+        min_iidx = min(intron_scores.keys(), key=lambda idx: intron_scores[idx][2])
+        donor_score, acceptor_score, _ = intron_scores[min_iidx]
+        transcript_score = _aggregate_transcript_score(
+            scores=[v[2] for v in intron_scores.values()],
+            agg=transcript_score_agg,
+            softmin_tau=softmin_tau,
+        )
+        results.append(
+            {
+                "transcript_id": tid,
+                "min_intron_index": min_iidx,
+                "Score_donor": donor_score,
+                "Score_acceptor": acceptor_score,
+                "min_donor_plus_acceptor": transcript_score,
+            }
+        )
+
+    results.sort(key=lambda x: str(x["transcript_id"]))
+    return results
+
+
+def aggregate_min_intron_scores(
+    site_score_rows: Iterable[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Backward-compatible alias of transcript aggregation defaults."""
+    return aggregate_transcript_scores(
+        site_score_rows=site_score_rows,
+        intron_score_op="+",
+        transcript_score_agg="min",
+    )
+
+
+def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
+    outdir = os.path.dirname(output_tsv)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+
+    with open(output_tsv, "w") as f:
+        f.write(
+            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\tmin_donor_plus_acceptor\n"
+        )
+        for r in rows:
+            f.write(
+                f"{r['transcript_id']}\t{r['min_intron_index']}\t{float(r['Score_donor']):.6f}\t{float(r['Score_acceptor']):.6f}\t{float(r['min_donor_plus_acceptor']):.6f}\n"
+            )
+
+
+def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
+    outdir = os.path.dirname(output_tsv)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+
+    with open(output_tsv, "w") as f:
+        f.write("transcript_id\tintron_index\tsite_type\tscore\n")
+        for r in rows:
+            f.write(
+                f"{r['transcript_id']}\t{r['intron_index']}\t{r['site_type']}\t{float(r['score']):.6f}\n"
+            )
+
+
+def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    with open(site_score_tsv, "r") as f:
+        _ = next(f, None)
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 4:
+                continue
+            rows.append(
+                {
+                    "transcript_id": parts[0],
+                    "intron_index": int(parts[1]),
+                    "site_type": parts[2],
+                    "score": float(parts[3]),
+                }
+            )
+    return rows
