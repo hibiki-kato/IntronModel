@@ -11,6 +11,7 @@ PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
     "Dmel": (40.0, 48.0, 40.0, 50.0),
     "Mmus": (5.0, 16.0, 35.0, 45.0),
 }
+FALLBACK_PLOT_BOUNDS: tuple[float, float, float, float] = (40.0, 50.0, 40.0, 50.0)
 
 LEGEND_FONT_SIZE = 14
 AXIS_TICK_FONT_SIZE = 16
@@ -109,7 +110,7 @@ def resolve_plot_output(species: str, output_png: Optional[str]) -> str:
             "..",
             "data",
             species,
-            "precision_sensitivity.png",
+            f"{species}_snpr.png",
         )
     )
 
@@ -121,7 +122,22 @@ def resolve_plot_bounds(
     y_min: Optional[float],
     y_max: Optional[float],
 ) -> tuple[float, float, float, float]:
-    default_bounds = PLOT_BOUNDS_BY_SPECIES.get(species, (40.0, 50.0, 40.0, 50.0))
+    default_bounds = PLOT_BOUNDS_BY_SPECIES.get(species)
+    if default_bounds is None:
+        missing_all_bounds = (
+            x_min is None
+            and x_max is None
+            and y_min is None
+            and y_max is None
+        )
+        if missing_all_bounds:
+            supported = ", ".join(sorted(PLOT_BOUNDS_BY_SPECIES))
+            raise ValueError(
+                f"Unknown species '{species}' for default plot bounds. "
+                f"Supported species: {supported}. "
+                "Specify --x_min/--x_max/--y_min/--y_max explicitly."
+            )
+        default_bounds = FALLBACK_PLOT_BOUNDS
     resolved_x_min = default_bounds[0] if x_min is None else x_min
     resolved_x_max = default_bounds[1] if x_max is None else x_max
     resolved_y_min = default_bounds[2] if y_min is None else y_min
@@ -175,6 +191,12 @@ def plot_eval_scores(
         x_max=x_max,
         y_min=y_min,
         y_max=y_max,
+    )
+    print(
+        "[plot_eval] bounds: "
+        f"species={species} "
+        f"x=({x_min_resolved}, {x_max_resolved}) "
+        f"y=({y_min_resolved}, {y_max_resolved})"
     )
 
     ax.set_xlabel("Sensitivity", fontsize=AXIS_LABEL_FONT_SIZE)
@@ -286,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     plot_parser.add_argument(
         "--output_png",
         default=None,
-        help="Output PNG path (default: data/{species}/precision_sensitivity.png)",
+        help="Output PNG path (default: data/{species}/{species}_snpr.png)",
     )
     plot_parser.add_argument(
         "--interactive",

@@ -29,7 +29,8 @@ Splice-site modeling and transcript scoring with a unified pipeline CLI.
 │   ├── eval_trans_score.sh
 │   ├── gffcompare_counts.sh
 │   ├── make_test_data.sh
-│   └── plot_eval.sh
+│   ├── plot_eval.sh
+│   └── tune_cnn.sh
 ├── scripts/
 │   ├── fetch_reference_data.sh
 │   └── prepare_species_data.sh
@@ -43,6 +44,7 @@ Splice-site modeling and transcript scoring with a unified pipeline CLI.
 │   │   └── <legacy models>
 │   └── util/
 └── tools/
+    ├── hparam_search.py
     └── scan_obsolete.py
 ```
 
@@ -134,20 +136,32 @@ python3 src/run_model.py \
 
 ## Wrapper Scripts
 
-All wrappers are maintained but kept thin and aligned to the unified CLI.
+All wrappers are maintained and aligned to the unified CLI.
+
+`run/cnn.sh` and `run/tune_cnn.sh` are config-only scripts.
+Edit the `CONFIG` block in each script, then run without arguments:
 
 ```bash
-bash run/cnn.sh --help
+bash run/cnn.sh
+bash run/tune_cnn.sh
+```
+
+`run/tune_cnn.sh` executes two-phase random search:
+
+1. quick phase (short epochs)
+2. full phase (top-k re-train)
+
+Outputs are written under:
+
+`data/<species>/tuning/cnn/<timestamp>/`
+
+The following wrappers keep CLI help:
+
+```bash
 bash run/gffcompare_counts.sh --help
 bash run/make_test_data.sh --help
 bash run/eval_trans_score.sh --help
 bash run/plot_eval.sh --help
-```
-
-`run/cnn.sh` now supports:
-
-```bash
-bash run/cnn.sh --site-score-tsv data/Dmel/site_score/cnn100bp_lossfocal.tsv
 ```
 
 ## Data Policy

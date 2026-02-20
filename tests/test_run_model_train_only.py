@@ -103,3 +103,50 @@ def test_run_pipeline_train_only_skips_infer_and_eval(
     assert float(summary["donor"]["best_score"]) == pytest.approx(0.91)
     assert summary["acceptor"]["best_metric"] == "pr_auc"
     assert float(summary["acceptor"]["best_score"]) == pytest.approx(0.89)
+
+
+def test_plot_range_defaults_are_none_for_species_specific_bounds() -> None:
+    parser = run_model._build_parser(
+        selected_model="cnn",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn",
+            "--species",
+            "Mmus",
+        ]
+    )
+    assert args.x_min is None
+    assert args.x_max is None
+    assert args.y_min is None
+    assert args.y_max is None
+
+
+def test_run_pipeline_rejects_single_task_without_train_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = run_model._build_parser(
+        selected_model="cnn",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn",
+            "--species",
+            "Dmel",
+            "--train_target",
+            "donor",
+        ]
+    )
+
+    def _load_dummy_model_module(model_name: str) -> _DummyModelModule:
+        assert model_name == "cnn"
+        return _DummyModelModule()
+
+    monkeypatch.setattr(run_model, "load_model_module", _load_dummy_model_module)
+
+    with pytest.raises(ValueError, match="requires --train_only"):
+        run_model.run_pipeline(args)

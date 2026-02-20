@@ -5,8 +5,10 @@ Any model connected to `src/run_model.py` must be registered in
 
 - `add_train_args(parser: argparse.ArgumentParser) -> None`
 - `add_infer_args(parser: argparse.ArgumentParser) -> None`
-- `train(common_args: argparse.Namespace, model_args: argparse.Namespace) -> dict[str, object]`
-- `infer_site(common_args: argparse.Namespace, model_args: argparse.Namespace) -> list[dict[str, object]]`
+- `train(common_args: argparse.Namespace, model_args: argparse.Namespace) ->`
+  `dict[str, object]`
+- `infer_site(common_args: argparse.Namespace, model_args: argparse.Namespace) ->`
+  `list[dict[str, object]]`
 
 ## Required `infer_site` Output Rows
 
@@ -16,6 +18,17 @@ Each row must contain:
 - `intron_index`: `int`
 - `site_type`: `str` (`donor` or `acceptor`)
 - `score`: `float`
+
+## Recommended `train` Summary Keys
+
+For donor/acceptor tuning workflows, include task-level keys in
+`train(...)->dict[str, object]` summaries:
+
+- `best_pr_auc`: `float | None`
+- `best_roc_auc`: `float | None`
+- `best_acc_at_0_5`: `float | None`
+- `best_metric`: `str`
+- `best_score`: `float`
 
 ## Pipeline Compatibility Rules
 

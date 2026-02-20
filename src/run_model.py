@@ -8,6 +8,7 @@ train -> infer -> transcript -> eval.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "model",
         "species",
         "device",
+        "perf_mode",
         "name_fields",
         "train_pos_path",
         "train_neg_path",
@@ -58,6 +60,21 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "eval_output_txt",
         "skip_train",
         "train_only",
+        "use_amp",
+        "amp_dtype",
+        "allow_tf32",
+        "cudnn_benchmark",
+        "deterministic",
+        "num_workers",
+        "prefetch_factor",
+        "persistent_workers",
+        "pin_memory",
+        "compile",
+        "compile_mode",
+        "min_batch_size",
+        "max_oom_retries",
+        "gpu_id",
+        "quick_phase",
         "intron_score_op",
         "transcript_score_agg",
         "softmin_tau",
@@ -75,6 +92,9 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "acceptor_checkpoint_path",
     }
 )
+
+MAX_CHECKPOINT_STEM_LENGTH: int = 200
+CHECKPOINT_STEM_HASH_CHARS: int = 12
 
 
 def _add_shared_common_args(parser: argparse.ArgumentParser) -> None:
@@ -166,15 +186,20 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
         help="Evaluation plot mode: none, true (save), interactive (save + show).",
     )
     parser.add_argument("--output_png", default=None)
-    parser.add_argument("--x_min", type=float, default=40.0)
-    parser.add_argument("--x_max", type=float, default=50.0)
-    parser.add_argument("--y_min", type=float, default=40.0)
-    parser.add_argument("--y_max", type=float, default=50.0)
+    parser.add_argument("--x_min", type=float, default=None)
+    parser.add_argument("--x_max", type=float, default=None)
+    parser.add_argument("--y_min", type=float, default=None)
+    parser.add_argument("--y_max", type=float, default=None)
 
 
 def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     """Add CNN train args without importing torch-dependent modules."""
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--train_target",
+        choices=["both", "donor", "acceptor"],
+        default="both",
+    )
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--lightweight", action="store_true")
@@ -186,7 +211,104 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--eta_min_ratio", type=float, default=0.01)
     parser.add_argument("--val_frac", type=float, default=0.1)
     parser.add_argument("--grad_clip", type=float, default=5.0)
+    parser.add_argument("--donor_batch_size", type=int, default=None)
+    parser.add_argument("--acceptor_batch_size", type=int, default=None)
+    parser.add_argument("--donor_lr", type=float, default=None)
+    parser.add_argument("--acceptor_lr", type=float, default=None)
+    parser.add_argument("--donor_conv_channels", type=str, default=None)
+    parser.add_argument("--acceptor_conv_channels", type=str, default=None)
+    parser.add_argument("--donor_kernel_size", type=int, default=None)
+    parser.add_argument("--acceptor_kernel_size", type=int, default=None)
+    parser.add_argument("--donor_dropout", type=float, default=None)
+    parser.add_argument("--acceptor_dropout", type=float, default=None)
+    parser.add_argument("--donor_fc_hidden", type=int, default=None)
+    parser.add_argument("--acceptor_fc_hidden", type=int, default=None)
+    parser.add_argument("--donor_weight_decay", type=float, default=None)
+    parser.add_argument("--acceptor_weight_decay", type=float, default=None)
+    parser.add_argument("--donor_eta_min_ratio", type=float, default=None)
+    parser.add_argument("--acceptor_eta_min_ratio", type=float, default=None)
+    parser.add_argument("--donor_val_frac", type=float, default=None)
+    parser.add_argument("--acceptor_val_frac", type=float, default=None)
+    parser.add_argument("--donor_grad_clip", type=float, default=None)
+    parser.add_argument("--acceptor_grad_clip", type=float, default=None)
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--compile_mode",
+        choices=["off", "on", "auto"],
+        default="auto",
+        help="Compilation mode for torch.compile.",
+    )
+    parser.add_argument(
+        "--use_amp",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable CUDA automatic mixed precision when set to 1.",
+    )
+    parser.add_argument(
+        "--amp_dtype",
+        choices=["auto", "bf16", "fp16"],
+        default="auto",
+        help="AMP dtype for CUDA autocast.",
+    )
+    parser.add_argument(
+        "--allow_tf32",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Allow TF32 on CUDA matmul and cuDNN when set to 1.",
+    )
+    parser.add_argument(
+        "--cudnn_benchmark",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable cuDNN benchmark autotuning when set to 1.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable deterministic algorithms when set to 1.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        default="auto",
+        help="DataLoader worker count. Use integer or auto.",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=4,
+        help="DataLoader prefetch factor (effective when num_workers > 0).",
+    )
+    parser.add_argument(
+        "--persistent_workers",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable DataLoader persistent workers when set to 1.",
+    )
+    parser.add_argument(
+        "--pin_memory",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable DataLoader pin_memory when set to 1.",
+    )
+    parser.add_argument(
+        "--min_batch_size",
+        type=int,
+        default=64,
+        help="Minimum batch size for CUDA OOM backoff retries.",
+    )
+    parser.add_argument(
+        "--max_oom_retries",
+        type=int,
+        default=8,
+        help="Maximum retries when reducing batch size after CUDA OOM.",
+    )
     parser.add_argument(
         "--loss",
         choices=list(LOSS_NAME_CHOICES),
@@ -194,17 +316,31 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
         help="Training loss type for donor/acceptor models.",
     )
     parser.add_argument(
+        "--donor_loss",
+        choices=list(LOSS_NAME_CHOICES),
+        default=None,
+    )
+    parser.add_argument(
+        "--acceptor_loss",
+        choices=list(LOSS_NAME_CHOICES),
+        default=None,
+    )
+    parser.add_argument(
         "--pos_weight_cap",
         type=float,
         default=20.0,
         help="Upper bound of positive-class weight for weighted_bce.",
     )
+    parser.add_argument("--donor_pos_weight_cap", type=float, default=None)
+    parser.add_argument("--acceptor_pos_weight_cap", type=float, default=None)
     parser.add_argument(
         "--focal_gamma",
         type=float,
         default=2.0,
         help="Gamma parameter used when --loss focal is selected.",
     )
+    parser.add_argument("--donor_focal_gamma", type=float, default=None)
+    parser.add_argument("--acceptor_focal_gamma", type=float, default=None)
     parser.add_argument(
         "--focal_alpha_pos",
         type=float,
@@ -214,18 +350,24 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
             "If omitted, it is inferred from class imbalance."
         ),
     )
+    parser.add_argument("--donor_focal_alpha_pos", type=float, default=None)
+    parser.add_argument("--acceptor_focal_alpha_pos", type=float, default=None)
     parser.add_argument(
         "--asym_gamma_pos",
         type=float,
         default=0.0,
         help="Positive-class gamma for --loss asymmetric_focal.",
     )
+    parser.add_argument("--donor_asym_gamma_pos", type=float, default=None)
+    parser.add_argument("--acceptor_asym_gamma_pos", type=float, default=None)
     parser.add_argument(
         "--asym_gamma_neg",
         type=float,
         default=4.0,
         help="Negative-class gamma for --loss asymmetric_focal.",
     )
+    parser.add_argument("--donor_asym_gamma_neg", type=float, default=None)
+    parser.add_argument("--acceptor_asym_gamma_neg", type=float, default=None)
     parser.add_argument(
         "--asym_alpha_pos",
         type=float,
@@ -235,6 +377,8 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
             "(0 < alpha < 1). If omitted, inferred from class imbalance."
         ),
     )
+    parser.add_argument("--donor_asym_alpha_pos", type=float, default=None)
+    parser.add_argument("--acceptor_asym_alpha_pos", type=float, default=None)
     parser.add_argument("--tag", default=None)
 
 
@@ -354,12 +498,27 @@ def _build_checkpoint_stem_from_params(
         value = params[key]
         if value is None:
             continue
+        if key == "train_target" and str(value) == "both":
+            continue
         label = NAME_FIELD_LABELS.get(key, key)
         pieces.append(f"{label}{_format_name_value(value)}")
 
     if not pieces:
         return model_name
-    return f"{model_name}_{'_'.join(pieces)}"
+
+    stem = f"{model_name}_{'_'.join(pieces)}"
+    if len(stem) <= MAX_CHECKPOINT_STEM_LENGTH:
+        return stem
+
+    digest = hashlib.sha1(stem.encode("utf-8")).hexdigest()[
+        :CHECKPOINT_STEM_HASH_CHARS
+    ]
+    suffix = f"_h{digest}"
+    max_prefix_len = MAX_CHECKPOINT_STEM_LENGTH - len(suffix)
+    if max_prefix_len <= 0:
+        return f"h{digest}"
+    trimmed_prefix = stem[:max_prefix_len].rstrip("_")
+    return f"{trimmed_prefix}{suffix}"
 
 
 def _build_checkpoint_paths(species: str, stem: str) -> dict[str, str]:
@@ -370,9 +529,18 @@ def _build_checkpoint_paths(species: str, stem: str) -> dict[str, str]:
     return {"donor": donor_path, "acceptor": acceptor_path}
 
 
-def _assert_checkpoint_paths_exist(paths: dict[str, str]) -> None:
-    """Assert donor/acceptor checkpoint files exist."""
-    for task, path in paths.items():
+def _assert_checkpoint_paths_exist(
+    paths: dict[str, str],
+    required_tasks: Optional[Sequence[str]] = None,
+) -> None:
+    """Assert checkpoint files exist for required tasks."""
+    task_names = tuple(required_tasks) if required_tasks is not None else tuple(
+        paths.keys()
+    )
+    for task in task_names:
+        if task not in paths:
+            raise ValueError(f"Unknown checkpoint task requested: {task}")
+        path = paths[task]
         if not os.path.exists(path):
             raise FileNotFoundError(f"{task.capitalize()} checkpoint not found: {path}")
 
@@ -541,6 +709,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
     from evaluate_scores import evaluate_score_file, plot_eval_scores
 
     model_module = load_model_module(args.model)
+    train_target = str(getattr(args, "train_target", "both")).strip().lower()
+    if train_target not in {"both", "donor", "acceptor"}:
+        raise ValueError("--train_target must be one of: both, donor, acceptor.")
+    if not args.train_only and train_target != "both":
+        raise ValueError(
+            "--train_target donor/acceptor requires --train_only. "
+            "Inference and transcript scoring require both checkpoints."
+        )
     donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
         species=args.species,
         donor_len=args.donor_len,
@@ -588,12 +764,24 @@ def run_pipeline(args: argparse.Namespace) -> None:
         with open(metrics_json, "w") as f:
             json.dump(summary, f, indent=2)
         print(f"Saved training summary: {metrics_json}")
-        print(f"Donor checkpoint: {summary['donor']['checkpoint']}")
-        print(f"Acceptor checkpoint: {summary['acceptor']['checkpoint']}")
+        donor_summary = summary.get("donor")
+        acceptor_summary = summary.get("acceptor")
+        if isinstance(donor_summary, dict) and "checkpoint" in donor_summary:
+            print(f"Donor checkpoint: {donor_summary['checkpoint']}")
+        if isinstance(acceptor_summary, dict) and "checkpoint" in acceptor_summary:
+            print(f"Acceptor checkpoint: {acceptor_summary['checkpoint']}")
 
     if args.train_only:
         if args.skip_train:
-            _assert_checkpoint_paths_exist(checkpoint_paths)
+            required_tasks = (
+                ("donor", "acceptor")
+                if train_target == "both"
+                else (train_target,)
+            )
+            _assert_checkpoint_paths_exist(
+                checkpoint_paths,
+                required_tasks=required_tasks,
+            )
             print("[pipeline] --train_only with --skip_train: checkpoints verified.")
         print("[pipeline] --train_only requested. Stop after training stage.")
         return
@@ -644,6 +832,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     print(f"Evaluation scores saved to {eval_output_txt}")
 
     if args.visualize != "none":
+        print(
+            "[pipeline] Plot request: "
+            f"species={args.species} "
+            f"x=({args.x_min}, {args.x_max}) "
+            f"y=({args.y_min}, {args.y_max})"
+        )
         plot_eval_scores(
             species=args.species,
             output_png=args.output_png,

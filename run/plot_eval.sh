@@ -7,7 +7,7 @@ Usage: bash run/plot_eval.sh [options]
 
 Options:
   --species <name>      Species folder under data/ (default: Dmel)
-  --output-png <path>   Output PNG path (default: data/<species>/precision_sensitivity.png)
+  --output-png <path>   Output PNG path (default: data/<species>/<species>_snpr.png)
   --interactive         Show plot interactively
   --x-min <float>       X-axis minimum (species default if omitted)
   --x-max <float>       X-axis maximum (species default if omitted)
@@ -36,7 +36,7 @@ conda activate intronmodel
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-SPECIES="Dmel"
+SPECIES="Athal"
 OUTPUT_PNG=""
 INTERACTIVE="0"
 X_MIN=""
@@ -106,6 +106,12 @@ Mmus)
 	DEFAULT_Y_MAX="45.0"
 	;;
 *)
+	if [[ -z "${X_MIN}" || -z "${X_MAX}" || -z "${Y_MIN}" || -z "${Y_MAX}" ]]; then
+		echo "[plot_eval.sh] Unknown species '${SPECIES}'." >&2
+		echo "[plot_eval.sh] Use one of: Athal, Dmel, Mmus; or provide all of" >&2
+		echo "[plot_eval.sh] --x-min --x-max --y-min --y-max explicitly." >&2
+		exit 1
+	fi
 	DEFAULT_X_MIN="40.0"
 	DEFAULT_X_MAX="50.0"
 	DEFAULT_Y_MIN="40.0"
