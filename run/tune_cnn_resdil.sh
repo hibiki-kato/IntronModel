@@ -291,15 +291,15 @@ PY
 # --------------------------
 # CONFIG (edit here)
 # --------------------------
-SPECIES="Mmus"
+SPECIES="Athal"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
 
 QUICK_TRIALS="8"
 QUICK_EPOCHS="3"
-TOP_K="5"
-FULL_EPOCHS="20"
+TOP_K="3"
+FULL_EPOCHS="10"
 TUNE_TARGETS="donor,acceptor"
 QUICK_TRIALS_MODE="fixed"
 TARGET_TIME_BUDGET_MINUTES="0"

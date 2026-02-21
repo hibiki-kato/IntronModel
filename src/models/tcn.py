@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import os
 import random
 import shutil
+import time
 from typing import (
     ContextManager,
     Dict,
@@ -154,7 +155,7 @@ def _resolve_num_workers(raw: Union[str, int], device: str) -> int:
         if device != "cuda":
             return 0
         cpu_count = os.cpu_count() or 4
-        return max(2, min(8, cpu_count // 2))
+        return max(0, cpu_count // 2)
     try:
         parsed = int(text)
     except ValueError as exc:
@@ -1092,10 +1093,23 @@ def train_task_model(
         cudnn_benchmark=cudnn_benchmark_bool,
         allow_tf32=allow_tf32_bool,
     )
+    total_started_at = time.perf_counter()
+    timing_sec: dict[str, float] = {
+        "read_examples": 0.0,
+        "split_examples": 0.0,
+        "dataset_build": 0.0,
+        "loader_build": 0.0,
+        "model_setup": 0.0,
+        "train_data_wait": 0.0,
+        "train_step": 0.0,
+        "validation": 0.0,
+        "total": 0.0,
+    }
     checkpoint_dir = os.path.dirname(checkpoint_path)
     if checkpoint_dir:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+    read_started_at = time.perf_counter()
     examples = read_examples_single_task(
         pos_path,
         neg_path,
@@ -1103,6 +1117,7 @@ def train_task_model(
         donor_len=donor_len,
         acceptor_len=acceptor_len,
     )
+    timing_sec["read_examples"] = time.perf_counter() - read_started_at
 
     n_pos = sum(y for _, y in examples)
     n_neg = len(examples) - n_pos
@@ -1111,7 +1126,9 @@ def train_task_model(
             f"Insufficient training examples for {task}: pos={n_pos}, neg={n_neg}."
         )
 
+    split_started_at = time.perf_counter()
     train_ex, val_ex = stratified_split(examples, val_frac=val_frac, seed=seed)
+    timing_sec["split_examples"] = time.perf_counter() - split_started_at
     print(
         f"[{task}] device={device} total={len(examples)} "
         f"(pos={n_pos}, neg={n_neg}) train={len(train_ex)} val={len(val_ex)}"
@@ -1119,6 +1136,7 @@ def train_task_model(
     preencode_dataset = device == "mps"
     if preencode_dataset:
         print(f"[{task}] dataset pre-encoding enabled for mps.")
+    dataset_started_at = time.perf_counter()
     train_ds = DNADataset(
         train_ex,
         window_len=window_len,
@@ -1129,6 +1147,7 @@ def train_task_model(
         window_len=window_len,
         preencode=preencode_dataset,
     )
+    timing_sec["dataset_build"] = time.perf_counter() - dataset_started_at
 
     if conv_channels is None:
         conv_channels = [64, 128] if lightweight else [64, 128, 256]
@@ -1164,6 +1183,7 @@ def train_task_model(
     while True:
         saw_training_batch = False
         compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
+        loader_started_at = time.perf_counter()
         loader_generator = torch.Generator()
         loader_generator.manual_seed(seed)
         train_loader_kwargs: dict[str, object] = {
@@ -1191,6 +1211,7 @@ def train_task_model(
             val_loader_kwargs["prefetch_factor"] = prefetch_factor
             val_loader_kwargs["persistent_workers"] = use_persistent_workers
         val_loader = DataLoader(**val_loader_kwargs)
+        timing_sec["loader_build"] += time.perf_counter() - loader_started_at
         print(
             f"[{task}] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
@@ -1198,6 +1219,7 @@ def train_task_model(
         )
 
         try:
+            model_setup_started_at = time.perf_counter()
             model = TCNSpliceCNN(
                 in_channels=4,
                 conv_channels=conv_channels,
@@ -1229,15 +1251,30 @@ def train_task_model(
                         f"({exc.__class__.__name__}). Continue without compile."
                     )
 
-            optimizer = torch.optim.AdamW(
-                model.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-            )
+            optimizer_impl = "adamw"
+            adamw_kwargs: dict[str, object] = {
+                "params": model.parameters(),
+                "lr": lr,
+                "weight_decay": weight_decay,
+            }
+            if device == "cuda":
+                try:
+                    optimizer = torch.optim.AdamW(
+                        **adamw_kwargs,
+                        fused=True,
+                    )
+                    optimizer_impl = "adamw_fused"
+                except (TypeError, RuntimeError):
+                    optimizer = torch.optim.AdamW(**adamw_kwargs)
+            else:
+                optimizer = torch.optim.AdamW(**adamw_kwargs)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=epochs,
                 eta_min=lr * eta_min_ratio,
+            )
+            timing_sec["model_setup"] += (
+                time.perf_counter() - model_setup_started_at
             )
             scaler_enabled = (
                 use_amp_bool
@@ -1265,7 +1302,14 @@ def train_task_model(
                     print(f"[{task}] epoch {epoch}/{epochs} start")
                 model.train()
                 running_loss = torch.zeros((), dtype=torch.float64)
-                for batch_idx, (x, y) in enumerate(train_loader, start=1):
+                train_iterator = iter(train_loader)
+                for batch_idx in range(1, len(train_loader) + 1):
+                    wait_started_at = time.perf_counter()
+                    x, y = next(train_iterator)
+                    timing_sec["train_data_wait"] += (
+                        time.perf_counter() - wait_started_at
+                    )
+                    step_started_at = time.perf_counter()
                     saw_training_batch = True
                     x = x.to(device, non_blocking=use_non_blocking)
                     y = y.to(device, non_blocking=use_non_blocking)
@@ -1312,10 +1356,14 @@ def train_task_model(
                         device="cpu",
                         dtype=torch.float64,
                     )
+                    timing_sec["train_step"] += (
+                        time.perf_counter() - step_started_at
+                    )
 
                 scheduler.step()
                 train_loss = float(running_loss / max(1, len(train_loader)))
 
+                val_started_at = time.perf_counter()
                 val_metrics = evaluate(
                     model=model,
                     loader=val_loader,
@@ -1323,6 +1371,7 @@ def train_task_model(
                     use_amp=use_amp_bool,
                     amp_dtype=amp_dtype_resolved,
                 )
+                timing_sec["validation"] += time.perf_counter() - val_started_at
                 pr_auc = val_metrics.get("pr_auc")
                 roc_auc = val_metrics.get("roc_auc")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
@@ -1394,12 +1443,36 @@ def train_task_model(
                 f"[{task}] done best_{best_metric_name}={best_score:.4f} "
                 f"at epoch {best_epoch}"
             )
+            timing_sec["total"] = time.perf_counter() - total_started_at
+            total_profile_sec = (
+                timing_sec["read_examples"]
+                + timing_sec["split_examples"]
+                + timing_sec["dataset_build"]
+                + timing_sec["loader_build"]
+                + timing_sec["model_setup"]
+                + timing_sec["train_data_wait"]
+                + timing_sec["train_step"]
+                + timing_sec["validation"]
+            )
+            timing_ratio: dict[str, float] = {}
+            if total_profile_sec > 0.0:
+                for key, value in timing_sec.items():
+                    if key == "total":
+                        continue
+                    timing_ratio[key] = value / total_profile_sec
+            print(
+                f"[{task}] timing total={timing_sec['total']:.3f}s "
+                f"data_wait={timing_sec['train_data_wait']:.3f}s "
+                f"train_step={timing_sec['train_step']:.3f}s "
+                f"val={timing_sec['validation']:.3f}s"
+            )
             return {
                 "task": task,
                 "num_examples": len(examples),
                 "num_pos": n_pos,
                 "num_neg": n_neg,
                 "best_metric": best_metric_name,
+                "best_epoch": best_epoch,
                 "best_score": float(best_score),
                 "best_pr_auc": best_pr_auc,
                 "best_roc_auc": best_roc_auc,
@@ -1442,6 +1515,9 @@ def train_task_model(
                 "oom_retries": oom_retries,
                 "gpu_id": gpu_id,
                 "quick_phase": quick_phase,
+                "optimizer_impl": optimizer_impl,
+                "timing_sec": timing_sec,
+                "timing_ratio": timing_ratio,
             }
         except RuntimeError as exc:
             is_compile_failure = (

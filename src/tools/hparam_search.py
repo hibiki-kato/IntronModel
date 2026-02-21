@@ -762,6 +762,43 @@ def _extract_pr_auc(summary: dict[str, object], task_name: str) -> Optional[floa
     return None
 
 
+def _extract_best_epoch(summary: dict[str, object], task_name: str) -> Optional[int]:
+    """Extract best epoch index for one task from train summary JSON."""
+    raw_task = summary.get(task_name)
+    if not isinstance(raw_task, dict):
+        return None
+    best_epoch = raw_task.get("best_epoch")
+    if isinstance(best_epoch, int) and best_epoch > 0:
+        return best_epoch
+    return None
+
+
+def _read_objective_best_epoch_from_metrics(
+    *,
+    metrics_json_path: str,
+    objective_metric: str,
+) -> Optional[int]:
+    """Read objective-aligned best epoch from one trial metrics JSON."""
+    try:
+        raw = json.loads(Path(metrics_json_path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    if objective_metric == "donor_pr_auc":
+        return _extract_best_epoch(raw, "donor")
+    if objective_metric == "acceptor_pr_auc":
+        return _extract_best_epoch(raw, "acceptor")
+    if objective_metric == "mean_pr_auc":
+        donor_epoch = _extract_best_epoch(raw, "donor")
+        acceptor_epoch = _extract_best_epoch(raw, "acceptor")
+        if donor_epoch is None or acceptor_epoch is None:
+            return None
+        return max(donor_epoch, acceptor_epoch)
+    return None
+
+
 def _iter_stream_lines(stream: object) -> Iterator[str]:
     """Yield decoded text lines from a subprocess stream."""
     if stream is None:
@@ -1843,15 +1880,31 @@ def run_search(config: SearchConfig) -> int:
     ranked_quick = rank_successful_trials(quick_rows)
 
     selected_for_full = ranked_quick[: config.top_k]
-    full_params = [dict(row.sampled_params) for row in selected_for_full]
-    full_count = len(full_params)
     full_overrides = dict(config.full_overrides)
     full_overrides.setdefault("epochs", config.full_epochs)
     full_overrides.setdefault("compile_mode", "auto")
+    full_epochs_value = _to_positive_int(full_overrides.get("epochs"))
+    filtered_for_full: list[TrialResult] = []
+    skipped_same_best_epoch = 0
+    for row in selected_for_full:
+        quick_best_epoch = _read_objective_best_epoch_from_metrics(
+            metrics_json_path=row.metrics_json,
+            objective_metric=config.objective_metric,
+        )
+        if (
+            full_epochs_value is not None
+            and quick_best_epoch is not None
+            and quick_best_epoch == full_epochs_value
+        ):
+            skipped_same_best_epoch += 1
+            continue
+        filtered_for_full.append(row)
+    full_params = [dict(row.sampled_params) for row in filtered_for_full]
+    full_count = len(full_params)
     print(
         f"[hparam_search] Full phase: top_k={config.top_k}, "
-        f"selected={full_count}, epochs={full_overrides.get('epochs')}, "
-        f"objective={config.objective_metric}.",
+        f"selected={full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
+        f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}.",
         flush=True,
     )
     full_rows: list[TrialResult]

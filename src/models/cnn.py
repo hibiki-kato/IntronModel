@@ -153,7 +153,7 @@ def _resolve_num_workers(raw: Union[str, int], device: str) -> int:
         if device != "cuda":
             return 0
         cpu_count = os.cpu_count() or 4
-        return max(2, min(8, cpu_count // 2))
+        return max(0, cpu_count // 2)
     try:
         parsed = int(text)
     except ValueError as exc:
@@ -1115,11 +1115,23 @@ def train_task_model(
                         f"({exc.__class__.__name__}). Continue without compile."
                     )
 
-            optimizer = torch.optim.AdamW(
-                model.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-            )
+            optimizer_impl = "adamw"
+            adamw_kwargs: dict[str, object] = {
+                "params": model.parameters(),
+                "lr": lr,
+                "weight_decay": weight_decay,
+            }
+            if device == "cuda":
+                try:
+                    optimizer = torch.optim.AdamW(
+                        **adamw_kwargs,
+                        fused=True,
+                    )
+                    optimizer_impl = "adamw_fused"
+                except (TypeError, RuntimeError):
+                    optimizer = torch.optim.AdamW(**adamw_kwargs)
+            else:
+                optimizer = torch.optim.AdamW(**adamw_kwargs)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=epochs,
@@ -1284,6 +1296,7 @@ def train_task_model(
                 "num_pos": n_pos,
                 "num_neg": n_neg,
                 "best_metric": best_metric_name,
+                "best_epoch": best_epoch,
                 "best_score": float(best_score),
                 "best_pr_auc": best_pr_auc,
                 "best_roc_auc": best_roc_auc,
@@ -1324,6 +1337,7 @@ def train_task_model(
                 "oom_retries": oom_retries,
                 "gpu_id": gpu_id,
                 "quick_phase": quick_phase,
+                "optimizer_impl": optimizer_impl,
             }
         except RuntimeError as exc:
             is_compile_failure = (

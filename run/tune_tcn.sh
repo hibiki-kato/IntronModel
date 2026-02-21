@@ -298,8 +298,8 @@ BASE_SEED="1337"
 
 QUICK_TRIALS="8"
 QUICK_EPOCHS="3"
-TOP_K="5"
-FULL_EPOCHS="20"
+TOP_K="3"
+FULL_EPOCHS="10"
 TUNE_TARGETS="donor,acceptor"
 QUICK_TRIALS_MODE="fixed"
 TARGET_TIME_BUDGET_MINUTES="0"
@@ -336,7 +336,7 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096]
+    "values": [64, 128, 256]
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-2, "scale": "log"},
@@ -352,15 +352,7 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
       "64,128,256",
       "64,128,256,512",
       "128,256,512",
-      "192,384,768,1536",
-      "128,256,512,1024",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "384,768,1536",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "384,768,1536,3072",
-      "256,512,1024,2048,3072"
+      "192,384,768"
     ]
   },
   "kernel_size": {
@@ -369,7 +361,7 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   },
   "tcn_block_repeats": {
     "type": "categorical",
-    "values": [1, 2, 3]
+    "values": [1, 2]
   },
   "tcn_causal": {
     "type": "categorical",
@@ -388,7 +380,7 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096, 8192]
+    "values": [64, 128, 256]
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
@@ -402,15 +394,7 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
       "128,256,512",
       "128,256,512,1024",
       "192,384,768",
-      "192,384,768,1536",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "256,512,1024,2048,3072",
-      "384,768,1536",
-      "384,768,1536,3072",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "768,1536,3072"
+      "256,512,1024"
     ]
   },
   "kernel_size": {
@@ -419,7 +403,7 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   },
   "tcn_block_repeats": {
     "type": "categorical",
-    "values": [1, 2, 3]
+    "values": [1, 2]
   },
   "tcn_causal": {
     "type": "categorical",
