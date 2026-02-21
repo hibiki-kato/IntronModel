@@ -4,11 +4,9 @@ Unified splice-site modeling and transcript scoring pipeline.
 
 ## Environment (Conda)
 
-Python target: 3.12+
+Python target: 3.12 (pinned)
 
-### Option A: `environment.yml` (simple)
-
-Create or update the environment from `environment.yml`:
+Create the environment from `environment.yml`:
 
 ```bash
 conda env create -f environment.yml
@@ -22,41 +20,10 @@ conda env update -f environment.yml --prune
 conda activate intronmodel
 ```
 
-### Option B: `conda-lock.yml` (reproducible)
-
-Install `conda-lock` once:
-
-```bash
-conda install -c conda-forge conda-lock
-```
-
-Install the locked environment:
-
-```bash
-conda-lock install -n intronmodel conda-lock.yml
-conda activate intronmodel
-```
-
-`conda-lock.yml` in this repository contains lock entries for:
-
-- `linux-64`
-- `osx-64`
-- `osx-arm64`
-- `win-64`
-
-If you change `environment.yml`, regenerate the lock:
-
-```bash
-bash scripts/update_conda_lock.sh
-```
-
 ### OS compatibility note
 
 `environment.yml` does **not** require the same OS, but resolution is
 platform-dependent and may fail if a dependency is unavailable on your OS.
-
-For cross-machine reproducibility, prefer `conda-lock.yml` because it pins
-packages per platform.
 
 ## Quick Start
 
@@ -79,7 +46,7 @@ bash run/cnn.sh
 Optional data preparation helper:
 
 ```bash
-bash scripts/prepare_species_data.sh \
+bash src/scripts/prepare_species_data.sh \
   --species Dmel \
   --donor-len 100 \
   --acceptor-len 100
@@ -131,7 +98,7 @@ Common wrapper controls:
 Build docs locally:
 
 ```bash
-python tools/generate_doc_figures.py
+python src/tools/generate_doc_figures.py
 python -m sphinx -b html docs docs/_build/html
 ```
 
@@ -140,8 +107,9 @@ Open `docs/_build/html/index.html`.
 ## GitHub Pages
 
 Docs are auto-deployed by `.github/workflows/docs-pages.yml` when pushing to
-`main` or `master` and files under `docs/**`, `tools/generate_doc_figures.py`,
-`environment.yml`, or the workflow itself change.
+`main` or `master` and files under `docs/**`,
+`src/tools/generate_doc_figures.py`, `environment.yml`, or the workflow itself
+change.
 
 Repository setting requirement: Pages must use **GitHub Actions** as the
 build/deploy source.
@@ -175,8 +143,8 @@ Run tests:
 pytest -q
 ```
 
-Update lock file when `environment.yml` changes:
+Update the active environment when `environment.yml` changes:
 
 ```bash
-bash scripts/update_conda_lock.sh
+conda env update -f environment.yml --prune
 ```

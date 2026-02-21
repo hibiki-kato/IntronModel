@@ -45,6 +45,7 @@ docs/_build/
 htmlcov/
 .ipynb_checkpoints/
 *.log
+conda-lock.yml
 sync.sh
 
 # rsync

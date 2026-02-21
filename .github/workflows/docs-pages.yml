@@ -36,7 +36,7 @@ jobs:
           miniconda-version: latest
           activate-environment: intronmodel
           environment-file: environment.yml
-          channels: conda-forge,pytorch
+          channels: conda-forge
           channel-priority: strict
 
       - name: Generate documentation figures
