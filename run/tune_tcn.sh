@@ -291,7 +291,7 @@ PY
 # --------------------------
 # CONFIG (edit here)
 # --------------------------
-SPECIES="Mmus"
+SPECIES="Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
