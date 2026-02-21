@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -214,6 +215,9 @@ def load_config(path: Path) -> SearchConfig:
         raise ValueError("output_dir must be a non-empty string.")
     if not isinstance(base_args, dict):
         raise ValueError("base_args must be an object.")
+    model_name = base_args.get("model")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError("base_args.model must be a non-empty string.")
 
     project_root = Path(project_root_raw).resolve()
     output_dir = Path(output_dir_raw).resolve()
@@ -271,6 +275,11 @@ def load_config(path: Path) -> SearchConfig:
     if not isinstance(full_overrides, dict):
         raise ValueError("full_overrides must be an object.")
 
+    normalized_base_args: dict[str, ArgValue] = {
+        str(key): value for key, value in base_args.items()
+    }
+    normalized_base_args["model"] = model_name.strip()
+
     return SearchConfig(
         project_root=project_root,
         species=species,
@@ -286,7 +295,7 @@ def load_config(path: Path) -> SearchConfig:
         max_oom_retries=max_oom_retries,
         objective_metric=objective_metric,
         global_best_config_path=global_best_config_path,
-        base_args={str(k): v for k, v in base_args.items()},
+        base_args=normalized_base_args,
         quick_overrides={str(k): v for k, v in quick_overrides.items()},
         full_overrides={str(k): v for k, v in full_overrides.items()},
         search_space=normalized_space,
@@ -702,12 +711,29 @@ def _is_oom_text(text: str) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
+def _is_non_retryable_oom_text(text: str) -> bool:
+    """Return whether text marks OOM as non-retryable by caller contract."""
+    lowered = text.lower()
+    markers = (
+        "non_retryable_oom",
+        "non-retryable oom",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _has_internal_oom_backoff(text: str) -> bool:
+    """Return whether training already attempted internal batch OOM backoff."""
+    lowered = text.lower()
+    marker = "retry with smaller batch size"
+    return marker in lowered
+
+
 def _build_run_model_command(
     project_root: Path,
     args: dict[str, ArgValue],
 ) -> list[str]:
     """Build command list for ``src/run_model.py`` execution."""
-    cmd = [sys.executable, str(project_root / "src" / "run_model.py")]
+    cmd = [sys.executable, "-u", str(project_root / "src" / "run_model.py")]
     for key in sorted(args):
         value = args[key]
         if value is None:
@@ -736,6 +762,49 @@ def _extract_pr_auc(summary: dict[str, object], task_name: str) -> Optional[floa
     return None
 
 
+def _iter_stream_lines(stream: object) -> Iterator[str]:
+    """Yield decoded text lines from a subprocess stream."""
+    if stream is None:
+        return
+    for raw_line in stream:
+        if isinstance(raw_line, str):
+            yield raw_line
+
+
+def _run_command_with_streaming(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    phase: str,
+    trial_id: int,
+) -> tuple[int, str]:
+    """Run a command and stream merged output while collecting it."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+
+    collected: list[str] = []
+    prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+    for line in _iter_stream_lines(proc.stdout):
+        collected.append(line)
+        stripped = line.rstrip("\n")
+        if stripped:
+            print(f"{prefix}{stripped}", flush=True)
+        else:
+            print(prefix, flush=True)
+
+    return_code = int(proc.wait())
+    return return_code, "".join(collected)
+
+
 def run_trial(
     *,
     config: SearchConfig,
@@ -753,7 +822,9 @@ def run_trial(
         merged_args[key] = value
     for key, value in overrides.items():
         merged_args[key] = value
-    merged_args["model"] = "cnn"
+    model_name = merged_args.get("model")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError("base_args.model must be a non-empty string.")
     merged_args["species"] = config.species
     merged_args["train_only"] = True
     merged_args["metrics_json"] = str(metrics_json)
@@ -783,40 +854,49 @@ def run_trial(
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(attempt_header)
 
-        run = subprocess.run(
-            cmd,
+        return_code, combined_output = _run_command_with_streaming(
+            cmd=cmd,
             cwd=config.project_root,
             env=env,
-            capture_output=True,
-            text=True,
-            check=False,
+            phase=phase,
+            trial_id=trial_id,
         )
-        return_code = int(run.returncode)
-        log_header = (
-            f"return_code={run.returncode}\n"
-        )
+        log_header = f"return_code={return_code}\n"
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(log_header)
-            handle.write("\n[stdout]\n")
-            handle.write(run.stdout)
-            handle.write("\n[stderr]\n")
-            handle.write(run.stderr)
+            handle.write("\n[combined]\n")
+            handle.write(combined_output)
             handle.write("\n")
 
-        if run.returncode == 0:
+        if return_code == 0:
             break
 
-        combined = f"{run.stdout}\n{run.stderr}"
+        is_oom = _is_oom_text(combined_output)
+        is_non_retryable_oom = _is_non_retryable_oom_text(combined_output)
+        has_internal_backoff = _has_internal_oom_backoff(combined_output)
         can_retry = (
-            _is_oom_text(combined)
+            is_oom
+            and not is_non_retryable_oom
+            and not has_internal_backoff
             and oom_retries < config.max_oom_retries
             and current_batch > config.min_batch_size
         )
         if not can_retry:
-            error_message = (
-                f"Training command failed (exit={run.returncode}). "
-                "See trial log for details."
-            )
+            if is_non_retryable_oom:
+                error_message = (
+                    f"Training failed with non-retryable OOM (exit={return_code}). "
+                    "Reduce model complexity or search-space bounds."
+                )
+            elif is_oom and has_internal_backoff:
+                error_message = (
+                    f"Training failed after internal OOM backoff (exit={return_code}). "
+                    "See trial log for details."
+                )
+            else:
+                error_message = (
+                    f"Training command failed (exit={return_code}). "
+                    "See trial log for details."
+                )
             duration_sec = time.time() - started_at
             return TrialResult(
                 phase=phase,
@@ -1103,6 +1183,159 @@ def estimate_cnn_param_complexity(
     total_params += (prev_channels * fc_hidden) + fc_hidden
     total_params += fc_hidden + 1
     return total_params
+
+
+def estimate_cnn_resdil_param_complexity(
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> Optional[int]:
+    """Estimate trainable parameters for ``cnn_resdil``.
+
+    The estimate mirrors ``ResDilSpliceCNN``:
+    stem conv + batch norm, one residual block per ``conv_channels`` entry
+    (two Conv1d layers with batch norms and optional projection), then
+    a two-layer fully connected head.
+    """
+    conv_channels_raw = sampled_params.get("conv_channels")
+    if conv_channels_raw is None:
+        conv_channels_raw = base_args.get("conv_channels")
+    conv_channels = _parse_conv_channels(conv_channels_raw)
+    if conv_channels is None:
+        lightweight = _to_bool(base_args.get("lightweight"))
+        conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+    kernel_raw = sampled_params.get("kernel_size")
+    if kernel_raw is None:
+        kernel_raw = base_args.get("kernel_size", 7)
+    kernel_size = _to_positive_int(kernel_raw)
+    if kernel_size is None:
+        return None
+
+    fc_hidden_raw = sampled_params.get("fc_hidden")
+    if fc_hidden_raw is None:
+        fc_hidden_raw = base_args.get("fc_hidden", 128)
+    fc_hidden = _to_positive_int(fc_hidden_raw)
+    if fc_hidden is None:
+        return None
+
+    stem_channels = conv_channels[0]
+    total_params = 0
+
+    # Stem Conv1d(4 -> stem) + stem BatchNorm affine params.
+    total_params += (4 * stem_channels * kernel_size) + stem_channels
+    total_params += 2 * stem_channels
+
+    prev_channels = stem_channels
+    for channel in conv_channels:
+        # Residual block conv1 + bn1.
+        total_params += (prev_channels * channel * kernel_size) + channel
+        total_params += 2 * channel
+        # Residual block conv2 + bn2.
+        total_params += (channel * channel * kernel_size) + channel
+        total_params += 2 * channel
+        # Projection path when channel width changes.
+        if prev_channels != channel:
+            total_params += (prev_channels * channel) + channel
+            total_params += 2 * channel
+        prev_channels = channel
+
+    # Fully connected head.
+    total_params += (prev_channels * fc_hidden) + fc_hidden
+    total_params += fc_hidden + 1
+    return total_params
+
+
+def estimate_tcn_param_complexity(
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> Optional[int]:
+    """Estimate trainable parameters for ``tcn``.
+
+    The estimate mirrors ``TCNSpliceCNN``:
+    stem conv + batch norm, repeated dilated residual blocks across
+    ``conv_channels`` (with optional projection per block), then a
+    two-layer fully connected head.
+    """
+    conv_channels_raw = sampled_params.get("conv_channels")
+    if conv_channels_raw is None:
+        conv_channels_raw = base_args.get("conv_channels")
+    conv_channels = _parse_conv_channels(conv_channels_raw)
+    if conv_channels is None:
+        lightweight = _to_bool(base_args.get("lightweight"))
+        conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+    kernel_raw = sampled_params.get("kernel_size")
+    if kernel_raw is None:
+        kernel_raw = base_args.get("kernel_size", 7)
+    kernel_size = _to_positive_int(kernel_raw)
+    if kernel_size is None:
+        return None
+
+    repeats_raw = sampled_params.get("tcn_block_repeats")
+    if repeats_raw is None:
+        repeats_raw = base_args.get("tcn_block_repeats", 2)
+    block_repeats = _to_positive_int(repeats_raw)
+    if block_repeats is None:
+        return None
+
+    fc_hidden_raw = sampled_params.get("fc_hidden")
+    if fc_hidden_raw is None:
+        fc_hidden_raw = base_args.get("fc_hidden", 128)
+    fc_hidden = _to_positive_int(fc_hidden_raw)
+    if fc_hidden is None:
+        return None
+
+    stem_channels = conv_channels[0]
+    total_params = 0
+
+    # Stem Conv1d(4 -> stem) + stem BatchNorm affine params.
+    total_params += (4 * stem_channels * kernel_size) + stem_channels
+    total_params += 2 * stem_channels
+
+    prev_channels = stem_channels
+    for _ in range(block_repeats):
+        for channel in conv_channels:
+            # Residual block conv1 + bn1.
+            total_params += (prev_channels * channel * kernel_size) + channel
+            total_params += 2 * channel
+            # Residual block conv2 + bn2.
+            total_params += (channel * channel * kernel_size) + channel
+            total_params += 2 * channel
+            # Projection path when channel width changes.
+            if prev_channels != channel:
+                total_params += (prev_channels * channel) + channel
+                total_params += 2 * channel
+            prev_channels = channel
+
+    # Fully connected head.
+    total_params += (prev_channels * fc_hidden) + fc_hidden
+    total_params += fc_hidden + 1
+    return total_params
+
+
+def estimate_model_param_complexity(
+    *,
+    model_name: str,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> Optional[int]:
+    """Estimate model complexity for supported model families."""
+    if model_name == "cnn":
+        return estimate_cnn_param_complexity(
+            sampled_params=sampled_params,
+            base_args=base_args,
+        )
+    if model_name == "cnn_resdil":
+        return estimate_cnn_resdil_param_complexity(
+            sampled_params=sampled_params,
+            base_args=base_args,
+        )
+    if model_name == "tcn":
+        return estimate_tcn_param_complexity(
+            sampled_params=sampled_params,
+            base_args=base_args,
+        )
+    return None
 
 
 def _rolling_mean_curve(
@@ -1430,6 +1663,7 @@ def maybe_update_global_best(
 def write_visualization(
     path: Path,
     *,
+    model_name: str,
     species: str,
     objective_metric: str,
     quick_rows: list[TrialResult],
@@ -1450,7 +1684,8 @@ def write_visualization(
         for row in rows:
             if row.status != "success" or row.objective_score is None:
                 continue
-            complexity = estimate_cnn_param_complexity(
+            complexity = estimate_model_param_complexity(
+                model_name=model_name,
                 sampled_params=row.sampled_params,
                 base_args=base_args,
             )
@@ -1651,6 +1886,7 @@ def run_search(config: SearchConfig) -> int:
     viz_path = config.output_dir / f"{config.species}_snpr.png"
     viz_error = write_visualization(
         viz_path,
+        model_name=str(config.base_args.get("model", "cnn")),
         species=config.species,
         objective_metric=config.objective_metric,
         quick_rows=quick_rows,

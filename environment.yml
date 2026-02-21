@@ -1,0 +1,20 @@
+name: intronmodel
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python>=3.12,<3.15
+  - pip
+  - numpy
+  - matplotlib
+  - biopython
+  - pytorch
+  - transformers
+  - huggingface_hub
+  - scikit-learn
+  - tqdm
+  - pyyaml
+  - pip:
+      - pytest>=8.0
+      - sphinx>=8.0
+      - myst-parser>=4.0

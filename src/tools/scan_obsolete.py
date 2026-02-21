@@ -63,7 +63,7 @@ class ScanResult:
 def _repo_root() -> Path:
     """Return repository root path based on this script location."""
 
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def _load_registry_models(registry_path: Path) -> dict[str, str]:

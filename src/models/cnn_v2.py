@@ -211,9 +211,7 @@ def evaluate(model, loader, device):
     metrics = {}
     metrics["acc@0.5"] = float(((probs >= 0.5) == labels).float().mean())
 
-    metrics["loss_bce"] = float(
-        F.binary_cross_entropy_with_logits(logits, labels).item()
-    )
+    metrics["loss_bce"] = float(F.binary_cross_entropy_with_logits(logits, labels))
 
     if roc_auc_score and len(torch.unique(labels)) > 1:
         metrics["roc_auc"] = float(roc_auc_score(labels.numpy(), probs.numpy()))

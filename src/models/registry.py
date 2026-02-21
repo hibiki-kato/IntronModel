@@ -39,6 +39,13 @@ class ModelModuleProtocol(Protocol):
 
 _MODEL_TO_MODULE: dict[str, str] = {
     "cnn": "models.cnn",
+    "tcn": "models.tcn",
+    "bert": "models.bert",
+    "dnabert": "models.dnabert",
+    "dnabert2": "models.dnabert",
+    "dnabert6": "models.dnabert",
+    "reservoir": "models.reservoir",
+    "cnn_resdil": "models.cnn_resdil",
 }
 
 

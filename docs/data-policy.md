@@ -16,12 +16,14 @@ source control:
 - `data/<species>/trans_score/`
 - `data/<species>/eval_score/`
 
+Path root can be overridden by `INTRONMODEL_DATA_ROOT`.
+
 ## Regeneration Workflow
 
 1. Import raw references from external storage:
 
 ```bash
-bash scripts/fetch_reference_data.sh \
+bash src/scripts/fetch_reference_data.sh \
   --species Dmel \
   --source-root /path/to/external_data_root
 ```
@@ -29,20 +31,14 @@ bash scripts/fetch_reference_data.sh \
 2. Prepare species directories and generate `transcripts.tsv`:
 
 ```bash
-bash scripts/prepare_species_data.sh \
+bash src/scripts/prepare_species_data.sh \
   --species Dmel \
   --donor-len 100 \
   --acceptor-len 100 \
   --source-root /path/to/external_data_root
 ```
 
-3. Generate gffcompare counts (if skipped in step 2):
-
-```bash
-bash run/gffcompare_counts.sh --species Dmel
-```
-
-4. Run pipeline or evaluation wrappers as needed.
+3. Run pipeline or evaluation wrappers as needed.
 
 ## Testing Data Rule
 

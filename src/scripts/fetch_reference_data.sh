@@ -3,14 +3,14 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOT'
-Usage: bash scripts/fetch_reference_data.sh [options]
+Usage: bash src/scripts/fetch_reference_data.sh [options]
 
 Copy or symlink external reference files into data/<species>/raw.
 
 Options:
   --species <name>      Athal|Dmel|Mmus|all (default: all)
   --source-root <path>  External root containing <species>/raw files (required)
-  --target-root <path>  Repository data root (default: ./data)
+  --target-root <path>  Repository data root (default: INTRONMODEL_DATA_ROOT or ./data)
   --mode <name>         copy|symlink (default: copy)
   -h, --help            Show this help
 
@@ -21,7 +21,7 @@ EOT
 
 SPECIES="all"
 SOURCE_ROOT=""
-TARGET_ROOT="data"
+TARGET_ROOT="${INTRONMODEL_DATA_ROOT:-data}"
 MODE="copy"
 
 while [[ $# -gt 0 ]]; do
@@ -68,7 +68,7 @@ if [[ ! -d "${SOURCE_ROOT}" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 if [[ "${TARGET_ROOT}" != /* ]]; then
 	TARGET_ROOT="${PROJECT_ROOT}/${TARGET_ROOT}"

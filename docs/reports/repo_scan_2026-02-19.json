@@ -17,7 +17,6 @@
   "readme_run_scripts": [
     "run/cnn.sh",
     "run/eval_trans_score.sh",
-    "run/gffcompare_counts.sh",
     "run/make_test_data.sh",
     "run/plot_eval.sh"
   ],
@@ -29,7 +28,6 @@
   "run_scripts_on_disk": [
     "run/cnn.sh",
     "run/eval_trans_score.sh",
-    "run/gffcompare_counts.sh",
     "run/make_test_data.sh",
     "run/plot_eval.sh"
   ],

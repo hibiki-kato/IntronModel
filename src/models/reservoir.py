@@ -1,1525 +1,2594 @@
-"""
-Reservoir computing (ESN) for Dmel splice site scoring.
+"""Reservoir computing model for site-level splice scoring.
 
-- Train independent models for donor and acceptor
-- Score test_sites.tsv and output transcript-level min intron scores
+This module provides a unified model API compatible with ``run_model.py``:
+- argument registration
+- donor/acceptor training
+- site-level inference
 
-Design:
-- k-mer tokenization (default k=3)
-- Fixed random embedding + fixed ESN reservoir
-- Trainable readout MLP only
+Design notes
+------------
+- Fixed random reservoir and fixed random token projection.
+- Trainable readout only.
+- Sequence-to-one prediction using configurable state aggregation.
+- Supports washout and pre-roll for ESN transient control.
 """
+
+from __future__ import annotations
 
 import argparse
-import math
+from contextlib import nullcontext
+from dataclasses import dataclass
 import os
 import random
-import re
-from collections import defaultdict
-from typing import Dict, List, Tuple
+import shutil
+from typing import ContextManager, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+from util.data_proc import (
+    build_run_name,
+    infer_default_train_paths,
+    read_examples_single_task,
+    read_test_site_rows,
+    resolve_effective_window_lengths,
+    resolve_test_tsv,
+    resolve_train_paths,
+    species_data_dirs,
+    validate_window_args,
+)
+from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
+
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
-except ImportError:
-    roc_auc_score = None
+except ImportError:  # pragma: no cover
     average_precision_score = None
+    roc_auc_score = None
 
-try:
-    from transformers import AutoModel, AutoTokenizer
-except ImportError:
-    AutoModel = None
-    AutoTokenizer = None
+DEFAULT_MPS_MAX_BATCH_SIZE: int = 2048
+SPECIAL_TOKENS: tuple[str, ...] = ("[PAD]", "[UNK]")
+DNA_BASES: tuple[str, ...] = ("A", "C", "G", "T")
+INPUT_MODE_CHOICES: tuple[str, ...] = ("onehot", "kmer")
+POOLING_CHOICES: tuple[str, ...] = (
+    "last",
+    "mean",
+    "max",
+    "mean_max",
+    "attention",
+    "logit_sum",
+    "weighted_logit_sum",
+)
+READ_ORDER_CHOICES: tuple[str, ...] = ("auto", "forward", "reverse")
 
 
-# --------------------------
-# Main
-# --------------------------
+def _binary_clf_curve(
+    labels: np.ndarray,
+    scores: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute cumulative false/true positives at each score threshold.
 
+    Complexity:
+        O(n log n) time and O(n) additional memory.
+    """
+    if labels.ndim != 1 or scores.ndim != 1:
+        raise ValueError("labels and scores must be 1-D arrays.")
+    if labels.shape[0] != scores.shape[0]:
+        raise ValueError("labels and scores must have the same length.")
+    if labels.size == 0:
+        raise ValueError("labels and scores must be non-empty.")
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Reservoir computing for splice site scoring"
+    order = np.argsort(-scores, kind="mergesort")
+    labels_sorted = labels[order].astype(np.int64, copy=False)
+    scores_sorted = scores[order]
+
+    distinct_indices = np.where(np.diff(scores_sorted))[0]
+    threshold_indices = np.r_[distinct_indices, labels_sorted.size - 1]
+
+    true_positives = np.cumsum(labels_sorted)[threshold_indices]
+    false_positives = (threshold_indices + 1) - true_positives
+
+    return (
+        false_positives.astype(np.float64, copy=False),
+        true_positives.astype(np.float64, copy=False),
     )
 
-    ap.add_argument("--species", type=str, default="Dmel")
-    ap.add_argument("--bp", type=int, default=50)
 
-    ap.add_argument("--k", type=int, default=3)
-    ap.add_argument("--max_len", type=int, default=32)
+def _fallback_average_precision(
+    labels: np.ndarray,
+    probs: np.ndarray,
+) -> float:
+    """Compute binary average precision without scikit-learn.
 
-    ap.add_argument(
-        "--model_type",
-        type=str,
-        default="esn",
-        choices=["esn", "hf"],
-        help="Model type: esn (classical reservoir) or hf (LLM reservoir)",
+    Complexity:
+        O(n log n) time and O(n) memory.
+    """
+    positives = float(np.sum(labels == 1))
+    if positives <= 0.0:
+        raise ValueError("At least one positive label is required.")
+
+    false_positives, true_positives = _binary_clf_curve(labels, probs)
+    precision = true_positives / np.maximum(true_positives + false_positives, 1.0)
+    recall = true_positives / positives
+
+    precision = np.r_[1.0, precision]
+    recall = np.r_[0.0, recall]
+    return float(np.sum((recall[1:] - recall[:-1]) * precision[1:]))
+
+
+def _fallback_roc_auc(labels: np.ndarray, probs: np.ndarray) -> float:
+    """Compute binary ROC-AUC without scikit-learn.
+
+    Complexity:
+        O(n log n) time and O(n) memory.
+    """
+    positives = float(np.sum(labels == 1))
+    negatives = float(np.sum(labels == 0))
+    if positives <= 0.0 or negatives <= 0.0:
+        raise ValueError("Both positive and negative labels are required.")
+
+    false_positives, true_positives = _binary_clf_curve(labels, probs)
+    fpr = np.r_[0.0, false_positives / negatives, 1.0]
+    tpr = np.r_[0.0, true_positives / positives, 1.0]
+    return float(np.trapezoid(tpr, fpr))
+
+
+def _bool_from_flag(flag: Union[bool, int]) -> bool:
+    """Convert integer/boolean flags from CLI to a strict bool."""
+    if isinstance(flag, bool):
+        return flag
+    return int(flag) != 0
+
+
+def _resolve_num_workers(raw: Union[str, int], device: str) -> int:
+    """Resolve DataLoader worker count from int or ``auto``."""
+    if isinstance(raw, int):
+        if raw < 0:
+            raise ValueError("--num_workers must be >= 0.")
+        return raw
+
+    text = str(raw).strip().lower()
+    if text == "auto":
+        if device != "cuda":
+            return 0
+        cpu_count = os.cpu_count() or 4
+        return max(2, min(8, cpu_count // 2))
+
+    try:
+        parsed = int(text)
+    except ValueError as exc:
+        raise ValueError("--num_workers must be an integer or 'auto'.") from exc
+    if parsed < 0:
+        raise ValueError("--num_workers must be >= 0.")
+    return parsed
+
+
+def _resolve_amp_dtype(name: str, device: str) -> Optional[torch.dtype]:
+    """Resolve AMP dtype from a user-facing string."""
+    if device != "cuda":
+        return None
+    lowered = name.strip().lower()
+    if lowered == "bf16":
+        return torch.bfloat16
+    if lowered == "fp16":
+        return torch.float16
+    if lowered != "auto":
+        raise ValueError("--amp_dtype must be one of: auto, bf16, fp16.")
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def _resolve_compile_enabled(
+    compile_mode: str,
+    compile_flag: bool,
+    quick_phase: bool,
+    device: str,
+    epochs: int,
+) -> bool:
+    """Resolve final torch.compile usage policy."""
+    if device != "cuda":
+        return False
+    if compile_flag:
+        return True
+    mode = compile_mode.strip().lower()
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    if mode != "auto":
+        raise ValueError("--compile_mode must be one of: off, on, auto.")
+    if quick_phase:
+        return False
+    if epochs < 10:
+        return False
+    ptxas_env = os.environ.get("TRITON_PTXAS_PATH")
+    ptxas_blackwell_env = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
+    if ptxas_env or ptxas_blackwell_env:
+        return True
+    return shutil.which("ptxas") is not None
+
+
+def _configure_triton_tool_paths() -> None:
+    """Configure Triton tool paths for ``torch.compile`` stability."""
+    ptxas_path = shutil.which("ptxas")
+    if ptxas_path is None:
+        return
+    if "TRITON_PTXAS_PATH" not in os.environ:
+        os.environ["TRITON_PTXAS_PATH"] = ptxas_path
+    if "TRITON_PTXAS_BLACKWELL_PATH" not in os.environ:
+        os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_path
+
+
+def _configure_torch_compile_runtime() -> None:
+    """Apply conservative torch.compile runtime settings for stability."""
+    dynamo_module = getattr(torch, "_dynamo", None)
+    if dynamo_module is None:
+        return
+    config_obj = getattr(dynamo_module, "config", None)
+    if config_obj is None:
+        return
+    capture_scalar_outputs = getattr(config_obj, "capture_scalar_outputs", None)
+    if isinstance(capture_scalar_outputs, bool) and not capture_scalar_outputs:
+        setattr(config_obj, "capture_scalar_outputs", True)
+    if "TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS" not in os.environ:
+        os.environ["TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS"] = "1"
+
+
+def _is_cuda_oom_error(exc: RuntimeError) -> bool:
+    """Return whether a runtime error is likely a CUDA OOM error."""
+    message = str(exc).lower()
+    keywords = (
+        "out of memory",
+        "cuda error: out of memory",
+        "cudnn_status_alloc_failed",
     )
+    return any(keyword in message for keyword in keywords)
 
-    # Increased capacity for better representation
-    ap.add_argument("--input_dim", type=int, default=256)
-    ap.add_argument("--reservoir_size", type=int, default=512)
-    ap.add_argument("--spectral_radius", type=float, default=0.9)
-    ap.add_argument("--leak", type=float, default=0.7)
-    ap.add_argument("--sparsity", type=float, default=0.02)
-    ap.add_argument("--readout_hidden", type=int, default=512)
 
-    ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--batch_size", type=int, default=256)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--seed", type=int, default=1337)
-
-    ap.add_argument(
-        "--hf_models",
-        type=str,
-        default="",
-        help="Comma-separated HF model names. Empty uses default list.",
+def _is_mps_oom_error(exc: RuntimeError) -> bool:
+    """Return whether a runtime error is likely an MPS OOM error."""
+    message = str(exc).lower()
+    keywords = (
+        "mps backend out of memory",
+        "out of memory (mps)",
+        "out of memory on mps",
+        "metal out of memory",
     )
-    ap.add_argument(
-        "--hf_tokenization",
-        type=str,
-        default="auto",
-        choices=["auto", "raw", "kmer"],
-    )
-    ap.add_argument("--hf_k", type=int, default=6)
-    ap.add_argument("--hf_max_len", type=int, default=128)
-    ap.add_argument(
-        "--hf_pooling",
-        type=str,
-        default="mean",
-        choices=["cls", "mean", "max", "mean_max"],
-    )
-    ap.add_argument("--hf_readout_hidden", type=int, default=512)
-    ap.add_argument("--hf_batch_size", type=int, default=64)
-    ap.add_argument("--hf_lr", type=float, default=None)
-    ap.add_argument("--hf_epochs", type=int, default=None)
-    ap.add_argument("--hf_unfreeze_backbone", action="store_true")
-    ap.add_argument("--hf_trust_remote_code", action="store_true")
+    return any(keyword in message for keyword in keywords)
 
-    ap.add_argument("--skip_training", action="store_true")
 
-    ap.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cuda", "mps", "cpu"],
-    )
+def _empty_device_cache(device: str) -> None:
+    """Best-effort cache cleanup for the given device."""
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        return
+    if device != "mps":
+        return
+    mps_module = getattr(torch, "mps", None)
+    if mps_module is None:
+        return
+    empty_cache_fn = getattr(mps_module, "empty_cache", None)
+    if callable(empty_cache_fn):
+        empty_cache_fn()
 
-    args = ap.parse_args()
 
-    species = args.species
-    bp = args.bp
-    pos_path = f"../data/{species}/train/{bp}bp.err"
-    neg_path = f"../data/{species}/train/{bp}bp.neg.err"
-    donor_model_dir = "../model/dirosophila/donar/reservoir"
-    acceptor_model_dir = "../model/dirosophila/acceptor/reservoir"
-    test_tsv = f"../data/{species}/raw/transcripts.tsv"
-    output_tsv = f"../data/{species}/trans_score/reservoir{bp}bp.tsv"
-
-    if args.device == "auto":
-        if torch.cuda.is_available():
-            device = "cuda"
-            print(f"Auto-detected device: CUDA ({torch.cuda.get_device_name(0)})")
-        elif torch.backends.mps.is_available():
-            device = "mps"
-            print("Auto-detected device: MPS")
-        else:
-            device = "cpu"
-            print("WARNING: Using CPU (slow)")
-    else:
-        device = args.device
-        print(f"Device: {device}")
-
-    if not args.skip_training:
-        if args.model_type == "esn":
-            train_model(
-                task="donor",
-                pos_path=pos_path,
-                neg_path=neg_path,
-                out_dir=donor_model_dir,
-                k=args.k,
-                max_len=args.max_len,
-                input_dim=args.input_dim,
-                reservoir_size=args.reservoir_size,
-                spectral_radius=args.spectral_radius,
-                leak=args.leak,
-                sparsity=args.sparsity,
-                readout_hidden=args.readout_hidden,
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                lr=args.lr,
-                seed=args.seed,
-                device=device,
-            )
-
-            train_model(
-                task="acceptor",
-                pos_path=pos_path,
-                neg_path=neg_path,
-                out_dir=acceptor_model_dir,
-                k=args.k,
-                max_len=args.max_len,
-                input_dim=args.input_dim,
-                reservoir_size=args.reservoir_size,
-                spectral_radius=args.spectral_radius,
-                leak=args.leak,
-                sparsity=args.sparsity,
-                readout_hidden=args.readout_hidden,
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                lr=args.lr,
-                seed=args.seed,
-                device=device,
-            )
-        else:
-            hf_models = parse_hf_models(args.hf_models)
-            hf_epochs = args.hf_epochs if args.hf_epochs is not None else args.epochs
-            hf_lr = args.hf_lr if args.hf_lr is not None else args.lr
-            freeze_backbone = not args.hf_unfreeze_backbone
-
-            for model_name in hf_models:
-                tag = sanitize_model_tag(model_name)
-                donor_dir = os.path.join(donor_model_dir, tag)
-                acceptor_dir = os.path.join(acceptor_model_dir, tag)
-
-                train_model_hf(
-                    task="donor",
-                    pos_path=pos_path,
-                    neg_path=neg_path,
-                    out_dir=donor_dir,
-                    model_name=model_name,
-                    tokenization=args.hf_tokenization,
-                    k=args.hf_k,
-                    max_len=args.hf_max_len,
-                    pooling=args.hf_pooling,
-                    readout_hidden=args.hf_readout_hidden,
-                    freeze_backbone=freeze_backbone,
-                    trust_remote_code=args.hf_trust_remote_code,
-                    epochs=hf_epochs,
-                    batch_size=args.hf_batch_size,
-                    lr=hf_lr,
-                    seed=args.seed,
-                    device=device,
-                )
-
-                train_model_hf(
-                    task="acceptor",
-                    pos_path=pos_path,
-                    neg_path=neg_path,
-                    out_dir=acceptor_dir,
-                    model_name=model_name,
-                    tokenization=args.hf_tokenization,
-                    k=args.hf_k,
-                    max_len=args.hf_max_len,
-                    pooling=args.hf_pooling,
-                    readout_hidden=args.hf_readout_hidden,
-                    freeze_backbone=freeze_backbone,
-                    trust_remote_code=args.hf_trust_remote_code,
-                    epochs=hf_epochs,
-                    batch_size=args.hf_batch_size,
-                    lr=hf_lr,
-                    seed=args.seed,
-                    device=device,
-                )
-    else:
-        print("Skipping training (--skip_training)")
-
-    if args.model_type == "esn":
-        donor_model_path = os.path.join(donor_model_dir, "best.pt")
-        acceptor_model_path = os.path.join(acceptor_model_dir, "best.pt")
-
-        if not os.path.exists(donor_model_path) or not os.path.exists(
-            acceptor_model_path
-        ):
-            print("Error: Model checkpoints not found!")
-            print(f"  Donor: {donor_model_path}")
-            print(f"  Acceptor: {acceptor_model_path}")
-            return
-
-        score_test_sites(
-            test_tsv=test_tsv,
-            donor_model_path=donor_model_path,
-            acceptor_model_path=acceptor_model_path,
-            output_tsv=output_tsv,
-            device=device,
+def _resolve_mps_max_batch_size() -> int:
+    """Resolve MPS batch-size cap from env with a safe default."""
+    raw = os.environ.get("INTRONMODEL_MPS_MAX_BATCH_SIZE")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_MPS_MAX_BATCH_SIZE
+    try:
+        parsed = int(raw)
+    except ValueError:
+        print(
+            "[reservoir] invalid INTRONMODEL_MPS_MAX_BATCH_SIZE. "
+            f"Use default {DEFAULT_MPS_MAX_BATCH_SIZE}.",
         )
-    else:
-        hf_models = parse_hf_models(args.hf_models)
-        for model_name in hf_models:
-            tag = sanitize_model_tag(model_name)
-            donor_dir = os.path.join(donor_model_dir, tag)
-            acceptor_dir = os.path.join(acceptor_model_dir, tag)
-            donor_model_path = os.path.join(donor_dir, "best.pt")
-            acceptor_model_path = os.path.join(acceptor_dir, "best.pt")
-
-            if not os.path.exists(donor_model_path) or not os.path.exists(
-                acceptor_model_path
-            ):
-                print("Error: Model checkpoints not found!")
-                print(f"  Donor: {donor_model_path}")
-                print(f"  Acceptor: {acceptor_model_path}")
-                continue
-
-            output_tsv = add_suffix_to_path(output_tsv, tag)
-            score_test_sites_hf(
-                test_tsv=test_tsv,
-                donor_model_path=donor_model_path,
-                acceptor_model_path=acceptor_model_path,
-                output_tsv=output_tsv,
-                device=device,
-                batch_size=args.hf_batch_size,
-            )
+        return DEFAULT_MPS_MAX_BATCH_SIZE
+    if parsed <= 0:
+        print(
+            "[reservoir] non-positive INTRONMODEL_MPS_MAX_BATCH_SIZE. "
+            f"Use default {DEFAULT_MPS_MAX_BATCH_SIZE}.",
+        )
+        return DEFAULT_MPS_MAX_BATCH_SIZE
+    return parsed
 
 
-# --------------------------
-# Repro utilities
-# --------------------------
+def _is_compile_runtime_error(exc: RuntimeError) -> bool:
+    """Return whether a runtime error is likely from ``torch.compile`` runtime."""
+    diagnostic = f"{type(exc).__module__}.{type(exc).__name__}: {exc}".lower()
+    keywords = (
+        "inductorerror",
+        "torch._inductor",
+        "torch._dynamo",
+        "triton",
+        "ptxas",
+        "backend_hash",
+    )
+    return any(keyword in diagnostic for keyword in keywords)
 
 
-def set_seed(seed: int = 1337):
+def _export_model_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Export model parameters in a stable, non-compiled key format."""
+    original_model = getattr(model, "_orig_mod", None)
+    if isinstance(original_model, nn.Module):
+        return dict(original_model.state_dict())
+    return dict(model.state_dict())
+
+
+def _normalize_checkpoint_state_dict(
+    raw_state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Normalize legacy/compiled checkpoint keys for plain model loading."""
+    compiled_prefix = "_orig_mod."
+    normalized: dict[str, torch.Tensor] = {}
+    for key, value in raw_state_dict.items():
+        if not key.startswith(compiled_prefix):
+            normalized[key] = value
+    for key, value in raw_state_dict.items():
+        if key.startswith(compiled_prefix):
+            stripped_key = key[len(compiled_prefix) :]
+            normalized.setdefault(stripped_key, value)
+    return normalized
+
+
+def set_seed(
+    seed: int = 1337,
+    deterministic: bool = True,
+    cudnn_benchmark: bool = False,
+    allow_tf32: bool = False,
+) -> None:
+    """Set random seeds and backend runtime flags."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, "use_deterministic_algorithms"):
+        torch.use_deterministic_algorithms(deterministic, warn_only=True)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = cudnn_benchmark and (not deterministic)
+        torch.backends.cudnn.allow_tf32 = allow_tf32
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+
+
+def _seed_worker(worker_id: int) -> None:
+    """Seed dataloader worker-local RNG states."""
+    del worker_id
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def pick_device(preference: str = "auto") -> str:
+    """Resolve runtime device preference."""
+    if preference != "auto":
+        return preference
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def sigmoid_np(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+    """Compute sigmoid values with numerically stable branches."""
+    logits = np.asarray(x, dtype=np.float64)
+    clipped = np.clip(logits, -500.0, 500.0)
+    out = np.empty_like(clipped, dtype=np.float64)
+    positive_mask = clipped >= 0.0
+    out[positive_mask] = 1.0 / (1.0 + np.exp(-clipped[positive_mask]))
+    negative_logits = clipped[~positive_mask]
+    exp_values = np.exp(negative_logits)
+    out[~positive_mask] = exp_values / (1.0 + exp_values)
+    return out.astype(np.float32, copy=False)
 
 
-# --------------------------
-# Parsing training files
-# --------------------------
+def build_kmer_vocab(kmer_k: int) -> dict[str, int]:
+    """Build deterministic k-mer vocabulary with special tokens."""
+    if kmer_k <= 0:
+        raise ValueError("--kmer_k must be positive.")
 
-LINE_PAIR_RE = re.compile(
-    r"^DEBUG\s+donor\s+([A-Za-z]+)\s+acceptor\s+([A-Za-z]+)(?:\s+[+-])?\s*$"
-)
-LINE_SINGLE_RE = re.compile(r"^DEBUG\s+(donor|acceptor)\s+([A-Za-z]+)(?:\s+[+-])?\s*$")
+    vocab = {token: index for index, token in enumerate(SPECIAL_TOKENS)}
+    next_index = len(vocab)
 
+    def _extend(prefix: str, depth: int) -> int:
+        nonlocal next_index
+        if depth == kmer_k:
+            vocab[prefix] = next_index
+            next_index += 1
+            return next_index
+        for base in DNA_BASES:
+            _extend(prefix + base, depth + 1)
+        return next_index
 
-def read_examples_single_task(
-    pos_path: str,
-    neg_path: str,
-    task: str,
-) -> List[Tuple[str, int]]:
-    """Read training examples for one task (donor or acceptor)."""
-    examples: List[Tuple[str, int]] = []
-
-    def read_one_set(path: str, label: int):
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or not line.startswith("DEBUG"):
-                    continue
-
-                m_pair = LINE_PAIR_RE.match(line)
-                if m_pair:
-                    donor_seq, acceptor_seq = m_pair.groups()
-                    if task == "donor":
-                        examples.append((donor_seq.upper(), label))
-                    else:
-                        examples.append((acceptor_seq.upper(), label))
-                    continue
-
-                m_single = LINE_SINGLE_RE.match(line)
-                if m_single:
-                    tname, seq = m_single.groups()
-                    if tname == task:
-                        examples.append((seq.upper(), label))
-                    continue
-
-    read_one_set(pos_path, label=1)
-    read_one_set(neg_path, label=0)
-    return examples
-
-
-# --------------------------
-# k-mer tokenizer
-# --------------------------
-
-SPECIAL_TOKENS = ["[PAD]", "[CLS]", "[SEP]", "[UNK]"]
-
-DEFAULT_HF_MODELS = [
-    "zhihan1996/DNABERT-2-117M",
-    "InstaDeepAI/nucleotide-transformer-v2-50m-multi-species",
-    "LongSafari/hyenadna-tiny-1k-seqlen",
-]
-
-
-def build_kmer_vocab(k: int = 3) -> Dict[str, int]:
-    bases = ["A", "C", "G", "T"]
-    vocab = {tok: i for i, tok in enumerate(SPECIAL_TOKENS)}
-    idx = len(vocab)
-
-    def rec(prefix: str, depth: int):
-        nonlocal idx
-        if depth == k:
-            vocab[prefix] = idx
-            idx += 1
-            return
-        for b in bases:
-            rec(prefix + b, depth + 1)
-
-    rec("", 0)
+    _extend("", 0)
     return vocab
 
 
-def kmerize(seq: str, k: int) -> List[str]:
-    if len(seq) < k:
+def build_onehot_vocab() -> dict[str, int]:
+    """Build vocabulary for base-wise onehot mode."""
+    vocab = {token: index for index, token in enumerate(SPECIAL_TOKENS)}
+    for base in DNA_BASES:
+        vocab[base] = len(vocab)
+    return vocab
+
+
+def kmerize(seq: str, kmer_k: int) -> list[str]:
+    """Convert one DNA sequence into overlapping k-mer tokens."""
+    if kmer_k <= 0:
+        raise ValueError("kmer_k must be positive.")
+    upper = seq.upper()
+    if len(upper) < kmer_k:
         return []
-    return [seq[i : i + k] for i in range(0, len(seq) - k + 1)]
+    return [upper[i : i + kmer_k] for i in range(0, len(upper) - kmer_k + 1)]
 
 
-def encode_kmers(kmers: List[str], vocab: Dict[str, int]) -> List[int]:
-    unk = vocab["[UNK]"]
-    return [vocab.get(km, unk) for km in kmers]
+def _resolve_read_order(
+    *,
+    task: str,
+    read_order: str,
+    donor_read_order: Optional[str],
+    acceptor_read_order: Optional[str],
+) -> str:
+    """Resolve read order for one task from global/per-task configuration."""
+    if task not in {"donor", "acceptor"}:
+        raise ValueError(f"Unsupported task: {task}")
+    if task == "donor" and donor_read_order is not None:
+        resolved = donor_read_order
+    elif task == "acceptor" and acceptor_read_order is not None:
+        resolved = acceptor_read_order
+    else:
+        resolved = read_order
+    normalized = resolved.strip().lower()
+    if normalized not in READ_ORDER_CHOICES:
+        choices_text = ", ".join(READ_ORDER_CHOICES)
+        raise ValueError(f"read_order must be one of: {choices_text}")
+    if normalized == "auto":
+        return "forward" if task == "donor" else "reverse"
+    return normalized
 
 
-def sanitize_model_tag(name: str) -> str:
-    tag = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-    return tag.strip("_.-") or "model"
+def _apply_read_order(seq: str, read_order: str) -> str:
+    """Apply read order transform to one sequence."""
+    if read_order == "forward":
+        return seq
+    if read_order == "reverse":
+        return seq[::-1]
+    raise ValueError("read_order must be forward or reverse after resolution.")
 
 
-def resolve_hf_tokenization(
-    model_name: str, tokenization: str, k: int
-) -> Tuple[str, int]:
-    if tokenization != "auto":
-        return tokenization, k
-    lower = model_name.lower()
-    if "dnabert" in lower:
-        return "kmer", 6
-    return "raw", k
+def _resolve_max_tokens(
+    raw: Union[str, int],
+    *,
+    input_mode: str,
+    window_len: int,
+    kmer_k: int,
+) -> int:
+    """Resolve max token length from ``auto`` or integer input."""
+    if window_len <= 0:
+        raise ValueError("window_len must be positive.")
+    if kmer_k <= 0:
+        raise ValueError("kmer_k must be positive.")
+    if input_mode == "onehot":
+        auto_tokens = window_len
+    else:
+        auto_tokens = max(1, window_len - kmer_k + 1)
+
+    if isinstance(raw, int):
+        resolved = raw
+    else:
+        text = str(raw).strip().lower()
+        if text == "auto":
+            return auto_tokens
+        try:
+            resolved = int(text)
+        except ValueError as exc:
+            raise ValueError("--max_tokens must be 'auto' or integer > 0.") from exc
+
+    if resolved <= 0:
+        raise ValueError("--max_tokens must be > 0.")
+    return resolved
 
 
-def seq_to_kmer_text(seq: str, k: int) -> str:
-    return " ".join(kmerize(seq, k))
+def _encode_sequence(
+    *,
+    seq: str,
+    vocab: Mapping[str, int],
+    input_mode: str,
+    kmer_k: int,
+    max_tokens: int,
+    read_order: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Encode one DNA sequence to token ids and attention mask."""
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive.")
 
+    ordered = _apply_read_order(seq.upper(), read_order=read_order)
+    if input_mode == "onehot":
+        tokens = list(ordered)
+    elif input_mode == "kmer":
+        tokens = kmerize(ordered, kmer_k)
+    else:
+        raise ValueError("input_mode must be onehot|kmer.")
 
-# --------------------------
-# Dataset
-# --------------------------
+    unk_id = vocab["[UNK]"]
+    pad_id = vocab["[PAD]"]
+    token_ids = [vocab.get(token, unk_id) for token in tokens]
 
+    if len(token_ids) > max_tokens:
+        token_ids = token_ids[:max_tokens]
 
-class KmerDataset(Dataset):
-    def __init__(
-        self,
-        examples: List[Tuple[str, int]],
-        vocab: Dict[str, int],
-        k: int = 3,
-        max_len: int = 32,
-    ):
-        self.examples = examples
-        self.vocab = vocab
-        self.k = k
-        self.max_len = max_len
-        self.pad_id = vocab["[PAD]"]
-        self.cls_id = vocab["[CLS]"]
-        self.sep_id = vocab["[SEP]"]
+    attn_mask = [1] * len(token_ids)
+    padding = max_tokens - len(token_ids)
+    if padding > 0:
+        token_ids.extend([pad_id] * padding)
+        attn_mask.extend([0] * padding)
 
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, idx):
-        seq, label = self.examples[idx]
-        kmers = kmerize(seq, self.k)
-        ids = [self.cls_id] + encode_kmers(kmers, self.vocab) + [self.sep_id]
-
-        if len(ids) > self.max_len:
-            ids = ids[: self.max_len]
-            ids[-1] = self.sep_id
-
-        attn_mask = [1] * len(ids)
-        pad_len = self.max_len - len(ids)
-        if pad_len > 0:
-            ids += [self.pad_id] * pad_len
-            attn_mask += [0] * pad_len
-
-        return (
-            torch.tensor(ids, dtype=torch.long),
-            torch.tensor(attn_mask, dtype=torch.float32),
-            torch.tensor(label, dtype=torch.float32),
-        )
-
-
-def collate_fn(batch):
-    input_ids, attn_mask, labels = zip(*batch)
     return (
-        torch.stack(input_ids, dim=0),
-        torch.stack(attn_mask, dim=0),
-        torch.stack(labels, dim=0),
+        np.asarray(token_ids, dtype=np.int64),
+        np.asarray(attn_mask, dtype=np.float32),
     )
 
 
-class HFSequenceDataset(Dataset):
+class SpliceTokenDataset(Dataset):
+    """Dataset returning token ids, attention mask, and binary labels.
+
+    Parameters
+    ----------
+    examples : Sequence[tuple[str, int]]
+        Sequence/label pairs.
+    vocab : Mapping[str, int]
+        Token vocabulary.
+    input_mode : str
+        ``onehot`` or ``kmer``.
+    kmer_k : int
+        K-mer size (used only in kmer mode).
+    max_tokens : int
+        Padded token length.
+    read_order : str
+        ``forward`` or ``reverse``.
+    pretokenize : bool, default=False
+        If ``True``, pre-encode all records at initialization.
+    """
+
     def __init__(
         self,
-        examples: List[Tuple[str, int]],
-        tokenizer,
-        max_len: int,
-        tokenization: str,
-        k: int,
-    ):
-        self.examples = examples
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.tokenization = tokenization
-        self.k = k
+        examples: Sequence[Tuple[str, int]],
+        vocab: Mapping[str, int],
+        input_mode: str,
+        kmer_k: int,
+        max_tokens: int,
+        read_order: str,
+        pretokenize: bool = False,
+    ) -> None:
+        self.examples: list[Tuple[str, int]] = list(examples)
+        self.vocab: Mapping[str, int] = vocab
+        self.input_mode: str = input_mode
+        self.kmer_k: int = kmer_k
+        self.max_tokens: int = max_tokens
+        self.read_order: str = read_order
+        self.pretokenize: bool = pretokenize
+        self._cached_ids: Optional[torch.Tensor]
+        self._cached_masks: Optional[torch.Tensor]
+        self._cached_labels: Optional[torch.Tensor]
 
-    def __len__(self):
+        if pretokenize:
+            all_ids: list[np.ndarray] = []
+            all_masks: list[np.ndarray] = []
+            labels: list[float] = []
+            for seq, label in self.examples:
+                token_ids, mask = _encode_sequence(
+                    seq=seq,
+                    vocab=self.vocab,
+                    input_mode=self.input_mode,
+                    kmer_k=self.kmer_k,
+                    max_tokens=self.max_tokens,
+                    read_order=self.read_order,
+                )
+                all_ids.append(token_ids)
+                all_masks.append(mask)
+                labels.append(float(label))
+            self._cached_ids = torch.from_numpy(np.stack(all_ids))
+            self._cached_masks = torch.from_numpy(np.stack(all_masks))
+            self._cached_labels = torch.from_numpy(
+                np.asarray(labels, dtype=np.float32)
+            )
+        else:
+            self._cached_ids = None
+            self._cached_masks = None
+            self._cached_labels = None
+
+    def __len__(self) -> int:
         return len(self.examples)
 
-    def __getitem__(self, idx):
+    def __getitem__(
+        self,
+        idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if (
+            self._cached_ids is not None
+            and self._cached_masks is not None
+            and self._cached_labels is not None
+        ):
+            return (
+                self._cached_ids[idx],
+                self._cached_masks[idx],
+                self._cached_labels[idx],
+            )
+
         seq, label = self.examples[idx]
-        if self.tokenization == "kmer":
-            text = seq_to_kmer_text(seq, self.k)
-        else:
-            text = seq
-
-        enc = self.tokenizer(
-            text,
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_len,
-            return_tensors="pt",
+        token_ids, mask = _encode_sequence(
+            seq=seq,
+            vocab=self.vocab,
+            input_mode=self.input_mode,
+            kmer_k=self.kmer_k,
+            max_tokens=self.max_tokens,
+            read_order=self.read_order,
         )
-        input_ids = enc["input_ids"].squeeze(0)
-        attention_mask = enc["attention_mask"].squeeze(0)
         return (
-            input_ids,
-            attention_mask,
-            torch.tensor(label, dtype=torch.float32),
+            torch.from_numpy(token_ids),
+            torch.from_numpy(mask),
+            torch.tensor(float(label), dtype=torch.float32),
         )
 
 
-# --------------------------
-# ESN Reservoir Model
-# --------------------------
+class ReservoirReadout(nn.Module):
+    """Fixed random reservoir with trainable sequence-to-one readout."""
 
-
-class ESNReadout(nn.Module):
     def __init__(
         self,
+        *,
         vocab_size: int,
-        max_len: int,
         input_dim: int,
         reservoir_size: int,
         spectral_radius: float,
         leak: float,
         sparsity: float,
+        input_scale: float,
+        pooling: str,
         readout_hidden: int,
-        seed: int = 1337,
-    ):
+        readout_dropout: float,
+        washout: int,
+        preroll_steps: int,
+        seed: int,
+    ) -> None:
         super().__init__()
-        self.vocab_size = vocab_size
-        self.max_len = max_len
-        self.input_dim = input_dim
-        self.reservoir_size = reservoir_size
-        self.spectral_radius = spectral_radius
-        self.leak = leak
-        self.sparsity = sparsity
+        if vocab_size <= 0:
+            raise ValueError("vocab_size must be positive.")
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive.")
+        if reservoir_size <= 0:
+            raise ValueError("reservoir_size must be positive.")
+        if spectral_radius <= 0.0:
+            raise ValueError("spectral_radius must be positive.")
+        if leak <= 0.0 or leak > 1.0:
+            raise ValueError("leak must satisfy 0 < leak <= 1.")
+        if sparsity <= 0.0 or sparsity > 1.0:
+            raise ValueError("sparsity must satisfy 0 < sparsity <= 1.")
+        if input_scale <= 0.0:
+            raise ValueError("input_scale must be positive.")
+        if pooling not in POOLING_CHOICES:
+            choices_text = ", ".join(POOLING_CHOICES)
+            raise ValueError(f"pooling must be one of: {choices_text}")
+        if readout_hidden <= 0:
+            raise ValueError("readout_hidden must be positive.")
+        if readout_dropout < 0.0 or readout_dropout >= 1.0:
+            raise ValueError("readout_dropout must satisfy 0 <= x < 1.")
+        if washout < 0:
+            raise ValueError("washout must be >= 0.")
+        if preroll_steps < 0:
+            raise ValueError("preroll_steps must be >= 0.")
+
+        self.vocab_size: int = vocab_size
+        self.input_dim: int = input_dim
+        self.reservoir_size: int = reservoir_size
+        self.spectral_radius: float = spectral_radius
+        self.leak: float = leak
+        self.sparsity: float = sparsity
+        self.input_scale: float = input_scale
+        self.pooling: str = pooling
+        self.readout_hidden: int = readout_hidden
+        self.readout_dropout: float = readout_dropout
+        self.washout: int = washout
+        self.preroll_steps: int = preroll_steps
 
         rng = np.random.default_rng(seed)
 
-        # Fixed random embedding
-        emb = rng.normal(
-            0.0, 1.0 / math.sqrt(input_dim), size=(vocab_size, input_dim)
+        token_proj = rng.normal(
+            0.0,
+            1.0 / np.sqrt(float(input_dim)),
+            size=(vocab_size, input_dim),
         ).astype(np.float32)
-        self.register_buffer("tok_emb", torch.from_numpy(emb), persistent=True)
+        self.register_buffer("token_proj", torch.from_numpy(token_proj), persistent=True)
 
-        # Fixed input weight
         w_in = rng.normal(
-            0.0, 1.0 / math.sqrt(input_dim), size=(reservoir_size, input_dim)
+            0.0,
+            1.0 / np.sqrt(float(input_dim)),
+            size=(reservoir_size, input_dim),
         ).astype(np.float32)
         self.register_buffer("w_in", torch.from_numpy(w_in), persistent=True)
 
-        # Fixed recurrent weight with sparsity
-        w_res = rng.normal(0.0, 1.0, size=(reservoir_size, reservoir_size)).astype(
-            np.float32
-        )
+        w_res_np = rng.normal(
+            0.0,
+            1.0,
+            size=(reservoir_size, reservoir_size),
+        ).astype(np.float32)
         mask = rng.random((reservoir_size, reservoir_size))
-        w_res[mask > sparsity] = 0.0
-
-        # Scale to target spectral radius (power iteration)
-        w_res_t = torch.from_numpy(w_res)
-        radius = self._estimate_spectral_radius(w_res_t)
+        w_res_np[mask > sparsity] = 0.0
+        w_res = torch.from_numpy(w_res_np)
+        radius = self._estimate_spectral_radius(w_res)
         scale = spectral_radius / max(radius, 1e-6)
-        w_res_t = w_res_t * scale
-        self.register_buffer("w_res", w_res_t, persistent=True)
+        w_res = w_res * scale
+        self.register_buffer("w_res", w_res, persistent=True)
 
-        # Trainable readout MLP (deeper for better feature extraction)
-        # Input will be reservoir_size * 2 due to avg+max pooling
-        self.readout = nn.Sequential(
-            nn.Linear(reservoir_size * 2, readout_hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(readout_hidden, readout_hidden // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(readout_hidden // 2, 1),
-        )
+        self.attn_proj: Optional[nn.Linear]
+        self.step_head: Optional[nn.Linear]
+        if pooling in {"attention", "weighted_logit_sum"}:
+            self.attn_proj = nn.Linear(reservoir_size, 1)
+        else:
+            self.attn_proj = None
+
+        if pooling in {"logit_sum", "weighted_logit_sum"}:
+            self.step_head = nn.Linear(reservoir_size, 1)
+            self.readout = nn.Identity()
+        else:
+            self.step_head = None
+            pooled_dim = reservoir_size * 2 if pooling == "mean_max" else reservoir_size
+            self.readout = nn.Sequential(
+                nn.Linear(pooled_dim, readout_hidden),
+                nn.ReLU(inplace=True),
+                nn.Dropout(readout_dropout),
+                nn.Linear(readout_hidden, 1),
+            )
 
     @staticmethod
-    def _estimate_spectral_radius(w: torch.Tensor, iters: int = 50) -> float:
-        # Power iteration
-        v = torch.randn(w.shape[0], 1)
+    def _estimate_spectral_radius(w: torch.Tensor, iters: int = 64) -> float:
+        """Estimate matrix spectral radius via power iteration."""
+        v = torch.randn(w.shape[0], 1, dtype=w.dtype)
         for _ in range(iters):
             v = w @ v
             v = v / (v.norm() + 1e-9)
         rayleigh = (v.t() @ w @ v).item()
         return abs(rayleigh)
 
-    def forward(self, input_ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        # input_ids: (B, L)
-        # attn_mask: (B, L)
-        bsz, seq_len = input_ids.shape
+    def _gather_last(self, states: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
+        """Gather last valid state for each sample."""
+        valid = keep_mask > 0
+        seq_len = states.shape[1]
+        rev_offset = valid.to(torch.long).flip(dims=(1,)).argmax(dim=1)
+        last_pos = (seq_len - 1) - rev_offset
+        has_valid = valid.any(dim=1)
+        fallback = torch.full_like(last_pos, seq_len - 1)
+        gather_pos = torch.where(has_valid, last_pos, fallback)
+        batch_idx = torch.arange(states.shape[0], device=states.device)
+        return states[batch_idx, gather_pos, :]
 
-        # Embed tokens (fixed)
-        u = self.tok_emb[input_ids]  # (B, L, input_dim)
-
-        # ESN state update
-        x = torch.zeros(bsz, self.reservoir_size, device=input_ids.device)
-        states = []
-
-        for t in range(seq_len):
-            u_t = u[:, t, :]  # (B, input_dim)
-            pre = torch.matmul(u_t, self.w_in.t()) + torch.matmul(x, self.w_res.t())
-            x = (1.0 - self.leak) * x + self.leak * torch.tanh(pre)
-
-            # only keep valid positions
-            mask_t = attn_mask[:, t].unsqueeze(1)
-            states.append(x * mask_t)
-
-        # Pool states (mean + max over valid steps for richer representation)
-        stacked = torch.stack(states, dim=1)  # (B, L, R)
-        valid = attn_mask.sum(dim=1).unsqueeze(1).clamp(min=1.0)
-
-        # Average pooling
-        avg_pooled = stacked.sum(dim=1) / valid  # (B, R)
-
-        # Max pooling (ignoring padded positions)
-        stacked_masked = stacked.clone()
-        mask_expanded = attn_mask.unsqueeze(2).expand_as(stacked)  # (B, L, R)
-        stacked_masked[mask_expanded == 0] = -1e9
-        max_pooled, _ = stacked_masked.max(dim=1)  # (B, R)
-
-        # Concatenate avg and max
-        pooled = torch.cat([avg_pooled, max_pooled], dim=1)  # (B, 2*R)
-
-        logits = self.readout(pooled).squeeze(-1)
-        return logits
-
-
-class HFReadout(nn.Module):
-    def __init__(
-        self,
-        model_name: str,
-        pooling: str,
-        readout_hidden: int,
-        freeze_backbone: bool = True,
-        trust_remote_code: bool = False,
-    ):
-        super().__init__()
-        if AutoModel is None:
-            raise RuntimeError(
-                "transformers is not installed. Install with: pip install transformers"
-            )
-        self.model_name = model_name
-        self.pooling = pooling
-        self.freeze_backbone = freeze_backbone
-
-        self.backbone = AutoModel.from_pretrained(
-            model_name, trust_remote_code=trust_remote_code
-        )
-        hidden = int(self.backbone.config.hidden_size)
-
-        if pooling == "mean_max":
-            in_dim = hidden * 2
-        else:
-            in_dim = hidden
-
-        self.readout = nn.Sequential(
-            nn.Linear(in_dim, readout_hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(readout_hidden, readout_hidden // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(readout_hidden // 2, 1),
-        )
-
-        if freeze_backbone:
-            for p in self.backbone.parameters():
-                p.requires_grad = False
-
-    def _pool(self, hidden: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        if self.pooling == "cls":
-            return hidden[:, 0, :]
-
-        mask = attention_mask.unsqueeze(-1).type_as(hidden)
-        denom = mask.sum(dim=1).clamp(min=1.0)
-        mean = (hidden * mask).sum(dim=1) / denom
-
-        if self.pooling == "mean":
-            return mean
-
-        masked = hidden.masked_fill(mask == 0, -1e9)
-        max_pooled, _ = masked.max(dim=1)
-
-        if self.pooling == "max":
-            return max_pooled
-
-        return torch.cat([mean, max_pooled], dim=1)
+    def _apply_washout(self, attn_mask: torch.Tensor) -> torch.Tensor:
+        """Apply fixed washout mask while keeping at least one valid step."""
+        keep = attn_mask.clone()
+        if self.washout > 0:
+            keep[:, : self.washout] = 0.0
+        has_keep = keep.sum(dim=1) > 0
+        valid = attn_mask > 0
+        seq_len = attn_mask.shape[1]
+        rev_offset = valid.to(torch.long).flip(dims=(1,)).argmax(dim=1)
+        last_pos = (seq_len - 1) - rev_offset
+        has_valid = valid.any(dim=1)
+        fallback = torch.full_like(last_pos, seq_len - 1)
+        fill_pos = torch.where(has_valid, last_pos, fallback)
+        fill_updates = torch.zeros_like(keep)
+        fill_updates.scatter_(1, fill_pos.unsqueeze(1), 1.0)
+        missing_mask = (~has_keep).to(dtype=keep.dtype).unsqueeze(1)
+        keep = torch.maximum(keep, fill_updates * missing_mask)
+        return keep
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if self.freeze_backbone:
-            with torch.no_grad():
-                outputs = self.backbone(
-                    input_ids=input_ids, attention_mask=attention_mask
+        """Run sequence-to-one forward pass.
+
+        Parameters
+        ----------
+        input_ids : torch.Tensor
+            Shape ``(batch, tokens)`` with dtype ``torch.long``.
+        attention_mask : torch.Tensor
+            Shape ``(batch, tokens)`` where 1 marks real token and 0 pad.
+
+        Returns
+        -------
+        torch.Tensor
+            Binary logits with shape ``(batch,)``.
+        """
+        tokens = self.token_proj[input_ids]  # (B, L, input_dim)
+        tokens = tokens.to(dtype=torch.float32)
+        attn_mask_f = attention_mask.to(dtype=torch.float32)
+        keep_mask = self._apply_washout(attn_mask_f)
+
+        batch_size, seq_len, _ = tokens.shape
+        state = torch.zeros(
+            batch_size,
+            self.reservoir_size,
+            dtype=tokens.dtype,
+            device=tokens.device,
+        )
+
+        for _ in range(self.preroll_steps):
+            pre = state @ self.w_res.t()
+            state = (1.0 - self.leak) * state + self.leak * torch.tanh(pre)
+
+        store_states = self.pooling == "attention"
+        states: Optional[torch.Tensor] = None
+        if store_states:
+            states = torch.empty(
+                batch_size,
+                seq_len,
+                self.reservoir_size,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+
+        running_sum: Optional[torch.Tensor] = None
+        running_max: Optional[torch.Tensor] = None
+        running_last: Optional[torch.Tensor] = None
+        running_logit_sum: Optional[torch.Tensor] = None
+        weighted_scores: Optional[torch.Tensor] = None
+        weighted_logits: Optional[torch.Tensor] = None
+        very_negative = torch.tensor(-1e9, dtype=tokens.dtype, device=tokens.device)
+
+        if self.pooling in {"mean", "mean_max"}:
+            running_sum = torch.zeros(
+                batch_size,
+                self.reservoir_size,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+        if self.pooling in {"max", "mean_max"}:
+            running_max = torch.full(
+                (batch_size, self.reservoir_size),
+                -1e9,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+        if self.pooling == "last":
+            running_last = torch.zeros(
+                batch_size,
+                self.reservoir_size,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+        if self.pooling == "logit_sum":
+            running_logit_sum = torch.zeros(
+                batch_size,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+        if self.pooling == "weighted_logit_sum":
+            weighted_scores = torch.empty(
+                batch_size,
+                seq_len,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+            weighted_logits = torch.empty(
+                batch_size,
+                seq_len,
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+
+        for step in range(seq_len):
+            token_step = tokens[:, step, :]
+            pre = self.input_scale * (token_step @ self.w_in.t())
+            pre = pre + (state @ self.w_res.t())
+            next_state = (1.0 - self.leak) * state + self.leak * torch.tanh(pre)
+            mask_step = attn_mask_f[:, step].unsqueeze(1)
+            state = (mask_step * next_state) + ((1.0 - mask_step) * state)
+
+            keep_step = keep_mask[:, step].unsqueeze(1)
+            if store_states and states is not None:
+                states[:, step, :] = state
+            if running_sum is not None:
+                running_sum = running_sum + (state * keep_step)
+            if running_max is not None:
+                masked_state = torch.where(keep_step > 0.0, state, very_negative)
+                running_max = torch.maximum(running_max, masked_state)
+            if running_last is not None:
+                running_last = torch.where(keep_step > 0.0, state, running_last)
+            if running_logit_sum is not None:
+                if self.step_head is None:
+                    raise RuntimeError("logit_sum pooling requires step_head.")
+                step_logits = self.step_head(state).squeeze(-1)
+                running_logit_sum = running_logit_sum + (
+                    step_logits * keep_mask[:, step]
                 )
-        else:
-            outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+            if weighted_scores is not None and weighted_logits is not None:
+                if self.step_head is None or self.attn_proj is None:
+                    raise RuntimeError("weighted_logit_sum requires step_head and attn_proj.")
+                weighted_scores[:, step] = self.attn_proj(state).squeeze(-1)
+                weighted_logits[:, step] = self.step_head(state).squeeze(-1)
 
-        hidden = outputs.last_hidden_state
-        pooled = self._pool(hidden, attention_mask)
-        logits = self.readout(pooled).squeeze(-1)
-        return logits
+        keep_mask_3d = keep_mask.unsqueeze(2)
+
+        if self.pooling == "last":
+            if running_last is None:
+                raise RuntimeError("last pooling state was not initialized.")
+            pooled = running_last
+            logits = self.readout(pooled).squeeze(-1)
+            return logits
+
+        if self.pooling == "mean":
+            if running_sum is None:
+                raise RuntimeError("mean pooling state was not initialized.")
+            denom = keep_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+            pooled = running_sum / denom
+            logits = self.readout(pooled).squeeze(-1)
+            return logits
+
+        if self.pooling == "max":
+            if running_max is None:
+                raise RuntimeError("max pooling state was not initialized.")
+            pooled = running_max
+            logits = self.readout(pooled).squeeze(-1)
+            return logits
+
+        if self.pooling == "mean_max":
+            if running_sum is None or running_max is None:
+                raise RuntimeError("mean_max pooling state was not initialized.")
+            denom = keep_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+            avg = running_sum / denom
+            mx = running_max
+            pooled = torch.cat([avg, mx], dim=1)
+            logits = self.readout(pooled).squeeze(-1)
+            return logits
+
+        if self.pooling == "attention":
+            if self.attn_proj is None:
+                raise RuntimeError("attention pooling requires attn_proj.")
+            if states is None:
+                raise RuntimeError("attention pooling requires intermediate states.")
+            scores = self.attn_proj(states).squeeze(-1)
+            scores = scores.masked_fill(keep_mask == 0.0, -1e9)
+            weights = torch.softmax(scores, dim=1)
+            pooled = (weights.unsqueeze(2) * states).sum(dim=1)
+            logits = self.readout(pooled).squeeze(-1)
+            return logits
+
+        if self.pooling == "logit_sum":
+            if running_logit_sum is None:
+                raise RuntimeError("logit_sum pooling state was not initialized.")
+            logits = running_logit_sum
+            return logits
+
+        if self.pooling == "weighted_logit_sum":
+            if weighted_scores is None or weighted_logits is None:
+                raise RuntimeError("weighted_logit_sum states were not initialized.")
+            scores = weighted_scores
+            scores = scores.masked_fill(keep_mask == 0.0, -1e9)
+            weights = torch.softmax(scores, dim=1)
+            logits = (weights * weighted_logits).sum(dim=1)
+            return logits
+
+        raise RuntimeError(f"Unsupported pooling: {self.pooling}")
 
 
-# --------------------------
-# Train / eval
-# --------------------------
+@dataclass(frozen=True)
+class TaskTrainParams:
+    """Resolved train-time hyperparameters for one task."""
+
+    batch_size: int
+    lr: float
+    loss_name: str
+    input_mode: str
+    kmer_k: int
+    max_tokens: str
+    input_dim: int
+    reservoir_size: int
+    spectral_radius: float
+    leak: float
+    sparsity: float
+    input_scale: float
+    pooling: str
+    readout_hidden: int
+    readout_dropout: float
+    washout: int
+    preroll_steps: int
+    read_order: str
+    weight_decay: float
+    eta_min_ratio: float
+    val_frac: float
+    grad_clip: float
+    pos_weight_cap: float
+    focal_gamma: float
+    focal_alpha_pos: Optional[float]
+    asym_gamma_pos: float
+    asym_gamma_neg: float
+    asym_alpha_pos: Optional[float]
+
+
+def _resolve_task_train_params(
+    *,
+    task: str,
+    model_args: argparse.Namespace,
+) -> TaskTrainParams:
+    """Resolve task-specific train parameters with fallback to shared values."""
+    if task not in {"donor", "acceptor"}:
+        raise ValueError(f"Unsupported task: {task}")
+
+    prefix = f"{task}_"
+
+    def _override_or_default(name: str, default: object) -> object:
+        override = getattr(model_args, f"{prefix}{name}", None)
+        return default if override is None else override
+
+    return TaskTrainParams(
+        batch_size=int(_override_or_default("batch_size", model_args.batch_size)),
+        lr=float(_override_or_default("lr", model_args.lr)),
+        loss_name=str(_override_or_default("loss", model_args.loss)),
+        input_mode=str(_override_or_default("input_mode", model_args.input_mode)),
+        kmer_k=int(_override_or_default("kmer_k", model_args.kmer_k)),
+        max_tokens=str(_override_or_default("max_tokens", model_args.max_tokens)),
+        input_dim=int(_override_or_default("input_dim", model_args.input_dim)),
+        reservoir_size=int(
+            _override_or_default("reservoir_size", model_args.reservoir_size)
+        ),
+        spectral_radius=float(
+            _override_or_default("spectral_radius", model_args.spectral_radius)
+        ),
+        leak=float(_override_or_default("leak", model_args.leak)),
+        sparsity=float(_override_or_default("sparsity", model_args.sparsity)),
+        input_scale=float(_override_or_default("input_scale", model_args.input_scale)),
+        pooling=str(_override_or_default("pooling", model_args.pooling)),
+        readout_hidden=int(
+            _override_or_default("readout_hidden", model_args.readout_hidden)
+        ),
+        readout_dropout=float(
+            _override_or_default("readout_dropout", model_args.readout_dropout)
+        ),
+        washout=int(_override_or_default("washout", model_args.washout)),
+        preroll_steps=int(
+            _override_or_default("preroll_steps", model_args.preroll_steps)
+        ),
+        read_order=_resolve_read_order(
+            task=task,
+            read_order=str(
+                _override_or_default("read_order", model_args.read_order)
+            ),
+            donor_read_order=getattr(model_args, "donor_read_order", None),
+            acceptor_read_order=getattr(model_args, "acceptor_read_order", None),
+        ),
+        weight_decay=float(
+            _override_or_default("weight_decay", model_args.weight_decay)
+        ),
+        eta_min_ratio=float(
+            _override_or_default("eta_min_ratio", model_args.eta_min_ratio)
+        ),
+        val_frac=float(_override_or_default("val_frac", model_args.val_frac)),
+        grad_clip=float(_override_or_default("grad_clip", model_args.grad_clip)),
+        pos_weight_cap=float(
+            _override_or_default("pos_weight_cap", model_args.pos_weight_cap)
+        ),
+        focal_gamma=float(_override_or_default("focal_gamma", model_args.focal_gamma)),
+        focal_alpha_pos=_override_or_default(
+            "focal_alpha_pos", model_args.focal_alpha_pos
+        ),
+        asym_gamma_pos=float(
+            _override_or_default("asym_gamma_pos", model_args.asym_gamma_pos)
+        ),
+        asym_gamma_neg=float(
+            _override_or_default("asym_gamma_neg", model_args.asym_gamma_neg)
+        ),
+        asym_alpha_pos=_override_or_default(
+            "asym_alpha_pos", model_args.asym_alpha_pos
+        ),
+    )
+
+
+def stratified_split(
+    examples: Sequence[Tuple[str, int]],
+    val_frac: float = 0.1,
+    seed: int = 1337,
+) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
+    """Split examples into train/validation subsets preserving labels."""
+    rng = random.Random(seed)
+    positives = [(seq, label) for seq, label in examples if label == 1]
+    negatives = [(seq, label) for seq, label in examples if label == 0]
+
+    rng.shuffle(positives)
+    rng.shuffle(negatives)
+
+    n_val_pos = max(1, int(len(positives) * val_frac))
+    n_val_neg = max(1, int(len(negatives) * val_frac))
+    n_val_pos = min(n_val_pos, len(positives) - 1)
+    n_val_neg = min(n_val_neg, len(negatives) - 1)
+
+    train = positives[n_val_pos:] + negatives[n_val_neg:]
+    val = positives[:n_val_pos] + negatives[:n_val_neg]
+
+    rng.shuffle(train)
+    rng.shuffle(val)
+    return train, val
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    use_amp: bool,
+    amp_dtype: Optional[torch.dtype],
+) -> Dict[str, float]:
+    """Evaluate one model on a validation loader."""
     model.eval()
-    all_logits = []
-    all_labels = []
+    all_logits: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+    use_non_blocking = device == "cuda"
 
-    for input_ids, attn_mask, labels in loader:
-        input_ids = input_ids.to(device)
-        attn_mask = attn_mask.to(device)
-        labels = labels.to(device)
+    for input_ids, attention_mask, labels in loader:
+        input_ids = input_ids.to(device, non_blocking=use_non_blocking)
+        attention_mask = attention_mask.to(device, non_blocking=use_non_blocking)
+        labels = labels.to(device, non_blocking=use_non_blocking)
 
-        logits = model(input_ids, attn_mask)
-        all_logits.append(logits.detach().cpu().numpy())
-        all_labels.append(labels.detach().cpu().numpy())
+        if use_amp and device == "cuda" and amp_dtype is not None:
+            amp_context: ContextManager[object] = torch.autocast(
+                device_type="cuda",
+                dtype=amp_dtype,
+                enabled=True,
+            )
+        else:
+            amp_context = nullcontext()
+
+        with amp_context:
+            logits = model(input_ids=input_ids, attention_mask=attention_mask)
+
+        all_logits.append(logits.float().cpu().numpy())
+        all_labels.append(labels.float().cpu().numpy())
 
     logits = np.concatenate(all_logits) if all_logits else np.array([])
     labels = np.concatenate(all_labels) if all_labels else np.array([])
     probs = sigmoid_np(logits) if logits.size else np.array([])
 
-    metrics = {}
+    probs = np.clip(probs, 1e-7, 1 - 1e-7)
+    labels = labels.astype(np.int32)
+
+    metrics: Dict[str, float] = {}
     if labels.size:
         metrics["acc@0.5"] = float(np.mean((probs >= 0.5) == (labels >= 0.5)))
-        metrics["loss_bce"] = float(
-            np.mean(
-                -(
-                    labels * np.log(probs + 1e-9)
-                    + (1 - labels) * np.log(1 - probs + 1e-9)
-                )
-            )
-        )
-        if roc_auc_score is not None and len(np.unique(labels)) > 1:
-            metrics["roc_auc"] = float(roc_auc_score(labels, probs))
-        if average_precision_score is not None and len(np.unique(labels)) > 1:
-            metrics["pr_auc"] = float(average_precision_score(labels, probs))
+
+        if len(np.unique(labels)) > 1:
+            roc_auc_value: Optional[float] = None
+            if roc_auc_score is not None:
+                try:
+                    roc_auc_value = float(roc_auc_score(labels, probs))
+                except Exception:
+                    roc_auc_value = None
+            if roc_auc_value is None:
+                try:
+                    roc_auc_value = _fallback_roc_auc(labels, probs)
+                except ValueError:
+                    roc_auc_value = None
+            if roc_auc_value is not None:
+                metrics["roc_auc"] = roc_auc_value
+
+            pr_auc_value: Optional[float] = None
+            if average_precision_score is not None:
+                try:
+                    pr_auc_value = float(average_precision_score(labels, probs))
+                except Exception:
+                    pr_auc_value = None
+            if pr_auc_value is None:
+                try:
+                    pr_auc_value = _fallback_average_precision(labels, probs)
+                except ValueError:
+                    pr_auc_value = None
+            if pr_auc_value is not None:
+                metrics["pr_auc"] = pr_auc_value
 
     return metrics
 
 
-def stratified_split(
-    examples: List[Tuple[str, int]], val_frac: float = 0.1, seed: int = 1337
-):
-    rng = random.Random(seed)
-    pos = [(s, y) for s, y in examples if y == 1]
-    neg = [(s, y) for s, y in examples if y == 0]
-
-    rng.shuffle(pos)
-    rng.shuffle(neg)
-
-    n_val_pos = max(1, int(len(pos) * val_frac))
-    n_val_neg = max(1, int(len(neg) * val_frac))
-
-    train = pos[n_val_pos:] + neg[n_val_neg:]
-    val = pos[:n_val_pos] + neg[:n_val_neg]
-
-    rng.shuffle(train)
-    rng.shuffle(val)
-
-    return train, val
-
-
-def train_model(
+def train_task_model(
     task: str,
     pos_path: str,
     neg_path: str,
-    out_dir: str,
-    k: int,
-    max_len: int,
-    input_dim: int,
-    reservoir_size: int,
-    spectral_radius: float,
-    leak: float,
-    sparsity: float,
-    readout_hidden: int,
-    epochs: int,
-    batch_size: int,
-    lr: float,
-    seed: int,
-    device: str,
-):
-    print(f"\n{'=' * 60}")
-    print(f"Training {task.upper()} ESN model")
-    print(f"{'=' * 60}")
+    checkpoint_path: str,
+    window_len: int,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    epochs: int = 20,
+    batch_size: int = 256,
+    lr: float = 5e-4,
+    seed: int = 1337,
+    input_mode: str = "onehot",
+    kmer_k: int = 3,
+    max_tokens: Union[str, int] = "auto",
+    input_dim: int = 128,
+    reservoir_size: int = 1024,
+    spectral_radius: float = 0.95,
+    leak: float = 0.3,
+    sparsity: float = 0.1,
+    input_scale: float = 0.5,
+    pooling: str = "mean_max",
+    readout_hidden: int = 256,
+    readout_dropout: float = 0.2,
+    washout: int = 0,
+    preroll_steps: int = 0,
+    read_order: str = "forward",
+    weight_decay: float = 0.01,
+    eta_min_ratio: float = 0.01,
+    val_frac: float = 0.1,
+    grad_clip: float = 1.0,
+    compile_model: bool = False,
+    compile_mode: str = "auto",
+    device: str = "auto",
+    loss_name: str = "weighted_bce",
+    pos_weight_cap: float = 20.0,
+    focal_gamma: float = 2.0,
+    focal_alpha_pos: Optional[float] = None,
+    asym_gamma_pos: float = 0.0,
+    asym_gamma_neg: float = 4.0,
+    asym_alpha_pos: Optional[float] = None,
+    use_amp: Union[bool, int] = 1,
+    amp_dtype: str = "auto",
+    allow_tf32: Union[bool, int] = 1,
+    cudnn_benchmark: Union[bool, int] = 1,
+    deterministic: Union[bool, int] = 0,
+    num_workers: Union[str, int] = "auto",
+    prefetch_factor: int = 4,
+    persistent_workers: Union[bool, int] = 1,
+    pin_memory: Union[bool, int] = 1,
+    min_batch_size: int = 64,
+    max_oom_retries: int = 8,
+    quick_phase: bool = False,
+    gpu_id: Optional[int] = None,
+) -> Dict[str, object]:
+    """Train one task model with GPU-aware runtime options."""
+    if window_len <= 0:
+        raise ValueError("window_len must be positive.")
+    if input_mode not in INPUT_MODE_CHOICES:
+        choices_text = ", ".join(INPUT_MODE_CHOICES)
+        raise ValueError(f"input_mode must be one of: {choices_text}")
+    if kmer_k <= 0:
+        raise ValueError("--kmer_k must be positive.")
+    if input_dim <= 0:
+        raise ValueError("--input_dim must be positive.")
+    if reservoir_size <= 0:
+        raise ValueError("--reservoir_size must be positive.")
+    if spectral_radius <= 0.0:
+        raise ValueError("--spectral_radius must be positive.")
+    if leak <= 0.0 or leak > 1.0:
+        raise ValueError("--leak must satisfy 0 < leak <= 1.")
+    if sparsity <= 0.0 or sparsity > 1.0:
+        raise ValueError("--sparsity must satisfy 0 < sparsity <= 1.")
+    if input_scale <= 0.0:
+        raise ValueError("--input_scale must be positive.")
+    if pooling not in POOLING_CHOICES:
+        choices_text = ", ".join(POOLING_CHOICES)
+        raise ValueError(f"--pooling must be one of: {choices_text}")
+    if readout_hidden <= 0:
+        raise ValueError("--readout_hidden must be positive.")
+    if readout_dropout < 0.0 or readout_dropout >= 1.0:
+        raise ValueError("--readout_dropout must satisfy 0 <= x < 1.")
+    if washout < 0:
+        raise ValueError("--washout must be >= 0.")
+    if preroll_steps < 0:
+        raise ValueError("--preroll_steps must be >= 0.")
+    if read_order not in {"forward", "reverse"}:
+        raise ValueError("read_order must be forward or reverse.")
+    if weight_decay < 0.0:
+        raise ValueError("--weight_decay must be non-negative.")
+    if eta_min_ratio < 0.0:
+        raise ValueError("--eta_min_ratio must be non-negative.")
+    if val_frac <= 0.0 or val_frac >= 1.0:
+        raise ValueError("--val_frac must satisfy 0 < val_frac < 1.")
+    if grad_clip < 0.0:
+        raise ValueError("--grad_clip must be non-negative.")
+    if prefetch_factor <= 0:
+        raise ValueError("--prefetch_factor must be positive.")
+    if min_batch_size <= 0:
+        raise ValueError("--min_batch_size must be positive.")
+    if max_oom_retries < 0:
+        raise ValueError("--max_oom_retries must be >= 0.")
+    if batch_size < min_batch_size:
+        raise ValueError("--batch_size must be >= --min_batch_size.")
 
-    set_seed(seed)
-    os.makedirs(out_dir, exist_ok=True)
+    device = pick_device(device)
+    resolved_num_workers = _resolve_num_workers(num_workers, device=device)
+    use_pin_memory = _bool_from_flag(pin_memory) and device == "cuda"
+    use_persistent_workers = (
+        _bool_from_flag(persistent_workers) and resolved_num_workers > 0
+    )
+    use_amp_bool = _bool_from_flag(use_amp) and device == "cuda"
+    allow_tf32_bool = _bool_from_flag(allow_tf32)
+    deterministic_bool = _bool_from_flag(deterministic)
+    cudnn_benchmark_bool = _bool_from_flag(cudnn_benchmark)
+    amp_dtype_resolved = _resolve_amp_dtype(amp_dtype, device)
+    compile_enabled = _resolve_compile_enabled(
+        compile_mode=compile_mode,
+        compile_flag=compile_model,
+        quick_phase=quick_phase,
+        device=device,
+        epochs=epochs,
+    )
 
-    examples = read_examples_single_task(pos_path, neg_path, task)
-    n_pos = sum(y for _, y in examples)
+    set_seed(
+        seed=seed,
+        deterministic=deterministic_bool,
+        cudnn_benchmark=cudnn_benchmark_bool,
+        allow_tf32=allow_tf32_bool,
+    )
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    if checkpoint_dir:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    examples = read_examples_single_task(
+        pos_path,
+        neg_path,
+        task,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+
+    n_pos = sum(label for _, label in examples)
     n_neg = len(examples) - n_pos
-    print(f"Total examples: {len(examples)} | pos={n_pos} | neg={n_neg}")
+    if n_pos < 2 or n_neg < 2:
+        raise ValueError(
+            f"Insufficient training examples for {task}: pos={n_pos}, neg={n_neg}."
+        )
 
-    train_ex, val_ex = stratified_split(examples, val_frac=0.1, seed=seed)
-    train_pos = sum(y for _, y in train_ex)
-    train_neg = len(train_ex) - train_pos
-    print(f"Train: {len(train_ex)} | pos={train_pos} | neg={train_neg}")
+    train_ex, val_ex = stratified_split(examples, val_frac=val_frac, seed=seed)
     print(
-        f"Val:   {len(val_ex)} | pos={sum(y for _, y in val_ex)} | neg={len(val_ex) - sum(y for _, y in val_ex)}"
+        f"[{task}] device={device} total={len(examples)} "
+        f"(pos={n_pos}, neg={n_neg}) train={len(train_ex)} val={len(val_ex)}"
     )
 
-    vocab = build_kmer_vocab(k)
-    print(f"Vocab size (k={k}): {len(vocab)}")
-
-    train_ds = KmerDataset(train_ex, vocab=vocab, k=k, max_len=max_len)
-    val_ds = KmerDataset(val_ex, vocab=vocab, k=k, max_len=max_len)
-
-    num_workers = 0 if device in ["mps", "cpu"] else 2
-    pin_memory = device == "cuda"
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
+    vocab = build_onehot_vocab() if input_mode == "onehot" else build_kmer_vocab(kmer_k)
+    max_tokens_effective = _resolve_max_tokens(
+        max_tokens,
+        input_mode=input_mode,
+        window_len=window_len,
+        kmer_k=kmer_k,
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
+    pretokenize_dataset = device == "mps"
+    if pretokenize_dataset:
+        print(f"[{task}] dataset pre-tokenization enabled for mps.")
+
+    train_ds = SpliceTokenDataset(
+        examples=train_ex,
+        vocab=vocab,
+        input_mode=input_mode,
+        kmer_k=kmer_k,
+        max_tokens=max_tokens_effective,
+        read_order=read_order,
+        pretokenize=pretokenize_dataset,
+    )
+    val_ds = SpliceTokenDataset(
+        examples=val_ex,
+        vocab=vocab,
+        input_mode=input_mode,
+        kmer_k=kmer_k,
+        max_tokens=max_tokens_effective,
+        read_order=read_order,
+        pretokenize=pretokenize_dataset,
     )
 
-    model = ESNReadout(
+    train_pos = sum(label for _, label in train_ex)
+    train_neg = len(train_ex) - train_pos
+    criterion, loss_meta = build_binary_classification_loss(
+        loss_name=loss_name,
+        train_pos=train_pos,
+        train_neg=train_neg,
+        device=device,
+        pos_weight_cap=pos_weight_cap,
+        focal_gamma=focal_gamma,
+        focal_alpha_pos=focal_alpha_pos,
+        asym_gamma_pos=asym_gamma_pos,
+        asym_gamma_neg=asym_gamma_neg,
+        asym_alpha_pos=asym_alpha_pos,
+    )
+
+    effective_batch_size = batch_size
+    if device == "mps":
+        mps_max_batch_size = _resolve_mps_max_batch_size()
+        if effective_batch_size > mps_max_batch_size:
+            print(
+                f"[{task}] mps batch clamp: {effective_batch_size} -> "
+                f"{mps_max_batch_size} "
+                "(set INTRONMODEL_MPS_MAX_BATCH_SIZE to change)."
+            )
+            effective_batch_size = mps_max_batch_size
+
+    oom_retries = 0
+    use_non_blocking = device == "cuda"
+    while True:
+        saw_training_batch = False
+        compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
+
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(seed)
+        train_loader_kwargs: dict[str, object] = {
+            "dataset": train_ds,
+            "batch_size": effective_batch_size,
+            "shuffle": True,
+            "num_workers": resolved_num_workers,
+            "pin_memory": use_pin_memory,
+            "worker_init_fn": _seed_worker if resolved_num_workers > 0 else None,
+            "generator": loader_generator,
+        }
+        if resolved_num_workers > 0:
+            train_loader_kwargs["prefetch_factor"] = prefetch_factor
+            train_loader_kwargs["persistent_workers"] = use_persistent_workers
+        train_loader = DataLoader(**train_loader_kwargs)
+
+        val_loader_kwargs: dict[str, object] = {
+            "dataset": val_ds,
+            "batch_size": effective_batch_size,
+            "shuffle": False,
+            "num_workers": resolved_num_workers,
+            "pin_memory": use_pin_memory,
+        }
+        if resolved_num_workers > 0:
+            val_loader_kwargs["prefetch_factor"] = prefetch_factor
+            val_loader_kwargs["persistent_workers"] = use_persistent_workers
+        val_loader = DataLoader(**val_loader_kwargs)
+
+        print(
+            f"[{task}] loader train_batches={len(train_loader)} "
+            f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
+            f"workers={resolved_num_workers}"
+        )
+
+        try:
+            model = ReservoirReadout(
+                vocab_size=len(vocab),
+                input_dim=input_dim,
+                reservoir_size=reservoir_size,
+                spectral_radius=spectral_radius,
+                leak=leak,
+                sparsity=sparsity,
+                input_scale=input_scale,
+                pooling=pooling,
+                readout_hidden=readout_hidden,
+                readout_dropout=readout_dropout,
+                washout=washout,
+                preroll_steps=preroll_steps,
+                seed=seed,
+            ).to(device)
+
+            if compile_enabled_attempt:
+                _configure_triton_tool_paths()
+                _configure_torch_compile_runtime()
+                ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
+                ptxas_blackwell_path = os.environ.get(
+                    "TRITON_PTXAS_BLACKWELL_PATH"
+                )
+                print(
+                    f"[{task}] torch.compile requested "
+                    f"(ptxas={ptxas_path}, "
+                    f"ptxas_blackwell={ptxas_blackwell_path})."
+                )
+                try:
+                    model = torch.compile(model)
+                except Exception as exc:
+                    compile_enabled_attempt = False
+                    compile_enabled = False
+                    print(
+                        f"[{task}] torch.compile setup failed "
+                        f"({exc.__class__.__name__}). Continue without compile."
+                    )
+
+            optimizer = torch.optim.AdamW(
+                model.parameters(),
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=epochs,
+                eta_min=lr * eta_min_ratio,
+            )
+
+            scaler_enabled = (
+                use_amp_bool
+                and device == "cuda"
+                and amp_dtype_resolved == torch.float16
+            )
+            if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+                scaler = torch.amp.GradScaler(
+                    "cuda",
+                    enabled=scaler_enabled,
+                )
+            else:
+                scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
+
+            best_score = -1e9
+            best_metric_name = "acc@0.5"
+            best_epoch = 0
+            best_pr_auc: Optional[float] = None
+            best_roc_auc: Optional[float] = None
+            best_acc_at_0_5: Optional[float] = None
+            log_every = max(1, epochs // 5)
+
+            for epoch in range(1, epochs + 1):
+                model.train()
+                running_loss = torch.zeros((), dtype=torch.float64)
+
+                for input_ids, attention_mask, labels in train_loader:
+                    saw_training_batch = True
+                    input_ids = input_ids.to(device, non_blocking=use_non_blocking)
+                    attention_mask = attention_mask.to(
+                        device,
+                        non_blocking=use_non_blocking,
+                    )
+                    labels = labels.to(device, non_blocking=use_non_blocking)
+
+                    optimizer.zero_grad(set_to_none=True)
+                    if (
+                        use_amp_bool
+                        and device == "cuda"
+                        and amp_dtype_resolved is not None
+                    ):
+                        amp_context: ContextManager[object] = torch.autocast(
+                            device_type="cuda",
+                            dtype=amp_dtype_resolved,
+                            enabled=True,
+                        )
+                    else:
+                        amp_context = nullcontext()
+
+                    with amp_context:
+                        logits = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                        )
+                        loss = criterion(logits, labels)
+
+                    if scaler_enabled:
+                        scaler.scale(loss).backward()
+                        if grad_clip > 0.0:
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(),
+                                grad_clip,
+                            )
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        if grad_clip > 0.0:
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(),
+                                grad_clip,
+                            )
+                        optimizer.step()
+
+                    running_loss = running_loss + loss.detach().to(
+                        device="cpu",
+                        dtype=torch.float64,
+                    )
+
+                scheduler.step()
+                train_loss = float(running_loss / max(1, len(train_loader)))
+
+                val_metrics = evaluate(
+                    model=model,
+                    loader=val_loader,
+                    device=device,
+                    use_amp=use_amp_bool,
+                    amp_dtype=amp_dtype_resolved,
+                )
+                pr_auc = val_metrics.get("pr_auc")
+                roc_auc = val_metrics.get("roc_auc")
+                acc_at_0_5 = val_metrics.get("acc@0.5")
+
+                if pr_auc is not None:
+                    best_pr_auc = (
+                        pr_auc if best_pr_auc is None else max(best_pr_auc, pr_auc)
+                    )
+                if roc_auc is not None:
+                    best_roc_auc = (
+                        roc_auc if best_roc_auc is None else max(best_roc_auc, roc_auc)
+                    )
+                if acc_at_0_5 is not None:
+                    best_acc_at_0_5 = (
+                        acc_at_0_5
+                        if best_acc_at_0_5 is None
+                        else max(best_acc_at_0_5, acc_at_0_5)
+                    )
+
+                if pr_auc is not None:
+                    score = pr_auc
+                    score_name = "pr_auc"
+                elif roc_auc is not None:
+                    score = roc_auc
+                    score_name = "roc_auc"
+                else:
+                    score = float(val_metrics.get("acc@0.5", 0.0))
+                    score_name = "acc@0.5"
+
+                improved = score > best_score
+                if improved:
+                    best_score = score
+                    best_metric_name = score_name
+                    best_epoch = epoch
+                    state_dict_to_save = _export_model_state_dict(model)
+                    torch.save(
+                        {
+                            "task": task,
+                            "window_len": window_len,
+                            "model_config": {
+                                "input_mode": input_mode,
+                                "kmer_k": kmer_k,
+                                "max_tokens": max_tokens_effective,
+                                "input_dim": input_dim,
+                                "reservoir_size": reservoir_size,
+                                "spectral_radius": spectral_radius,
+                                "leak": leak,
+                                "sparsity": sparsity,
+                                "input_scale": input_scale,
+                                "pooling": pooling,
+                                "readout_hidden": readout_hidden,
+                                "readout_dropout": readout_dropout,
+                                "washout": washout,
+                                "preroll_steps": preroll_steps,
+                                "read_order": read_order,
+                            },
+                            "vocab": dict(vocab),
+                            "model_state": state_dict_to_save,
+                        },
+                        checkpoint_path,
+                    )
+
+                should_log = (
+                    epoch == 1
+                    or epoch == epochs
+                    or epoch % log_every == 0
+                    or improved
+                )
+                if should_log:
+                    mark = "*" if improved else "-"
+                    print(
+                        f"[{task}] {mark} epoch {epoch}/{epochs} "
+                        f"loss={train_loss:.4f} {score_name}={score:.4f} "
+                        f"best={best_score:.4f} (ep {best_epoch})"
+                    )
+
+            print(
+                f"[{task}] done best_{best_metric_name}={best_score:.4f} "
+                f"at epoch {best_epoch}"
+            )
+            return {
+                "task": task,
+                "num_examples": len(examples),
+                "num_pos": n_pos,
+                "num_neg": n_neg,
+                "best_metric": best_metric_name,
+                "best_score": float(best_score),
+                "best_pr_auc": best_pr_auc,
+                "best_roc_auc": best_roc_auc,
+                "best_acc_at_0_5": best_acc_at_0_5,
+                "checkpoint": checkpoint_path,
+                "loss": loss_name,
+                "pos_weight": loss_meta["pos_weight"],
+                "focal_gamma": loss_meta["focal_gamma"],
+                "focal_alpha_pos": loss_meta["focal_alpha_pos"],
+                "asym_gamma_pos": loss_meta["asym_gamma_pos"],
+                "asym_gamma_neg": loss_meta["asym_gamma_neg"],
+                "asym_alpha_pos": loss_meta["asym_alpha_pos"],
+                "input_mode": input_mode,
+                "kmer_k": kmer_k,
+                "max_tokens": max_tokens_effective,
+                "input_dim": input_dim,
+                "reservoir_size": reservoir_size,
+                "spectral_radius": spectral_radius,
+                "leak": leak,
+                "sparsity": sparsity,
+                "input_scale": input_scale,
+                "pooling": pooling,
+                "readout_hidden": readout_hidden,
+                "readout_dropout": readout_dropout,
+                "washout": washout,
+                "preroll_steps": preroll_steps,
+                "read_order": read_order,
+                "weight_decay": weight_decay,
+                "eta_min_ratio": eta_min_ratio,
+                "val_frac": val_frac,
+                "grad_clip": grad_clip,
+                "compile_enabled": compile_enabled_attempt,
+                "use_amp": use_amp_bool,
+                "amp_dtype": (
+                    str(amp_dtype_resolved).replace("torch.", "")
+                    if amp_dtype_resolved is not None
+                    else None
+                ),
+                "allow_tf32": allow_tf32_bool,
+                "cudnn_benchmark": cudnn_benchmark_bool,
+                "deterministic": deterministic_bool,
+                "num_workers": resolved_num_workers,
+                "prefetch_factor": (
+                    prefetch_factor if resolved_num_workers > 0 else None
+                ),
+                "persistent_workers": use_persistent_workers,
+                "pin_memory": use_pin_memory,
+                "effective_batch_size": effective_batch_size,
+                "oom_retries": oom_retries,
+                "gpu_id": gpu_id,
+                "quick_phase": quick_phase,
+            }
+
+        except RuntimeError as exc:
+            is_compile_failure = (
+                compile_enabled_attempt and _is_compile_runtime_error(exc)
+            )
+            if is_compile_failure:
+                compile_enabled = False
+                print(
+                    f"[{task}] torch.compile runtime failed "
+                    f"({exc.__class__.__name__}). Retry without compile."
+                )
+                _empty_device_cache(device)
+                continue
+
+            is_device_oom = False
+            if device == "cuda":
+                is_device_oom = _is_cuda_oom_error(exc)
+            elif device == "mps":
+                is_device_oom = _is_mps_oom_error(exc)
+
+            if is_device_oom and not saw_training_batch:
+                raise RuntimeError(
+                    "NON_RETRYABLE_OOM: OOM occurred before first training batch. "
+                    "Model config is likely too large for the device."
+                ) from exc
+
+            should_retry = (
+                is_device_oom
+                and oom_retries < max_oom_retries
+                and effective_batch_size > min_batch_size
+            )
+            if not should_retry:
+                raise
+
+            next_batch_size = max(min_batch_size, effective_batch_size // 2)
+            if next_batch_size >= effective_batch_size:
+                raise
+            oom_retries += 1
+            print(
+                f"[{task}] {device.upper()} OOM detected. "
+                "Retry with smaller batch size: "
+                f"{effective_batch_size} -> {next_batch_size} "
+                f"(retry {oom_retries}/{max_oom_retries})"
+            )
+            effective_batch_size = next_batch_size
+            _empty_device_cache(device)
+
+
+def _int_from_checkpoint(
+    mapping: Mapping[str, object],
+    key: str,
+    default: int,
+) -> int:
+    """Read one integer config field from a mapping with fallback."""
+    raw = mapping.get(key, default)
+    if isinstance(raw, bool):
+        return default
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        if raw.is_integer():
+            return int(raw)
+        return default
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    return default
+
+
+def _float_from_checkpoint(
+    mapping: Mapping[str, object],
+    key: str,
+    default: float,
+) -> float:
+    """Read one float config field from a mapping with fallback."""
+    raw = mapping.get(key, default)
+    if isinstance(raw, bool):
+        return default
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+    return default
+
+
+def load_task_model(
+    checkpoint_path: str,
+    device: str,
+) -> Tuple[nn.Module, Dict[str, object], Dict[str, int]]:
+    """Load task model and tokenizer metadata from checkpoint."""
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(ckpt, dict):
+        raise ValueError(f"Invalid checkpoint payload: {checkpoint_path}")
+
+    model_state = ckpt.get("model_state")
+    if not isinstance(model_state, dict):
+        raise ValueError(f"Checkpoint missing model_state: {checkpoint_path}")
+    normalized_state = _normalize_checkpoint_state_dict(model_state)
+
+    model_config_obj = ckpt.get("model_config", {})
+    model_config: Dict[str, object]
+    if isinstance(model_config_obj, dict):
+        model_config = dict(model_config_obj)
+    else:
+        model_config = {}
+
+    vocab_obj = ckpt.get("vocab")
+    if not isinstance(vocab_obj, dict):
+        raise RuntimeError("Checkpoint missing vocab. Re-train the model.")
+    vocab: Dict[str, int] = {}
+    for key, value in vocab_obj.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            vocab[key] = value
+        elif isinstance(value, float) and value.is_integer():
+            vocab[key] = int(value)
+        elif isinstance(value, str):
+            try:
+                vocab[key] = int(value)
+            except ValueError:
+                continue
+    if not vocab:
+        raise RuntimeError("Checkpoint vocab is empty or invalid.")
+
+    input_dim = _int_from_checkpoint(model_config, "input_dim", 128)
+    reservoir_size = _int_from_checkpoint(model_config, "reservoir_size", 1024)
+    spectral_radius = _float_from_checkpoint(model_config, "spectral_radius", 0.95)
+    leak = _float_from_checkpoint(model_config, "leak", 0.3)
+    sparsity = _float_from_checkpoint(model_config, "sparsity", 0.1)
+    input_scale = _float_from_checkpoint(model_config, "input_scale", 0.5)
+    pooling_raw = model_config.get("pooling", "mean_max")
+    pooling = str(pooling_raw) if isinstance(pooling_raw, str) else "mean_max"
+    readout_hidden = _int_from_checkpoint(model_config, "readout_hidden", 256)
+    readout_dropout = _float_from_checkpoint(model_config, "readout_dropout", 0.2)
+    washout = _int_from_checkpoint(model_config, "washout", 0)
+    preroll_steps = _int_from_checkpoint(model_config, "preroll_steps", 0)
+
+    seed_for_build = 1337
+    model = ReservoirReadout(
         vocab_size=len(vocab),
-        max_len=max_len,
         input_dim=input_dim,
         reservoir_size=reservoir_size,
         spectral_radius=spectral_radius,
         leak=leak,
         sparsity=sparsity,
-        readout_hidden=readout_hidden,
-        seed=seed,
-    ).to(device)
-
-    pos_weight_raw = (train_neg / max(1, train_pos)) if train_pos > 0 else 1.0
-    pos_weight = min(pos_weight_raw, 20.0)
-    pos_weight_t = torch.tensor([pos_weight], dtype=torch.float32, device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_t, reduction="mean")
-
-    optimizer = torch.optim.AdamW(model.readout.parameters(), lr=lr, weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=lr * 0.01
-    )
-
-    print(f"pos_weight (raw): {pos_weight_raw:.4f} -> (capped): {pos_weight:.4f}")
-    print(f"Learning rate: {lr}")
-    print(f"Reservoir size: {reservoir_size}")
-
-    best_score = -1e9
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        running_loss = 0.0
-
-        for batch_idx, (input_ids, attn_mask, labels) in enumerate(train_loader):
-            input_ids = input_ids.to(device)
-            attn_mask = attn_mask.to(device)
-            labels = labels.to(device)
-
-            logits = model(input_ids, attn_mask)
-            loss = criterion(logits, labels)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.readout.parameters(), 5.0)
-            optimizer.step()
-
-            running_loss += loss.item()
-
-            if (batch_idx + 1) % max(1, len(train_loader) // 5) == 0:
-                print(
-                    f"  Epoch {epoch} [{batch_idx + 1}/{len(train_loader)}] loss: {loss.item():.4f}"
-                )
-
-        scheduler.step()
-
-        train_loss = running_loss / max(1, len(train_loader))
-        val_metrics = evaluate(model, val_loader, device)
-
-        if "pr_auc" in val_metrics:
-            score = val_metrics["pr_auc"]
-            score_name = "pr_auc"
-        elif "roc_auc" in val_metrics:
-            score = val_metrics["roc_auc"]
-            score_name = "roc_auc"
-        else:
-            score = val_metrics.get("acc@0.5", 0.0)
-            score_name = "acc@0.5"
-
-        current_lr = optimizer.param_groups[0]["lr"]
-        print(f"\nEpoch {epoch}/{epochs}")
-        print(f"  Train loss: {train_loss:.4f}")
-        print(f"  LR: {current_lr:.6f}")
-        print(f"  Val metrics: {val_metrics}")
-        print(f"  Score ({score_name}): {score:.4f}")
-
-        if score > best_score:
-            best_score = score
-            ckpt_path = os.path.join(out_dir, "best.pt")
-            torch.save(
-                {
-                    "task": task,
-                    "k": k,
-                    "max_len": max_len,
-                    "input_dim": input_dim,
-                    "reservoir_size": reservoir_size,
-                    "spectral_radius": spectral_radius,
-                    "leak": leak,
-                    "sparsity": sparsity,
-                    "readout_hidden": readout_hidden,
-                    "vocab": build_kmer_vocab(k),
-                    "model_state": model.state_dict(),
-                },
-                ckpt_path,
-            )
-            print(f"  ✅ Saved checkpoint: {ckpt_path}")
-
-    print(f"\nBest {task} {score_name}: {best_score:.4f}")
-    return model
-
-
-def _ensure_hf_tokenizer(model_name: str, trust_remote_code: bool):
-    if AutoTokenizer is None:
-        raise RuntimeError(
-            "transformers is not installed. Install with: pip install transformers"
-        )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name, use_fast=True, trust_remote_code=trust_remote_code
-    )
-    if tokenizer.pad_token is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        elif tokenizer.unk_token is not None:
-            tokenizer.pad_token = tokenizer.unk_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-    return tokenizer
-
-
-def train_model_hf(
-    task: str,
-    pos_path: str,
-    neg_path: str,
-    out_dir: str,
-    model_name: str,
-    tokenization: str,
-    k: int,
-    max_len: int,
-    pooling: str,
-    readout_hidden: int,
-    freeze_backbone: bool,
-    trust_remote_code: bool,
-    epochs: int,
-    batch_size: int,
-    lr: float,
-    seed: int,
-    device: str,
-):
-    print(f"\n{'=' * 60}")
-    print(f"Training {task.upper()} HF reservoir model")
-    print(f"Backbone: {model_name}")
-    print(f"{'=' * 60}")
-
-    set_seed(seed)
-    os.makedirs(out_dir, exist_ok=True)
-
-    examples = read_examples_single_task(pos_path, neg_path, task)
-    n_pos = sum(y for _, y in examples)
-    n_neg = len(examples) - n_pos
-    print(f"Total examples: {len(examples)} | pos={n_pos} | neg={n_neg}")
-
-    train_ex, val_ex = stratified_split(examples, val_frac=0.1, seed=seed)
-    train_pos = sum(y for _, y in train_ex)
-    train_neg = len(train_ex) - train_pos
-    print(f"Train: {len(train_ex)} | pos={train_pos} | neg={train_neg}")
-    print(
-        f"Val:   {len(val_ex)} | pos={sum(y for _, y in val_ex)} | neg={len(val_ex) - sum(y for _, y in val_ex)}"
-    )
-
-    tokenizer = _ensure_hf_tokenizer(model_name, trust_remote_code)
-    tokenization, k = resolve_hf_tokenization(model_name, tokenization, k)
-    print(f"Tokenization: {tokenization} (k={k})")
-    print(f"Max length: {max_len}")
-
-    train_ds = HFSequenceDataset(
-        train_ex,
-        tokenizer=tokenizer,
-        max_len=max_len,
-        tokenization=tokenization,
-        k=k,
-    )
-    val_ds = HFSequenceDataset(
-        val_ex,
-        tokenizer=tokenizer,
-        max_len=max_len,
-        tokenization=tokenization,
-        k=k,
-    )
-
-    num_workers = 0 if device in ["mps", "cpu"] else 2
-    pin_memory = device == "cuda"
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
-    )
-
-    model = HFReadout(
-        model_name=model_name,
+        input_scale=input_scale,
         pooling=pooling,
         readout_hidden=readout_hidden,
-        freeze_backbone=freeze_backbone,
-        trust_remote_code=trust_remote_code,
+        readout_dropout=readout_dropout,
+        washout=washout,
+        preroll_steps=preroll_steps,
+        seed=seed_for_build,
     ).to(device)
-
-    model.backbone.resize_token_embeddings(len(tokenizer))
-    if freeze_backbone:
-        for p in model.backbone.parameters():
-            p.requires_grad = False
-
-    pos_weight_raw = (train_neg / max(1, train_pos)) if train_pos > 0 else 1.0
-    pos_weight = min(pos_weight_raw, 20.0)
-    pos_weight_t = torch.tensor([pos_weight], dtype=torch.float32, device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_t, reduction="mean")
-
-    if freeze_backbone:
-        params = list(model.readout.parameters())
-    else:
-        params = list(model.parameters())
-
-    optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=lr * 0.01
-    )
-
-    print(f"pos_weight (raw): {pos_weight_raw:.4f} -> (capped): {pos_weight:.4f}")
-    print(f"Learning rate: {lr}")
-    print(f"Pooling: {pooling}")
-    print(f"Freeze backbone: {freeze_backbone}")
-
-    best_score = -1e9
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        running_loss = 0.0
-
-        for batch_idx, (input_ids, attn_mask, labels) in enumerate(train_loader):
-            input_ids = input_ids.to(device)
-            attn_mask = attn_mask.to(device)
-            labels = labels.to(device)
-
-            logits = model(input_ids, attn_mask)
-            loss = criterion(logits, labels)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, 5.0)
-            optimizer.step()
-
-            running_loss += loss.item()
-
-            if (batch_idx + 1) % max(1, len(train_loader) // 5) == 0:
-                print(
-                    f"  Epoch {epoch} [{batch_idx + 1}/{len(train_loader)}] loss: {loss.item():.4f}"
-                )
-
-        scheduler.step()
-
-        train_loss = running_loss / max(1, len(train_loader))
-        val_metrics = evaluate(model, val_loader, device)
-
-        if "pr_auc" in val_metrics:
-            score = val_metrics["pr_auc"]
-            score_name = "pr_auc"
-        elif "roc_auc" in val_metrics:
-            score = val_metrics["roc_auc"]
-            score_name = "roc_auc"
-        else:
-            score = val_metrics.get("acc@0.5", 0.0)
-            score_name = "acc@0.5"
-
-        current_lr = optimizer.param_groups[0]["lr"]
-        print(f"\nEpoch {epoch}/{epochs}")
-        print(f"  Train loss: {train_loss:.4f}")
-        print(f"  LR: {current_lr:.6f}")
-        print(f"  Val metrics: {val_metrics}")
-        print(f"  Score ({score_name}): {score:.4f}")
-
-        if score > best_score:
-            best_score = score
-            ckpt_path = os.path.join(out_dir, "best.pt")
-            payload = {
-                "task": task,
-                "hf_model_name": model_name,
-                "hf_pooling": pooling,
-                "hf_max_len": max_len,
-                "hf_tokenization": tokenization,
-                "hf_k": k,
-                "readout_hidden": readout_hidden,
-                "freeze_backbone": freeze_backbone,
-                "hf_trust_remote_code": trust_remote_code,
-                "readout_state": model.readout.state_dict(),
-            }
-            if not freeze_backbone:
-                payload["backbone_state"] = model.backbone.state_dict()
-            torch.save(payload, ckpt_path)
-            print(f"  ✅ Saved checkpoint: {ckpt_path}")
-
-    print(f"\nBest {task} {score_name}: {best_score:.4f}")
-    return model
-
-
-# --------------------------
-# Scoring
-# --------------------------
-
-
-@torch.no_grad()
-def load_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]:
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-    model = ESNReadout(
-        vocab_size=len(ckpt["vocab"]),
-        max_len=ckpt["max_len"],
-        input_dim=ckpt["input_dim"],
-        reservoir_size=ckpt["reservoir_size"],
-        spectral_radius=ckpt["spectral_radius"],
-        leak=ckpt["leak"],
-        sparsity=ckpt["sparsity"],
-        readout_hidden=ckpt["readout_hidden"],
-        seed=1337,
-    ).to(device)
-
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(normalized_state)
     model.eval()
-    return model, ckpt
 
-
-@torch.no_grad()
-def load_model_hf(checkpoint_path: str, device: str):
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    trust_remote_code = ckpt.get("hf_trust_remote_code", False)
-
-    model = HFReadout(
-        model_name=ckpt["hf_model_name"],
-        pooling=ckpt["hf_pooling"],
-        readout_hidden=ckpt["readout_hidden"],
-        freeze_backbone=ckpt.get("freeze_backbone", True),
-        trust_remote_code=trust_remote_code,
-    ).to(device)
-
-    tokenizer = _ensure_hf_tokenizer(ckpt["hf_model_name"], trust_remote_code)
-    model.backbone.resize_token_embeddings(len(tokenizer))
-    if ckpt.get("freeze_backbone", True):
-        for p in model.backbone.parameters():
-            p.requires_grad = False
-
-    model.readout.load_state_dict(ckpt["readout_state"], strict=True)
-    if "backbone_state" in ckpt:
-        model.backbone.load_state_dict(ckpt["backbone_state"], strict=True)
-    model.eval()
-    tokenization = ckpt.get("hf_tokenization", "raw")
-    k = int(ckpt.get("hf_k", 6))
-    max_len = int(ckpt["hf_max_len"])
-    return model, tokenizer, tokenization, k, max_len, ckpt
+    resolved_config: Dict[str, object] = {
+        "input_mode": str(model_config.get("input_mode", "onehot")),
+        "kmer_k": _int_from_checkpoint(model_config, "kmer_k", 3),
+        "max_tokens": _int_from_checkpoint(model_config, "max_tokens", 100),
+        "input_dim": input_dim,
+        "reservoir_size": reservoir_size,
+        "spectral_radius": spectral_radius,
+        "leak": leak,
+        "sparsity": sparsity,
+        "input_scale": input_scale,
+        "pooling": pooling,
+        "readout_hidden": readout_hidden,
+        "readout_dropout": readout_dropout,
+        "washout": washout,
+        "preroll_steps": preroll_steps,
+        "read_order": str(model_config.get("read_order", "forward")),
+    }
+    return model, resolved_config, vocab
 
 
 @torch.no_grad()
 def score_sequences(
-    model,
-    sequences: List[str],
-    vocab: Dict[str, int],
-    k: int,
-    max_len: int,
+    model: nn.Module,
+    sequences: Sequence[str],
+    vocab: Mapping[str, int],
+    input_mode: str,
+    kmer_k: int,
+    max_tokens: int,
+    read_order: str,
     device: str,
     batch_size: int = 512,
 ) -> np.ndarray:
-    model.eval()
-    dataset = KmerDataset(
-        [(s, 0) for s in sequences], vocab=vocab, k=k, max_len=max_len
-    )
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-    )
+    """Score input sequences with one trained task model."""
+    if not sequences:
+        return np.array([])
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
 
-    all_probs = []
-    for input_ids, attn_mask, _ in loader:
-        input_ids = input_ids.to(device)
-        attn_mask = attn_mask.to(device)
-        logits = model(input_ids, attn_mask)
+    model.eval()
+    all_probs: list[np.ndarray] = []
+
+    for start in range(0, len(sequences), batch_size):
+        batch_sequences = sequences[start : start + batch_size]
+        encoded_ids: list[np.ndarray] = []
+        encoded_masks: list[np.ndarray] = []
+        for seq in batch_sequences:
+            token_ids, attention_mask = _encode_sequence(
+                seq=seq,
+                vocab=vocab,
+                input_mode=input_mode,
+                kmer_k=kmer_k,
+                max_tokens=max_tokens,
+                read_order=read_order,
+            )
+            encoded_ids.append(token_ids)
+            encoded_masks.append(attention_mask)
+
+        ids_tensor = torch.from_numpy(np.stack(encoded_ids)).to(device)
+        mask_tensor = torch.from_numpy(np.stack(encoded_masks)).to(device)
+
+        logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
         probs = torch.sigmoid(logits).cpu().numpy()
         all_probs.append(probs)
 
-    return np.concatenate(all_probs) if all_probs else np.array([])
+    return np.concatenate(all_probs)
 
 
-@torch.no_grad()
-def score_sequences_hf(
-    model,
-    sequences: List[str],
-    tokenizer,
-    tokenization: str,
-    k: int,
-    max_len: int,
-    device: str,
-    batch_size: int = 128,
-) -> np.ndarray:
-    model.eval()
-    dataset = HFSequenceDataset(
-        [(s, 0) for s in sequences],
-        tokenizer=tokenizer,
-        max_len=max_len,
-        tokenization=tokenization,
-        k=k,
-    )
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-    )
-
-    all_probs = []
-    for input_ids, attn_mask, _ in loader:
-        input_ids = input_ids.to(device)
-        attn_mask = attn_mask.to(device)
-        logits = model(input_ids, attn_mask)
-        probs = torch.sigmoid(logits).cpu().numpy()
-        all_probs.append(probs)
-
-    return np.concatenate(all_probs) if all_probs else np.array([])
-
-
-def score_test_sites(
-    test_tsv: str,
+def infer_site_scores(
+    site_rows: List[Dict[str, object]],
     donor_model_path: str,
     acceptor_model_path: str,
-    output_tsv: str,
-    device: str,
-):
-    print(f"\n{'=' * 60}")
-    print("Scoring test sites")
-    print(f"{'=' * 60}")
+    device: str = "auto",
+    batch_size: int = 512,
+) -> List[Dict[str, object]]:
+    """Run donor/acceptor inference and return normalized site rows."""
+    device = pick_device(device)
 
-    donor_model, donor_ckpt = load_model(donor_model_path, device)
-    acceptor_model, acceptor_ckpt = load_model(acceptor_model_path, device)
+    donor_model, donor_config, donor_vocab = load_task_model(donor_model_path, device)
+    acceptor_model, acceptor_config, acceptor_vocab = load_task_model(
+        acceptor_model_path,
+        device,
+    )
 
-    if (
-        donor_ckpt["k"] != acceptor_ckpt["k"]
-        or donor_ckpt["max_len"] != acceptor_ckpt["max_len"]
-    ):
-        raise RuntimeError("Donor/acceptor config mismatch")
+    donor_input_mode = str(donor_config.get("input_mode", "onehot"))
+    donor_k = _int_from_checkpoint(donor_config, "kmer_k", 3)
+    donor_max_tokens = _int_from_checkpoint(donor_config, "max_tokens", 100)
+    donor_read_order = str(donor_config.get("read_order", "forward"))
 
-    k = donor_ckpt["k"]
-    max_len = donor_ckpt["max_len"]
-    vocab = donor_ckpt["vocab"]
+    acceptor_input_mode = str(acceptor_config.get("input_mode", "onehot"))
+    acceptor_k = _int_from_checkpoint(acceptor_config, "kmer_k", 3)
+    acceptor_max_tokens = _int_from_checkpoint(acceptor_config, "max_tokens", 100)
+    acceptor_read_order = str(acceptor_config.get("read_order", "forward"))
 
-    print(f"Loaded donor model: {donor_model_path}")
-    print(f"Loaded acceptor model: {acceptor_model_path}")
-    print(f"k={k}, max_len={max_len}")
+    donor_seqs = [str(row["seq"]) for row in site_rows if row["site_type"] == "donor"]
+    acceptor_seqs = [
+        str(row["seq"])
+        for row in site_rows
+        if row["site_type"] == "acceptor"
+    ]
 
-    print(f"\nReading {test_tsv}...")
-    data = []
-    with open(test_tsv, "r") as f:
-        _ = next(f)
-        for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) >= 8:
-                data.append(
-                    {
-                        "transcript_id": parts[0],
-                        "site_type": parts[2],
-                        "intron_index": int(parts[3]),
-                        "seq": parts[7],
-                    }
-                )
-
-    print(f"Total sites: {len(data)}")
-
-    transcript_introns = defaultdict(lambda: defaultdict(dict))
-    for row in data:
-        tid = row["transcript_id"]
-        iidx = row["intron_index"]
-        stype = row["site_type"]
-        seq = row["seq"]
-        transcript_introns[tid][iidx][stype] = seq
-
-    results = []
-    print("\nScoring transcripts...")
-
-    all_donor_seqs = []
-    all_acceptor_seqs = []
-    transcript_keys = []
-
-    for tid, introns in transcript_introns.items():
-        for iidx in sorted(introns.keys()):
-            sites = introns[iidx]
-            all_donor_seqs.append(sites.get("donor", ""))
-            all_acceptor_seqs.append(sites.get("acceptor", ""))
-            transcript_keys.append((tid, iidx))
-
-    print(f"Total introns to score: {len(transcript_keys)}")
-
-    print("Scoring donor sequences...")
     donor_scores = score_sequences(
-        donor_model, all_donor_seqs, vocab, k, max_len, device, batch_size=512
+        model=donor_model,
+        sequences=donor_seqs,
+        vocab=donor_vocab,
+        input_mode=donor_input_mode,
+        kmer_k=donor_k,
+        max_tokens=donor_max_tokens,
+        read_order=donor_read_order,
+        device=device,
+        batch_size=batch_size,
     )
-
-    print("Scoring acceptor sequences...")
     acceptor_scores = score_sequences(
-        acceptor_model, all_acceptor_seqs, vocab, k, max_len, device, batch_size=512
-    )
-
-    print("Aggregating results...")
-    transcript_intron_dict = defaultdict(dict)
-
-    for idx, (tid, iidx) in enumerate(transcript_keys):
-        donor_score = donor_scores[idx] if all_donor_seqs[idx] else 0.0
-        acceptor_score = acceptor_scores[idx] if all_acceptor_seqs[idx] else 0.0
-        total_score = donor_score + acceptor_score
-        transcript_intron_dict[tid][iidx] = (donor_score, acceptor_score, total_score)
-
-    for tid, introns_dict in transcript_intron_dict.items():
-        if not introns_dict:
-            continue
-        min_iidx = min(introns_dict.keys(), key=lambda iidx: introns_dict[iidx][2])
-        donor_score, acceptor_score, total_score = introns_dict[min_iidx]
-        results.append(
-            {
-                "transcript_id": tid,
-                "min_intron_index": min_iidx,
-                "Score_donor": donor_score,
-                "Score_acceptor": acceptor_score,
-                "min_donor_plus_acceptor": total_score,
-            }
-        )
-
-    results.sort(key=lambda x: x["transcript_id"])
-
-    print(f"\nWriting results to {output_tsv}...")
-    outdir = os.path.dirname(output_tsv)
-    if outdir:
-        os.makedirs(outdir, exist_ok=True)
-    with open(output_tsv, "w") as f:
-        f.write(
-            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\tmin_donor_plus_acceptor\n"
-        )
-        for r in results:
-            f.write(
-                f"{r['transcript_id']}\t{r['min_intron_index']}\t{r['Score_donor']:.6f}\t{r['Score_acceptor']:.6f}\t{r['min_donor_plus_acceptor']:.6f}\n"
-            )
-
-    print(f"✅ Done! Results saved to {output_tsv}")
-    print(f"Total transcripts: {len(results)}")
-
-
-def score_test_sites_hf(
-    test_tsv: str,
-    donor_model_path: str,
-    acceptor_model_path: str,
-    output_tsv: str,
-    device: str,
-    batch_size: int,
-):
-    print(f"\n{'=' * 60}")
-    print("Scoring test sites (HF reservoir)")
-    print(f"{'=' * 60}")
-
-    donor_model, donor_tok, donor_tok_mode, donor_k, donor_max_len, donor_ckpt = (
-        load_model_hf(donor_model_path, device)
-    )
-    (
-        acceptor_model,
-        acc_tok,
-        acc_tok_mode,
-        acc_k,
-        acc_max_len,
-        acceptor_ckpt,
-    ) = load_model_hf(acceptor_model_path, device)
-
-    if donor_ckpt["hf_model_name"] != acceptor_ckpt["hf_model_name"]:
-        raise RuntimeError("Donor/acceptor backbone mismatch")
-    if donor_max_len != acc_max_len:
-        raise RuntimeError("Donor/acceptor max_len mismatch")
-    if donor_tok_mode != acc_tok_mode or donor_k != acc_k:
-        raise RuntimeError("Donor/acceptor tokenization mismatch")
-
-    print(f"Loaded donor model: {donor_model_path}")
-    print(f"Loaded acceptor model: {acceptor_model_path}")
-    print(f"Backbone: {donor_ckpt['hf_model_name']}")
-    print(f"Tokenization: {donor_tok_mode} (k={donor_k})")
-    print(f"Max length: {donor_max_len}")
-
-    print(f"\nReading {test_tsv}...")
-    data = []
-    with open(test_tsv, "r") as f:
-        _ = next(f)
-        for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) >= 8:
-                data.append(
-                    {
-                        "transcript_id": parts[0],
-                        "site_type": parts[2],
-                        "intron_index": int(parts[3]),
-                        "seq": parts[7],
-                    }
-                )
-
-    print(f"Total sites: {len(data)}")
-
-    transcript_introns = defaultdict(lambda: defaultdict(dict))
-    for row in data:
-        tid = row["transcript_id"]
-        iidx = row["intron_index"]
-        stype = row["site_type"]
-        seq = row["seq"]
-        transcript_introns[tid][iidx][stype] = seq
-
-    results = []
-    print("\nScoring transcripts...")
-
-    all_donor_seqs = []
-    all_acceptor_seqs = []
-    transcript_keys = []
-
-    for tid, introns in transcript_introns.items():
-        for iidx in sorted(introns.keys()):
-            sites = introns[iidx]
-            all_donor_seqs.append(sites.get("donor", ""))
-            all_acceptor_seqs.append(sites.get("acceptor", ""))
-            transcript_keys.append((tid, iidx))
-
-    print(f"Total introns to score: {len(transcript_keys)}")
-
-    print("Scoring donor sequences...")
-    donor_scores = score_sequences_hf(
-        donor_model,
-        all_donor_seqs,
-        donor_tok,
-        donor_tok_mode,
-        donor_k,
-        donor_max_len,
-        device,
+        model=acceptor_model,
+        sequences=acceptor_seqs,
+        vocab=acceptor_vocab,
+        input_mode=acceptor_input_mode,
+        kmer_k=acceptor_k,
+        max_tokens=acceptor_max_tokens,
+        read_order=acceptor_read_order,
+        device=device,
         batch_size=batch_size,
     )
 
-    print("Scoring acceptor sequences...")
-    acceptor_scores = score_sequences_hf(
-        acceptor_model,
-        all_acceptor_seqs,
-        acc_tok,
-        acc_tok_mode,
-        acc_k,
-        acc_max_len,
-        device,
-        batch_size=batch_size,
-    )
+    out_rows: List[Dict[str, object]] = []
+    donor_idx = 0
+    acceptor_idx = 0
 
-    print("Aggregating results...")
-    transcript_intron_dict = defaultdict(dict)
+    for row in site_rows:
+        site_type = str(row["site_type"])
+        if site_type == "donor":
+            score = (
+                float(donor_scores[donor_idx])
+                if donor_idx < len(donor_scores)
+                else 0.0
+            )
+            donor_idx += 1
+        else:
+            score = (
+                float(acceptor_scores[acceptor_idx])
+                if acceptor_idx < len(acceptor_scores)
+                else 0.0
+            )
+            acceptor_idx += 1
 
-    for idx, (tid, iidx) in enumerate(transcript_keys):
-        donor_score = donor_scores[idx] if all_donor_seqs[idx] else 0.0
-        acceptor_score = acceptor_scores[idx] if all_acceptor_seqs[idx] else 0.0
-        total_score = donor_score + acceptor_score
-        transcript_intron_dict[tid][iidx] = (donor_score, acceptor_score, total_score)
-
-    for tid, introns_dict in transcript_intron_dict.items():
-        if not introns_dict:
-            continue
-        min_iidx = min(introns_dict.keys(), key=lambda iidx: introns_dict[iidx][2])
-        donor_score, acceptor_score, total_score = introns_dict[min_iidx]
-        results.append(
+        out_rows.append(
             {
-                "transcript_id": tid,
-                "min_intron_index": min_iidx,
-                "Score_donor": donor_score,
-                "Score_acceptor": acceptor_score,
-                "min_donor_plus_acceptor": total_score,
+                "transcript_id": row["transcript_id"],
+                "intron_index": int(row["intron_index"]),
+                "site_type": site_type,
+                "score": score,
             }
         )
 
-    results.sort(key=lambda x: x["transcript_id"])
+    return out_rows
 
-    print(f"\nWriting results to {output_tsv}...")
-    outdir = os.path.dirname(output_tsv)
-    if outdir:
-        os.makedirs(outdir, exist_ok=True)
-    with open(output_tsv, "w") as f:
-        f.write(
-            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\tmin_donor_plus_acceptor\n"
+
+def add_train_args(parser: argparse.ArgumentParser) -> None:
+    """Register reservoir-specific training arguments."""
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--train_target",
+        choices=["both", "donor", "acceptor"],
+        default="both",
+        help=(
+            "Training target. 'both' trains donor and acceptor. "
+            "'donor'/'acceptor' train one task only (for tuning)."
+        ),
+    )
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=5e-4)
+
+    parser.add_argument(
+        "--input_mode",
+        choices=list(INPUT_MODE_CHOICES),
+        default="onehot",
+        help="Input tokenization mode.",
+    )
+    parser.add_argument("--kmer_k", type=int, default=3)
+    parser.add_argument("--max_tokens", default="auto")
+    parser.add_argument("--input_dim", type=int, default=128)
+    parser.add_argument("--reservoir_size", type=int, default=1024)
+    parser.add_argument("--spectral_radius", type=float, default=0.95)
+    parser.add_argument("--leak", type=float, default=0.3)
+    parser.add_argument("--sparsity", type=float, default=0.1)
+    parser.add_argument("--input_scale", type=float, default=0.5)
+    parser.add_argument(
+        "--pooling",
+        choices=list(POOLING_CHOICES),
+        default="mean_max",
+    )
+    parser.add_argument("--readout_hidden", type=int, default=256)
+    parser.add_argument("--readout_dropout", type=float, default=0.2)
+    parser.add_argument("--washout", type=int, default=0)
+    parser.add_argument("--preroll_steps", type=int, default=0)
+    parser.add_argument(
+        "--read_order",
+        choices=list(READ_ORDER_CHOICES),
+        default="auto",
+        help="Task-wise sequence order; auto uses donor=forward, acceptor=reverse.",
+    )
+    parser.add_argument(
+        "--donor_read_order",
+        choices=list(READ_ORDER_CHOICES),
+        default=None,
+        help="Donor-only override for --read_order.",
+    )
+    parser.add_argument(
+        "--acceptor_read_order",
+        choices=list(READ_ORDER_CHOICES),
+        default=None,
+        help="Acceptor-only override for --read_order.",
+    )
+
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--eta_min_ratio", type=float, default=0.01)
+    parser.add_argument("--val_frac", type=float, default=0.1)
+    parser.add_argument("--grad_clip", type=float, default=1.0)
+
+    parser.add_argument("--donor_batch_size", type=int, default=None)
+    parser.add_argument("--acceptor_batch_size", type=int, default=None)
+    parser.add_argument("--donor_lr", type=float, default=None)
+    parser.add_argument("--acceptor_lr", type=float, default=None)
+    parser.add_argument("--donor_loss", choices=list(LOSS_NAME_CHOICES), default=None)
+    parser.add_argument(
+        "--acceptor_loss",
+        choices=list(LOSS_NAME_CHOICES),
+        default=None,
+    )
+    parser.add_argument(
+        "--donor_input_mode",
+        choices=list(INPUT_MODE_CHOICES),
+        default=None,
+    )
+    parser.add_argument(
+        "--acceptor_input_mode",
+        choices=list(INPUT_MODE_CHOICES),
+        default=None,
+    )
+    parser.add_argument("--donor_kmer_k", type=int, default=None)
+    parser.add_argument("--acceptor_kmer_k", type=int, default=None)
+    parser.add_argument("--donor_max_tokens", default=None)
+    parser.add_argument("--acceptor_max_tokens", default=None)
+    parser.add_argument("--donor_input_dim", type=int, default=None)
+    parser.add_argument("--acceptor_input_dim", type=int, default=None)
+    parser.add_argument("--donor_reservoir_size", type=int, default=None)
+    parser.add_argument("--acceptor_reservoir_size", type=int, default=None)
+    parser.add_argument("--donor_spectral_radius", type=float, default=None)
+    parser.add_argument("--acceptor_spectral_radius", type=float, default=None)
+    parser.add_argument("--donor_leak", type=float, default=None)
+    parser.add_argument("--acceptor_leak", type=float, default=None)
+    parser.add_argument("--donor_sparsity", type=float, default=None)
+    parser.add_argument("--acceptor_sparsity", type=float, default=None)
+    parser.add_argument("--donor_input_scale", type=float, default=None)
+    parser.add_argument("--acceptor_input_scale", type=float, default=None)
+    parser.add_argument("--donor_pooling", choices=list(POOLING_CHOICES), default=None)
+    parser.add_argument(
+        "--acceptor_pooling",
+        choices=list(POOLING_CHOICES),
+        default=None,
+    )
+    parser.add_argument("--donor_readout_hidden", type=int, default=None)
+    parser.add_argument("--acceptor_readout_hidden", type=int, default=None)
+    parser.add_argument("--donor_readout_dropout", type=float, default=None)
+    parser.add_argument("--acceptor_readout_dropout", type=float, default=None)
+    parser.add_argument("--donor_washout", type=int, default=None)
+    parser.add_argument("--acceptor_washout", type=int, default=None)
+    parser.add_argument("--donor_preroll_steps", type=int, default=None)
+    parser.add_argument("--acceptor_preroll_steps", type=int, default=None)
+    parser.add_argument("--donor_weight_decay", type=float, default=None)
+    parser.add_argument("--acceptor_weight_decay", type=float, default=None)
+    parser.add_argument("--donor_eta_min_ratio", type=float, default=None)
+    parser.add_argument("--acceptor_eta_min_ratio", type=float, default=None)
+    parser.add_argument("--donor_val_frac", type=float, default=None)
+    parser.add_argument("--acceptor_val_frac", type=float, default=None)
+    parser.add_argument("--donor_grad_clip", type=float, default=None)
+    parser.add_argument("--acceptor_grad_clip", type=float, default=None)
+
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--compile_mode",
+        choices=["off", "on", "auto"],
+        default="auto",
+        help="Compilation mode for torch.compile.",
+    )
+    parser.add_argument(
+        "--use_amp",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable CUDA automatic mixed precision when set to 1.",
+    )
+    parser.add_argument(
+        "--amp_dtype",
+        choices=["auto", "bf16", "fp16"],
+        default="auto",
+        help="AMP dtype for CUDA autocast.",
+    )
+    parser.add_argument(
+        "--allow_tf32",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Allow TF32 on CUDA matmul and cuDNN when set to 1.",
+    )
+    parser.add_argument(
+        "--cudnn_benchmark",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable cuDNN benchmark autotuning when set to 1.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable deterministic algorithms when set to 1.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        default="auto",
+        help="DataLoader worker count. Use integer or auto.",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=4,
+        help="DataLoader prefetch factor (effective when num_workers > 0).",
+    )
+    parser.add_argument(
+        "--persistent_workers",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable DataLoader persistent workers when set to 1.",
+    )
+    parser.add_argument(
+        "--pin_memory",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable DataLoader pin_memory when set to 1.",
+    )
+    parser.add_argument(
+        "--min_batch_size",
+        type=int,
+        default=64,
+        help="Minimum batch size for OOM backoff retries.",
+    )
+    parser.add_argument(
+        "--max_oom_retries",
+        type=int,
+        default=8,
+        help="Maximum retries when reducing batch size after OOM.",
+    )
+
+    parser.add_argument(
+        "--loss",
+        choices=list(LOSS_NAME_CHOICES),
+        default="weighted_bce",
+        help="Training loss type for donor/acceptor models.",
+    )
+    parser.add_argument(
+        "--pos_weight_cap",
+        type=float,
+        default=20.0,
+        help="Upper bound of positive-class weight for weighted_bce.",
+    )
+    parser.add_argument("--donor_pos_weight_cap", type=float, default=None)
+    parser.add_argument("--acceptor_pos_weight_cap", type=float, default=None)
+    parser.add_argument(
+        "--focal_gamma",
+        type=float,
+        default=2.0,
+        help="Gamma parameter used when --loss focal is selected.",
+    )
+    parser.add_argument("--donor_focal_gamma", type=float, default=None)
+    parser.add_argument("--acceptor_focal_gamma", type=float, default=None)
+    parser.add_argument(
+        "--focal_alpha_pos",
+        type=float,
+        default=None,
+        help=(
+            "Positive-class alpha for focal loss (0 < alpha < 1). "
+            "If omitted, it is inferred from class imbalance."
+        ),
+    )
+    parser.add_argument("--donor_focal_alpha_pos", type=float, default=None)
+    parser.add_argument("--acceptor_focal_alpha_pos", type=float, default=None)
+    parser.add_argument(
+        "--asym_gamma_pos",
+        type=float,
+        default=0.0,
+        help="Positive-class gamma for --loss asymmetric_focal.",
+    )
+    parser.add_argument("--donor_asym_gamma_pos", type=float, default=None)
+    parser.add_argument("--acceptor_asym_gamma_pos", type=float, default=None)
+    parser.add_argument(
+        "--asym_gamma_neg",
+        type=float,
+        default=4.0,
+        help="Negative-class gamma for --loss asymmetric_focal.",
+    )
+    parser.add_argument("--donor_asym_gamma_neg", type=float, default=None)
+    parser.add_argument("--acceptor_asym_gamma_neg", type=float, default=None)
+    parser.add_argument(
+        "--asym_alpha_pos",
+        type=float,
+        default=None,
+        help=(
+            "Positive-class alpha for --loss asymmetric_focal "
+            "(0 < alpha < 1). If omitted, inferred from class imbalance."
+        ),
+    )
+    parser.add_argument("--donor_asym_alpha_pos", type=float, default=None)
+    parser.add_argument("--acceptor_asym_alpha_pos", type=float, default=None)
+    parser.add_argument("--tag", default=None)
+
+
+def add_infer_args(parser: argparse.ArgumentParser) -> None:
+    """Register reservoir-specific inference arguments."""
+    parser.add_argument("--batch_size", type=int, default=512)
+
+
+def train(
+    common_args: argparse.Namespace,
+    model_args: argparse.Namespace,
+) -> Dict[str, object]:
+    """Train donor/acceptor reservoir models with unified argument interface."""
+    train_pos_path, train_neg_path, inferred_train_len = resolve_train_paths(
+        species=common_args.species,
+        train_pos_path=common_args.train_pos_path,
+        train_neg_path=common_args.train_neg_path,
+        donor_len=common_args.donor_len,
+        acceptor_len=common_args.acceptor_len,
+    )
+
+    donor_len, acceptor_len = resolve_effective_window_lengths(
+        donor_len=common_args.donor_len,
+        acceptor_len=common_args.acceptor_len,
+        inferred_train_len=inferred_train_len,
+    )
+    validate_window_args(
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+
+    donor_window_len = donor_len if donor_len is not None else 50
+    acceptor_window_len = acceptor_len if acceptor_len is not None else 50
+
+    donor_checkpoint_path = str(
+        getattr(common_args, "donor_checkpoint_path", "")
+    ).strip()
+    acceptor_checkpoint_path = str(
+        getattr(common_args, "acceptor_checkpoint_path", "")
+    ).strip()
+    if not donor_checkpoint_path:
+        raise ValueError("Missing donor checkpoint path in common_args.")
+    if not acceptor_checkpoint_path:
+        raise ValueError("Missing acceptor checkpoint path in common_args.")
+
+    train_target = str(getattr(model_args, "train_target", "both")).strip().lower()
+    if train_target not in {"both", "donor", "acceptor"}:
+        raise ValueError("--train_target must be one of: both, donor, acceptor.")
+    tasks_to_train = (
+        ["donor", "acceptor"] if train_target == "both" else [train_target]
+    )
+
+    task_checkpoint_paths = {
+        "donor": donor_checkpoint_path,
+        "acceptor": acceptor_checkpoint_path,
+    }
+    task_window_len = {
+        "donor": donor_window_len,
+        "acceptor": acceptor_window_len,
+    }
+
+    task_hparams: dict[str, TaskTrainParams] = {}
+    task_metrics: dict[str, Dict[str, object]] = {}
+    for task in tasks_to_train:
+        resolved = _resolve_task_train_params(task=task, model_args=model_args)
+        task_hparams[task] = resolved
+        task_metrics[task] = train_task_model(
+            task=task,
+            pos_path=train_pos_path,
+            neg_path=train_neg_path,
+            checkpoint_path=task_checkpoint_paths[task],
+            window_len=task_window_len[task],
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+            epochs=model_args.epochs,
+            batch_size=resolved.batch_size,
+            lr=resolved.lr,
+            seed=common_args.seed,
+            input_mode=resolved.input_mode,
+            kmer_k=resolved.kmer_k,
+            max_tokens=resolved.max_tokens,
+            input_dim=resolved.input_dim,
+            reservoir_size=resolved.reservoir_size,
+            spectral_radius=resolved.spectral_radius,
+            leak=resolved.leak,
+            sparsity=resolved.sparsity,
+            input_scale=resolved.input_scale,
+            pooling=resolved.pooling,
+            readout_hidden=resolved.readout_hidden,
+            readout_dropout=resolved.readout_dropout,
+            washout=resolved.washout,
+            preroll_steps=resolved.preroll_steps,
+            read_order=resolved.read_order,
+            weight_decay=resolved.weight_decay,
+            eta_min_ratio=resolved.eta_min_ratio,
+            val_frac=resolved.val_frac,
+            grad_clip=resolved.grad_clip,
+            compile_model=model_args.compile,
+            compile_mode=model_args.compile_mode,
+            device=common_args.device,
+            loss_name=resolved.loss_name,
+            pos_weight_cap=resolved.pos_weight_cap,
+            focal_gamma=resolved.focal_gamma,
+            focal_alpha_pos=resolved.focal_alpha_pos,
+            asym_gamma_pos=resolved.asym_gamma_pos,
+            asym_gamma_neg=resolved.asym_gamma_neg,
+            asym_alpha_pos=resolved.asym_alpha_pos,
+            use_amp=model_args.use_amp,
+            amp_dtype=model_args.amp_dtype,
+            allow_tf32=model_args.allow_tf32,
+            cudnn_benchmark=model_args.cudnn_benchmark,
+            deterministic=model_args.deterministic,
+            num_workers=model_args.num_workers,
+            prefetch_factor=model_args.prefetch_factor,
+            persistent_workers=model_args.persistent_workers,
+            pin_memory=model_args.pin_memory,
+            min_batch_size=model_args.min_batch_size,
+            max_oom_retries=model_args.max_oom_retries,
+            quick_phase=bool(getattr(common_args, "quick_phase", False)),
+            gpu_id=getattr(common_args, "gpu_id", None),
         )
-        for r in results:
-            f.write(
-                f"{r['transcript_id']}\t{r['min_intron_index']}\t{r['Score_donor']:.6f}\t{r['Score_acceptor']:.6f}\t{r['min_donor_plus_acceptor']:.6f}\n"
+
+    run_name_lr = model_args.lr
+    run_name_batch_size = model_args.batch_size
+    if train_target != "both":
+        selected_params = task_hparams[tasks_to_train[0]]
+        run_name_lr = selected_params.lr
+        run_name_batch_size = selected_params.batch_size
+
+    run_name = build_run_name(
+        model_name="reservoir",
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        lr=run_name_lr,
+        batch_size=run_name_batch_size,
+        epochs=model_args.epochs,
+        tag=model_args.tag,
+    )
+
+    task_hparams_summary: dict[str, Dict[str, object]] = {}
+    for task, params in task_hparams.items():
+        task_hparams_summary[task] = {
+            "batch_size": params.batch_size,
+            "lr": params.lr,
+            "loss": params.loss_name,
+            "input_mode": params.input_mode,
+            "kmer_k": params.kmer_k,
+            "max_tokens": params.max_tokens,
+            "input_dim": params.input_dim,
+            "reservoir_size": params.reservoir_size,
+            "spectral_radius": params.spectral_radius,
+            "leak": params.leak,
+            "sparsity": params.sparsity,
+            "input_scale": params.input_scale,
+            "pooling": params.pooling,
+            "readout_hidden": params.readout_hidden,
+            "readout_dropout": params.readout_dropout,
+            "washout": params.washout,
+            "preroll_steps": params.preroll_steps,
+            "read_order": params.read_order,
+            "weight_decay": params.weight_decay,
+            "eta_min_ratio": params.eta_min_ratio,
+            "val_frac": params.val_frac,
+            "grad_clip": params.grad_clip,
+            "pos_weight_cap": params.pos_weight_cap,
+            "focal_gamma": params.focal_gamma,
+            "focal_alpha_pos": params.focal_alpha_pos,
+            "asym_gamma_pos": params.asym_gamma_pos,
+            "asym_gamma_neg": params.asym_gamma_neg,
+            "asym_alpha_pos": params.asym_alpha_pos,
+        }
+
+    summary: Dict[str, object] = {
+        "model": "reservoir",
+        "species": common_args.species,
+        "train_pos_path": train_pos_path,
+        "train_neg_path": train_neg_path,
+        "donor_len": donor_len,
+        "acceptor_len": acceptor_len,
+        "epochs": model_args.epochs,
+        "batch_size": model_args.batch_size,
+        "lr": model_args.lr,
+        "train_target": train_target,
+        "seed": common_args.seed,
+        "device": common_args.device,
+        "checkpoint_name": os.path.basename(donor_checkpoint_path),
+        "donor_checkpoint_path": donor_checkpoint_path,
+        "acceptor_checkpoint_path": acceptor_checkpoint_path,
+        "input_mode": model_args.input_mode,
+        "kmer_k": model_args.kmer_k,
+        "max_tokens": model_args.max_tokens,
+        "input_dim": model_args.input_dim,
+        "reservoir_size": model_args.reservoir_size,
+        "spectral_radius": model_args.spectral_radius,
+        "leak": model_args.leak,
+        "sparsity": model_args.sparsity,
+        "input_scale": model_args.input_scale,
+        "pooling": model_args.pooling,
+        "readout_hidden": model_args.readout_hidden,
+        "readout_dropout": model_args.readout_dropout,
+        "washout": model_args.washout,
+        "preroll_steps": model_args.preroll_steps,
+        "read_order": model_args.read_order,
+        "weight_decay": model_args.weight_decay,
+        "eta_min_ratio": model_args.eta_min_ratio,
+        "val_frac": model_args.val_frac,
+        "grad_clip": model_args.grad_clip,
+        "compile": model_args.compile,
+        "compile_mode": model_args.compile_mode,
+        "use_amp": bool(model_args.use_amp),
+        "amp_dtype": model_args.amp_dtype,
+        "allow_tf32": bool(model_args.allow_tf32),
+        "cudnn_benchmark": bool(model_args.cudnn_benchmark),
+        "deterministic": bool(model_args.deterministic),
+        "num_workers": model_args.num_workers,
+        "prefetch_factor": model_args.prefetch_factor,
+        "persistent_workers": bool(model_args.persistent_workers),
+        "pin_memory": bool(model_args.pin_memory),
+        "min_batch_size": model_args.min_batch_size,
+        "max_oom_retries": model_args.max_oom_retries,
+        "loss": model_args.loss,
+        "focal_gamma": model_args.focal_gamma,
+        "focal_alpha_pos": model_args.focal_alpha_pos,
+        "asym_gamma_pos": model_args.asym_gamma_pos,
+        "asym_gamma_neg": model_args.asym_gamma_neg,
+        "asym_alpha_pos": model_args.asym_alpha_pos,
+        "run_name": run_name,
+        "inferred_train_len": inferred_train_len,
+        "task_hyperparameters": task_hparams_summary,
+    }
+    summary.update(task_metrics)
+    return summary
+
+
+def infer_site(
+    common_args: argparse.Namespace,
+    model_args: argparse.Namespace,
+) -> List[Dict[str, object]]:
+    """Run site-level inference and return rows with fixed schema."""
+    dirs = species_data_dirs(common_args.species)
+    inferred_train_len: Optional[int] = None
+    if common_args.donor_len is None and common_args.acceptor_len is None:
+        try:
+            _, _, inferred_train_len = infer_default_train_paths(
+                train_dir=dirs["train"],
+                donor_len=None,
+                acceptor_len=None,
             )
+        except ValueError:
+            inferred_train_len = None
 
-    print(f"✅ Done! Results saved to {output_tsv}")
-    print(f"Total transcripts: {len(results)}")
+    donor_len, acceptor_len = resolve_effective_window_lengths(
+        donor_len=common_args.donor_len,
+        acceptor_len=common_args.acceptor_len,
+        inferred_train_len=inferred_train_len,
+    )
+    validate_window_args(
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
 
+    test_tsv = resolve_test_tsv(common_args.species, common_args.test_tsv)
+    donor_model_path = str(getattr(common_args, "donor_checkpoint_path", "")).strip()
+    acceptor_model_path = str(
+        getattr(common_args, "acceptor_checkpoint_path", "")
+    ).strip()
+    if not donor_model_path:
+        raise ValueError("Missing donor checkpoint path in common_args.")
+    if not acceptor_model_path:
+        raise ValueError("Missing acceptor checkpoint path in common_args.")
+    if not os.path.exists(donor_model_path):
+        raise FileNotFoundError(f"Donor checkpoint not found: {donor_model_path}")
+    if not os.path.exists(acceptor_model_path):
+        raise FileNotFoundError(f"Acceptor checkpoint not found: {acceptor_model_path}")
 
-def parse_hf_models(arg: str) -> List[str]:
-    if arg:
-        return [m.strip() for m in arg.split(",") if m.strip()]
-    return DEFAULT_HF_MODELS
+    site_rows, skipped_short = read_test_site_rows(
+        test_tsv=test_tsv,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+    print(f"Loaded test sites: {len(site_rows)}")
+    if skipped_short:
+        print(f"Skipped short sites: {skipped_short}")
 
-
-def add_suffix_to_path(path: str, suffix: str) -> str:
-    base, ext = os.path.splitext(path)
-    return f"{base}.{suffix}{ext or '.tsv'}"
-
-
-if __name__ == "__main__":
-    main()
+    return infer_site_scores(
+        site_rows=site_rows,
+        donor_model_path=donor_model_path,
+        acceptor_model_path=acceptor_model_path,
+        device=common_args.device,
+        batch_size=model_args.batch_size,
+    )

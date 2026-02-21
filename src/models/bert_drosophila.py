@@ -450,7 +450,7 @@ def train_model(
 
     for epoch in range(1, epochs + 1):
         model.train()
-        running_loss = 0.0
+        running_loss = torch.zeros((), dtype=torch.float64)
 
         for batch in train_loader:
             input_ids = batch.input_ids.to(device)
@@ -470,9 +470,12 @@ def train_model(
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_now
 
-            running_loss += loss.item()
+            running_loss = running_loss + loss.detach().to(
+                device="cpu",
+                dtype=torch.float64,
+            )
 
-        train_loss = running_loss / max(1, len(train_loader))
+        train_loss = float(running_loss / max(1, len(train_loader)))
         val_metrics = evaluate(model, val_loader, device=device)
 
         if "pr_auc" in val_metrics:

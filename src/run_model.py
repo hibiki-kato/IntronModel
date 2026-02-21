@@ -22,6 +22,7 @@ from util.data_proc import (
     default_site_output_path,
     default_transcript_output_path,
     infer_default_train_paths,
+    model_root,
     parse_name_fields,
     project_root,
     resolve_effective_window_lengths,
@@ -59,6 +60,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "class_file",
         "eval_output_txt",
         "skip_train",
+        "continue_train",
         "train_only",
         "use_amp",
         "amp_dtype",
@@ -78,10 +80,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "intron_score_op",
         "transcript_score_agg",
         "softmin_tau",
-        "good",
-        "total",
-        "ref",
-        "gffcompare_counts_file",
+        "ref_gff",
         "visualize",
         "output_png",
         "x_min",
@@ -90,6 +89,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "y_max",
         "donor_checkpoint_path",
         "acceptor_checkpoint_path",
+        "pretrained_model_name",
     }
 )
 
@@ -134,12 +134,26 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--transcript_output_tsv", default=None)
     parser.add_argument("--metrics_json", default=None)
     parser.add_argument("--class_file", default=None)
+    parser.add_argument(
+        "--ref_gff",
+        default=None,
+        help=(
+            "Reference GFF for evaluation. If omitted, it is auto-resolved "
+            "from data/<species>/raw."
+        ),
+    )
     parser.add_argument("--eval_output_txt", default=None)
     parser.add_argument(
         "--skip_train",
         "--skip-training",
         action="store_true",
         help="Skip training and use existing checkpoints.",
+    )
+    parser.add_argument(
+        "--continue_train",
+        "--continue-training",
+        action="store_true",
+        help="Continue training from existing checkpoints as initial weights.",
     )
     parser.add_argument(
         "--train_only",
@@ -169,14 +183,6 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Temperature used when --transcript_score_agg is "
             "softmin or softmin_wavg."
-        ),
-    )
-    parser.add_argument(
-        "--gffcompare_counts_file",
-        default=None,
-        help=(
-            "Path to a count file containing good/total/ref for eval. "
-            "If omitted, auto-detect from data/<species>/raw."
         ),
     )
     parser.add_argument(
@@ -409,7 +415,7 @@ def _build_parser(
     if model_module is not None:
         model_module.add_train_args(parser)
         model_module.add_infer_args(parser)
-    elif selected_model == "cnn":
+    elif selected_model in {"cnn", "cnn_resdil", "tcn"}:
         _add_cnn_fallback_train_args(parser)
         _add_cnn_fallback_infer_args(parser)
 
@@ -523,9 +529,9 @@ def _build_checkpoint_stem_from_params(
 
 def _build_checkpoint_paths(species: str, stem: str) -> dict[str, str]:
     """Build strict donor/acceptor checkpoint paths."""
-    root = project_root()
-    donor_path = os.path.join(root, "model", species, "donor", f"{stem}.pt")
-    acceptor_path = os.path.join(root, "model", species, "acceptor", f"{stem}.pt")
+    root = model_root()
+    donor_path = os.path.join(root, species, "donor", f"{stem}.pt")
+    acceptor_path = os.path.join(root, species, "acceptor", f"{stem}.pt")
     return {"donor": donor_path, "acceptor": acceptor_path}
 
 
@@ -595,113 +601,63 @@ def _resolve_pipeline_paths(
     )
 
 
-def _resolve_gffcompare_counts_file(
+def _resolve_ref_gff_file(
     species: str,
     configured_path: Optional[str],
 ) -> str:
-    """Resolve gffcompare count file path for evaluation.
+    """Resolve reference GFF path for evaluation.
 
     Parameters
     ----------
     species : str
         Species folder name under ``data``.
     configured_path : str | None
-        Optional explicit path provided by CLI.
+        Optional explicit path provided by ``--ref_gff``.
 
     Returns
     -------
     str
-        Resolved existing path to a count file.
+        Existing path to the reference GFF file.
 
     Raises
     ------
     FileNotFoundError
-        If no candidate count file exists.
+        If a valid reference GFF cannot be resolved.
     """
 
     if configured_path not in (None, "", "None"):
         if os.path.exists(configured_path):
             return configured_path
-        raise FileNotFoundError(
-            f"gffcompare counts file not found: {configured_path}"
-        )
+        raise FileNotFoundError(f"Reference GFF not found: {configured_path}")
 
     raw_dir = species_data_dirs(species)["raw"]
-    candidates: tuple[str, ...] = (
-        os.path.join(raw_dir, "gffcompare_compare"),
-        os.path.join(raw_dir, "gffcompare_compare.txt"),
-        os.path.join(raw_dir, "gffcompare_counts.txt"),
-    )
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    if not os.path.isdir(raw_dir):
+        raise FileNotFoundError(f"Raw directory not found: {raw_dir}")
 
-    raise FileNotFoundError(
-        "gffcompare counts file not found. "
-        f"Checked: {', '.join(candidates)}. "
-        "Run run/gffcompare_counts.sh first."
-    )
+    candidates: list[str] = []
+    for name in sorted(os.listdir(raw_dir)):
+        path = os.path.join(raw_dir, name)
+        if not os.path.isfile(path):
+            continue
+        if name.endswith(".gff") or name.endswith(".gff3") or ".gff." in name:
+            candidates.append(path)
 
-
-def _load_eval_counts(counts_file: str) -> tuple[int, int, int]:
-    """Load good/total/ref counts from a key-value file.
-
-    Parameters
-    ----------
-    counts_file : str
-        Input file path. Each non-comment line must be ``<key><ws><value>``.
-
-    Returns
-    -------
-    tuple[int, int, int]
-        Parsed ``(good, total, ref)``.
-
-    Raises
-    ------
-    ValueError
-        If required keys are missing, duplicated, or invalid.
-    """
-
-    values: dict[str, int] = {}
-    required_keys: tuple[str, str, str] = ("good", "total", "ref")
-    required_key_set: frozenset[str] = frozenset(required_keys)
-
-    with open(counts_file, "r") as f:
-        for line_no, raw_line in enumerate(f, start=1):
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            fields = line.split()
-            if len(fields) != 2:
-                raise ValueError(
-                    f"Invalid format in {counts_file}:{line_no}: {raw_line.rstrip()}"
-                )
-            key, value_text = fields
-            if key not in required_key_set:
-                continue
-            if key in values:
-                raise ValueError(
-                    f"Duplicate key '{key}' in {counts_file}:{line_no}"
-                )
-            try:
-                value = int(value_text)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Invalid integer for '{key}' in {counts_file}:{line_no}"
-                ) from exc
-            if value <= 0:
-                raise ValueError(
-                    f"'{key}' must be > 0 in {counts_file}:{line_no}"
-                )
-            values[key] = value
-
-    missing = [key for key in required_keys if key not in values]
-    if missing:
-        raise ValueError(
-            f"Missing keys in {counts_file}: {', '.join(missing)}"
+    if not candidates:
+        raise FileNotFoundError(
+            "Reference GFF not found under raw directory. "
+            "Set --ref_gff explicitly."
         )
 
-    return values["good"], values["total"], values["ref"]
+    preferred = [
+        path
+        for path in candidates
+        if path.endswith(".fix.gff") or path.endswith(".gff.fix")
+    ]
+    if preferred:
+        return preferred[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return candidates[0]
 
 
 def run_pipeline(args: argparse.Namespace) -> None:
@@ -734,6 +690,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     args.donor_checkpoint_path = checkpoint_paths["donor"]
     args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
+    args.donor_init_checkpoint_path = ""
+    args.acceptor_init_checkpoint_path = ""
 
     (
         args.test_tsv,
@@ -748,9 +706,28 @@ def run_pipeline(args: argparse.Namespace) -> None:
         inferred_train_len=inferred_train_len,
     )
 
+    if args.skip_train and args.continue_train:
+        raise ValueError("--continue_train cannot be combined with --skip_train.")
+
     if args.skip_train:
         print("[pipeline] Skip training (--skip_train).")
     else:
+        if args.continue_train:
+            required_tasks = (
+                ("donor", "acceptor")
+                if train_target == "both"
+                else (train_target,)
+            )
+            _assert_checkpoint_paths_exist(
+                checkpoint_paths,
+                required_tasks=required_tasks,
+            )
+            args.donor_init_checkpoint_path = checkpoint_paths["donor"]
+            args.acceptor_init_checkpoint_path = checkpoint_paths["acceptor"]
+            print(
+                "[pipeline] Continue training (--continue_train): "
+                "use existing checkpoints as initialization."
+            )
         summary = model_module.train(common_args=args, model_args=args)
         metrics_json = args.metrics_json
         if metrics_json is None:
@@ -807,28 +784,24 @@ def run_pipeline(args: argparse.Namespace) -> None:
     print(f"Saved transcript scores: {transcript_output_tsv}")
     print(f"Total transcripts: {len(transcript_rows)}")
 
-    counts_file = _resolve_gffcompare_counts_file(
+    ref_gff = _resolve_ref_gff_file(
         species=args.species,
-        configured_path=args.gffcompare_counts_file,
+        configured_path=args.ref_gff,
     )
-    good, total, ref = _load_eval_counts(counts_file)
-    print(
-        "[pipeline] Evaluation counts loaded from "
-        f"{counts_file}: good={good} total={total} ref={ref}"
-    )
+    print(f"[pipeline] Evaluation reference GFF: {ref_gff}")
 
     output_lines = evaluate_score_file(
         class_file=class_file,
         score_file=transcript_output_tsv,
-        good=good,
-        total=total,
-        ref=ref,
+        ref_gff=ref_gff,
     )
     eval_out_dir = os.path.dirname(eval_output_txt)
     if eval_out_dir:
         os.makedirs(eval_out_dir, exist_ok=True)
-    with open(eval_output_txt, "w") as f:
-        f.write("\n".join(output_lines) + "\n")
+    with open(eval_output_txt, "w", encoding="utf-8") as f:
+        if output_lines:
+            f.write("\n".join(output_lines))
+            f.write("\n")
     print(f"Evaluation scores saved to {eval_output_txt}")
 
     if args.visualize != "none":

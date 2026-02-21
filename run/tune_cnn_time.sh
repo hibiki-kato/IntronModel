@@ -20,7 +20,10 @@ conda activate intronmodel
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${PROJECT_ROOT}/data"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 format_elapsed() {
 	local total_seconds="$1"
@@ -80,13 +83,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${project_root}/data/${species}/tuning/cnn/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/cnn/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${project_root}/data/${species}/tuning/cnn/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -120,7 +123,7 @@ run_double_descent_plot() {
 	local species_name="$3"
 	local target_name="$4"
 
-	"${python_bin}" "${project_root}/tools/plot_tuning_double_descent.py" \
+	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
 		--target "${target_name}" || true
@@ -129,7 +132,7 @@ run_double_descent_plot() {
 # --------------------------
 # CONFIG (edit here)
 # --------------------------
-TIME_BUDGET_MINUTES="360"
+TIME_BUDGET_MINUTES="30"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -364,8 +367,8 @@ while true; do
 
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
-	output_dir="${PROJECT_ROOT}/data/${species}/tuning/cnn/${target}/${run_id}"
-	global_best_path="${PROJECT_ROOT}/data/${species}/tuning/cnn/${target}"\
+	output_dir="${DATA_ROOT}/${species}/tuning/cnn/${target}/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/cnn/${target}"\
 "/best_config.json"
 		objective_metric="${target}_pr_auc"
 		config_path="${output_dir}/hparam_search_config.json"
@@ -465,7 +468,7 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=%s\n' \
 		"${remaining_hms}" "${species}" "${target}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/tools/hparam_search.py" \
+	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${config_path}"; then
 		echo "[temp_tune_cnn_6h.sh] cycle=${job_index} failed "\
 			"species=${species} target=${target}" >&2

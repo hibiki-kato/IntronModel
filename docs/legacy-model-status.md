@@ -1,24 +1,33 @@
 # Legacy Model Status
 
-These modules are retained as legacy experimental code. They are intentionally
-not connected to the unified `run_model.py` path.
+This page tracks model files under `src/models/` that are currently outside the
+unified `run_model.py` registry path.
 
-## Inventory
+## Current Inventory (not in registry)
 
-- `src/models/bert.py`
 - `src/models/bert_drosophila.py`
 - `src/models/cnn_v2.py`
-- `src/models/reservoir.py`
 
-## Current Policy
+## Integrated Models (in registry)
 
-- Keep files for reference and future porting.
-- Do not register them in `src/models/registry.py` yet.
-- Do not claim production support in README.
-- Port incrementally by conforming to the model integration contract.
+- `cnn`
+- `cnn_resdil`
+- `tcn`
+- `bert`
+- `dnabert`
+- `dnabert2`
+- `dnabert6`
+- `reservoir`
 
-## Rationale
+## Policy
 
-- They use independent CLI flows and path conventions.
-- They do not currently expose the unified `add_* / train / infer_site` API.
-- Mixing them into the registry before refactoring would reduce reliability.
+- Keep legacy files for reference and controlled porting.
+- Do not advertise legacy files as supported wrappers unless registered.
+- Add new registry entries only after contract compliance and pipeline tests.
+
+## Porting Checklist
+
+1. Implement `add_train_args`, `add_infer_args`, `train`, `infer_site`.
+2. Pass registry contract validation in `src/models/registry.py`.
+3. Verify pipeline compatibility via `src/run_model.py`.
+4. Add/adjust wrapper scripts and documentation.

@@ -19,7 +19,10 @@ conda activate intronmodel
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${PROJECT_ROOT}/data"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 format_elapsed() {
 	local total_seconds="$1"
@@ -210,7 +213,7 @@ SPECIES="Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
-EPOCHS="30"
+EPOCHS="25"
 BATCH_SIZE="512"
 LR="5e-4"
 LOSS="focal"
@@ -276,6 +279,7 @@ SEED="1337"
 NAME_FIELDS=""
 VISUALIZE="true"
 SKIP_TRAINING="0"
+CONTINUE_TRAINING="1"
 TRAIN_ONLY="0"
 PRECOMPUTED_SITE_SCORE_TSV=""
 
@@ -306,6 +310,14 @@ if [[ "${TRAIN_ONLY}" != "0" && "${TRAIN_ONLY}" != "1" ]]; then
 fi
 if [[ "${SKIP_TRAINING}" != "0" && "${SKIP_TRAINING}" != "1" ]]; then
 	echo "[cnn.sh] SKIP_TRAINING must be 0 or 1." >&2
+	exit 1
+fi
+if [[ "${CONTINUE_TRAINING}" != "0" && "${CONTINUE_TRAINING}" != "1" ]]; then
+	echo "[cnn.sh] CONTINUE_TRAINING must be 0 or 1." >&2
+	exit 1
+fi
+if [[ "${SKIP_TRAINING}" == "1" && "${CONTINUE_TRAINING}" == "1" ]]; then
+	echo "[cnn.sh] CONTINUE_TRAINING=1 cannot be used with SKIP_TRAINING=1." >&2
 	exit 1
 fi
 if [[ "${TRAIN_TARGET}" != "both" && "${TRAIN_TARGET}" != "donor" \
@@ -377,8 +389,8 @@ if [[ "${USE_TUNED_HPARAMS}" != "off" ]]; then
 	done
 fi
 
-TEST_TSV="${PROJECT_ROOT}/data/${SPECIES}/raw/transcripts.tsv"
-CLASS_FILE="${PROJECT_ROOT}/data/${SPECIES}/raw/transcript_class.txt"
+TEST_TSV="${DATA_ROOT}/${SPECIES}/raw/transcripts.tsv"
+CLASS_FILE="${DATA_ROOT}/${SPECIES}/raw/transcript_class.txt"
 
 OUTPUT_STEM="$({
 	PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 - <<PY
@@ -422,9 +434,9 @@ print(
 PY
 } | tr -d '\n')"
 
-OUTPUT_SITE_SCORE_TSV="${PROJECT_ROOT}/data/${SPECIES}/site_score/${OUTPUT_STEM}.tsv"
-OUTPUT_TRANS_SCORE_TSV="${PROJECT_ROOT}/data/${SPECIES}/trans_score/${OUTPUT_STEM}.tsv"
-OUTPUT_EVAL_SCORE_TXT="${PROJECT_ROOT}/data/${SPECIES}/eval_score/${OUTPUT_STEM}.txt"
+OUTPUT_SITE_SCORE_TSV="${DATA_ROOT}/${SPECIES}/site_score/${OUTPUT_STEM}.tsv"
+OUTPUT_TRANS_SCORE_TSV="${DATA_ROOT}/${SPECIES}/trans_score/${OUTPUT_STEM}.tsv"
+OUTPUT_EVAL_SCORE_TXT="${DATA_ROOT}/${SPECIES}/eval_score/${OUTPUT_STEM}.txt"
 
 RUN_ARGS=(
 	--model "${MODEL}"
@@ -588,6 +600,9 @@ if [[ -n "${ACCEPTOR_ASYM_GAMMA_NEG}" ]]; then
 fi
 if [[ "${SKIP_TRAINING}" == "1" ]]; then
 	RUN_ARGS+=(--skip_train)
+fi
+if [[ "${CONTINUE_TRAINING}" == "1" ]]; then
+	RUN_ARGS+=(--continue_train)
 fi
 if [[ "${TRAIN_ONLY}" == "1" ]]; then
 	RUN_ARGS+=(--train_only)

@@ -6,6 +6,8 @@ dist/
 wheels/
 *.egg-info
 .pytest_cache
+.cache
+*.bin
 
 # Virtual environments
 .venv
@@ -29,3 +31,24 @@ copilot-instructions.md
 .DS_Store
 # Windows
 Thumbs.db
+
+SS-BERT
+
+# Sphinx output
+docs/_build/
+
+# Common local tool outputs
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+*.log
+sync.sh
+
+# rsync
+.rsyncignore
+
+AGENTS.md
+skills

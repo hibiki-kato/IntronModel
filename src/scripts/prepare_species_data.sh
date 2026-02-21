@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOT'
-Usage: bash scripts/prepare_species_data.sh [options]
+Usage: bash src/scripts/prepare_species_data.sh [options]
 
 Prepare species-level data directories and generated files.
 
@@ -12,8 +12,7 @@ Options:
   --donor-len <int>       Donor window length (default: 100)
   --acceptor-len <int>    Acceptor window length (default: 100)
   --source-root <path>    Optional source root for raw data import
-  --skip-gffcompare       Skip gffcompare count generation
-  --target-root <path>    Data root path (default: ./data)
+  --target-root <path>    Data root path (default: INTRONMODEL_DATA_ROOT or ./data)
   -h, --help              Show this help
 
 Notes:
@@ -26,8 +25,7 @@ SPECIES="Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 SOURCE_ROOT=""
-SKIP_GFFCOMPARE="0"
-TARGET_ROOT="data"
+TARGET_ROOT="${INTRONMODEL_DATA_ROOT:-data}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -46,10 +44,6 @@ while [[ $# -gt 0 ]]; do
 	--source-root)
 		SOURCE_ROOT="$2"
 		shift 2
-		;;
-	--skip-gffcompare)
-		SKIP_GFFCOMPARE="1"
-		shift
 		;;
 	--target-root)
 		TARGET_ROOT="$2"
@@ -77,7 +71,7 @@ Athal | Dmel | Mmus)
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 if [[ "${TARGET_ROOT}" != /* ]]; then
 	TARGET_ROOT="${PROJECT_ROOT}/${TARGET_ROOT}"
@@ -91,7 +85,7 @@ mkdir -p "${SPECIES_DIR}/trans_score"
 mkdir -p "${SPECIES_DIR}/eval_score"
 
 if [[ -n "${SOURCE_ROOT}" ]]; then
-	bash "${PROJECT_ROOT}/scripts/fetch_reference_data.sh" \
+	bash "${PROJECT_ROOT}/src/scripts/fetch_reference_data.sh" \
 		--species "${SPECIES}" \
 		--source-root "${SOURCE_ROOT}" \
 		--target-root "${TARGET_ROOT}" \
@@ -103,10 +97,6 @@ bash "${PROJECT_ROOT}/run/make_test_data.sh" \
 	--donor-len "${DONOR_LEN}" \
 	--acceptor-len "${ACCEPTOR_LEN}" \
 	--out-tsv "${SPECIES_DIR}/raw/transcripts.tsv"
-
-if [[ "${SKIP_GFFCOMPARE}" == "0" ]]; then
-	bash "${PROJECT_ROOT}/run/gffcompare_counts.sh" --species "${SPECIES}"
-fi
 
 echo "[prepare_species_data] prepared directories under ${SPECIES_DIR}"
 echo "[prepare_species_data] generated raw/transcripts.tsv"

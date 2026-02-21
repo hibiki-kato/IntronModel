@@ -13,7 +13,7 @@ def test_resolve_plot_bounds_for_known_species() -> None:
         y_min=None,
         y_max=None,
     )
-    assert bounds == (5.0, 16.0, 35.0, 45.0)
+    assert bounds == (10.0, 18.0, 40.0, 46.0)
 
 
 def test_resolve_plot_bounds_unknown_species_requires_explicit_bounds() -> None:

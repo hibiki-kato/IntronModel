@@ -13,8 +13,11 @@ import os
 import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
-LINE_PAIR_RE = re.compile(
+LINE_PAIR_LABELED_RE = re.compile(
     r"^DEBUG\s+donor\s+([A-Za-z]+)\s+acceptor\s+([A-Za-z]+)(?:\s+[+-])?\s*$"
+)
+LINE_PAIR_SIMPLE_RE = re.compile(
+    r"^DEBUG\s+pair\s+([A-Za-z]+)\s+([A-Za-z]+)(?:\s+[+-])?\s*$"
 )
 LINE_SINGLE_RE = re.compile(r"^DEBUG\s+(donor|acceptor)\s+([A-Za-z]+)(?:\s+[+-])?\s*$")
 
@@ -84,6 +87,26 @@ def project_root() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+def data_root() -> str:
+    """Return data root directory, overridable by environment variable."""
+    root = os.environ.get("INTRONMODEL_DATA_ROOT")
+    if root is None or root.strip() == "":
+        return os.path.join(project_root(), "data")
+    if os.path.isabs(root):
+        return root
+    return os.path.normpath(os.path.join(project_root(), root))
+
+
+def model_root() -> str:
+    """Return model root directory, overridable by environment variable."""
+    root = os.environ.get("INTRONMODEL_MODEL_ROOT")
+    if root is None or root.strip() == "":
+        return os.path.join(project_root(), "model")
+    if os.path.isabs(root):
+        return root
+    return os.path.normpath(os.path.join(project_root(), root))
+
+
 def species_data_dirs(species: str) -> Dict[str, str]:
     """Return canonical data directories for a species.
 
@@ -97,8 +120,7 @@ def species_data_dirs(species: str) -> Dict[str, str]:
     dict[str, str]
         Paths for base/raw/train/trans_score/site_score/eval_score directories.
     """
-    root = project_root()
-    base = os.path.join(root, "data", species)
+    base = os.path.join(data_root(), species)
     return {
         "base": base,
         "raw": os.path.join(base, "raw"),
@@ -121,7 +143,7 @@ def parse_name_fields(name_fields: Optional[str]) -> List[str]:
     Returns
     -------
     list[str]
-        Parsed field list. Default is ``["bp_avg"]``.
+        Parsed field list. Default is an empty list.
 
     Raises
     ------
@@ -129,14 +151,14 @@ def parse_name_fields(name_fields: Optional[str]) -> List[str]:
         If unknown field names are provided.
     """
     if name_fields in (None, ""):
-        return ["bp_avg"]
+        return []
     raw_fields = [
         field.strip()
         for field in str(name_fields).split(",")
         if field.strip()
     ]
     if not raw_fields:
-        return ["bp_avg"]
+        return []
     if len(raw_fields) == 1 and raw_fields[0] == "none":
         return []
     unknown = [field for field in raw_fields if field not in NAME_FIELD_CHOICES]
@@ -298,7 +320,7 @@ def default_site_output_path(
 ) -> str:
     """Return default site-score TSV output path."""
     dirs = species_data_dirs(species)
-    fields = list(name_fields) if name_fields is not None else ["bp_avg"]
+    fields = list(name_fields) if name_fields is not None else []
     params = name_params or {}
     stem = build_output_stem(
         model_name=model_name,
@@ -322,7 +344,7 @@ def default_transcript_output_path(
 ) -> str:
     """Return default transcript-score TSV output path."""
     dirs = species_data_dirs(species)
-    fields = list(name_fields) if name_fields is not None else ["bp_avg"]
+    fields = list(name_fields) if name_fields is not None else []
     params = name_params or {}
     stem = build_output_stem(
         model_name=model_name,
@@ -354,8 +376,7 @@ def build_run_name(
 
 def infer_default_model_dir(species: str, task: str, model_name: str) -> str:
     """Return strict default model directory for a species/task/model."""
-    root = project_root()
-    return os.path.join(root, "model", species, task, model_name)
+    return os.path.join(model_root(), species, task, model_name)
 
 
 def validate_window_args(
@@ -525,6 +546,31 @@ def reshape_site_sequence(
     return None
 
 
+def parse_pair_sequences(line: str) -> Optional[Tuple[str, str]]:
+    """Parse one pair-record line into donor and acceptor sequences.
+
+    Parameters
+    ----------
+    line : str
+        Raw line from training file.
+
+    Returns
+    -------
+    tuple[str, str] | None
+        ``(donor_seq, acceptor_seq)`` when the line is a supported pair record;
+        otherwise ``None``.
+    """
+    m_pair_labeled = LINE_PAIR_LABELED_RE.match(line)
+    if m_pair_labeled:
+        return m_pair_labeled.groups()
+
+    m_pair_simple = LINE_PAIR_SIMPLE_RE.match(line)
+    if m_pair_simple:
+        return m_pair_simple.groups()
+
+    return None
+
+
 def read_examples_single_task(
     pos_path: str,
     neg_path: str,
@@ -542,9 +588,9 @@ def read_examples_single_task(
                 if not line or not line.startswith("DEBUG"):
                     continue
 
-                m_pair = LINE_PAIR_RE.match(line)
-                if m_pair:
-                    donor_seq, acceptor_seq = m_pair.groups()
+                pair_sequences = parse_pair_sequences(line)
+                if pair_sequences:
+                    donor_seq, acceptor_seq = pair_sequences
                     raw_seq = donor_seq if task == "donor" else acceptor_seq
                     seq = reshape_site_sequence(
                         raw_seq,

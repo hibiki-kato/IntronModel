@@ -1,31 +1,43 @@
 # Documentation Index
 
-This directory contains repository operation documents used before introducing
-new model families.
+This directory includes a Sphinx-based documentation tree.
 
-## Files
+Primary entry page:
 
-- `docs/repo-structure.md`: canonical repository structure and ownership
-- `docs/model-integration-contract.md`: required interface for model modules
-- `docs/legacy-model-status.md`: current legacy model inventory and policy
-- `docs/data-policy.md`: data externalization and regeneration policy
-- `docs/history-rewrite-playbook.md`: operational steps for Git history cleanup
-- `docs/reports/repo_scan_2026-02-19.md`: current consistency scan snapshot
+- `docs/index.md`
 
-## Environment Baseline
+## Build Docs
 
-- Python: 3.12+
-- Required runtime packages: `torch`, `numpy`, `matplotlib`
-- Required test package: `pytest`
-
-Install test dependency:
+Activate the project conda environment first:
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
+conda activate intronmodel
 ```
 
-Run tests:
+Generate architecture figures:
 
 ```bash
-python3 -m pytest -q
+python src/tools/generate_doc_figures.py
 ```
+
+Build HTML:
+
+```bash
+python -m sphinx -b html docs docs/_build/html
+```
+
+Open:
+
+- `docs/_build/html/index.html`
+
+## Main Pages
+
+- `docs/model-architecture.md`: detailed mathematics and layer-level model docs
+- `docs/run-wrapper-scripts.md`: wrapper CONFIG options and continue-learning
+  flow
+- `docs/docs-system.md`: documentation tooling and rationale
+- `docs/repo-structure.md`
+- `docs/model-integration-contract.md`
+- `docs/legacy-model-status.md`
+- `docs/data-policy.md`
+- `docs/history-rewrite-playbook.md`

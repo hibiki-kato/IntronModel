@@ -36,6 +36,10 @@ conda activate intronmodel
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 SPECIES="Dmel"
 DONOR_LEN="100"
@@ -92,7 +96,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-RAW_DIR="${PROJECT_ROOT}/data/${SPECIES}/raw"
+RAW_DIR="${DATA_ROOT}/${SPECIES}/raw"
 if [[ ! -d "${RAW_DIR}" ]]; then
 	echo "Raw directory not found: ${RAW_DIR}" >&2
 	exit 2

@@ -16,9 +16,9 @@ Options:
   -h, --help            Show this help
 
 Species default ranges:
-  Athal: x=[10.0, 39.0], y=[48.0, 80.0]
-  Dmel : x=[40.0, 48.0], y=[40.0, 50.0]
-  Mmus : x=[5.0, 16.0],  y=[35.0, 45.0]
+  Athal: x=[10.0, 52.0], y=[48.0, 75.0]
+  Dmel : x=[40.0, 52.0], y=[40.0, 55.0]
+  Mmus : x=[10.0, 18.0], y=[40.0, 46.0]
 EOT
 }
 
@@ -36,9 +36,9 @@ conda activate intronmodel
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-SPECIES="Athal"
+SPECIES="Mmus"
 OUTPUT_PNG=""
-INTERACTIVE="0"
+INTERACTIVE="1"
 X_MIN=""
 X_MAX=""
 Y_MIN=""
@@ -89,21 +89,21 @@ done
 case "${SPECIES}" in
 Athal)
 	DEFAULT_X_MIN="10.0"
-	DEFAULT_X_MAX="39.0"
+	DEFAULT_X_MAX="52.0"
 	DEFAULT_Y_MIN="48.0"
-	DEFAULT_Y_MAX="80.0"
+	DEFAULT_Y_MAX="75.0"
 	;;
 Dmel)
 	DEFAULT_X_MIN="40.0"
-	DEFAULT_X_MAX="48.0"
+	DEFAULT_X_MAX="52.0"
 	DEFAULT_Y_MIN="40.0"
-	DEFAULT_Y_MAX="50.0"
+	DEFAULT_Y_MAX="55.0"
 	;;
 Mmus)
-	DEFAULT_X_MIN="5.0"
-	DEFAULT_X_MAX="16.0"
-	DEFAULT_Y_MIN="35.0"
-	DEFAULT_Y_MAX="45.0"
+	DEFAULT_X_MIN="10.0"
+	DEFAULT_X_MAX="18.0"
+	DEFAULT_Y_MIN="40.0"
+	DEFAULT_Y_MAX="46.0"
 	;;
 *)
 	if [[ -z "${X_MIN}" || -z "${X_MAX}" || -z "${Y_MIN}" || -z "${Y_MAX}" ]]; then

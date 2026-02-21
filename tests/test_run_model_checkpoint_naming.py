@@ -46,9 +46,7 @@ def test_checkpoint_stem_excludes_eval_and_transcript_args() -> None:
         "compile_mode": "auto",
         "use_amp": 1,
         "softmin_tau": 0.5,
-        "good": 15169,
-        "total": 38235,
-        "ref": 32288,
+        "ref_gff": "/tmp/ref.gff",
         "intron_score_op": "*",
         "transcript_score_agg": "min",
     }
@@ -62,9 +60,7 @@ def test_checkpoint_stem_excludes_eval_and_transcript_args() -> None:
     )
 
     assert stem.startswith("cnn_dlen100_alen120")
-    assert "good" not in stem
-    assert "total" not in stem
-    assert "ref" not in stem
+    assert "ref_gff" not in stem
     assert "iop" not in stem
     assert "tagg" not in stem
     assert "stau" not in stem

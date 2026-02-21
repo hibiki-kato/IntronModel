@@ -1,0 +1,44 @@
+name: Conda Lock
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+jobs:
+  conda-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: "3.12"
+          miniconda-version: "latest"
+          channels: conda-forge,pytorch
+          channel-priority: strict
+
+      - name: Install conda-lock
+        shell: bash -l {0}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install conda-lock
+
+      - name: Update lock file
+        shell: bash -l {0}
+        run: |
+          ./src/scripts/update_conda_lock.sh
+
+      - name: Check lock is committed
+        shell: bash -l {0}
+        run: |
+          if ! git diff --quiet -- conda-lock.yml; then
+            echo "::error::conda-lock.yml is out of date."
+            echo "::error::Run ./src/scripts/update_conda_lock.sh and commit changes."
+            git --no-pager diff -- conda-lock.yml
+            exit 1
+          fi

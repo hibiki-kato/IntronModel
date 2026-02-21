@@ -1,206 +1,182 @@
 # IntronModel
 
-Splice-site modeling and transcript scoring with a unified pipeline CLI.
+Unified splice-site modeling and transcript scoring pipeline.
 
-## Status
+## Environment (Conda)
 
-- Supported pipeline model: `cnn`
-- Unified entrypoint: `src/run_model.py`
-- Legacy experimental modules are kept under `src/models/` but are **not**
-  connected to the unified CLI:
-  - `src/models/bert.py`
-  - `src/models/bert_drosophila.py`
-  - `src/models/cnn_v2.py`
-  - `src/models/reservoir.py`
+Python target: 3.12+
 
-## Repository Layout
+### Option A: `environment.yml` (simple)
 
-```text
-.
-├── docs/
-│   ├── README.md
-│   ├── data-policy.md
-│   ├── legacy-model-status.md
-│   ├── model-integration-contract.md
-│   ├── repo-structure.md
-│   └── reports/
-├── run/
-│   ├── cnn.sh
-│   ├── eval_trans_score.sh
-│   ├── gffcompare_counts.sh
-│   ├── make_test_data.sh
-│   ├── plot_eval.sh
-│   └── tune_cnn.sh
-├── scripts/
-│   ├── fetch_reference_data.sh
-│   └── prepare_species_data.sh
-├── src/
-│   ├── evaluate_scores.py
-│   ├── gffcompare_counts.py
-│   ├── run_model.py
-│   ├── models/
-│   │   ├── registry.py
-│   │   ├── cnn.py
-│   │   └── <legacy models>
-│   └── util/
-└── tools/
-    ├── hparam_search.py
-    └── scan_obsolete.py
-```
-
-## Unified Pipeline CLI
-
-`src/run_model.py` executes a fixed pipeline in order:
-
-1. train
-2. infer (site-level scoring)
-3. transcript (transcript-level aggregation)
-4. eval (SN/PR/F1 output and optional plot)
-
-Automatic skipping:
-
-- `--skip_train` skips training.
-- `--site_score_tsv <path>` skips infer and consumes an external site score TSV.
-- `--train_only` runs only training and stops before infer/transcript/eval.
-
-### Main Usage
+Create or update the environment from `environment.yml`:
 
 ```bash
-python3 src/run_model.py \
+conda env create -f environment.yml
+conda activate intronmodel
+```
+
+If the environment already exists:
+
+```bash
+conda env update -f environment.yml --prune
+conda activate intronmodel
+```
+
+### Option B: `conda-lock.yml` (reproducible)
+
+Install `conda-lock` once:
+
+```bash
+conda install -c conda-forge conda-lock
+```
+
+Install the locked environment:
+
+```bash
+conda-lock install -n intronmodel conda-lock.yml
+conda activate intronmodel
+```
+
+`conda-lock.yml` in this repository contains lock entries for:
+
+- `linux-64`
+- `osx-64`
+- `osx-arm64`
+- `win-64`
+
+If you change `environment.yml`, regenerate the lock:
+
+```bash
+bash scripts/update_conda_lock.sh
+```
+
+### OS compatibility note
+
+`environment.yml` does **not** require the same OS, but resolution is
+platform-dependent and may fail if a dependency is unavailable on your OS.
+
+For cross-machine reproducibility, prefer `conda-lock.yml` because it pins
+packages per platform.
+
+## Quick Start
+
+Direct CLI run (train + infer + transcript aggregation + evaluation):
+
+```bash
+python src/run_model.py \
   --model cnn \
   --species Dmel \
   --donor_len 100 \
-  --acceptor_len 100 \
-  --loss focal \
-  --name_fields bp_avg,loss
+  --acceptor_len 100
 ```
 
-### Inference-like Usage (skip training)
-
-```bash
-python3 src/run_model.py \
-  --model cnn \
-  --species Dmel \
-  --donor_len 100 \
-  --acceptor_len 100 \
-  --loss focal \
-  --name_fields bp_avg,loss \
-  --skip_train
-```
-
-### Training-only Usage (donor/acceptor model tuning)
-
-```bash
-python3 src/run_model.py \
-  --model cnn \
-  --species Dmel \
-  --donor_len 100 \
-  --acceptor_len 100 \
-  --loss focal \
-  --epochs 5 \
-  --train_only
-```
-
-### Use Precomputed Site Scores (skip infer)
-
-```bash
-python3 src/run_model.py \
-  --model cnn \
-  --species Dmel \
-  --site_score_tsv data/Dmel/site_score/cnn100bp_lossfocal.tsv \
-  --skip_train
-```
-
-## Transcript Aggregation Options
-
-`--intron_score_op`:
-
-- `+`
-- `*`
-- `harmonic`
-- `min`
-
-`--transcript_score_agg`:
-
-- `min`
-- `softmin`
-- `softmin_wavg`
-- `+`
-- `*`
-- `mean`
-- `avg` (alias of `mean`)
-- `median`
-- `max`
-
-`--softmin_tau` is used by `softmin` and `softmin_wavg` and must be positive.
-
-## Wrapper Scripts
-
-All wrappers are maintained and aligned to the unified CLI.
-
-`run/cnn.sh` and `run/tune_cnn.sh` are config-only scripts.
-Edit the `CONFIG` block in each script, then run without arguments:
+Wrapper run (config-only; edit `run/cnn.sh` CONFIG first):
 
 ```bash
 bash run/cnn.sh
-bash run/tune_cnn.sh
 ```
 
-`run/tune_cnn.sh` executes two-phase random search:
-
-1. quick phase (short epochs)
-2. full phase (top-k re-train)
-
-Outputs are written under:
-
-`data/<species>/tuning/cnn/<timestamp>/`
-
-The following wrappers keep CLI help:
+Optional data preparation helper:
 
 ```bash
-bash run/gffcompare_counts.sh --help
-bash run/make_test_data.sh --help
-bash run/eval_trans_score.sh --help
-bash run/plot_eval.sh --help
+bash scripts/prepare_species_data.sh \
+  --species Dmel \
+  --donor-len 100 \
+  --acceptor-len 100
 ```
 
-## Data Policy
+## Available Models
 
-Large data and generated artifacts are externalized from Git tracking.
+Registered in `src/models/registry.py`:
 
-- `data/` is ignored.
-- Reproducibility depends on scripts and documented procedures.
-- See `docs/data-policy.md` for details.
+- `cnn`
+- `cnn_resdil`
+- `tcn`
+- `bert`
+- `dnabert`
+- `dnabert2`
+- `dnabert6`
+- `reservoir`
 
-## Environment
+## Wrapper Scripts
 
-This project targets Python 3.12+.
+Config-only training/inference wrappers:
 
-Suggested packages:
+- `run/cnn.sh`
+- `run/cnn_resdil.sh`
+- `run/tcn.sh`
+- `run/bert.sh`
+- `run/dnabert.sh`
+- `run/reservoir.sh`
 
-- `torch`
-- `numpy`
-- `matplotlib`
-- `pytest`
+Common wrapper controls:
 
-For test dependencies:
+- `SKIP_TRAINING=1`
+- `CONTINUE_TRAINING=1`
+- `TRAIN_ONLY=1`
+- `USE_TUNED_HPARAMS=off|auto|required` (except `run/dnabert.sh`)
+
+`run/dnabert.sh` variant switch:
+
+- `DNABERT_VARIANT="2"` -> `--model dnabert2`
+- `DNABERT_VARIANT="6"` -> `--model dnabert6`
+
+## Documentation
+
+- [Documentation entry](docs/index.md)
+- [Model architecture](docs/model-architecture.md)
+- [Run wrapper guide](docs/run-wrapper-scripts.md)
+- [Docs system](docs/docs-system.md)
+
+Build docs locally:
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
+python tools/generate_doc_figures.py
+python -m sphinx -b html docs docs/_build/html
 ```
 
-## Tests
+Open `docs/_build/html/index.html`.
+
+## GitHub Pages
+
+Docs are auto-deployed by `.github/workflows/docs-pages.yml` when pushing to
+`main` or `master` and files under `docs/**`, `tools/generate_doc_figures.py`,
+`environment.yml`, or the workflow itself change.
+
+Repository setting requirement: Pages must use **GitHub Actions** as the
+build/deploy source.
+
+## Path Overrides
+
+Default runtime roots are:
+
+- data root: `<repo>/data`
+- model root: `<repo>/model`
+
+You can override them with environment variables:
 
 ```bash
-python3 -m pytest -q
+export INTRONMODEL_DATA_ROOT=/path/to/data_root
+export INTRONMODEL_MODEL_ROOT=/path/to/model_root
 ```
 
-## Documentation Index
+These overrides affect:
 
-- `docs/README.md`
-- `docs/repo-structure.md`
-- `docs/model-integration-contract.md`
-- `docs/legacy-model-status.md`
-- `docs/data-policy.md`
-- `docs/history-rewrite-playbook.md`
-- `docs/reports/repo_scan_2026-02-19.md`
+- training/inference input and output under `data/<species>/...`
+- tuning outputs and `best_config.json` under
+  `data/<species>/tuning/<model>/<target>/`
+- checkpoint paths under `model/<species>/{donor,acceptor}/`
+
+## Development
+
+Run tests:
+
+```bash
+pytest -q
+```
+
+Update lock file when `environment.yml` changes:
+
+```bash
+bash scripts/update_conda_lock.sh
+```

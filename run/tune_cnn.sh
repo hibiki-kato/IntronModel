@@ -19,7 +19,10 @@ conda activate intronmodel
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${PROJECT_ROOT}/data"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 format_elapsed() {
 	local total_seconds="$1"
@@ -131,13 +134,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${project_root}/data/${species}/tuning/cnn/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/cnn/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${project_root}/data/${species}/tuning/cnn/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -480,8 +483,8 @@ echo "[tune_cnn.sh] targets=${TARGET_LIST[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
-	OUTPUT_DIR="${PROJECT_ROOT}/data/${SPECIES}/tuning/cnn/${TARGET}/${RUN_TIMESTAMP}"
-	GLOBAL_BEST_CONFIG_PATH="${PROJECT_ROOT}/data/${SPECIES}/tuning/cnn/${TARGET}/best_config.json"
+	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/cnn/${TARGET}/${RUN_TIMESTAMP}"
+	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/cnn/${TARGET}/best_config.json"
 	mkdir -p "${OUTPUT_DIR}"
 	TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	TARGET_START_SECONDS="${SECONDS}"
@@ -620,7 +623,7 @@ JSON
 
 	echo "[tune_cnn.sh] target=${TARGET}"
 	echo "[tune_cnn.sh] output_dir=${OUTPUT_DIR}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/tools/hparam_search.py" \
+	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${CONFIG_PATH}"; then
 		target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 		target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"

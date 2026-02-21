@@ -25,18 +25,22 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 # --------------------------
 # CONFIG (edit here)
 # --------------------------
 CONDA_ENV="intronmodel"
 USE_CONDA_ACTIVATE="1"
-VISUALIZE="none"
+VISUALIZE="true"
 OUTPUT_PNG=""
-TARGET_SPECIES=("Athal")
-SCORE_INPUTS=("LLM100f.tsv")
+TARGET_SPECIES=("Dmel")
+SCORE_INPUTS=("cnn100bp.tsv" "Markov.txt" "LLM100f.tsv")
 CLASS_FILE_OVERRIDE=""
-COUNTS_FILE_OVERRIDE=""
+REF_GFF_OVERRIDE=""
 
 if [[ "${VISUALIZE}" != "none" && "${VISUALIZE}" != "true" \
 	&& "${VISUALIZE}" != "interactive" ]]; then
@@ -98,18 +102,53 @@ resolve_score_file() {
 	return 1
 }
 
+resolve_ref_gff() {
+	local raw_dir="$1"
+	local gff_candidates=()
+	local regular_candidates=()
+	local preferred_candidates=()
+
+	shopt -s nullglob
+	gff_candidates=("${raw_dir}"/*.gff "${raw_dir}"/*.gff3 "${raw_dir}"/*.gff.*)
+	shopt -u nullglob
+
+	if [[ ${#gff_candidates[@]} -eq 0 ]]; then
+		return 1
+	fi
+
+	for candidate in "${gff_candidates[@]}"; do
+		if [[ ! -f "${candidate}" ]]; then
+			continue
+		fi
+		regular_candidates+=("${candidate}")
+		if [[ "${candidate}" == *.fix.gff || "${candidate}" == *.gff.fix ]]; then
+			preferred_candidates+=("${candidate}")
+		fi
+	done
+
+	if [[ ${#regular_candidates[@]} -eq 0 ]]; then
+		return 1
+	fi
+	if [[ ${#preferred_candidates[@]} -gt 0 ]]; then
+		echo "${preferred_candidates[0]}"
+		return 0
+	fi
+	echo "${regular_candidates[0]}"
+	return 0
+}
+
 for species in "${TARGET_SPECIES[@]}"; do
-	RAW_DIR="${PROJECT_ROOT}/data/${species}/raw"
-	TRANS_SCORE_DIR="${PROJECT_ROOT}/data/${species}/trans_score"
-	EVAL_SCORE_DIR="${PROJECT_ROOT}/data/${species}/eval_score"
+	RAW_DIR="${DATA_ROOT}/${species}/raw"
+	TRANS_SCORE_DIR="${DATA_ROOT}/${species}/trans_score"
+	EVAL_SCORE_DIR="${DATA_ROOT}/${species}/eval_score"
 
 	CLASS_FILE="${CLASS_FILE_OVERRIDE}"
-	COUNTS_FILE="${COUNTS_FILE_OVERRIDE}"
+	REF_GFF="${REF_GFF_OVERRIDE}"
 	if [[ -z "${CLASS_FILE}" ]]; then
 		CLASS_FILE="${RAW_DIR}/transcript_class.txt"
 	fi
-	if [[ -z "${COUNTS_FILE}" ]]; then
-		COUNTS_FILE="${RAW_DIR}/gffcompare_counts.txt"
+	if [[ -z "${REF_GFF}" ]]; then
+		REF_GFF="$(resolve_ref_gff "${RAW_DIR}" || true)"
 	fi
 
 	if [[ ! -d "${TRANS_SCORE_DIR}" ]]; then
@@ -120,19 +159,9 @@ for species in "${TARGET_SPECIES[@]}"; do
 		echo "class file not found: ${CLASS_FILE}" >&2
 		exit 3
 	fi
-	if [[ ! -f "${COUNTS_FILE}" ]]; then
-		echo "counts file not found: ${COUNTS_FILE}" >&2
+	if [[ -z "${REF_GFF}" || ! -f "${REF_GFF}" ]]; then
+		echo "reference gff not found for species=${species}" >&2
 		exit 4
-	fi
-
-	GOOD="$(awk -F '\t' '$1 == "good" {print $2}' "${COUNTS_FILE}")"
-	TOTAL="$(awk -F '\t' '$1 == "total" {print $2}' "${COUNTS_FILE}")"
-	REF="$(awk -F '\t' '$1 == "ref" {print $2}' "${COUNTS_FILE}")"
-
-	if [[ ! "${GOOD}" =~ ^[0-9]+$ || ! "${TOTAL}" =~ ^[0-9]+$ \
-		|| ! "${REF}" =~ ^[0-9]+$ ]]; then
-		echo "Invalid counts in ${COUNTS_FILE}. Expected good/total/ref." >&2
-		exit 5
 	fi
 
 	mkdir -p "${EVAL_SCORE_DIR}"
@@ -153,11 +182,9 @@ for species in "${TARGET_SPECIES[@]}"; do
 			eval
 			"${CLASS_FILE}"
 			"${score_file}"
+			"${REF_GFF}"
 			--output_file "${output_file}"
 			--species "${species}"
-			--good "${GOOD}"
-			--total "${TOTAL}"
-			--ref "${REF}"
 			--visualize "${VISUALIZE}"
 		)
 		if [[ -n "${OUTPUT_PNG}" ]]; then
@@ -165,7 +192,7 @@ for species in "${TARGET_SPECIES[@]}"; do
 		fi
 
 		echo "[eval_trans_score] species=${species} file=${score_file}"
-		echo "[eval_trans_score] counts good=${GOOD} total=${TOTAL} ref=${REF}"
+		echo "[eval_trans_score] ref_gff=${REF_GFF}"
 		python3 "${PROJECT_ROOT}/src/evaluate_scores.py" "${RUN_ARGS[@]}"
 		echo "[eval_trans_score] wrote ${output_file}"
 	done

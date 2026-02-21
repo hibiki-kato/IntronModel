@@ -4,31 +4,58 @@
 
 - `src/run_model.py`: single public CLI for train/infer/transcript/eval pipeline
 - `src/models/registry.py`: model registration and contract validation
-- `src/models/cnn.py`: only model connected to unified pipeline
-- `src/util/`: shared utilities for data processing and transcript aggregation
+- `src/models/`: unified model modules currently in registry
+  - `cnn.py`
+  - `cnn_resdil.py`
+  - `tcn.py`
+  - `bert.py`
+  - `dnabert.py` (used by `dnabert`, `dnabert2`, `dnabert6` keys)
+  - `reservoir.py`
+- `src/util/`: shared preprocessing, naming, and transcript aggregation
+  utilities
 - `src/evaluate_scores.py`: evaluation text generation and plotting
-- `src/gffcompare_counts.py`: utility for gffcompare-derived count files
 
-## Wrapper Scripts
+## Wrapper Scripts (Root)
 
-- `run/cnn.sh`: thin wrapper for `src/run_model.py`
-- `run/make_test_data.sh`: builds `transcripts.tsv` from FASTA/GTF
-- `run/gffcompare_counts.sh`: builds `gffcompare_counts.txt`
-- `run/eval_trans_score.sh`: evaluates existing transcript score TSV files
-- `run/plot_eval.sh`: plots precision/sensitivity from eval outputs
+Unified pipeline wrappers (config-only):
 
-## Non-Connected Legacy Modules
+- `run/cnn.sh`
+- `run/cnn_resdil.sh`
+- `run/tcn.sh`
+- `run/bert.sh`
+- `run/dnabert.sh`
+- `run/reservoir.sh`
 
-Legacy modules are intentionally kept under `src/models` for reference but are
-not part of the public runtime path:
+Tuning wrappers:
 
-- `src/models/bert.py`
+- `run/tune_cnn.sh`, `run/tune_cnn_time.sh`
+- `run/tune_cnn_resdil.sh`, `run/tune_cnn_resdil_time.sh`
+- `run/tune_tcn.sh`, `run/tune_tcn_time.sh`
+- `run/tune_bert.sh`
+- `run/tune_reservoir.sh`
+
+Utilities:
+
+- `run/make_test_data.sh`
+- `run/eval_trans_score.sh`
+- `run/plot_eval.sh`
+
+## Source Tooling and Data Scripts
+
+- `src/scripts/`: data provisioning and lockfile update helpers
+- `src/tools/`: Python tooling (doc figure generation, tuning runner, scans)
+
+## Legacy or Non-Integrated Modules
+
+These files are still present but are not wired to `run_model.py` registry:
+
 - `src/models/bert_drosophila.py`
 - `src/models/cnn_v2.py`
-- `src/models/reservoir.py`
 
 ## Data and Artifacts
 
 - `data/` is externalized from Git tracking.
-- `model/` stores local checkpoints (`*.pt`) and is not treated as source code.
+- `model/` stores local checkpoints (`*.pt`) and pretrained snapshots.
+- Runtime path overrides: `INTRONMODEL_DATA_ROOT`,
+  `INTRONMODEL_MODEL_ROOT`.
 - Only minimal deterministic fixtures should be kept under `tests/fixtures/`.

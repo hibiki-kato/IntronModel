@@ -225,6 +225,21 @@ def _configure_triton_tool_paths() -> None:
         os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_path
 
 
+def _configure_torch_compile_runtime() -> None:
+    """Apply conservative torch.compile runtime settings for stability."""
+    dynamo_module = getattr(torch, "_dynamo", None)
+    if dynamo_module is None:
+        return
+    config_obj = getattr(dynamo_module, "config", None)
+    if config_obj is None:
+        return
+    capture_scalar_outputs = getattr(config_obj, "capture_scalar_outputs", None)
+    if isinstance(capture_scalar_outputs, bool) and not capture_scalar_outputs:
+        setattr(config_obj, "capture_scalar_outputs", True)
+    if "TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS" not in os.environ:
+        os.environ["TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS"] = "1"
+
+
 def _is_cuda_oom_error(exc: RuntimeError) -> bool:
     """Return whether a runtime error is likely a CUDA OOM error."""
     message = str(exc).lower()
@@ -1035,6 +1050,7 @@ def train_task_model(
     oom_retries = 0
     use_non_blocking = device == "cuda"
     while True:
+        saw_training_batch = False
         compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
         loader_generator = torch.Generator()
         loader_generator.manual_seed(seed)
@@ -1080,6 +1096,7 @@ def train_task_model(
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
+                _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
                 ptxas_blackwell_path = os.environ.get(
                     "TRITON_PTXAS_BLACKWELL_PATH"
@@ -1133,8 +1150,9 @@ def train_task_model(
                 if device == "mps":
                     print(f"[{task}] epoch {epoch}/{epochs} start")
                 model.train()
-                running_loss = 0.0
+                running_loss = torch.zeros((), dtype=torch.float64)
                 for batch_idx, (x, y) in enumerate(train_loader, start=1):
+                    saw_training_batch = True
                     x = x.to(device, non_blocking=use_non_blocking)
                     y = y.to(device, non_blocking=use_non_blocking)
 
@@ -1176,10 +1194,13 @@ def train_task_model(
                         optimizer.step()
                     if device == "mps" and batch_idx == 1:
                         print(f"[{task}] epoch {epoch}/{epochs} first batch done")
-                    running_loss += float(loss.item())
+                    running_loss = running_loss + loss.detach().to(
+                        device="cpu",
+                        dtype=torch.float64,
+                    )
 
                 scheduler.step()
-                train_loss = running_loss / max(1, len(train_loader))
+                train_loss = float(running_loss / max(1, len(train_loader)))
 
                 val_metrics = evaluate(
                     model=model,
@@ -1322,6 +1343,11 @@ def train_task_model(
                 is_device_oom = _is_cuda_oom_error(exc)
             elif device == "mps":
                 is_device_oom = _is_mps_oom_error(exc)
+            if is_device_oom and not saw_training_batch:
+                raise RuntimeError(
+                    "NON_RETRYABLE_OOM: OOM occurred before first training batch. "
+                    "Model config is likely too large for the device."
+                ) from exc
             should_retry = (
                 is_device_oom
                 and oom_retries < max_oom_retries

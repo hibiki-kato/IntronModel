@@ -75,12 +75,14 @@ def test_run_pipeline_train_only_skips_infer_and_eval(
         assert model_name == "cnn"
         return _DummyModelModule()
 
-    def _fail_counts(
+    def _fail_ref_gff(
         species: str,
         configured_path: str | None,
     ) -> str:
         del species, configured_path
-        raise AssertionError("eval count resolution must not run in train-only mode.")
+        raise AssertionError(
+            "ref_gff resolution must not run in train-only mode."
+        )
 
     def _fail_aggregate(
         site_score_rows: list[dict[str, object]],
@@ -92,7 +94,7 @@ def test_run_pipeline_train_only_skips_infer_and_eval(
         raise AssertionError("transcript aggregation must not run in train-only mode.")
 
     monkeypatch.setattr(run_model, "load_model_module", _load_dummy_model_module)
-    monkeypatch.setattr(run_model, "_resolve_gffcompare_counts_file", _fail_counts)
+    monkeypatch.setattr(run_model, "_resolve_ref_gff_file", _fail_ref_gff)
     monkeypatch.setattr(run_model, "aggregate_transcript_scores", _fail_aggregate)
 
     run_model.run_pipeline(args)

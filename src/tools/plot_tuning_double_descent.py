@@ -1,7 +1,7 @@
 """Plot aggregated tuning history for double-descent inspection.
 
 This utility reads all successful tuning trials under:
-``data/<species>/tuning/cnn/<target>/<run_id>/{quick_trials,full_trials}.tsv``
+``data/<species>/tuning/<model>/<target>/<run_id>/{quick_trials,full_trials}.tsv``
 and generates one pooled complexity-vs-score figure.
 """
 
@@ -14,9 +14,13 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from tools.hparam_search import ArgValue, Scalar, estimate_cnn_param_complexity
+    from tools.hparam_search import (
+        ArgValue,
+        Scalar,
+        estimate_model_param_complexity,
+    )
 except ModuleNotFoundError:
-    from hparam_search import ArgValue, Scalar, estimate_cnn_param_complexity
+    from hparam_search import ArgValue, Scalar, estimate_model_param_complexity
 
 
 @dataclass(frozen=True)
@@ -90,9 +94,10 @@ def load_points(
     project_root: Path,
     species: str,
     target: str,
+    model_name: str,
 ) -> list[TrialPoint]:
     """Load all successful historical points for one species/target."""
-    root = project_root / "data" / species / "tuning" / "cnn" / target
+    root = project_root / "data" / species / "tuning" / model_name / target
     if not root.exists():
         return []
 
@@ -113,7 +118,8 @@ def load_points(
                     if score is None:
                         continue
                     sampled = _extract_sampled_params(row)
-                    complexity = estimate_cnn_param_complexity(
+                    complexity = estimate_model_param_complexity(
+                        model_name=model_name,
                         sampled_params=sampled,
                         base_args={},
                     )
@@ -266,6 +272,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--project_root", required=True)
     parser.add_argument("--species", required=True)
     parser.add_argument("--target", choices=["donor", "acceptor"], required=True)
+    parser.add_argument("--model", default="cnn")
     parser.add_argument("--output_png", default=None)
     return parser.parse_args(argv)
 
@@ -278,14 +285,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     project_root = Path(args.project_root).resolve()
     species = str(args.species)
     target = str(args.target)
+    model_name = str(args.model)
     points = load_points(
         project_root=project_root,
         species=species,
         target=target,
+        model_name=model_name,
     )
     if not points:
         print(
-            f"[plot_tuning_double_descent] no points found for {species}/{target}.",
+            "[plot_tuning_double_descent] no points found for "
+            f"{species}/{model_name}/{target}.",
             flush=True,
         )
         return 0
@@ -298,7 +308,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             / "data"
             / species
             / "tuning"
-            / "cnn"
+            / model_name
             / target
             / f"{species}_{target}_double_descent.png"
         )
@@ -312,8 +322,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[plot_tuning_double_descent] skipped: {error}", flush=True)
         return 0
     print(
-        "[plot_tuning_double_descent] wrote "
-        f"{output_png} (points={len(points)})",
+        f"[plot_tuning_double_descent] wrote {output_png} (points={len(points)})",
         flush=True,
     )
     return 0

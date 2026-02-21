@@ -1,15 +1,19 @@
+"""Evaluate transcript-level scores and optionally plot SN/PR scatter data."""
+
+from __future__ import annotations
+
 import argparse
 import os
 import sys
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
-    "Athal": (10.0, 39.0, 48.0, 80.0),
-    "Dmel": (40.0, 48.0, 40.0, 50.0),
-    "Mmus": (5.0, 16.0, 35.0, 45.0),
+    "Athal": (10.0, 52.0, 48.0, 75.0),
+    "Dmel": (40.0, 52.0, 40.0, 55.0),
+    "Mmus": (10.0, 18.0, 40.0, 46.0),
 }
 FALLBACK_PLOT_BOUNDS: tuple[float, float, float, float] = (40.0, 50.0, 40.0, 50.0)
 
@@ -19,57 +23,188 @@ AXIS_LABEL_FONT_SIZE = 18
 TITLE_FONT_SIZE = 20
 
 
-def load_class_dict(class_file: str) -> Dict[str, str]:
-    class_dict: Dict[str, str] = {}
-    with open(class_file, "r") as f:
-        for line in f:
-            tr, cl = line.strip().split()
-            class_dict[tr] = cl
-    return class_dict
+def load_class_dict(class_file: str | Path) -> dict[str, str]:
+    """Load transcript -> class mapping from ``transcript_class.txt``.
+
+    Parameters
+    ----------
+    class_file : str | pathlib.Path
+        Path to a whitespace-delimited file with two columns:
+        transcript_id and class_code.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping from transcript id to class code.
+
+    Raises
+    ------
+    ValueError
+        If a non-empty line does not contain exactly two columns.
+    """
+
+    mapping: dict[str, str] = {}
+    with Path(class_file).open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            fields = line.split()
+            if len(fields) != 2:
+                raise ValueError(
+                    f"Invalid class line at {class_file}:{line_no}: {raw_line.rstrip()}"
+                )
+            transcript_id, class_code = fields
+            mapping[transcript_id] = class_code
+    return mapping
+
+
+def count_reference_transcripts(ref_gff: str | Path) -> int:
+    """Count reference transcripts from a GFF feature stream.
+
+    This follows the legacy shell pipeline logic exactly:
+    count consecutive ``exon`` runs whose run-length is greater than 1.
+
+    Parameters
+    ----------
+    ref_gff : str | pathlib.Path
+        Path to the reference GFF file.
+
+    Returns
+    -------
+    int
+        Number of counted reference transcript-like exon runs.
+
+    Raises
+    ------
+    ValueError
+        If no eligible exon run is found.
+    """
+
+    run_feature: str | None = None
+    run_length = 0
+    reference_count = 0
+
+    with Path(ref_gff).open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if len(fields) < 3:
+                continue
+            feature = fields[2]
+
+            if feature == run_feature:
+                run_length += 1
+                continue
+
+            if run_feature == "exon" and run_length > 1:
+                reference_count += 1
+            run_feature = feature
+            run_length = 1
+
+    if run_feature == "exon" and run_length > 1:
+        reference_count += 1
+
+    if reference_count <= 0:
+        raise ValueError(
+            "Failed to derive positive reference count from ref_gff: "
+            f"{ref_gff}"
+        )
+    return reference_count
+
+
+def _truncate_percent(numerator: int, denominator: int) -> float:
+    """Compute truncated percentage with two decimals."""
+
+    if denominator <= 0:
+        raise ValueError("denominator must be positive")
+    return int((numerator / denominator) * 10000.0) / 100.0
 
 
 def evaluate_score_file(
-    class_file: str,
-    score_file: str,
-    good: int,
-    total: int,
-    ref: int,
-) -> List[str]:
-    class_dict = load_class_dict(class_file)
+    class_file: str | Path,
+    score_file: str | Path,
+    ref_gff: str | Path,
+) -> list[str]:
+    """Evaluate transcript scores into SN/PR/F1 rows.
 
-    filtered_data: List[Tuple[str, float, str]] = []
-    with open(score_file, "r") as f:
+    Parameters
+    ----------
+    class_file : str | pathlib.Path
+        Transcript class file (``transcript_id class_code``).
+    score_file : str | pathlib.Path
+        Transcript score table. The 1st column is transcript id and the 5th
+        column is the score used for sorting.
+    ref_gff : str | pathlib.Path
+        Reference GFF path used to compute the sensitivity denominator.
+
+    Returns
+    -------
+    list[str]
+        Lines formatted as:
+        ``transcript_id score class_code sensitivity precision f1``.
+    """
+
+    class_dict = load_class_dict(class_file)
+    reference_count = count_reference_transcripts(ref_gff)
+
+    filtered_data: list[tuple[str, float, str]] = []
+    running_total = 0
+    running_good = 0
+
+    with Path(score_file).open("r", encoding="utf-8") as f:
         next(f, None)
-        for line in f:
-            fields = line.strip().split()
+        for raw_line in f:
+            fields = raw_line.strip().split()
             if len(fields) < 5:
                 continue
-            tr = fields[0]
-            score = float(fields[4])
-            last_field = float(fields[-1])
-            if tr in class_dict and class_dict[tr] != "c" and last_field != 10000:
-                filtered_data.append((tr, score, class_dict[tr]))
 
-    filtered_data.sort(key=lambda x: x[1])
+            transcript_id = fields[0]
+            class_code = class_dict.get(transcript_id)
+            if class_code is None or class_code == "c":
+                continue
 
-    output_lines: List[str] = []
-    current_good = good
-    current_total = total
-    for tr, score, cl in filtered_data:
-        if cl == "=":
-            current_good -= 1
-        current_total -= 1
-        if current_total == 0:
-            current_total = 1
-        sn = int(current_good / ref * 10000) / 100
-        pr = int(current_good / current_total * 10000) / 100
-        f1 = 0.0 if (sn + pr) == 0.0 else 2.0 * (sn * pr) / (sn + pr)
-        output_lines.append(f"{tr} {score} {cl} {sn} {pr} {f1}")
+            try:
+                score = float(fields[4])
+                last_field = float(fields[-1])
+            except ValueError:
+                continue
+            if last_field == 10000:
+                continue
+
+            filtered_data.append((transcript_id, score, class_code))
+            running_total += 1
+            if class_code == "=":
+                running_good += 1
+
+    filtered_data.sort(key=lambda row: row[1])
+
+    output_lines: list[str] = []
+    for transcript_id, score, class_code in filtered_data:
+        if class_code == "=":
+            running_good -= 1
+        running_total -= 1
+        if running_total <= 0:
+            continue
+
+        sensitivity = _truncate_percent(running_good, reference_count)
+        precision = _truncate_percent(running_good, running_total)
+        f1 = 0.0
+        if sensitivity + precision > 0.0:
+            f1 = 2.0 * (sensitivity * precision) / (sensitivity + precision)
+        output_lines.append(
+            f"{transcript_id} {score} {class_code} "
+            f"{sensitivity} {precision} {f1}"
+        )
 
     return output_lines
 
 
 def infer_species_from_path(path: str, default_species: str = "Dmel") -> str:
+    """Infer species name from a path that includes ``data/<species>/...``."""
+
     parts = os.path.normpath(path).split(os.sep)
     if "data" in parts:
         idx = parts.index("data")
@@ -79,8 +214,12 @@ def infer_species_from_path(path: str, default_species: str = "Dmel") -> str:
 
 
 def resolve_eval_output_file(
-    score_file: str, output_file: Optional[str], species: Optional[str] = None
+    score_file: str,
+    output_file: str | None,
+    species: str | None = None,
 ) -> str:
+    """Resolve output file path for evaluation text."""
+
     if output_file not in (None, "", "None"):
         return output_file
 
@@ -88,7 +227,11 @@ def resolve_eval_output_file(
     base = os.path.splitext(os.path.basename(score_file))[0]
     out_dir = os.path.normpath(
         os.path.join(
-            os.path.dirname(__file__), "..", "data", inferred_species, "eval_score"
+            os.path.dirname(__file__),
+            "..",
+            "data",
+            inferred_species,
+            "eval_score",
         )
     )
     os.makedirs(out_dir, exist_ok=True)
@@ -96,12 +239,16 @@ def resolve_eval_output_file(
 
 
 def resolve_eval_dir(species: str) -> str:
+    """Resolve ``data/<species>/eval_score`` directory path."""
+
     return os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "data", species, "eval_score")
     )
 
 
-def resolve_plot_output(species: str, output_png: Optional[str]) -> str:
+def resolve_plot_output(species: str, output_png: str | None) -> str:
+    """Resolve output PNG path for summary scatter plot."""
+
     if output_png:
         return output_png
     return os.path.normpath(
@@ -117,11 +264,13 @@ def resolve_plot_output(species: str, output_png: Optional[str]) -> str:
 
 def resolve_plot_bounds(
     species: str,
-    x_min: Optional[float],
-    x_max: Optional[float],
-    y_min: Optional[float],
-    y_max: Optional[float],
+    x_min: float | None,
+    x_max: float | None,
+    y_min: float | None,
+    y_max: float | None,
 ) -> tuple[float, float, float, float]:
+    """Resolve plotting bounds with species defaults."""
+
     default_bounds = PLOT_BOUNDS_BY_SPECIES.get(species)
     if default_bounds is None:
         missing_all_bounds = (
@@ -147,13 +296,15 @@ def resolve_plot_bounds(
 
 def plot_eval_scores(
     species: str,
-    output_png: Optional[str] = None,
+    output_png: str | None = None,
     interactive: bool = False,
-    x_min: Optional[float] = None,
-    x_max: Optional[float] = None,
-    y_min: Optional[float] = None,
-    y_max: Optional[float] = None,
-):
+    x_min: float | None = None,
+    x_max: float | None = None,
+    y_min: float | None = None,
+    y_max: float | None = None,
+) -> None:
+    """Plot sensitivity/precision points from all eval text files."""
+
     eval_dir = resolve_eval_dir(species)
     if not os.path.isdir(eval_dir):
         raise FileNotFoundError(f"eval_score directory not found: {eval_dir}")
@@ -166,8 +317,8 @@ def plot_eval_scores(
     fig, ax = plt.subplots(figsize=(16, 12), dpi=100)
     markers = ["o", "s", "^", "D", "v", "p", "*", "h", "x", "+"]
 
-    for i, file in enumerate(files):
-        data = np.loadtxt(os.path.join(eval_dir, file), usecols=(3, 4))
+    for index, filename in enumerate(files):
+        data = np.loadtxt(os.path.join(eval_dir, filename), usecols=(3, 4))
         if data.ndim == 1:
             data = np.expand_dims(data, axis=0)
         sensitivity = data[:, 0]
@@ -176,8 +327,8 @@ def plot_eval_scores(
             sensitivity,
             precision,
             s=2,
-            marker=markers[i % len(markers)],
-            label=file[:-4],
+            marker=markers[index % len(markers)],
+            label=filename[:-4],
         )
 
     (
@@ -219,22 +370,24 @@ def plot_eval_scores(
         plt.show()
 
 
-def run_eval_command(args):
+def run_eval_command(args: argparse.Namespace) -> None:
+    """Run `eval` subcommand."""
+
     species_for_output = args.species or infer_species_from_path(args.score_file)
     output_lines = evaluate_score_file(
         class_file=args.class_file,
         score_file=args.score_file,
-        good=args.good,
-        total=args.total,
-        ref=args.ref,
+        ref_gff=args.ref_gff,
     )
     output_file = resolve_eval_output_file(
         score_file=args.score_file,
         output_file=args.output_file,
         species=species_for_output,
     )
-    with open(output_file, "w") as f:
-        f.write("\n".join(output_lines) + "\n")
+    with Path(output_file).open("w", encoding="utf-8") as f:
+        if output_lines:
+            f.write("\n".join(output_lines))
+            f.write("\n")
     print(f"Evaluation scores saved to {output_file}")
 
     if args.visualize != "none":
@@ -249,7 +402,9 @@ def run_eval_command(args):
         )
 
 
-def run_plot_command(args):
+def run_plot_command(args: argparse.Namespace) -> None:
+    """Run `plot` subcommand."""
+
     plot_eval_scores(
         species=args.species,
         output_png=args.output_png,
@@ -262,28 +417,37 @@ def run_plot_command(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build top-level CLI parser."""
+
     parser = argparse.ArgumentParser(
-        description="Evaluate transcript scores and/or visualize sensitivity-precision curves"
+        description=(
+            "Evaluate transcript scores and/or visualize "
+            "sensitivity-precision curves"
+        )
     )
     subparsers = parser.add_subparsers(dest="command")
 
     eval_parser = subparsers.add_parser(
-        "eval", help="Evaluate one score TSV into eval_score txt"
+        "eval",
+        help="Evaluate one score TSV into eval_score txt",
     )
     eval_parser.add_argument("class_file", help="Path to class file")
     eval_parser.add_argument("score_file", help="Path to score file")
+    eval_parser.add_argument("ref_gff", help="Path to reference GFF")
     eval_parser.add_argument("--output_file", default=None, help="Path to output txt")
     eval_parser.add_argument(
-        "--species", default=None, help="Species override for default output path"
+        "--species",
+        default=None,
+        help="Species override for default output path",
     )
-    eval_parser.add_argument("--good", type=int, default=15169)
-    eval_parser.add_argument("--total", type=int, default=38235)
-    eval_parser.add_argument("--ref", type=int, default=32288)
     eval_parser.add_argument(
         "--visualize",
         choices=["none", "true", "interactive"],
         default="none",
-        help="Plot after evaluation: none (default), true (save png), interactive (save + show)",
+        help=(
+            "Plot after evaluation: none (default), true (save png), "
+            "interactive (save + show)"
+        ),
     )
     eval_parser.add_argument(
         "--output_png",
@@ -297,7 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.set_defaults(func=run_eval_command)
 
     plot_parser = subparsers.add_parser(
-        "plot", help="Plot all eval_score txt files for a species"
+        "plot",
+        help="Plot all eval_score txt files for a species",
     )
     plot_parser.add_argument(
         "species",
@@ -325,21 +490,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_legacy_eval_parser() -> argparse.ArgumentParser:
+    """Build parser for backward-compatible no-subcommand mode."""
+
     parser = argparse.ArgumentParser()
     parser.add_argument("class_file", help="Path to class file")
     parser.add_argument("score_file", help="Path to score file")
+    parser.add_argument("ref_gff", help="Path to reference GFF")
     parser.add_argument("--output_file", help="Path to output file", default=None)
     parser.add_argument(
-        "--species", default=None, help="Species override for default output path"
+        "--species",
+        default=None,
+        help="Species override for default output path",
     )
-    parser.add_argument("--good", type=int, default=15169)
-    parser.add_argument("--total", type=int, default=38235)
-    parser.add_argument("--ref", type=int, default=32288)
     parser.add_argument(
         "--visualize",
         choices=["none", "true", "interactive"],
         default="none",
-        help="Plot after evaluation: none (default), true (save png), interactive (save + show)",
+        help=(
+            "Plot after evaluation: none (default), true (save png), "
+            "interactive (save + show)"
+        ),
     )
     parser.add_argument(
         "--output_png",
@@ -353,7 +523,9 @@ def build_legacy_eval_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main():
+def main() -> None:
+    """CLI entrypoint."""
+
     argv = sys.argv[1:]
     if argv and argv[0] in {"eval", "plot"}:
         parser = build_parser()
@@ -361,7 +533,6 @@ def main():
         args.func(args)
         return
 
-    # Backward-compatible mode: treat as `eval`
     args = build_legacy_eval_parser().parse_args(argv)
     run_eval_command(args)
 
