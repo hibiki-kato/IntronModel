@@ -14,6 +14,7 @@ fi
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="60"
 
+SPECIES="Dmel Mmus Athal"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
