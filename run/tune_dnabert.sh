@@ -17,11 +17,9 @@ ACCEPTOR_LEN="100"
 BASE_SEED="1337"
 DNABERT_VARIANT="2"
 PRETRAINED_MODEL_NAME=""
-PRETRAINED_MODEL_RELATIVE_PATH_2="model/pretrained/dnabert2-117m"
-PRETRAINED_MODEL_RELATIVE_PATH_6="model/pretrained/dnabert6"
+PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m"
+PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
 PRETRAINED_REVISION=""
-TRUST_REMOTE_CODE="1"
-
 QUICK_TRIALS="6"
 QUICK_EPOCHS="3"
 TOP_K="2"
@@ -285,7 +283,20 @@ resolve_dnabert_model() {
 		echo "[tune_dnabert.sh] pretrained relative path is empty for variant=${variant}." >&2
 		return 1
 	fi
-	PRETRAINED_MODEL_NAME_RESOLVED="${model_root}/${relative_path}"
+	if [[ "${relative_path}" == /* ]]; then
+		PRETRAINED_MODEL_NAME_RESOLVED="${relative_path}"
+		return 0
+	fi
+
+	local normalized_relative_path="${relative_path#./}"
+	while [[ "${normalized_relative_path}" == model/* ]]; do
+		normalized_relative_path="${normalized_relative_path#model/}"
+	done
+	if [[ -z "${normalized_relative_path}" ]]; then
+		echo "[tune_dnabert.sh] pretrained relative path resolved to empty value." >&2
+		return 1
+	fi
+	PRETRAINED_MODEL_NAME_RESOLVED="${model_root}/${normalized_relative_path}"
 }
 
 resolve_search_space_file() {
