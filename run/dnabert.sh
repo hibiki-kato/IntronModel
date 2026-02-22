@@ -13,7 +13,7 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 DNABERT_VARIANT="6"
-SPECIES="Dmel"
+SPECIES="Athal, Dmel, Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
@@ -26,7 +26,7 @@ INTRON_SCORE_OP="*"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
-NAME_FIELDS="epoch"
+NAME_FIELDS=""
 VISUALIZE="true"
 SKIP_TRAINING="0"
 CONTINUE_TRAINING="0"

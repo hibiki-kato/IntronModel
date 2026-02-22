@@ -1,0 +1,613 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -gt 0 ]]; then
+	echo "[tune_dnabert_time.sh] This script is config-only." \
+		"Edit top CONFIG and run without args." >&2
+	exit 1
+fi
+
+# --------------------------
+# CONFIG (edit here)
+# --------------------------
+# Frequently edited knobs are intentionally placed first in this block.
+# Advanced fallback defaults are kept below.
+TIME_BUDGET_MINUTES="60"
+
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
+BASE_SEED="1337"
+DNABERT_VARIANT="2"
+PRETRAINED_MODEL_NAME=""
+PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m"
+PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
+PRETRAINED_REVISION=""
+TRUST_REMOTE_CODE="1"
+
+QUICK_TRIALS="6"
+QUICK_EPOCHS="2"
+TOP_K="2"
+FULL_EPOCHS="6"
+QUICK_COMPILE_MODE="off"
+FULL_COMPILE_MODE="auto"
+
+GPU_IDS="auto"
+# Keep the default to one concurrent trial for stable single-GPU throughput.
+# Increase manually when you intentionally run multi-GPU parallel tuning.
+MAX_PARALLEL_TRIALS="1"
+
+DEVICE="auto"
+USE_AMP="1"
+AMP_DTYPE="auto"
+ALLOW_TF32="1"
+CUDNN_BENCHMARK="1"
+DETERMINISTIC="0"
+NUM_WORKERS="auto"
+PREFETCH_FACTOR="4"
+PERSISTENT_WORKERS="1"
+PIN_MEMORY="1"
+MIN_BATCH_SIZE="8"
+MAX_OOM_RETRIES="5"
+
+VISUALIZE="none"
+NAME_FIELDS="none"
+UPDATE_DOUBLE_DESCENT_PLOT="1"
+
+SEARCH_ALGO="history_guided"
+HISTORY_TOP_N="512"
+GUIDED_RANDOM_FRACTION="0.20"
+GUIDED_MUTATION_RATE="0.35"
+SEARCH_SPACE_FILE="auto"
+
+CROSS_SPECIES_BEST_MODE="auto"
+CROSS_SPECIES_BEST_OVERRIDE=""
+CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
+
+# Equal-species wall-clock scheduling with acceptor-heavy target mix.
+# Keep this list to Dmel/Mmus only to avoid long Athal-only cycles.
+JOB_ORDER=(
+	"Dmel:acceptor"
+	"Mmus:acceptor"
+	"Dmel:donor"
+	"Mmus:donor"
+	"Dmel:acceptor"
+	"Mmus:acceptor"
+)
+
+DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
+{
+  "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
+  "batch_size": {
+    "type": "categorical",
+    "values": [8, 12, 16, 24, 32]
+  },
+  "loss": {
+    "type": "categorical",
+    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+  },
+  "max_tokens": {
+    "type": "categorical",
+    "values": ["auto", 96, 128]
+  },
+  "dropout": {
+    "type": "float",
+    "min": 0.10,
+    "max": 0.40,
+    "scale": "linear"
+  },
+  "head_layer_norm": {
+    "type": "categorical",
+    "values": [1]
+  },
+  "weight_decay": {"type": "float", "min": 1e-5, "max": 5e-2, "scale": "log"},
+  "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 5e-2, "scale": "log"},
+  "grad_clip": {"type": "float", "min": 0.5, "max": 2.0, "scale": "linear"},
+  "pos_weight_cap": {"type": "float", "min": 12.0, "max": 32.0, "scale": "linear"},
+  "focal_gamma": {"type": "float", "min": 1.0, "max": 3.0, "scale": "linear"},
+  "asym_gamma_pos": {"type": "float", "min": 0.0, "max": 2.0, "scale": "linear"},
+  "asym_gamma_neg": {"type": "float", "min": 2.0, "max": 6.0, "scale": "linear"}
+}
+JSON
+)"
+
+DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
+{
+  "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
+  "batch_size": {
+    "type": "categorical",
+    "values": [8, 12, 16, 24, 32]
+  },
+  "loss": {
+    "type": "categorical",
+    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+  },
+  "max_tokens": {
+    "type": "categorical",
+    "values": ["auto", 96, 128, 160]
+  },
+  "dropout": {
+    "type": "float",
+    "min": 0.12,
+    "max": 0.45,
+    "scale": "linear"
+  },
+  "head_layer_norm": {
+    "type": "categorical",
+    "values": [1]
+  },
+  "weight_decay": {"type": "float", "min": 1e-5, "max": 6e-2, "scale": "log"},
+  "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 7e-2, "scale": "log"},
+  "grad_clip": {"type": "float", "min": 0.5, "max": 2.5, "scale": "linear"},
+  "pos_weight_cap": {"type": "float", "min": 12.0, "max": 36.0, "scale": "linear"},
+  "focal_gamma": {"type": "float", "min": 1.0, "max": 3.5, "scale": "linear"},
+  "asym_gamma_pos": {"type": "float", "min": 0.0, "max": 2.5, "scale": "linear"},
+  "asym_gamma_neg": {"type": "float", "min": 2.0, "max": 7.0, "scale": "linear"}
+}
+JSON
+)"
+
+
+# --------------------------
+# Runtime implementation
+# --------------------------
+# Ensure conda is available in non-interactive shells.
+if command -v conda >/dev/null 2>&1; then
+	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+	if [[ -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
+		# shellcheck source=/dev/null
+		source "${CONDA_BASE}/etc/profile.d/conda.sh"
+	fi
+fi
+
+conda activate intronmodel
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
+
+format_elapsed() {
+	local total_seconds="$1"
+	local hours=$((total_seconds / 3600))
+	local minutes=$(((total_seconds % 3600) / 60))
+	local seconds=$((total_seconds % 60))
+	printf '%02d:%02d:%02d' "${hours}" "${minutes}" "${seconds}"
+}
+
+resolve_species_case() {
+	local raw_species="$1"
+	local data_root="$2"
+
+	if [[ -d "${data_root}/${raw_species}" ]]; then
+		printf '%s\n' "${raw_species}"
+		return 0
+	fi
+
+	local matches=()
+	mapfile -t matches < <(
+		find "${data_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+			| awk -v target="${raw_species}" 'tolower($0) == tolower(target)'
+	)
+	if [[ ${#matches[@]} -eq 1 ]]; then
+		printf '%s\n' "${matches[0]}"
+		return 0
+	fi
+	printf '%s\n' "${raw_species}"
+	return 0
+}
+
+resolve_python_bin() {
+	if command -v python3 >/dev/null 2>&1; then
+		printf '%s\n' "python3"
+		return 0
+	fi
+	if command -v python >/dev/null 2>&1; then
+		printf '%s\n' "python"
+		return 0
+	fi
+	echo "[tune_dnabert_time.sh] python interpreter not found (python3/python)." >&2
+	return 1
+}
+
+resolve_dnabert_model() {
+	local variant="$1"
+	local explicit_pretrained="$2"
+	local model_root="$3"
+	local relative_path_2="$4"
+	local relative_path_6="$5"
+
+	if [[ "${variant}" != "2" && "${variant}" != "6" ]]; then
+		echo "[tune_dnabert_time.sh] DNABERT_VARIANT must be 2 or 6." >&2
+		return 1
+	fi
+
+	MODEL_NAME="dnabert${variant}"
+	if [[ -n "${explicit_pretrained}" ]]; then
+		PRETRAINED_MODEL_NAME_RESOLVED="${explicit_pretrained}"
+		return 0
+	fi
+
+	local relative_path
+	if [[ "${variant}" == "2" ]]; then
+		relative_path="${relative_path_2}"
+	else
+		relative_path="${relative_path_6}"
+	fi
+	if [[ -z "${relative_path}" ]]; then
+		echo "[tune_dnabert_time.sh] pretrained relative path is empty for variant=${variant}." >&2
+		return 1
+	fi
+	PRETRAINED_MODEL_NAME_RESOLVED="${model_root}/${relative_path}"
+}
+
+resolve_search_space_file() {
+	local explicit_file="$1"
+	local project_root="$2"
+	local species="$3"
+	local target="$4"
+
+	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
+		if [[ -f "${explicit_file}" ]]; then
+			printf '%s\n' "${explicit_file}"
+			return 0
+		fi
+		echo "[tune_dnabert_time.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
+		return 2
+	fi
+
+	local target_file="${DATA_ROOT}/${species}/tuning/dnabert/${target}/search_space.json"
+	if [[ -f "${target_file}" ]]; then
+		printf '%s\n' "${target_file}"
+		return 0
+	fi
+
+	local species_file="${DATA_ROOT}/${species}/tuning/dnabert/search_space.json"
+	if [[ -f "${species_file}" ]]; then
+		printf '%s\n' "${species_file}"
+		return 0
+	fi
+
+	return 1
+}
+
+normalize_json_object_file() {
+	local python_bin="$1"
+	local json_path="$2"
+
+	"${python_bin}" - "${json_path}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+if not isinstance(payload, dict):
+    raise ValueError("Search-space file must contain a JSON object.")
+print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+PY
+}
+
+run_double_descent_plot() {
+	local python_bin="$1"
+	local project_root="$2"
+	local species_name="$3"
+	local target_name="$4"
+
+	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
+		--project_root "${project_root}" \
+		--species "${species_name}" \
+		--target "${target_name}" \
+		--model "dnabert" || true
+}
+
+if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
+	|| [[ "${TIME_BUDGET_MINUTES}" -le 0 ]]; then
+	echo "[tune_dnabert_time.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
+	exit 1
+fi
+if ! [[ "${QUICK_TRIALS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_TRIALS}" -le 0 ]]; then
+	echo "[tune_dnabert_time.sh] QUICK_TRIALS must be a positive integer." >&2
+	exit 1
+fi
+if ! [[ "${QUICK_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_EPOCHS}" -le 0 ]]; then
+	echo "[tune_dnabert_time.sh] QUICK_EPOCHS must be a positive integer." >&2
+	exit 1
+fi
+if ! [[ "${TOP_K}" =~ ^[0-9]+$ ]] || [[ "${TOP_K}" -le 0 ]]; then
+	echo "[tune_dnabert_time.sh] TOP_K must be a positive integer." >&2
+	exit 1
+fi
+if ! [[ "${FULL_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${FULL_EPOCHS}" -le 0 ]]; then
+	echo "[tune_dnabert_time.sh] FULL_EPOCHS must be a positive integer." >&2
+	exit 1
+fi
+if [[ "${QUICK_COMPILE_MODE}" != "off" \
+	&& "${QUICK_COMPILE_MODE}" != "on" \
+	&& "${QUICK_COMPILE_MODE}" != "auto" ]]; then
+	echo "[tune_dnabert_time.sh] QUICK_COMPILE_MODE must be off|on|auto." >&2
+	exit 1
+fi
+if [[ "${FULL_COMPILE_MODE}" != "off" \
+	&& "${FULL_COMPILE_MODE}" != "on" \
+	&& "${FULL_COMPILE_MODE}" != "auto" ]]; then
+	echo "[tune_dnabert_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
+	exit 1
+fi
+if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; then
+	echo "[tune_dnabert_time.sh] SEARCH_ALGO must be random|history_guided." >&2
+	exit 1
+fi
+if ! [[ "${HISTORY_TOP_N}" =~ ^[0-9]+$ ]] || [[ "${HISTORY_TOP_N}" -le 0 ]]; then
+	echo "[tune_dnabert_time.sh] HISTORY_TOP_N must be a positive integer." >&2
+	exit 1
+fi
+if ! [[ "${GUIDED_RANDOM_FRACTION}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+	echo "[tune_dnabert_time.sh] GUIDED_RANDOM_FRACTION must be numeric in [0,1]." >&2
+	exit 1
+fi
+if ! awk -v x="${GUIDED_RANDOM_FRACTION}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
+	echo "[tune_dnabert_time.sh] GUIDED_RANDOM_FRACTION must be in [0,1]." >&2
+	exit 1
+fi
+if ! [[ "${GUIDED_MUTATION_RATE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+	echo "[tune_dnabert_time.sh] GUIDED_MUTATION_RATE must be numeric in [0,1]." >&2
+	exit 1
+fi
+if ! awk -v x="${GUIDED_MUTATION_RATE}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
+	echo "[tune_dnabert_time.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
+	exit 1
+fi
+if [[ ${#JOB_ORDER[@]} -eq 0 ]]; then
+	echo "[tune_dnabert_time.sh] JOB_ORDER must contain at least one" \
+		"species:target pair." >&2
+	exit 1
+fi
+if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
+	&& "${UPDATE_DOUBLE_DESCENT_PLOT}" != "1" ]]; then
+	echo "[tune_dnabert_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
+	exit 1
+fi
+
+PYTHON_BIN="$(resolve_python_bin)"
+MODEL_NAME=""
+PRETRAINED_MODEL_NAME_RESOLVED=""
+resolve_dnabert_model \
+	"${DNABERT_VARIANT}" \
+	"${PRETRAINED_MODEL_NAME}" \
+	"${MODEL_ROOT}" \
+	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
+	"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
+	echo "[tune_dnabert_time.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
+	exit 1
+fi
+START_SECONDS="${SECONDS}"
+BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
+START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TOTAL_CYCLE_SECONDS=0
+COMPLETED_CYCLES=0
+
+echo "[tune_dnabert_time.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}min"
+echo "[tune_dnabert_time.sh] quick+full cycles: "\
+	"quick_trials=${QUICK_TRIALS} quick_epochs=${QUICK_EPOCHS} "\
+	"top_k=${TOP_K} full_epochs=${FULL_EPOCHS}"
+echo "[tune_dnabert_time.sh] schedule=${JOB_ORDER[*]}"
+
+job_index=0
+while true; do
+	elapsed_seconds=$((SECONDS - START_SECONDS))
+	if [[ "${elapsed_seconds}" -ge "${BUDGET_SECONDS}" ]]; then
+		break
+	fi
+	remaining_seconds=$((BUDGET_SECONDS - elapsed_seconds))
+	if [[ "${COMPLETED_CYCLES}" -gt 0 ]]; then
+		avg_cycle_seconds_guard=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
+		if [[ "${avg_cycle_seconds_guard}" -gt 0 ]] \
+			&& [[ "${remaining_seconds}" -lt "${avg_cycle_seconds_guard}" ]]; then
+			echo "[tune_dnabert_time.sh] stop before next cycle: "\
+				"remaining=$(format_elapsed "${remaining_seconds}") "\
+				"< avg_cycle=$(format_elapsed "${avg_cycle_seconds_guard}")"
+			break
+		fi
+	fi
+	remaining_hms="$(format_elapsed "${remaining_seconds}")"
+
+	pair="${JOB_ORDER[$((job_index % ${#JOB_ORDER[@]}))]}"
+	raw_species="${pair%%:*}"
+	target="${pair##*:}"
+	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
+	if [[ "${target}" != "donor" && "${target}" != "acceptor" ]]; then
+		echo "[tune_dnabert_time.sh] invalid target in JOB_ORDER: ${pair}" >&2
+		exit 1
+	fi
+
+	run_stamp="$(date +%Y%m%d_%H%M%S)"
+	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
+	output_dir="${DATA_ROOT}/${species}/tuning/dnabert/${target}/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/dnabert/${target}"\
+"/best_config.json"
+	SEED_BEST_CONFIG_PATH=""
+	if ! SEED_BEST_CONFIG_PATH="$(
+		resolve_cross_species_best_seed \
+			"tune_dnabert_time.sh" \
+			"${PYTHON_BIN}" \
+			"${DATA_ROOT}" \
+			"dnabert" \
+			"${species}" \
+			"${target}" \
+			"${global_best_path}" \
+			"${CROSS_SPECIES_BEST_MODE}" \
+			"${CROSS_SPECIES_BEST_OVERRIDE}" \
+			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
+	)"; then
+		exit 1
+	fi
+	SEED_BEST_CONFIG_JSON="null"
+	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
+		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
+	fi
+		objective_metric="${target}_pr_auc"
+		config_path="${output_dir}/hparam_search_config.json"
+		mkdir -p "${output_dir}"
+		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
+		if [[ "${target}" == "acceptor" ]]; then
+			target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
+		fi
+		search_space_path=""
+		if search_space_resolved="$(
+			resolve_search_space_file \
+				"${SEARCH_SPACE_FILE}" \
+				"${PROJECT_ROOT}" \
+				"${species}" \
+				"${target}"
+		)"; then
+			search_space_path="${search_space_resolved}"
+			if ! target_space_json="$(
+				normalize_json_object_file \
+					"${PYTHON_BIN}" \
+					"${search_space_path}" 2>&1
+			)"; then
+				echo "[tune_dnabert_time.sh] failed to parse search-space file: "\
+					"${search_space_path}" >&2
+				echo "[tune_dnabert_time.sh] parse detail: ${target_space_json}" >&2
+				exit 1
+			fi
+			target_search_space_json="${target_space_json}"
+			echo "[tune_dnabert_time.sh] using search space: ${search_space_path}"
+		else
+			search_space_status=$?
+			if [[ "${search_space_status}" -eq 2 ]]; then
+				exit 1
+			fi
+			echo "[tune_dnabert_time.sh] using embedded ${target} search space."
+		fi
+
+		cat > "${config_path}" <<JSON
+{
+  "project_root": "${PROJECT_ROOT}",
+  "species": "${species}",
+  "output_dir": "${output_dir}",
+  "quick_trials": ${QUICK_TRIALS},
+  "quick_epochs": ${QUICK_EPOCHS},
+  "top_k": ${TOP_K},
+  "full_epochs": ${FULL_EPOCHS},
+  "base_seed": ${BASE_SEED},
+  "gpu_ids": "${GPU_IDS}",
+  "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
+  "objective_metric": "${objective_metric}",
+  "global_best_config_path": "${global_best_path}",
+  "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
+  "search_algo": "${SEARCH_ALGO}",
+  "history_top_n": ${HISTORY_TOP_N},
+  "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},
+  "guided_mutation_rate": ${GUIDED_MUTATION_RATE},
+  "min_batch_size": ${MIN_BATCH_SIZE},
+  "max_oom_retries": ${MAX_OOM_RETRIES},
+  "base_args": {
+    "model": "${MODEL_NAME}",
+    "species": "${species}",
+    "train_target": "${target}",
+    "donor_len": ${DONOR_LEN},
+    "acceptor_len": ${ACCEPTOR_LEN},
+    "pretrained_model_name": "${PRETRAINED_MODEL_NAME_RESOLVED}",
+    "pretrained_revision": "${PRETRAINED_REVISION}",
+    "trust_remote_code": ${TRUST_REMOTE_CODE},
+    "device": "${DEVICE}",
+    "visualize": "${VISUALIZE}",
+    "name_fields": "${NAME_FIELDS}",
+    "use_amp": ${USE_AMP},
+    "amp_dtype": "${AMP_DTYPE}",
+    "allow_tf32": ${ALLOW_TF32},
+    "cudnn_benchmark": ${CUDNN_BENCHMARK},
+    "deterministic": ${DETERMINISTIC},
+    "num_workers": "${NUM_WORKERS}",
+    "prefetch_factor": ${PREFETCH_FACTOR},
+    "persistent_workers": ${PERSISTENT_WORKERS},
+    "pin_memory": ${PIN_MEMORY},
+    "min_batch_size": ${MIN_BATCH_SIZE},
+    "max_oom_retries": ${MAX_OOM_RETRIES},
+    "train_pos_path": null,
+    "train_neg_path": null
+  },
+  "quick_overrides": {
+    "epochs": ${QUICK_EPOCHS},
+    "compile_mode": "${QUICK_COMPILE_MODE}"
+  },
+	  "full_overrides": {
+	    "epochs": ${FULL_EPOCHS},
+	    "compile_mode": "${FULL_COMPILE_MODE}"
+	  },
+	  "search_space": ${target_search_space_json}
+}
+JSON
+
+	job_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	job_start_seconds="${SECONDS}"
+	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
+	printf '[tune_dnabert_time.sh] cycle=%s elapsed=%s start=%s ' \
+		"${job_index}" "${job_elapsed_hms}" "${job_start}"
+	printf 'ETA_remaining=%s species=%s target=%s\n' \
+		"${remaining_hms}" "${species}" "${target}"
+	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+		--config "${config_path}"; then
+		echo "[tune_dnabert_time.sh] cycle=${job_index} failed "\
+			"species=${species} target=${target}" >&2
+	fi
+	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
+		run_double_descent_plot \
+			"${PYTHON_BIN}" \
+			"${PROJECT_ROOT}" \
+			"${species}" \
+			"${target}"
+	fi
+	cycle_duration_seconds=$((SECONDS - job_start_seconds))
+	TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))
+	COMPLETED_CYCLES=$((COMPLETED_CYCLES + 1))
+	avg_cycle_seconds=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
+	remaining_seconds=$((BUDGET_SECONDS - (SECONDS - START_SECONDS)))
+	if [[ "${remaining_seconds}" -lt 0 ]]; then
+		remaining_seconds=0
+	fi
+	estimated_cycles_left=0
+	if [[ "${avg_cycle_seconds}" -gt 0 ]]; then
+		estimated_cycles_left=$((remaining_seconds / avg_cycle_seconds))
+	fi
+	printf '[tune_dnabert_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
+		"${job_index}" \
+		"$(format_elapsed "${cycle_duration_seconds}")" \
+		"$(format_elapsed "${avg_cycle_seconds}")"
+	printf 'ETA_cycles_left=%s\n' "${estimated_cycles_left}"
+
+	job_index=$((job_index + 1))
+done
+
+if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
+	final_plot_jobs=()
+	for scheduled_pair in "${JOB_ORDER[@]}"; do
+		if [[ " ${final_plot_jobs[*]} " != *" ${scheduled_pair} "* ]]; then
+			final_plot_jobs+=("${scheduled_pair}")
+		fi
+	done
+	for final_pair in "${final_plot_jobs[@]}"; do
+		final_species="${final_pair%%:*}"
+		final_target="${final_pair##*:}"
+		run_double_descent_plot \
+			"${PYTHON_BIN}" \
+			"${PROJECT_ROOT}" \
+			"${final_species}" \
+			"${final_target}"
+	done
+fi
+
+END_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TOTAL_SECONDS=$((SECONDS - START_SECONDS))
+TOTAL_HMS="$(format_elapsed "${TOTAL_SECONDS}")"
+echo "[tune_dnabert_time.sh] done start=${START_EPOCH} end=${END_EPOCH} "\
+	"elapsed=${TOTAL_HMS} cycles=${job_index}"
