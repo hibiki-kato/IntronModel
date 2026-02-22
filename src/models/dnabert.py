@@ -10,6 +10,7 @@ import argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import shutil
 import sys
@@ -597,10 +598,50 @@ def _load_tokenizer(
             "trust_remote_code": trust_remote_code,
         }
     )
+    resolved_pretrained_model_name = _resolve_pretrained_model_name(
+        pretrained_model_name
+    )
     return AutoTokenizer.from_pretrained(
-        pretrained_model_name,
+        resolved_pretrained_model_name,
         **tokenizer_kwargs,
     )
+
+
+def _resolve_pretrained_model_name(pretrained_model_name: str) -> str:
+    """Resolve pretrained source string and validate explicit local paths.
+
+    Parameters
+    ----------
+    pretrained_model_name : str
+        Hugging Face repo id or local checkpoint directory path.
+
+    Returns
+    -------
+    str
+        Resolved model source string passed to ``from_pretrained``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If an explicit local path is provided but does not exist.
+    """
+    explicit_local_path = (
+        os.path.isabs(pretrained_model_name)
+        or pretrained_model_name.startswith("./")
+        or pretrained_model_name.startswith("../")
+        or pretrained_model_name.startswith("~")
+    )
+    if not explicit_local_path:
+        return pretrained_model_name
+
+    expanded_path = Path(pretrained_model_name).expanduser()
+    if not expanded_path.exists():
+        cwd = Path.cwd()
+        raise FileNotFoundError(
+            "Explicit local --pretrained_model_name does not exist: "
+            f"{expanded_path}. Current working directory: {cwd}."
+        )
+    return str(expanded_path)
 
 
 class DnaBertTokenDataset(Dataset):
@@ -802,6 +843,9 @@ def _build_dnabert_model(
     _require_transformers()
     assert AutoConfig is not None
     assert AutoModel is not None
+    resolved_pretrained_model_name = _resolve_pretrained_model_name(
+        pretrained_model_name
+    )
     config_kwargs = _without_none_kwargs(
         {
             "trust_remote_code": trust_remote_code,
@@ -809,14 +853,14 @@ def _build_dnabert_model(
         }
     )
     config = AutoConfig.from_pretrained(
-        pretrained_model_name,
+        resolved_pretrained_model_name,
         **config_kwargs,
     )
     resolved_pad_token_id = _resolve_pad_token_id_from_config(config)
     if getattr(config, "pad_token_id", None) != resolved_pad_token_id:
         setattr(config, "pad_token_id", resolved_pad_token_id)
     _patch_dnabert_alibi_meta_compat(
-        pretrained_model_name=pretrained_model_name,
+        pretrained_model_name=resolved_pretrained_model_name,
         pretrained_revision=pretrained_revision,
         trust_remote_code=trust_remote_code,
         config=config,
@@ -831,7 +875,7 @@ def _build_dnabert_model(
     )
     try:
         backbone = AutoModel.from_pretrained(
-            pretrained_model_name,
+            resolved_pretrained_model_name,
             **model_kwargs,
         )
     except ImportError as exc:
