@@ -9,6 +9,7 @@ dependencies:
   - biopython
   - pytorch
   - transformers
+  - einops
   - huggingface_hub
   - scikit-learn
   - tqdm

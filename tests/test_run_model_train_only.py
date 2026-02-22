@@ -105,6 +105,9 @@ def test_run_pipeline_train_only_skips_infer_and_eval(
     assert float(summary["donor"]["best_score"]) == pytest.approx(0.91)
     assert summary["acceptor"]["best_metric"] == "pr_auc"
     assert float(summary["acceptor"]["best_score"]) == pytest.approx(0.89)
+    assert summary["validation_protocol"]["split_type"] == "stratified_site"
+    assert isinstance(summary["validation_signature"], str)
+    assert len(summary["validation_signature"]) == 12
 
 
 def test_plot_range_defaults_are_none_for_species_specific_bounds() -> None:

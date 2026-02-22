@@ -34,7 +34,7 @@ Open:
 
 - `docs/model-architecture.md`: detailed mathematics and layer-level model docs
 - `docs/run-wrapper-scripts.md`: wrapper CONFIG options and continue-learning
-  flow
+  flow, including top-first editing conventions for `run/*.sh`
 - `docs/docs-system.md`: documentation tooling and rationale
 - `docs/repo-structure.md`
 - `docs/model-integration-contract.md`

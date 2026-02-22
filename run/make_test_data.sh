@@ -23,6 +23,22 @@ Notes:
 EOT
 }
 
+# --------------------------
+# USER DEFAULTS (optional edit)
+# --------------------------
+CONDA_ENV="intronmodel"
+SPECIES="Dmel"
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
+FASTA_PATH=""
+GTF_PATH=""
+OUT_TSV=""
+FEATURE="exon"
+LIMIT="0"
+
+# --------------------------
+# Runtime implementation
+# --------------------------
 # Ensure conda is available in non-interactive shells.
 if command -v conda >/dev/null 2>&1; then
 	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
@@ -32,7 +48,7 @@ if command -v conda >/dev/null 2>&1; then
 	fi
 fi
 
-conda activate intronmodel
+conda activate "${CONDA_ENV}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -40,15 +56,6 @@ DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
 MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
 export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
 export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
-
-SPECIES="Dmel"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-FASTA_PATH=""
-GTF_PATH=""
-OUT_TSV=""
-FEATURE="exon"
-LIMIT="0"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in

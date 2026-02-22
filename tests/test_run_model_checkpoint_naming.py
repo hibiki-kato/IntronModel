@@ -135,6 +135,50 @@ def test_checkpoint_stem_includes_single_task_train_target() -> None:
     assert "train_targetdonor" in stem
 
 
+def test_checkpoint_stem_donor_target_excludes_acceptor_overrides() -> None:
+    """Single-task donor stems must ignore unrelated acceptor-only overrides."""
+    stem = _build_checkpoint_stem_from_params(
+        model_name="cnn",
+        donor_len=100,
+        acceptor_len=100,
+        inferred_train_len=None,
+        raw_params={
+            "epochs": 20,
+            "train_target": "donor",
+            "donor_batch_size": 128,
+            "acceptor_batch_size": 2048,
+            "acceptor_lr": 1e-5,
+        },
+    )
+
+    assert "train_targetdonor" in stem
+    assert "donor_batch_size128" in stem
+    assert "acceptor_batch_size" not in stem
+    assert "acceptor_lr" not in stem
+
+
+def test_checkpoint_stem_acceptor_target_excludes_donor_overrides() -> None:
+    """Single-task acceptor stems must ignore unrelated donor-only overrides."""
+    stem = _build_checkpoint_stem_from_params(
+        model_name="cnn",
+        donor_len=100,
+        acceptor_len=100,
+        inferred_train_len=None,
+        raw_params={
+            "epochs": 20,
+            "train_target": "acceptor",
+            "acceptor_batch_size": 128,
+            "donor_batch_size": 64,
+            "donor_lr": 1e-3,
+        },
+    )
+
+    assert "train_targetacceptor" in stem
+    assert "acceptor_batch_size128" in stem
+    assert "donor_batch_size" not in stem
+    assert "donor_lr" not in stem
+
+
 def test_checkpoint_stem_is_shortened_with_hash_when_too_long() -> None:
     raw_params: dict[str, object] = {
         "epochs": 20,

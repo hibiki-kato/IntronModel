@@ -25,6 +25,7 @@ def _dummy_config(tmp_path: Path) -> hparam_search.SearchConfig:
         max_oom_retries=1,
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
+        seed_best_config_path=None,
         base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
         quick_overrides={},
         full_overrides={},

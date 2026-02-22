@@ -164,6 +164,7 @@ def test_run_trial_oom_backoff_then_success(
         max_oom_retries=4,
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
+        seed_best_config_path=None,
         base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
         quick_overrides={},
         full_overrides={},
@@ -246,6 +247,7 @@ def test_run_trial_succeeds_with_single_task_objective(
         max_oom_retries=0,
         objective_metric="donor_pr_auc",
         global_best_config_path=None,
+        seed_best_config_path=None,
         base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
         quick_overrides={},
         full_overrides={},
@@ -346,6 +348,71 @@ def test_load_global_best_params_rejects_out_of_range_value(
         )
 
 
+def test_load_global_best_params_skips_signature_mismatch(tmp_path: Path) -> None:
+    search_space = hparam_search._validate_search_space(
+        _base_config_dict(tmp_path)["search_space"]
+    )
+    path = tmp_path / "best_config.json"
+    payload = {
+        "status": "ok",
+        "validation_signature": "abcd1234ef56",
+        "sampled_params": {
+            "batch_size": 1024,
+            "kernel_size": 7,
+            "lr": 2e-4,
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = hparam_search.load_global_best_params(
+        path=path,
+        search_space=search_space,
+        expected_validation_signature="deadbeefcafe",
+    )
+    assert loaded is None
+
+
+def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
+    output_path = tmp_path / "best_config.json"
+    row = hparam_search.TrialResult(
+        phase="full",
+        trial_id=3,
+        status="success",
+        gpu_id="0",
+        sampled_params={"batch_size": 512},
+        effective_batch_size=512,
+        oom_retries=0,
+        donor_pr_auc=0.82,
+        acceptor_pr_auc=0.81,
+        mean_pr_auc=0.815,
+        objective_metric="mean_pr_auc",
+        objective_score=0.815,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json="metrics.json",
+        log_file="trial.log",
+        validation_signature="feedbeefcafe",
+        validation_protocol={
+            "split_type": "stratified_site",
+            "val_frac": 0.1,
+            "seed": 1337,
+            "train_source": {
+                "train_pos_path": "data/Dmel/train/100bp.err",
+                "train_neg_path": "data/Dmel/train/100bp.neg.err",
+            },
+            "metric_primary": "mean_pr_auc",
+        },
+        selection_score=0.815,
+    )
+
+    hparam_search.write_best_config(output_path, row)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["validation_signature"] == "feedbeefcafe"
+    assert payload["validation_protocol"]["split_type"] == "stratified_site"
+    assert float(payload["selection_score"]) == pytest.approx(0.815)
+
+
 def test_run_search_ignores_global_best_in_quick_and_uses_species_plot_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -385,6 +452,7 @@ def test_run_search_ignores_global_best_in_quick_and_uses_species_plot_name(
         max_oom_retries=2,
         objective_metric="mean_pr_auc",
         global_best_config_path=global_best_path,
+        seed_best_config_path=None,
         base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
         quick_overrides={"compile_mode": "off"},
         full_overrides={"compile_mode": "auto"},
@@ -505,6 +573,7 @@ def test_run_trial_uses_model_from_base_args(
         max_oom_retries=0,
         objective_metric="donor_pr_auc",
         global_best_config_path=None,
+        seed_best_config_path=None,
         base_args={"model": "cnn_resdil", "species": "Dmel", "batch_size": 512},
         quick_overrides={},
         full_overrides={},
@@ -682,6 +751,7 @@ def test_build_trial_params_history_guided_is_reproducible(
         max_oom_retries=1,
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
+        seed_best_config_path=None,
         base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
         quick_overrides={},
         full_overrides={},

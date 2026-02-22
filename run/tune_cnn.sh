@@ -2,10 +2,149 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[tune_cnn.sh] This script is config-only. Edit CONFIG and run without args." >&2
+	echo "[tune_cnn.sh] This script is config-only. Edit top CONFIG and run without args." >&2
 	exit 1
 fi
 
+# --------------------------
+# CONFIG (edit here)
+# --------------------------
+# Frequently edited knobs are intentionally placed first in this block.
+# Advanced fallback defaults are kept below.
+SPECIES="Athal"
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
+BASE_SEED="1337"
+
+QUICK_TRIALS="8"
+QUICK_EPOCHS="3"
+TOP_K="3"
+FULL_EPOCHS="10"
+TUNE_TARGETS="donor,acceptor"
+QUICK_TRIALS_MODE="fixed"
+TARGET_TIME_BUDGET_MINUTES="0"
+TOTAL_TIME_BUDGET_MINUTES="0"
+MIN_QUICK_TRIALS="8"
+QUICK_TRIAL_SEC_FALLBACK="12.0"
+SEARCH_ALGO="history_guided"
+HISTORY_TOP_N="128"
+GUIDED_RANDOM_FRACTION="0.35"
+GUIDED_MUTATION_RATE="0.25"
+
+GPU_IDS="auto"
+MAX_PARALLEL_TRIALS="auto"
+
+DEVICE="auto"
+USE_AMP="1"
+AMP_DTYPE="auto"
+ALLOW_TF32="1"
+CUDNN_BENCHMARK="1"
+DETERMINISTIC="0"
+NUM_WORKERS="auto"
+PREFETCH_FACTOR="4"
+PERSISTENT_WORKERS="1"
+PIN_MEMORY="1"
+MIN_BATCH_SIZE="64"
+MAX_OOM_RETRIES="8"
+SEARCH_SPACE_FILE="auto"
+
+CROSS_SPECIES_BEST_MODE="auto"
+CROSS_SPECIES_BEST_OVERRIDE=""
+CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
+
+VISUALIZE="none"
+NAME_FIELDS="none"
+
+DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
+{
+  "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
+  "batch_size": {
+    "type": "categorical",
+    "values": [128, 256, 512, 1024, 2048, 4096]
+  },
+  "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
+  "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-2, "scale": "log"},
+  "loss": {
+    "type": "categorical",
+    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+  },
+  "conv_channels": {
+    "type": "categorical",
+    "values": [
+      "96,192,384",
+      "64,128",
+      "64,128,256",
+      "64,128,256,512",
+      "128,256,512",
+      "192,384,768,1536",
+      "128,256,512,1024",
+      "256,512,1024",
+      "256,512,1024,2048",
+      "384,768,1536",
+      "512,1024,2048",
+      "512,1024,2048,3072",
+      "384,768,1536,3072",
+      "256,512,1024,2048,3072"
+    ]
+  },
+  "kernel_size": {
+    "type": "categorical",
+    "values": [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]
+  },
+  "fc_hidden": {
+    "type": "categorical",
+    "values": [64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096]
+  }
+}
+JSON
+)"
+
+DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
+{
+  "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
+  "batch_size": {
+    "type": "categorical",
+    "values": [128, 256, 512, 1024, 2048, 4096, 8192]
+  },
+  "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
+  "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
+  "loss": {
+    "type": "categorical",
+    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+  },
+  "conv_channels": {
+    "type": "categorical",
+    "values": [
+      "128,256,512",
+      "128,256,512,1024",
+      "192,384,768",
+      "192,384,768,1536",
+      "256,512,1024",
+      "256,512,1024,2048",
+      "256,512,1024,2048,3072",
+      "384,768,1536",
+      "384,768,1536,3072",
+      "512,1024,2048",
+      "512,1024,2048,3072",
+      "768,1536,3072"
+    ]
+  },
+  "kernel_size": {
+    "type": "categorical",
+    "values": [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27]
+  },
+  "fc_hidden": {
+    "type": "categorical",
+    "values": [128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144]
+  }
+}
+JSON
+)"
+
+
+# --------------------------
+# Runtime implementation
+# --------------------------
 # Ensure conda is available in non-interactive shells.
 if command -v conda >/dev/null 2>&1; then
 	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
@@ -23,6 +162,9 @@ DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
 MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
 export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
 export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
 	local total_seconds="$1"
@@ -288,135 +430,6 @@ print(
 PY
 }
 
-# --------------------------
-# CONFIG (edit here)
-# --------------------------
-SPECIES="Athal"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-BASE_SEED="1337"
-
-QUICK_TRIALS="24"
-QUICK_EPOCHS="3"
-TOP_K="3"
-FULL_EPOCHS="10"
-TUNE_TARGETS="donor,acceptor"
-QUICK_TRIALS_MODE="fixed"
-TARGET_TIME_BUDGET_MINUTES="0"
-TOTAL_TIME_BUDGET_MINUTES="0"
-MIN_QUICK_TRIALS="8"
-QUICK_TRIAL_SEC_FALLBACK="12.0"
-SEARCH_ALGO="history_guided"
-HISTORY_TOP_N="128"
-GUIDED_RANDOM_FRACTION="0.35"
-GUIDED_MUTATION_RATE="0.25"
-
-GPU_IDS="auto"
-MAX_PARALLEL_TRIALS="auto"
-
-DEVICE="auto"
-USE_AMP="1"
-AMP_DTYPE="auto"
-ALLOW_TF32="1"
-CUDNN_BENCHMARK="1"
-DETERMINISTIC="0"
-NUM_WORKERS="auto"
-PREFETCH_FACTOR="4"
-PERSISTENT_WORKERS="1"
-PIN_MEMORY="1"
-MIN_BATCH_SIZE="64"
-MAX_OOM_RETRIES="8"
-SEARCH_SPACE_FILE="auto"
-
-VISUALIZE="none"
-NAME_FIELDS="none"
-
-DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
-{
-  "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
-  "batch_size": {
-    "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096]
-  },
-  "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-2, "scale": "log"},
-  "loss": {
-    "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal"]
-  },
-  "conv_channels": {
-    "type": "categorical",
-    "values": [
-      "96,192,384",
-      "64,128",
-      "64,128,256",
-      "64,128,256,512",
-      "128,256,512",
-      "192,384,768,1536",
-      "128,256,512,1024",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "384,768,1536",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "384,768,1536,3072",
-      "256,512,1024,2048,3072"
-    ]
-  },
-  "kernel_size": {
-    "type": "categorical",
-    "values": [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]
-  },
-  "fc_hidden": {
-    "type": "categorical",
-    "values": [64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096]
-  }
-}
-JSON
-)"
-
-DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
-{
-  "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
-  "batch_size": {
-    "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096, 8192]
-  },
-  "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
-  "loss": {
-    "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal"]
-  },
-  "conv_channels": {
-    "type": "categorical",
-    "values": [
-      "128,256,512",
-      "128,256,512,1024",
-      "192,384,768",
-      "192,384,768,1536",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "256,512,1024,2048,3072",
-      "384,768,1536",
-      "384,768,1536,3072",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "768,1536,3072"
-    ]
-  },
-  "kernel_size": {
-    "type": "categorical",
-    "values": [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27]
-  },
-  "fc_hidden": {
-    "type": "categorical",
-    "values": [128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144]
-  }
-}
-JSON
-)"
-
 SPECIES="$(resolve_species_case "${SPECIES}" "${DATA_ROOT}")"
 mapfile -t TARGET_LIST < <(resolve_tune_targets "${TUNE_TARGETS}")
 PYTHON_BIN="$(resolve_python_bin)"
@@ -485,6 +498,26 @@ for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
 	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/cnn/${TARGET}/${RUN_TIMESTAMP}"
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/cnn/${TARGET}/best_config.json"
+	SEED_BEST_CONFIG_PATH=""
+	if ! SEED_BEST_CONFIG_PATH="$(
+		resolve_cross_species_best_seed \
+			"tune_cnn.sh" \
+			"${PYTHON_BIN}" \
+			"${DATA_ROOT}" \
+			"cnn" \
+			"${SPECIES}" \
+			"${TARGET}" \
+			"${GLOBAL_BEST_CONFIG_PATH}" \
+			"${CROSS_SPECIES_BEST_MODE}" \
+			"${CROSS_SPECIES_BEST_OVERRIDE}" \
+			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
+	)"; then
+		exit 1
+	fi
+	SEED_BEST_CONFIG_JSON="null"
+	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
+		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
+	fi
 	mkdir -p "${OUTPUT_DIR}"
 	TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	TARGET_START_SECONDS="${SECONDS}"
@@ -580,6 +613,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "objective_metric": "${OBJECTIVE_METRIC}",
   "global_best_config_path": "${GLOBAL_BEST_CONFIG_PATH}",
+  "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
   "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},

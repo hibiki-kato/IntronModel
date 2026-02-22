@@ -6,7 +6,7 @@ usage() {
 Usage: bash run/eval_trans_score.sh
 
 This script uses internal configuration only.
-Edit the CONFIG block in this file to change species, score files,
+Edit the top CONFIG block in this file to change species, score files,
 visualization mode, or environment settings.
 
 Optional:
@@ -19,20 +19,14 @@ if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
 	exit 0
 fi
 if [[ $# -gt 0 ]]; then
-	echo "This script does not accept CLI options. Edit the CONFIG block instead." >&2
+	echo "This script does not accept CLI options. Edit the top CONFIG block instead." >&2
 	exit 1
 fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
-MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
-export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
-export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 # --------------------------
 # CONFIG (edit here)
 # --------------------------
+# Frequently edited knobs are intentionally placed first in this block.
 CONDA_ENV="intronmodel"
 USE_CONDA_ACTIVATE="1"
 VISUALIZE="true"
@@ -55,6 +49,16 @@ if [[ ${#SCORE_INPUTS[@]} -eq 0 ]]; then
 	echo "SCORE_INPUTS must contain at least one score file name/path." >&2
 	exit 1
 fi
+
+# --------------------------
+# Runtime implementation
+# --------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
+MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
+export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
+export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
 
 if [[ "${USE_CONDA_ACTIVATE}" == "1" ]] && command -v conda >/dev/null 2>&1; then
 	CONDA_BASE="$(conda info --base 2>/dev/null || true)"

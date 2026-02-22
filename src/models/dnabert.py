@@ -32,6 +32,10 @@ from util.data_proc import (
     validate_window_args,
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
+from util.training_control import (
+    resolve_early_stopping_params,
+    resolve_training_epoch_budget,
+)
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -684,6 +688,7 @@ class DnaBertBinaryClassifier(nn.Module):
         backbone: nn.Module,
         hidden_size: int,
         dropout: float,
+        head_layer_norm: bool,
     ) -> None:
         super().__init__()
         if hidden_size <= 0:
@@ -691,6 +696,9 @@ class DnaBertBinaryClassifier(nn.Module):
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
         self.backbone = backbone
+        self.head_norm = (
+            nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
+        )
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_size, 1)
 
@@ -719,7 +727,8 @@ class DnaBertBinaryClassifier(nn.Module):
             raise RuntimeError("Unsupported backbone output format.")
 
         cls_hidden = hidden[:, 0, :]
-        logits = self.classifier(self.dropout(cls_hidden)).squeeze(-1)
+        head_input = self.head_norm(cls_hidden)
+        logits = self.classifier(self.dropout(head_input)).squeeze(-1)
         return logits
 
 
@@ -787,6 +796,7 @@ def _build_dnabert_model(
     pretrained_revision: Optional[str],
     trust_remote_code: bool,
     dropout: float,
+    head_layer_norm: bool,
 ) -> DnaBertBinaryClassifier:
     """Build DNABERT classifier from a pretrained checkpoint."""
     _require_transformers()
@@ -819,10 +829,21 @@ def _build_dnabert_model(
             "revision": pretrained_revision,
         }
     )
-    backbone = AutoModel.from_pretrained(
-        pretrained_model_name,
-        **model_kwargs,
-    )
+    try:
+        backbone = AutoModel.from_pretrained(
+            pretrained_model_name,
+            **model_kwargs,
+        )
+    except ImportError as exc:
+        message = str(exc)
+        if "einops" in message:
+            raise RuntimeError(
+                "DNABERT remote module dependency is missing: einops. "
+                "Install it in the intronmodel environment "
+                "(e.g., `conda env update -f environment.yml --prune` "
+                "or `pip install einops`)."
+            ) from exc
+        raise
     _disable_dnabert_triton_flash_attention(backbone)
     _materialize_dnabert_meta_buffers(backbone)
     hidden_size = _resolve_hidden_size(backbone)
@@ -830,6 +851,7 @@ def _build_dnabert_model(
         backbone=backbone,
         hidden_size=hidden_size,
         dropout=dropout,
+        head_layer_norm=head_layer_norm,
     )
 
 
@@ -842,6 +864,7 @@ class TaskTrainParams:
     loss_name: str
     max_tokens: str
     dropout: float
+    head_layer_norm: int
     weight_decay: float
     eta_min_ratio: float
     val_frac: float
@@ -875,6 +898,9 @@ def _resolve_task_train_params(
         loss_name=str(_override_or_default("loss", model_args.loss)),
         max_tokens=str(_override_or_default("max_tokens", model_args.max_tokens)),
         dropout=float(_override_or_default("dropout", model_args.dropout)),
+        head_layer_norm=int(
+            _override_or_default("head_layer_norm", model_args.head_layer_norm)
+        ),
         weight_decay=float(
             _override_or_default("weight_decay", model_args.weight_decay)
         ),
@@ -1017,11 +1043,14 @@ def train_task_model(
     pretrained_revision: str = "",
     trust_remote_code: Union[bool, int] = 1,
     epochs: int = 20,
+    early_stop_patience: int = 0,
+    early_stop_min_delta: float = 0.0,
     batch_size: int = 64,
     lr: float = 2e-5,
     seed: int = 1337,
     max_tokens: Union[str, int] = "auto",
     dropout: float = 0.1,
+    head_layer_norm: Union[bool, int] = 1,
     weight_decay: float = 0.01,
     eta_min_ratio: float = 0.01,
     val_frac: float = 0.1,
@@ -1087,6 +1116,8 @@ def train_task_model(
         Maximum token length (``auto`` or integer >= 2).
     dropout : float, default=0.1
         Dropout rate of classification head.
+    head_layer_norm : bool | int, default=1
+        Whether to apply LayerNorm before the classification head.
     weight_decay : float, default=0.01
         AdamW weight decay.
     eta_min_ratio : float, default=0.01
@@ -1164,6 +1195,8 @@ def train_task_model(
         raise ValueError("--pretrained_model_name must be non-empty.")
     if dropout < 0.0 or dropout >= 1.0:
         raise ValueError("--dropout must satisfy 0 <= dropout < 1.")
+    if isinstance(head_layer_norm, int) and head_layer_norm not in (0, 1):
+        raise ValueError("--head_layer_norm must be 0 or 1.")
     if weight_decay < 0.0:
         raise ValueError("--weight_decay must be non-negative.")
     if eta_min_ratio < 0.0:
@@ -1194,6 +1227,7 @@ def train_task_model(
     deterministic_bool = _bool_from_flag(deterministic)
     cudnn_benchmark_bool = _bool_from_flag(cudnn_benchmark)
     trust_remote_code_bool = _bool_from_flag(trust_remote_code)
+    head_layer_norm_bool = _bool_from_flag(head_layer_norm)
     amp_dtype_resolved = _resolve_amp_dtype(amp_dtype, device)
     compile_enabled = _resolve_compile_enabled(
         compile_mode=compile_mode,
@@ -1333,6 +1367,7 @@ def train_task_model(
                 pretrained_revision=revision,
                 trust_remote_code=trust_remote_code_bool,
                 dropout=dropout,
+                head_layer_norm=head_layer_norm_bool,
             ).to(device)
             initialized_from_checkpoint = False
             if init_checkpoint_path is not None:
@@ -1423,9 +1458,14 @@ def train_task_model(
             best_pr_auc: Optional[float] = None
             best_roc_auc: Optional[float] = None
             best_acc_at_0_5: Optional[float] = None
+            epoch_history: list[dict[str, object]] = []
             log_every = max(1, epochs // 5)
+            epochs_completed = 0
+            epochs_since_improvement = 0
+            stopped_early = False
 
             for epoch in range(1, epochs + 1):
+                epochs_completed = epoch
                 model.train()
                 running_loss = torch.zeros((), dtype=torch.float64)
                 for input_ids, attention_mask, labels in train_loader:
@@ -1520,8 +1560,9 @@ def train_task_model(
                     score = float(val_metrics.get("acc@0.5", 0.0))
                     score_name = "acc@0.5"
 
-                improved = score > best_score
+                improved = score > (best_score + early_stop_min_delta)
                 if improved:
+                    epochs_since_improvement = 0
                     best_score = score
                     best_metric_name = score_name
                     best_epoch = epoch
@@ -1536,11 +1577,30 @@ def train_task_model(
                                 "trust_remote_code": trust_remote_code_bool,
                                 "max_tokens": max_tokens_effective,
                                 "dropout": dropout,
+                                "head_layer_norm": head_layer_norm_bool,
                             },
                             "model_state": state_dict_to_save,
                         },
                         checkpoint_path,
                     )
+                else:
+                    epochs_since_improvement += 1
+
+                epoch_history.append(
+                    {
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "pr_auc": pr_auc,
+                        "roc_auc": roc_auc,
+                        "acc@0.5": acc_at_0_5,
+                        "objective_metric": score_name,
+                        "objective_score": score,
+                        "improved": improved,
+                        "best_metric": best_metric_name,
+                        "best_score": float(best_score),
+                        "best_epoch": best_epoch,
+                    }
+                )
 
                 should_log = (
                     epoch == 1
@@ -1555,6 +1615,14 @@ def train_task_model(
                         f"loss={train_loss:.4f} {score_name}={score:.4f} "
                         f"best={best_score:.4f} (ep {best_epoch})"
                     )
+
+                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                    stopped_early = True
+                    print(
+                        f"[{task}] early stop at epoch {epoch} "
+                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                    )
+                    break
 
             print(
                 f"[{task}] done best_{best_metric_name}={best_score:.4f} "
@@ -1571,6 +1639,11 @@ def train_task_model(
                 "best_pr_auc": best_pr_auc,
                 "best_roc_auc": best_roc_auc,
                 "best_acc_at_0_5": best_acc_at_0_5,
+                "epoch_history": epoch_history,
+                "epochs_completed": epochs_completed,
+                "stopped_early": stopped_early,
+                "early_stop_patience": early_stop_patience,
+                "early_stop_min_delta": early_stop_min_delta,
                 "checkpoint": checkpoint_path,
                 "loss": loss_name,
                 "pos_weight": loss_meta["pos_weight"],
@@ -1584,6 +1657,7 @@ def train_task_model(
                 "trust_remote_code": trust_remote_code_bool,
                 "max_tokens": max_tokens_effective,
                 "dropout": dropout,
+                "head_layer_norm": head_layer_norm_bool,
                 "weight_decay": weight_decay,
                 "eta_min_ratio": eta_min_ratio,
                 "val_frac": val_frac,
@@ -1739,12 +1813,27 @@ def load_task_model(
     )
     max_tokens = _int_from_checkpoint(model_config, "max_tokens", 128)
     dropout = _float_from_checkpoint(model_config, "dropout", 0.1)
+    if "head_layer_norm" not in model_config:
+        raise ValueError(
+            "Checkpoint model_config is missing 'head_layer_norm'. "
+            "Retrain DNABERT checkpoints with the current code."
+        )
+    head_layer_norm_raw = model_config["head_layer_norm"]
+    if isinstance(head_layer_norm_raw, bool):
+        head_layer_norm = head_layer_norm_raw
+    elif isinstance(head_layer_norm_raw, int) and head_layer_norm_raw in (0, 1):
+        head_layer_norm = bool(head_layer_norm_raw)
+    else:
+        raise ValueError(
+            "Checkpoint model_config.head_layer_norm must be bool or 0/1 int."
+        )
 
     model = _build_dnabert_model(
         pretrained_model_name=pretrained_model_name,
         pretrained_revision=pretrained_revision,
         trust_remote_code=trust_remote_code,
         dropout=dropout,
+        head_layer_norm=head_layer_norm,
     ).to(device)
     model.load_state_dict(normalized_state)
     model.eval()
@@ -1761,6 +1850,7 @@ def load_task_model(
         "trust_remote_code": trust_remote_code,
         "max_tokens": max_tokens,
         "dropout": dropout,
+        "head_layer_norm": head_layer_norm,
     }
     return model, resolved_config, tokenizer
 
@@ -1898,7 +1988,30 @@ def infer_site_scores(
 
 def add_train_args(parser: argparse.ArgumentParser) -> None:
     """Register DNABERT-specific training arguments."""
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--epochs",
+        type=str,
+        default="20",
+        help="Epoch count (positive integer) or auto for early-stop mode.",
+    )
+    parser.add_argument(
+        "--max_epochs",
+        type=int,
+        default=200,
+        help="Upper epoch limit used when --epochs=auto.",
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=12,
+        help="Early-stop patience (epochs without improvement).",
+    )
+    parser.add_argument(
+        "--early_stop_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation-metric improvement to reset patience.",
+    )
     parser.add_argument(
         "--train_target",
         choices=["both", "donor", "acceptor"],
@@ -1933,6 +2046,13 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Max token length. Use integer or auto (window_len + 2).",
     )
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--head_layer_norm",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Apply LayerNorm before the DNABERT classification head.",
+    )
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--eta_min_ratio", type=float, default=0.01)
     parser.add_argument("--val_frac", type=float, default=0.1)
@@ -1978,6 +2098,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--acceptor_max_tokens", default=None)
     parser.add_argument("--donor_dropout", type=float, default=None)
     parser.add_argument("--acceptor_dropout", type=float, default=None)
+    parser.add_argument("--donor_head_layer_norm", type=int, default=None)
+    parser.add_argument("--acceptor_head_layer_norm", type=int, default=None)
     parser.add_argument("--donor_weight_decay", type=float, default=None)
     parser.add_argument("--acceptor_weight_decay", type=float, default=None)
     parser.add_argument("--donor_eta_min_ratio", type=float, default=None)
@@ -2178,6 +2300,17 @@ def train(
     train_target = str(getattr(model_args, "train_target", "both")).strip().lower()
     if train_target not in {"both", "donor", "acceptor"}:
         raise ValueError("--train_target must be one of: both, donor, acceptor.")
+
+    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+        epochs_arg=model_args.epochs,
+        max_epochs=int(model_args.max_epochs),
+    )
+    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
+        patience_arg=model_args.early_stop_patience,
+        min_delta_arg=model_args.early_stop_min_delta,
+    )
+    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
+
     tasks_to_train = (
         ["donor", "acceptor"] if train_target == "both" else [train_target]
     )
@@ -2217,12 +2350,15 @@ def train(
             pretrained_model_name=model_args.pretrained_model_name,
             pretrained_revision=model_args.pretrained_revision,
             trust_remote_code=model_args.trust_remote_code,
-            epochs=model_args.epochs,
+            epochs=resolved_epochs,
+            early_stop_patience=effective_early_stop_patience,
+            early_stop_min_delta=early_stop_min_delta,
             batch_size=resolved.batch_size,
             lr=resolved.lr,
             seed=common_args.seed,
             max_tokens=resolved.max_tokens,
             dropout=resolved.dropout,
+            head_layer_norm=resolved.head_layer_norm,
             weight_decay=resolved.weight_decay,
             eta_min_ratio=resolved.eta_min_ratio,
             val_frac=resolved.val_frac,
@@ -2267,7 +2403,7 @@ def train(
         acceptor_len=acceptor_len,
         lr=run_name_lr,
         batch_size=run_name_batch_size,
-        epochs=model_args.epochs,
+        epochs=resolved_epochs,
         tag=model_args.tag,
     )
 
@@ -2279,6 +2415,7 @@ def train(
             "loss": params.loss_name,
             "max_tokens": params.max_tokens,
             "dropout": params.dropout,
+            "head_layer_norm": bool(params.head_layer_norm),
             "weight_decay": params.weight_decay,
             "eta_min_ratio": params.eta_min_ratio,
             "val_frac": params.val_frac,
@@ -2298,7 +2435,12 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": model_args.epochs,
+        "epochs": resolved_epochs,
+        "epochs_config": str(model_args.epochs),
+        "epochs_auto": epochs_auto,
+        "max_epochs": model_args.max_epochs,
+        "early_stop_patience": early_stop_patience,
+        "early_stop_min_delta": early_stop_min_delta,
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,
@@ -2314,6 +2456,7 @@ def train(
         "trust_remote_code": bool(model_args.trust_remote_code),
         "max_tokens": model_args.max_tokens,
         "dropout": model_args.dropout,
+        "head_layer_norm": bool(model_args.head_layer_norm),
         "weight_decay": model_args.weight_decay,
         "eta_min_ratio": model_args.eta_min_ratio,
         "val_frac": model_args.val_frac,

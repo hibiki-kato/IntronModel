@@ -82,11 +82,23 @@ Common wrapper controls:
 - `CONTINUE_TRAINING=1`
 - `TRAIN_ONLY=1`
 - `USE_TUNED_HPARAMS=off|auto|required` (except `run/dnabert.sh`)
+- `EPOCHS=<int|auto>` with `MAX_EPOCHS`, `EARLY_STOP_PATIENCE`,
+  `EARLY_STOP_MIN_DELTA`
 
 `run/dnabert.sh` variant switch:
 
 - `DNABERT_VARIANT="2"` -> `--model dnabert2`
 - `DNABERT_VARIANT="6"` -> `--model dnabert6`
+
+Training/inference wrappers follow a top-first workflow:
+
+- edit the top `CONFIG (edit here)` block first
+- then run without arguments (`bash run/cnn.sh`, etc.)
+
+Tuning wrappers (`run/tune_*.sh`) follow the same pattern:
+
+- edit the top `CONFIG (edit here)` block first
+- then run without arguments (`bash run/tune_cnn.sh`, etc.)
 
 ## Documentation
 

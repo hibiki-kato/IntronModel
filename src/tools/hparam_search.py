@@ -26,6 +26,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+SRC_ROOT: Path = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from util.validation_protocol import (
+    LEGACY_VALIDATION_SIGNATURE,
+    build_validation_protocol,
+    compute_validation_signature,
+)
+
 Scalar = int | float | str | bool
 ArgValue = Scalar | None
 
@@ -51,6 +62,9 @@ class TrialResult:
     duration_sec: float
     metrics_json: str
     log_file: str
+    validation_signature: str = LEGACY_VALIDATION_SIGNATURE
+    validation_protocol: Optional[dict[str, object]] = None
+    selection_score: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +85,7 @@ class SearchConfig:
     max_oom_retries: int
     objective_metric: str
     global_best_config_path: Optional[Path]
+    seed_best_config_path: Optional[Path]
     base_args: dict[str, ArgValue]
     quick_overrides: dict[str, ArgValue]
     full_overrides: dict[str, ArgValue]
@@ -268,6 +283,14 @@ def load_config(path: Path) -> SearchConfig:
         if not isinstance(global_best_config_raw, str) or not global_best_config_raw:
             raise ValueError("global_best_config_path must be a non-empty string.")
         global_best_config_path = Path(global_best_config_raw).resolve()
+    seed_best_config_raw = raw.get("seed_best_config_path")
+    seed_best_config_path: Optional[Path]
+    if seed_best_config_raw is None:
+        seed_best_config_path = None
+    else:
+        if not isinstance(seed_best_config_raw, str) or not seed_best_config_raw:
+            raise ValueError("seed_best_config_path must be a non-empty string.")
+        seed_best_config_path = Path(seed_best_config_raw).resolve()
     quick_overrides = raw.get("quick_overrides", {})
     full_overrides = raw.get("full_overrides", {})
     if not isinstance(quick_overrides, dict):
@@ -295,6 +318,7 @@ def load_config(path: Path) -> SearchConfig:
         max_oom_retries=max_oom_retries,
         objective_metric=objective_metric,
         global_best_config_path=global_best_config_path,
+        seed_best_config_path=seed_best_config_path,
         base_args=normalized_base_args,
         quick_overrides={str(k): v for k, v in quick_overrides.items()},
         full_overrides={str(k): v for k, v in full_overrides.items()},
@@ -336,6 +360,7 @@ def load_global_best_params(
     *,
     path: Optional[Path],
     search_space: dict[str, dict[str, object]],
+    expected_validation_signature: Optional[str] = None,
 ) -> Optional[dict[str, Scalar]]:
     """Load and validate previous best sampled params for forced inclusion."""
     if path is None or not path.exists():
@@ -348,6 +373,17 @@ def load_global_best_params(
         raise ValueError("Global best config must be an object.")
     if raw.get("status") != "ok":
         return None
+    if expected_validation_signature is not None:
+        signature = raw.get("validation_signature")
+        if isinstance(signature, str) and signature.strip():
+            if signature.strip() != expected_validation_signature:
+                print(
+                    "[hparam_search] Skip global best due to validation "
+                    "signature mismatch: "
+                    f"{signature.strip()} != {expected_validation_signature}.",
+                    flush=True,
+                )
+                return None
 
     sampled = raw.get("sampled_params")
     if not isinstance(sampled, dict):
@@ -389,7 +425,11 @@ def _select_objective_score(
     raise ValueError(f"Unsupported objective metric: {objective_metric}")
 
 
-def _read_best_objective_score(path: Path, objective_metric: str) -> Optional[float]:
+def _read_best_objective_score(
+    path: Path,
+    objective_metric: str,
+    expected_validation_signature: Optional[str] = None,
+) -> Optional[float]:
     """Read objective score from a best_config.json payload."""
     if not path.exists():
         return None
@@ -399,6 +439,11 @@ def _read_best_objective_score(path: Path, objective_metric: str) -> Optional[fl
         return None
     if not isinstance(raw, dict):
         return None
+    if expected_validation_signature is not None:
+        signature = raw.get("validation_signature")
+        if isinstance(signature, str) and signature.strip():
+            if signature.strip() != expected_validation_signature:
+                return None
     value = raw.get("objective_score")
     if isinstance(value, (int, float)):
         return float(value)
@@ -406,6 +451,27 @@ def _read_best_objective_score(path: Path, objective_metric: str) -> Optional[fl
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _extract_validation_protocol(
+    summary: dict[str, object],
+) -> Optional[dict[str, object]]:
+    """Extract validation protocol from one metrics summary."""
+    raw = summary.get("validation_protocol")
+    if not isinstance(raw, dict):
+        return None
+    normalized: dict[str, object] = {}
+    for key, value in raw.items():
+        normalized[str(key)] = value
+    return normalized
+
+
+def _extract_validation_signature(summary: dict[str, object]) -> str:
+    """Extract validation signature with legacy fallback."""
+    raw = summary.get("validation_signature")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return LEGACY_VALIDATION_SIGNATURE
 
 
 def _sample_value(spec: dict[str, object], rng: random.Random) -> Scalar:
@@ -1029,6 +1095,8 @@ def run_trial(
 
     donor_pr_auc = _extract_pr_auc(summary, "donor")
     acceptor_pr_auc = _extract_pr_auc(summary, "acceptor")
+    validation_protocol = _extract_validation_protocol(summary)
+    validation_signature = _extract_validation_signature(summary)
     mean_pr_auc: Optional[float]
     if donor_pr_auc is None or acceptor_pr_auc is None:
         mean_pr_auc = None
@@ -1084,6 +1152,9 @@ def run_trial(
         duration_sec=duration_sec,
         metrics_json=str(metrics_json),
         log_file=str(log_file),
+        validation_signature=validation_signature,
+        validation_protocol=validation_protocol,
+        selection_score=objective_score,
     )
 
 
@@ -1149,6 +1220,58 @@ def _to_bool(value: object) -> bool:
         if lowered in {"0", "false", "no", "off", ""}:
             return False
     return False
+
+
+def _derive_validation_protocol_from_args(
+    *,
+    merged_args: dict[str, ArgValue],
+    objective_metric: str,
+) -> dict[str, object]:
+    """Build validation protocol payload for one run-argument mapping."""
+    val_frac_raw = merged_args.get("val_frac")
+    val_frac: Optional[float]
+    if isinstance(val_frac_raw, bool) or val_frac_raw is None:
+        val_frac = None
+    elif isinstance(val_frac_raw, (int, float)):
+        val_frac = float(val_frac_raw)
+    elif isinstance(val_frac_raw, str):
+        stripped = val_frac_raw.strip()
+        val_frac = float(stripped) if stripped else None
+    else:
+        val_frac = None
+
+    seed_raw = merged_args.get("seed")
+    seed: Optional[int]
+    if isinstance(seed_raw, bool) or seed_raw is None:
+        seed = None
+    elif isinstance(seed_raw, int):
+        seed = int(seed_raw)
+    elif isinstance(seed_raw, float):
+        seed = int(seed_raw)
+    elif isinstance(seed_raw, str):
+        stripped = seed_raw.strip()
+        seed = int(stripped) if stripped else None
+    else:
+        seed = None
+
+    train_pos_path = merged_args.get("train_pos_path")
+    train_neg_path = merged_args.get("train_neg_path")
+    return build_validation_protocol(
+        val_frac=val_frac,
+        seed=seed,
+        train_pos_path=(
+            str(train_pos_path)
+            if isinstance(train_pos_path, (str, Path))
+            else None
+        ),
+        train_neg_path=(
+            str(train_neg_path)
+            if isinstance(train_neg_path, (str, Path))
+            else None
+        ),
+        metric_primary=objective_metric,
+        split_type="stratified_site",
+    )
 
 
 def _parse_conv_channels(value: object) -> Optional[list[int]]:
@@ -1640,12 +1763,29 @@ def build_trial_params(
     return sampled
 
 
-def write_best_config(path: Path, row: Optional[TrialResult]) -> None:
+def write_best_config(
+    path: Path,
+    row: Optional[TrialResult],
+    *,
+    fallback_validation_protocol: Optional[dict[str, object]] = None,
+    fallback_validation_signature: Optional[str] = None,
+) -> None:
     """Write best-trial config JSON."""
     if row is None:
         payload: dict[str, object] = {"status": "no_successful_trial"}
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return
+    validation_protocol = (
+        row.validation_protocol
+        if row.validation_protocol is not None
+        else fallback_validation_protocol
+    )
+    validation_signature = row.validation_signature
+    if (
+        validation_signature == LEGACY_VALIDATION_SIGNATURE
+        and fallback_validation_signature is not None
+    ):
+        validation_signature = fallback_validation_signature
     payload = {
         "status": "ok",
         "phase": row.phase,
@@ -1659,6 +1799,9 @@ def write_best_config(path: Path, row: Optional[TrialResult]) -> None:
         "effective_batch_size": row.effective_batch_size,
         "oom_retries": row.oom_retries,
         "sampled_params": row.sampled_params,
+        "selection_score": row.selection_score,
+        "validation_signature": validation_signature,
+        "validation_protocol": validation_protocol,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -1667,6 +1810,8 @@ def maybe_update_global_best(
     *,
     global_best_path: Optional[Path],
     best_row: Optional[TrialResult],
+    fallback_validation_protocol: Optional[dict[str, object]] = None,
+    fallback_validation_signature: Optional[str] = None,
 ) -> None:
     """Update global best config if current run improves the best score."""
     if (
@@ -1678,6 +1823,11 @@ def maybe_update_global_best(
     previous_score = _read_best_objective_score(
         global_best_path,
         best_row.objective_metric,
+        expected_validation_signature=(
+            best_row.validation_signature
+            if best_row.validation_signature != LEGACY_VALIDATION_SIGNATURE
+            else fallback_validation_signature
+        ),
     )
     if previous_score is not None and previous_score > best_row.objective_score:
         print(
@@ -1688,7 +1838,12 @@ def maybe_update_global_best(
         )
         return
     global_best_path.parent.mkdir(parents=True, exist_ok=True)
-    write_best_config(global_best_path, best_row)
+    write_best_config(
+        global_best_path,
+        best_row,
+        fallback_validation_protocol=fallback_validation_protocol,
+        fallback_validation_signature=fallback_validation_signature,
+    )
     print(
         "[hparam_search] Updated global best config: "
         f"{global_best_path} "
@@ -1803,6 +1958,13 @@ def write_visualization(
 def run_search(config: SearchConfig) -> int:
     """Execute the full two-phase search run."""
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    baseline_validation_protocol = _derive_validation_protocol_from_args(
+        merged_args=dict(config.base_args),
+        objective_metric=config.objective_metric,
+    )
+    baseline_validation_signature = compute_validation_signature(
+        baseline_validation_protocol
+    )
     gpu_ids = detect_gpu_ids(config.gpu_ids_setting)
     max_parallel_trials = resolve_max_parallel(
         setting=config.max_parallel_trials_setting,
@@ -1824,6 +1986,7 @@ def run_search(config: SearchConfig) -> int:
     previous_global_best_score = _read_best_objective_score(
         config.global_best_config_path,
         config.objective_metric,
+        expected_validation_signature=baseline_validation_signature,
     )
     if previous_global_best_score is not None:
         print(
@@ -1851,6 +2014,28 @@ def run_search(config: SearchConfig) -> int:
     else:
         print("[hparam_search] Search algorithm: random.", flush=True)
 
+    seed_best_params: Optional[dict[str, Scalar]] = None
+    if config.seed_best_config_path is not None:
+        try:
+            seed_best_params = load_global_best_params(
+                path=config.seed_best_config_path,
+                search_space=config.search_space,
+                expected_validation_signature=baseline_validation_signature,
+            )
+        except ValueError as exc:
+            print(
+                "[hparam_search] Seed best config ignored due to validation "
+                f"error: {exc}",
+                flush=True,
+            )
+        else:
+            if seed_best_params is not None:
+                print(
+                    "[hparam_search] Loaded seed best sampled params from "
+                    f"{config.seed_best_config_path}.",
+                    flush=True,
+                )
+
     quick_params = build_trial_params(
         config=config,
         phase="quick",
@@ -1858,6 +2043,13 @@ def run_search(config: SearchConfig) -> int:
         seed_offset=0,
         history_trials=history_trials,
     )
+    if seed_best_params is not None and quick_params:
+        quick_params[0] = dict(seed_best_params)
+        print(
+            "[hparam_search] Quick trial 0000 replaced with seed best "
+            "sampled params.",
+            flush=True,
+        )
     quick_overrides = dict(config.quick_overrides)
     quick_overrides.setdefault("epochs", config.quick_epochs)
     quick_overrides.setdefault("compile_mode", "off")
@@ -1931,10 +2123,17 @@ def run_search(config: SearchConfig) -> int:
     else:
         best_row = None
 
-    write_best_config(config.output_dir / "best_config.json", best_row)
+    write_best_config(
+        config.output_dir / "best_config.json",
+        best_row,
+        fallback_validation_protocol=baseline_validation_protocol,
+        fallback_validation_signature=baseline_validation_signature,
+    )
     maybe_update_global_best(
         global_best_path=config.global_best_config_path,
         best_row=best_row,
+        fallback_validation_protocol=baseline_validation_protocol,
+        fallback_validation_signature=baseline_validation_signature,
     )
     viz_path = config.output_dir / f"{config.species}_snpr.png"
     viz_error = write_visualization(

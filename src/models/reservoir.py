@@ -40,6 +40,10 @@ from util.data_proc import (
     validate_window_args,
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
+from util.training_control import (
+    resolve_early_stopping_params,
+    resolve_training_epoch_budget,
+)
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -1202,6 +1206,8 @@ def train_task_model(
     donor_len: Optional[int],
     acceptor_len: Optional[int],
     epochs: int = 20,
+    early_stop_patience: int = 0,
+    early_stop_min_delta: float = 0.0,
     batch_size: int = 256,
     lr: float = 5e-4,
     seed: int = 1337,
@@ -1525,9 +1531,14 @@ def train_task_model(
             best_pr_auc: Optional[float] = None
             best_roc_auc: Optional[float] = None
             best_acc_at_0_5: Optional[float] = None
+            epoch_history: list[dict[str, object]] = []
             log_every = max(1, epochs // 5)
+            epochs_completed = 0
+            epochs_since_improvement = 0
+            stopped_early = False
 
             for epoch in range(1, epochs + 1):
+                epochs_completed = epoch
                 model.train()
                 running_loss = torch.zeros((), dtype=torch.float64)
 
@@ -1624,8 +1635,9 @@ def train_task_model(
                     score = float(val_metrics.get("acc@0.5", 0.0))
                     score_name = "acc@0.5"
 
-                improved = score > best_score
+                improved = score > (best_score + early_stop_min_delta)
                 if improved:
+                    epochs_since_improvement = 0
                     best_score = score
                     best_metric_name = score_name
                     best_epoch = epoch
@@ -1656,6 +1668,24 @@ def train_task_model(
                         },
                         checkpoint_path,
                     )
+                else:
+                    epochs_since_improvement += 1
+
+                epoch_history.append(
+                    {
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "pr_auc": pr_auc,
+                        "roc_auc": roc_auc,
+                        "acc@0.5": acc_at_0_5,
+                        "objective_metric": score_name,
+                        "objective_score": score,
+                        "improved": improved,
+                        "best_metric": best_metric_name,
+                        "best_score": float(best_score),
+                        "best_epoch": best_epoch,
+                    }
+                )
 
                 should_log = (
                     epoch == 1
@@ -1670,6 +1700,14 @@ def train_task_model(
                         f"loss={train_loss:.4f} {score_name}={score:.4f} "
                         f"best={best_score:.4f} (ep {best_epoch})"
                     )
+
+                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                    stopped_early = True
+                    print(
+                        f"[{task}] early stop at epoch {epoch} "
+                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                    )
+                    break
 
             print(
                 f"[{task}] done best_{best_metric_name}={best_score:.4f} "
@@ -1686,6 +1724,11 @@ def train_task_model(
                 "best_pr_auc": best_pr_auc,
                 "best_roc_auc": best_roc_auc,
                 "best_acc_at_0_5": best_acc_at_0_5,
+                "epoch_history": epoch_history,
+                "epochs_completed": epochs_completed,
+                "stopped_early": stopped_early,
+                "early_stop_patience": early_stop_patience,
+                "early_stop_min_delta": early_stop_min_delta,
                 "checkpoint": checkpoint_path,
                 "loss": loss_name,
                 "pos_weight": loss_meta["pos_weight"],
@@ -2057,7 +2100,30 @@ def infer_site_scores(
 
 def add_train_args(parser: argparse.ArgumentParser) -> None:
     """Register reservoir-specific training arguments."""
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--epochs",
+        type=str,
+        default="20",
+        help="Epoch count (positive integer) or auto for early-stop mode.",
+    )
+    parser.add_argument(
+        "--max_epochs",
+        type=int,
+        default=200,
+        help="Upper epoch limit used when --epochs=auto.",
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=12,
+        help="Early-stop patience (epochs without improvement).",
+    )
+    parser.add_argument(
+        "--early_stop_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation-metric improvement to reset patience.",
+    )
     parser.add_argument(
         "--train_target",
         choices=["both", "donor", "acceptor"],
@@ -2363,6 +2429,17 @@ def train(
     train_target = str(getattr(model_args, "train_target", "both")).strip().lower()
     if train_target not in {"both", "donor", "acceptor"}:
         raise ValueError("--train_target must be one of: both, donor, acceptor.")
+
+    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+        epochs_arg=model_args.epochs,
+        max_epochs=int(model_args.max_epochs),
+    )
+    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
+        patience_arg=model_args.early_stop_patience,
+        min_delta_arg=model_args.early_stop_min_delta,
+    )
+    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
+
     tasks_to_train = (
         ["donor", "acceptor"] if train_target == "both" else [train_target]
     )
@@ -2389,7 +2466,9 @@ def train(
             window_len=task_window_len[task],
             donor_len=donor_len,
             acceptor_len=acceptor_len,
-            epochs=model_args.epochs,
+            epochs=resolved_epochs,
+            early_stop_patience=effective_early_stop_patience,
+            early_stop_min_delta=early_stop_min_delta,
             batch_size=resolved.batch_size,
             lr=resolved.lr,
             seed=common_args.seed,
@@ -2450,7 +2529,7 @@ def train(
         acceptor_len=acceptor_len,
         lr=run_name_lr,
         batch_size=run_name_batch_size,
-        epochs=model_args.epochs,
+        epochs=resolved_epochs,
         tag=model_args.tag,
     )
 
@@ -2494,7 +2573,12 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": model_args.epochs,
+        "epochs": resolved_epochs,
+        "epochs_config": str(model_args.epochs),
+        "epochs_auto": epochs_auto,
+        "max_epochs": model_args.max_epochs,
+        "early_stop_patience": early_stop_patience,
+        "early_stop_min_delta": early_stop_min_delta,
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,

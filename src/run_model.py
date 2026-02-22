@@ -13,9 +13,11 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 from models.registry import available_models, load_model_module
+from util.checkpoint_prune import prune_species_model_checkpoints
 from util.data_proc import (
     NAME_FIELD_CHOICES,
     NAME_FIELD_LABELS,
@@ -27,6 +29,10 @@ from util.data_proc import (
     project_root,
     resolve_effective_window_lengths,
     species_data_dirs,
+)
+from util.validation_protocol import (
+    build_validation_protocol,
+    compute_validation_signature,
 )
 from util.transcript_eval import (
     INTRON_SCORE_OP_CHOICES,
@@ -196,11 +202,50 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--x_max", type=float, default=None)
     parser.add_argument("--y_min", type=float, default=None)
     parser.add_argument("--y_max", type=float, default=None)
+    parser.add_argument(
+        "--checkpoint_top_k",
+        type=int,
+        default=3,
+        help=(
+            "Keep top-k checkpoints per "
+            "species/model/task/validation_signature bucket."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint_prune_dry_run",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="When set to 1, print pruning candidates without deleting files.",
+    )
 
 
 def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     """Add CNN train args without importing torch-dependent modules."""
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--epochs",
+        type=str,
+        default="20",
+        help="Epoch count (positive integer) or auto for early-stop mode.",
+    )
+    parser.add_argument(
+        "--max_epochs",
+        type=int,
+        default=200,
+        help="Upper epoch limit used when --epochs=auto.",
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=12,
+        help="Early-stop patience (epochs without improvement).",
+    )
+    parser.add_argument(
+        "--early_stop_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum validation-metric improvement to reset patience.",
+    )
     parser.add_argument(
         "--train_target",
         choices=["both", "donor", "acceptor"],
@@ -496,10 +541,20 @@ def _build_checkpoint_stem_from_params(
         pieces.append(f"alen{_format_name_value(acceptor_len_eff)}")
 
     params = dict(raw_params)
+    train_target_raw = params.get("train_target")
+    train_target = (
+        str(train_target_raw).strip().lower()
+        if train_target_raw is not None
+        else "both"
+    )
     for key in sorted(params):
         if key in CHECKPOINT_NAME_EXCLUDED_FIELDS:
             continue
         if key in {"donor_len", "acceptor_len"}:
+            continue
+        if train_target == "donor" and key.startswith("acceptor_"):
+            continue
+        if train_target == "acceptor" and key.startswith("donor_"):
             continue
         value = params[key]
         if value is None:
@@ -549,6 +604,65 @@ def _assert_checkpoint_paths_exist(
         path = paths[task]
         if not os.path.exists(path):
             raise FileNotFoundError(f"{task.capitalize()} checkpoint not found: {path}")
+
+
+def _latest_checkpoint_for_task(species: str, task: str) -> Optional[str]:
+    """Return the newest checkpoint path for one species/task, if available."""
+    if task not in {"donor", "acceptor"}:
+        raise ValueError(f"Unknown checkpoint task requested: {task}")
+
+    task_dir = os.path.join(model_root(), species, task)
+    if not os.path.isdir(task_dir):
+        return None
+
+    candidates: list[str] = []
+    for file_name in os.listdir(task_dir):
+        if not file_name.endswith(".pt"):
+            continue
+        path = os.path.join(task_dir, file_name)
+        if os.path.isfile(path):
+            candidates.append(path)
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda path: (os.path.getmtime(path), os.path.basename(path)),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def _resolve_missing_checkpoints_for_skip_train(
+    *,
+    species: str,
+    paths: dict[str, str],
+    required_tasks: Sequence[str],
+) -> dict[str, str]:
+    """Fill missing checkpoint paths with latest available task checkpoints.
+
+    Notes
+    -----
+    This is a skip-training fallback only. It prioritizes run continuity when
+    strict filename matching is unavailable (for example after checkpoint
+    pruning). The selected checkpoint is the latest file by mtime under each
+    task directory.
+    """
+    resolved = dict(paths)
+    for task in required_tasks:
+        current = resolved.get(task)
+        if current is None:
+            raise ValueError(f"Unknown checkpoint task requested: {task}")
+        if os.path.exists(current):
+            continue
+        fallback = _latest_checkpoint_for_task(species=species, task=task)
+        if fallback is None:
+            continue
+        resolved[task] = fallback
+        print(
+            "[pipeline] checkpoint fallback: "
+            f"{task} strict path not found; using latest checkpoint: {fallback}"
+        )
+    return resolved
 
 
 def _resolve_pipeline_paths(
@@ -660,6 +774,63 @@ def _resolve_ref_gff_file(
     return candidates[0]
 
 
+def _safe_float(value: object, default: float = float("-inf")) -> float:
+    """Convert one scalar-like value to float with fallback."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def _attach_validation_metadata(
+    *,
+    summary: dict[str, object],
+    args: argparse.Namespace,
+) -> None:
+    """Attach validation protocol/signature and per-task selection score."""
+    metric_primary = "pr_auc"
+    donor = summary.get("donor")
+    if isinstance(donor, dict):
+        donor_metric = donor.get("best_metric")
+        if isinstance(donor_metric, str) and donor_metric.strip():
+            metric_primary = donor_metric.strip()
+
+    protocol = build_validation_protocol(
+        val_frac=getattr(args, "val_frac", None),
+        seed=getattr(args, "seed", None),
+        train_pos_path=(
+            str(summary.get("train_pos_path"))
+            if isinstance(summary.get("train_pos_path"), str)
+            else getattr(args, "train_pos_path", None)
+        ),
+        train_neg_path=(
+            str(summary.get("train_neg_path"))
+            if isinstance(summary.get("train_neg_path"), str)
+            else getattr(args, "train_neg_path", None)
+        ),
+        metric_primary=metric_primary,
+        split_type="stratified_site",
+    )
+    signature = compute_validation_signature(protocol)
+    summary["validation_protocol"] = protocol
+    summary["validation_signature"] = signature
+
+    selection_by_task: dict[str, float] = {}
+    for task in ("donor", "acceptor"):
+        task_payload = summary.get(task)
+        if not isinstance(task_payload, dict):
+            continue
+        best_score = _safe_float(task_payload.get("best_score"))
+        if best_score == float("-inf"):
+            continue
+        selection_by_task[task] = best_score
+    if selection_by_task:
+        summary["selection_score_by_task"] = selection_by_task
+        for task, value in selection_by_task.items():
+            summary[f"selection_score_{task}"] = value
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     """Run the model pipeline with optional stage skipping."""
     from evaluate_scores import evaluate_score_file, plot_eval_scores
@@ -729,6 +900,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 "use existing checkpoints as initialization."
             )
         summary = model_module.train(common_args=args, model_args=args)
+        _attach_validation_metadata(summary=summary, args=args)
         metrics_json = args.metrics_json
         if metrics_json is None:
             dirs = species_data_dirs(args.species)
@@ -747,6 +919,23 @@ def run_pipeline(args: argparse.Namespace) -> None:
             print(f"Donor checkpoint: {donor_summary['checkpoint']}")
         if isinstance(acceptor_summary, dict) and "checkpoint" in acceptor_summary:
             print(f"Acceptor checkpoint: {acceptor_summary['checkpoint']}")
+        top_k = int(getattr(args, "checkpoint_top_k", 3))
+        if top_k <= 0:
+            raise ValueError("--checkpoint_top_k must be > 0.")
+        prune_report = prune_species_model_checkpoints(
+            data_root=Path(species_data_dirs(args.species)["base"]).parent,
+            species=args.species,
+            model_name=args.model,
+            top_k=top_k,
+            dry_run=bool(int(getattr(args, "checkpoint_prune_dry_run", 0))),
+        )
+        print(
+            "[pipeline] checkpoint prune: "
+            f"total={prune_report.total_candidates} "
+            f"kept={prune_report.kept_count} "
+            f"deleted={prune_report.deleted_count} "
+            f"dry_run={prune_report.dry_run}"
+        )
 
     if args.train_only:
         if args.skip_train:
@@ -755,6 +944,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 if train_target == "both"
                 else (train_target,)
             )
+            checkpoint_paths = _resolve_missing_checkpoints_for_skip_train(
+                species=args.species,
+                paths=checkpoint_paths,
+                required_tasks=required_tasks,
+            )
+            args.donor_checkpoint_path = checkpoint_paths["donor"]
+            args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
             _assert_checkpoint_paths_exist(
                 checkpoint_paths,
                 required_tasks=required_tasks,
@@ -768,6 +964,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         site_rows = read_site_scores(site_score_tsv)
         print(f"[pipeline] Skip infer (use --site_score_tsv): {site_score_tsv}")
     else:
+        checkpoint_paths = _resolve_missing_checkpoints_for_skip_train(
+            species=args.species,
+            paths=checkpoint_paths,
+            required_tasks=("donor", "acceptor"),
+        )
+        args.donor_checkpoint_path = checkpoint_paths["donor"]
+        args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
         _assert_checkpoint_paths_exist(checkpoint_paths)
         site_rows = model_module.infer_site(common_args=args, model_args=args)
         write_site_scores(site_output_tsv, site_rows)

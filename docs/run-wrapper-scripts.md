@@ -3,6 +3,25 @@
 This page documents the config-only shell wrappers under `run/` and how they
 map to `src/run_model.py`.
 
+Runtime logic for the main training/inference wrappers is centralized in
+`src/tools/run_wrapper_pipeline.py`. Each `run/*.sh` keeps only the editable
+`CONFIG` block and delegates validation/argument assembly/execution to this
+Python backend.
+
+## 0. Editing Workflow (Top-First)
+
+Wrapper scripts are intentionally organized so you can edit settings in one
+place before reading implementation details.
+
+- Edit only the top `CONFIG (edit here)` block.
+- Run the wrapper without CLI arguments (for example, `bash run/tune_bert.sh`).
+- For tuning wrappers, frequently changed knobs are placed first in `CONFIG`
+  (for example: species, bp lengths, trial/epoch budget, target selection).
+- The same top-first layout is applied to training/inference wrappers
+  (`run/cnn.sh`, `run/bert.sh`, etc.).
+- Embedded fallback search-space JSON is in the same `CONFIG` block but should
+  be treated as an advanced/default section.
+
 ## 1. Pipeline Wrapper Inventory
 
 Training/inference wrappers (edit CONFIG block, run without CLI args):
@@ -19,6 +38,9 @@ Utility wrappers:
 - `run/make_test_data.sh`
 - `run/eval_trans_score.sh`
 - `run/plot_eval.sh`
+
+Utility wrappers keep editable defaults near the top as `CONFIG` or
+`USER DEFAULTS` blocks.
 
 Tuning wrappers:
 
@@ -100,13 +122,27 @@ Common runtime knobs exposed by wrappers include:
 
 - `DEVICE` (`auto|cuda|mps|cpu`)
 - `USE_AMP`, `AMP_DTYPE`
-- `USE_COMPILE` (`off|on|auto`)
+- `COMPILE_MODE` (`off|on|auto`)
 - `ALLOW_TF32`, `CUDNN_BENCHMARK`, `DETERMINISTIC`
 - DataLoader controls: `NUM_WORKERS`, `PREFETCH_FACTOR`,
   `PERSISTENT_WORKERS`, `PIN_MEMORY`
 - OOM backoff controls: `MIN_BATCH_SIZE`, `MAX_OOM_RETRIES`
 - MPS cap: `MPS_MAX_BATCH_SIZE` -> exported as
   `INTRONMODEL_MPS_MAX_BATCH_SIZE`
+
+## 6.1 Auto tmux (SSH disconnect-safe)
+
+Main wrappers (`run/cnn.sh`, `run/dnabert.sh`, etc.) automatically bootstrap
+into `tmux` when launched from an SSH TTY and not already inside `tmux`.
+This keeps long jobs running after SSH disconnect.
+
+- Default mode: `INTRONMODEL_AUTO_TMUX=auto`
+- Force always-on: `INTRONMODEL_AUTO_TMUX=on`
+- Disable: `INTRONMODEL_AUTO_TMUX=off`
+- Session prefix override: `INTRONMODEL_TMUX_SESSION_PREFIX=<prefix>`
+
+When auto-bootstrapped, wrappers print the created session name and attach
+command (for reconnect).
 
 ## 7. Recommended Usage Patterns
 
@@ -115,6 +151,8 @@ Common runtime knobs exposed by wrappers include:
 - Donor-only or acceptor-only tuning: set `TRAIN_TARGET` and `TRAIN_ONLY=1`
 - Prefer tuned configs: set `USE_TUNED_HPARAMS=required` after tuning outputs
   are available
+- Adaptive epoch budget: set `EPOCHS=auto` and tune
+  `MAX_EPOCHS` / `EARLY_STOP_PATIENCE` / `EARLY_STOP_MIN_DELTA`
 
 ## 8. Data/Model Path Overrides
 
