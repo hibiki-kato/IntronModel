@@ -12,13 +12,14 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced per-task overrides are kept below.
 set -a
-DNABERT_VARIANT="6"
+DNABERT_VARIANT="2"
 SPECIES="Athal, Dmel, Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
 PRETRAINED_MODEL_NAME=""
-PRETRAINED_MODEL_RELATIVE_PATH="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
+PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
+PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
 PRETRAINED_REVISION=""
 TRUST_REMOTE_CODE="1"
 
@@ -35,7 +36,7 @@ PRECOMPUTED_SITE_SCORE_TSV=""
 CHECKPOINT_TOP_K="3"
 CHECKPOINT_PRUNE_DRY_RUN="0"
 
-EPOCHS="10"
+EPOCHS="8"
 MAX_EPOCHS="100"
 EARLY_STOP_PATIENCE="12"
 EARLY_STOP_MIN_DELTA="0.0"
@@ -131,6 +132,29 @@ format_elapsed() {
 	printf '%02d:%02d:%02d' "${hours}" "${minutes}" "${seconds}"
 }
 
+resolve_dnabert_relative_path() {
+	local variant="$1"
+	local relative_path_2="$2"
+	local relative_path_6="$3"
+
+	if [[ "${variant}" != "2" && "${variant}" != "6" ]]; then
+		echo "[dnabert.sh] DNABERT_VARIANT must be 2 or 6." >&2
+		return 1
+	fi
+
+	local resolved_path
+	if [[ "${variant}" == "2" ]]; then
+		resolved_path="${relative_path_2}"
+	else
+		resolved_path="${relative_path_6}"
+	fi
+	if [[ -z "${resolved_path}" ]]; then
+		echo "[dnabert.sh] pretrained relative path is empty for variant=${variant}." >&2
+		return 1
+	fi
+	printf '%s\n' "${resolved_path}"
+}
+
 SCRIPT_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SCRIPT_START_SECONDS="${SECONDS}"
 
@@ -147,6 +171,16 @@ print_script_timing() {
 }
 
 trap 'print_script_timing' EXIT
+
+if [[ -z "${PRETRAINED_MODEL_NAME}" ]]; then
+	PRETRAINED_MODEL_RELATIVE_PATH="$(
+		resolve_dnabert_relative_path \
+			"${DNABERT_VARIANT}" \
+			"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
+			"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+	)"
+	export PRETRAINED_MODEL_RELATIVE_PATH
+fi
 
 PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
 	python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \
