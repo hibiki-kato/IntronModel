@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -22,10 +23,13 @@ from run_model import (
     _infer_window_defaults,
     parse_args,
 )
+from util.checkpoint_io import (
+    TaskName,
+    extract_task_checkpoint_path,
+    normalize_checkpoint_path,
+    read_json_object,
+)
 from util.data_proc import build_output_stem, parse_name_fields
-
-
-TaskName = str
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,62 @@ def _resolve_tuned_config_path(
     return None
 
 
+def _resolve_tuned_checkpoint_path(
+    *,
+    task: TaskName,
+    tuned_config_path: Path,
+) -> Path | None:
+    """Resolve checkpoint path from one tuned best_config.json file."""
+    payload = read_json_object(tuned_config_path)
+    if payload is None:
+        return None
+    if str(payload.get("status", "")).strip().lower() != "ok":
+        return None
+
+    direct = extract_task_checkpoint_path(
+        payload,
+        task=task,
+        base_dir=tuned_config_path.parent,
+    )
+    if direct is not None and direct.exists():
+        return direct
+
+    metrics_json_raw = payload.get("metrics_json")
+    if isinstance(metrics_json_raw, str) and metrics_json_raw.strip():
+        metrics_path = normalize_checkpoint_path(
+            metrics_json_raw,
+            base_dir=tuned_config_path.parent,
+        )
+        metrics_payload = read_json_object(metrics_path)
+        if metrics_payload is not None:
+            from_metrics_json = extract_task_checkpoint_path(
+                metrics_payload,
+                task=task,
+                base_dir=metrics_path.parent,
+            )
+            if from_metrics_json is not None and from_metrics_json.exists():
+                return from_metrics_json
+
+    phase = payload.get("phase")
+    trial_id = payload.get("trial_id")
+    if not isinstance(phase, str) or not isinstance(trial_id, int):
+        return None
+    metrics_path = (
+        tuned_config_path.parent / f"{phase}_trial_{trial_id:04d}.metrics.json"
+    )
+    metrics_payload = read_json_object(metrics_path)
+    if metrics_payload is None:
+        return None
+    fallback = extract_task_checkpoint_path(
+        metrics_payload,
+        task=task,
+        base_dir=metrics_path.parent,
+    )
+    if fallback is None or not fallback.exists():
+        return None
+    return fallback
+
+
 def _extract_tuned_assignments(
     config_path: Path,
     task_prefix: str,
@@ -195,17 +255,28 @@ def _extract_tuned_assignments(
     return assignments
 
 
-def _apply_tuned_overrides(spec: WrapperSpec, env: dict[str, str], data_root: Path) -> None:
+def _apply_tuned_overrides(
+    spec: WrapperSpec,
+    env: dict[str, str],
+    data_root: Path,
+) -> dict[TaskName, Path]:
     """Apply per-task tuned hparam overrides to empty task env fields."""
 
+    resolved_configs: dict[TaskName, Path] = {}
     use_mode = env.get("USE_TUNED_HPARAMS", "off")
     if use_mode == "off":
-        return
+        return resolved_configs
 
     species = env["SPECIES"]
+    tuned_model_name = spec.model_env_name
+    if spec.script_name == "dnabert.sh":
+        resolved_model_name = env.get("MODEL", "").strip()
+        if resolved_model_name != "":
+            tuned_model_name = resolved_model_name
+
     if env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == "":
         env["SHARED_TUNED_CONFIG_PATH"] = str(
-            data_root / species / "tuning" / spec.model_env_name / "best_config.json"
+            data_root / species / "tuning" / tuned_model_name / "best_config.json"
         )
 
     train_target = env["TRAIN_TARGET"]
@@ -222,7 +293,7 @@ def _apply_tuned_overrides(spec: WrapperSpec, env: dict[str, str], data_root: Pa
             explicit_path=env.get(explicit_key, ""),
             species=species,
             data_root=data_root,
-            model_name=spec.model_env_name,
+            model_name=tuned_model_name,
             shared_path=env.get("SHARED_TUNED_CONFIG_PATH", ""),
         )
         if resolved is None:
@@ -273,6 +344,89 @@ def _apply_tuned_overrides(spec: WrapperSpec, env: dict[str, str], data_root: Pa
         print(
             f"[{spec.script_name}] tuned {task} loaded from {resolved} "
             f"(applied={applied_count}, kept_manual={kept_manual_count})"
+        )
+        resolved_configs[task] = resolved.resolve()
+    return resolved_configs
+
+
+def _resolve_expected_checkpoint_paths_for_run(
+    run_args: list[str],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Resolve strict checkpoint paths and required tasks for one run argument set."""
+    args = parse_args(run_args)
+    donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
+        species=args.species,
+        donor_len=args.donor_len,
+        acceptor_len=args.acceptor_len,
+    )
+    checkpoint_stem = _build_checkpoint_stem_from_params(
+        model_name=args.model,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        inferred_train_len=inferred_train_len,
+        raw_params=dict(vars(args)),
+    )
+    checkpoint_paths = _build_checkpoint_paths(args.species, checkpoint_stem)
+
+    train_target = str(getattr(args, "train_target", "both")).strip().lower()
+    if not bool(getattr(args, "train_only", False)):
+        required_tasks: tuple[str, ...] = ("donor", "acceptor")
+    elif train_target == "both":
+        required_tasks = ("donor", "acceptor")
+    else:
+        required_tasks = (train_target,)
+    return checkpoint_paths, required_tasks
+
+
+def _materialize_checkpoint_alias(
+    *,
+    source_path: Path,
+    target_path: Path,
+) -> str:
+    """Materialize one checkpoint alias via hardlink or copy."""
+    if target_path.exists():
+        return "existing"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source_path, target_path)
+    except OSError:
+        shutil.copy2(source_path, target_path)
+        return "copy"
+    return "hardlink"
+
+
+def _ensure_tuned_checkpoint_aliases(
+    *,
+    spec: WrapperSpec,
+    run_args: list[str],
+    tuned_config_paths: Mapping[TaskName, Path],
+) -> None:
+    """Ensure strict checkpoint paths are backed by tuned best checkpoints."""
+    if not tuned_config_paths:
+        return
+    checkpoint_paths, required_tasks = _resolve_expected_checkpoint_paths_for_run(
+        run_args
+    )
+    for task in required_tasks:
+        strict_path = Path(checkpoint_paths[task]).resolve()
+        if strict_path.exists():
+            continue
+        tuned_config_path = tuned_config_paths.get(task)
+        if tuned_config_path is None:
+            continue
+        tuned_checkpoint = _resolve_tuned_checkpoint_path(
+            task=task,
+            tuned_config_path=tuned_config_path,
+        )
+        if tuned_checkpoint is None:
+            continue
+        mode = _materialize_checkpoint_alias(
+            source_path=tuned_checkpoint,
+            target_path=strict_path,
+        )
+        print(
+            f"[{spec.script_name}] tuned {task} checkpoint alias "
+            f"{mode}: {tuned_checkpoint} -> {strict_path}"
         )
 
 
@@ -413,7 +567,11 @@ def _validate_dnabert_specific(env: Mapping[str, str]) -> None:
 
     variant = _require_env(env, "DNABERT_VARIANT")
     _check_choice(variant, ("2", "6"), "DNABERT_VARIANT")
-    _check_choice(_require_env(env, "TRUST_REMOTE_CODE"), ("0", "1"), "TRUST_REMOTE_CODE")
+    _check_choice(
+        _require_env(env, "TRUST_REMOTE_CODE"),
+        ("0", "1"),
+        "TRUST_REMOTE_CODE",
+    )
 
 
 def _resolve_dnabert_model(env: dict[str, str], model_root: Path) -> None:
@@ -506,8 +664,9 @@ def _run_single_species(
         "MPS_MAX_BATCH_SIZE",
     )
 
+    tuned_config_paths: dict[TaskName, Path] = {}
     if spec.supports_tuned_hparams:
-        _apply_tuned_overrides(spec, env, data_root)
+        tuned_config_paths = _apply_tuned_overrides(spec, env, data_root)
 
     model_name = _require_env(env, "MODEL")
     donor_len = _as_int(_require_env(env, "DONOR_LEN"), "DONOR_LEN")
@@ -541,6 +700,15 @@ def _run_single_species(
     env["OUTPUT_EVAL_SCORE_TXT"] = str(output_eval_score_txt)
 
     run_args = _build_run_args(spec, env)
+    if (
+        env.get("SKIP_TRAINING", "0") == "1"
+        or env.get("CONTINUE_TRAINING", "0") == "1"
+    ):
+        _ensure_tuned_checkpoint_aliases(
+            spec=spec,
+            run_args=run_args,
+            tuned_config_paths=tuned_config_paths,
+        )
     run_args.extend(
         [
             "--test_tsv",
@@ -1157,8 +1325,24 @@ SPECS: dict[str, WrapperSpec] = {
     "dnabert.sh": WrapperSpec(
         script_name="dnabert.sh",
         model_env_name="dnabert",
-        supports_tuned_hparams=False,
-        tuned_key_map={},
+        supports_tuned_hparams=True,
+        tuned_key_map={
+            "batch_size": "BATCH_SIZE",
+            "lr": "LR",
+            "loss": "LOSS",
+            "max_tokens": "MAX_TOKENS",
+            "dropout": "DROPOUT",
+            "weight_decay": "WEIGHT_DECAY",
+            "eta_min_ratio": "ETA_MIN_RATIO",
+            "val_frac": "VAL_FRAC",
+            "grad_clip": "GRAD_CLIP",
+            "pos_weight_cap": "POS_WEIGHT_CAP",
+            "focal_gamma": "FOCAL_GAMMA",
+            "focal_alpha_pos": "FOCAL_ALPHA_POS",
+            "asym_gamma_pos": "ASYM_GAMMA_POS",
+            "asym_gamma_neg": "ASYM_GAMMA_NEG",
+            "asym_alpha_pos": "ASYM_ALPHA_POS",
+        },
         stem_param_builder="dnabert",
         required_arg_keys=(
             "SPECIES",

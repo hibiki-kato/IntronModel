@@ -153,68 +153,29 @@ JSON
 # --------------------------
 # Runtime implementation
 # --------------------------
-# Ensure conda is available in non-interactive shells.
-if command -v conda >/dev/null 2>&1; then
-	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-	if [[ -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
-		# shellcheck source=/dev/null
-		source "${CONDA_BASE}/etc/profile.d/conda.sh"
-	fi
-fi
-
-conda activate intronmodel
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
-MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
-export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
-export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/common.sh"
+intronmodel_activate_conda "intronmodel"
+intronmodel_init_paths "${BASH_SOURCE[0]}"
+
+# Auto-run inside tmux on SSH so jobs survive disconnects.
+# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
-	local total_seconds="$1"
-	local hours=$((total_seconds / 3600))
-	local minutes=$(((total_seconds % 3600) / 60))
-	local seconds=$((total_seconds % 60))
-	printf '%02d:%02d:%02d' "${hours}" "${minutes}" "${seconds}"
+	intronmodel_format_elapsed "$1"
 }
 
 resolve_species_case() {
-	local raw_species="$1"
-	local data_root="$2"
-
-	if [[ -d "${data_root}/${raw_species}" ]]; then
-		printf '%s\n' "${raw_species}"
-		return 0
-	fi
-
-	local matches=()
-	mapfile -t matches < <(
-		find "${data_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-			| awk -v target="${raw_species}" 'tolower($0) == tolower(target)'
-	)
-	if [[ ${#matches[@]} -eq 1 ]]; then
-		printf '%s\n' "${matches[0]}"
-		return 0
-	fi
-	printf '%s\n' "${raw_species}"
-	return 0
+	intronmodel_resolve_species_case "$1" "$2" ""
 }
 
 resolve_python_bin() {
-	if command -v python3 >/dev/null 2>&1; then
-		printf '%s\n' "python3"
-		return 0
-	fi
-	if command -v python >/dev/null 2>&1; then
-		printf '%s\n' "python"
-		return 0
-	fi
-	echo "[tune_cnn_resdil_time.sh] python interpreter not found (python3/python)." >&2
-	return 1
+	intronmodel_resolve_python_bin "tune_cnn_resdil_time.sh"
 }
 
 resolve_search_space_file() {

@@ -111,6 +111,12 @@ def test_prune_keeps_top_k_per_validation_signature(tmp_path: Path) -> None:
     assert not ckpt_a1.exists()
     assert ckpt_a2.exists()
     assert ckpt_b1.exists()
+    assert (
+        data_root / species / "tuning" / model_name / "checkpoint_prune_top1.json"
+    ).exists()
+    assert not (
+        data_root / species / "tuning" / model_name / "leaderboard_top1.json"
+    ).exists()
 
 
 def test_prune_isolates_legacy_signature(tmp_path: Path) -> None:
@@ -232,3 +238,75 @@ def test_prune_protects_checkpoint_referenced_by_best_config(tmp_path: Path) -> 
     assert ckpt_keep.exists()
     assert ckpt_drop.exists()
 
+
+def test_prune_protects_checkpoint_referenced_by_metrics_json_field(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    species = "Dmel"
+    model_name = "cnn"
+
+    ckpt_keep = model_root / species / "donor" / "keep_metrics.pt"
+    ckpt_drop = model_root / species / "donor" / "drop_metrics.pt"
+    for path in (ckpt_keep, ckpt_drop):
+        _write_checkpoint(path)
+    acc = model_root / species / "acceptor" / "placeholder.pt"
+    _write_checkpoint(acc)
+
+    site_score = data_root / species / "site_score"
+    _write_train_summary(
+        path=site_score / "keep_metrics.train.json",
+        model_name=model_name,
+        donor_checkpoint_path=ckpt_keep,
+        acceptor_checkpoint_path=acc,
+        donor_best_score=0.10,
+        acceptor_best_score=0.0,
+        donor_pr_auc=0.10,
+        acceptor_pr_auc=0.0,
+        validation_signature="sig_keep_metrics",
+    )
+    _write_train_summary(
+        path=site_score / "drop_metrics.train.json",
+        model_name=model_name,
+        donor_checkpoint_path=ckpt_drop,
+        acceptor_checkpoint_path=acc,
+        donor_best_score=0.90,
+        acceptor_best_score=0.0,
+        donor_pr_auc=0.90,
+        acceptor_pr_auc=0.0,
+        validation_signature="sig_keep_metrics",
+    )
+
+    tuning_root = data_root / species / "tuning" / model_name / "donor"
+    tuning_root.mkdir(parents=True, exist_ok=True)
+    metrics_path = tuning_root / "external.metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "donor_checkpoint_path": str(ckpt_keep),
+                "acceptor_checkpoint_path": str(acc),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tuning_root / "best_config.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "metrics_json": str(metrics_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = prune_species_model_checkpoints(
+        data_root=data_root,
+        species=species,
+        model_name=model_name,
+        top_k=1,
+        dry_run=False,
+    )
+    assert report.deleted_count == 0
+    assert ckpt_keep.exists()
+    assert ckpt_drop.exists()

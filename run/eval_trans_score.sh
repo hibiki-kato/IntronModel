@@ -54,19 +54,16 @@ fi
 # Runtime implementation
 # --------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
-MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
-export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
-export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/common.sh"
+intronmodel_init_paths "${BASH_SOURCE[0]}"
 
-if [[ "${USE_CONDA_ACTIVATE}" == "1" ]] && command -v conda >/dev/null 2>&1; then
-	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-	if [[ -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
-		# shellcheck source=/dev/null
-		source "${CONDA_BASE}/etc/profile.d/conda.sh"
-	fi
-	conda activate "${CONDA_ENV}"
+# Auto-run inside tmux on SSH so jobs survive disconnects.
+# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
+
+if [[ "${USE_CONDA_ACTIVATE}" == "1" ]]; then
+	intronmodel_activate_conda "${CONDA_ENV}"
 fi
 
 if [[ -z "${MPLCONFIGDIR:-}" ]]; then

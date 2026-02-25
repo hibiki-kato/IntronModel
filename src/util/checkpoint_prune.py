@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from util.checkpoint_io import extract_checkpoint_paths, read_json_object
 from util.validation_protocol import LEGACY_VALIDATION_SIGNATURE
 
 _TASKS: tuple[str, ...] = ("donor", "acceptor")
@@ -38,17 +39,6 @@ class PruneReport:
     deleted_paths: tuple[Path, ...]
 
 
-def _read_json_object(path: Path) -> Optional[dict[str, object]]:
-    """Read one JSON object file, returning ``None`` when invalid."""
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    return raw
-
-
 def _safe_float(value: object, default: float = float("-inf")) -> float:
     """Convert scalar to float with fallback."""
     if isinstance(value, bool):
@@ -72,30 +62,6 @@ def _extract_validation_signature(payload: dict[str, object]) -> str:
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return LEGACY_VALIDATION_SIGNATURE
-
-
-def _extract_checkpoint_paths(payload: dict[str, object]) -> tuple[Path, ...]:
-    """Extract donor/acceptor checkpoint paths from summary payload."""
-    paths: list[Path] = []
-    for task in _TASKS:
-        key_name = f"{task}_checkpoint_path"
-        direct = payload.get(key_name)
-        if isinstance(direct, str) and direct.strip():
-            path = Path(direct.strip()).resolve()
-            if path.exists():
-                paths.append(path)
-                continue
-
-        task_payload = payload.get(task)
-        if not isinstance(task_payload, dict):
-            continue
-        nested = task_payload.get("checkpoint")
-        if isinstance(nested, str) and nested.strip():
-            path = Path(nested.strip()).resolve()
-            if path.exists():
-                paths.append(path)
-    deduped = sorted(set(paths))
-    return tuple(deduped)
 
 
 def _extract_selection_score(payload: dict[str, object]) -> float:
@@ -188,13 +154,18 @@ def _collect_summary_candidates(
 
     candidates: list[SummaryCandidate] = []
     for summary_path in sorted(site_score_dir.glob("*.train.json")):
-        payload = _read_json_object(summary_path)
+        payload = read_json_object(summary_path)
         if payload is None:
             continue
         summary_model = _extract_model_name(payload)
         if summary_model != model_name:
             continue
-        checkpoint_paths = _extract_checkpoint_paths(payload)
+        checkpoint_map = extract_checkpoint_paths(
+            payload,
+            base_dir=summary_path.parent,
+            existing_only=True,
+        )
+        checkpoint_paths = tuple(sorted(set(checkpoint_map.values())))
         if not checkpoint_paths:
             continue
         modified_time = max(path.stat().st_mtime for path in checkpoint_paths)
@@ -218,27 +189,50 @@ def _resolve_checkpoint_references_from_best_config(
     best_config_path: Path,
 ) -> set[Path]:
     """Resolve checkpoint paths referenced by one tuning best_config."""
-    payload = _read_json_object(best_config_path)
+    payload = read_json_object(best_config_path)
     if payload is None or payload.get("status") != "ok":
         return set()
 
-    protected: set[Path] = set()
-    for task in _TASKS:
-        key_name = f"{task}_checkpoint_path"
-        raw_path = payload.get(key_name)
-        if isinstance(raw_path, str) and raw_path.strip():
-            protected.add(Path(raw_path.strip()).resolve())
+    protected: set[Path] = set(
+        extract_checkpoint_paths(
+            payload,
+            base_dir=best_config_path.parent,
+            existing_only=False,
+        ).values()
+    )
+
+    metrics_json_raw = payload.get("metrics_json")
+    if isinstance(metrics_json_raw, str) and metrics_json_raw.strip():
+        metrics_path = Path(metrics_json_raw.strip())
+        if not metrics_path.is_absolute():
+            metrics_path = (
+                best_config_path.parent / metrics_json_raw.strip()
+            ).resolve()
+        metrics_payload = read_json_object(metrics_path)
+        if metrics_payload is not None:
+            for path in extract_checkpoint_paths(
+                metrics_payload,
+                base_dir=metrics_path.parent,
+                existing_only=False,
+            ).values():
+                protected.add(path)
 
     phase = payload.get("phase")
     trial_id = payload.get("trial_id")
     if not isinstance(phase, str) or not isinstance(trial_id, int):
         return protected
 
-    metrics_path = best_config_path.parent / f"{phase}_trial_{trial_id:04d}.metrics.json"
-    metrics_payload = _read_json_object(metrics_path)
+    metrics_path = (
+        best_config_path.parent / f"{phase}_trial_{trial_id:04d}.metrics.json"
+    )
+    metrics_payload = read_json_object(metrics_path)
     if metrics_payload is None:
         return protected
-    for path in _extract_checkpoint_paths(metrics_payload):
+    for path in extract_checkpoint_paths(
+        metrics_payload,
+        base_dir=metrics_path.parent,
+        existing_only=False,
+    ).values():
         protected.add(path)
     return protected
 
@@ -255,7 +249,9 @@ def _collect_protected_checkpoints(
         return set()
     protected: set[Path] = set()
     for best_config_path in sorted(tuning_root.rglob("best_config.json")):
-        protected.update(_resolve_checkpoint_references_from_best_config(best_config_path))
+        protected.update(
+            _resolve_checkpoint_references_from_best_config(best_config_path)
+        )
     return protected
 
 
@@ -270,7 +266,7 @@ def _write_leaderboard(
     """Write leaderboard JSON for one species/model."""
     out_dir = data_root / species / "tuning" / model_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"leaderboard_top{top_k}.json"
+    output_path = out_dir / f"checkpoint_prune_top{top_k}.json"
 
     signatures: list[dict[str, object]] = []
     for signature, rows in sorted(ranked_rows.items()):
@@ -361,7 +357,9 @@ def prune_species_model_checkpoints(
         for candidate in candidates
         for path in candidate.checkpoint_paths
     }
-    delete_paths = tuple(sorted(path for path in unique_paths if path not in keep_paths))
+    delete_paths = tuple(
+        sorted(path for path in unique_paths if path not in keep_paths)
+    )
     if not dry_run:
         for path in delete_paths:
             try:

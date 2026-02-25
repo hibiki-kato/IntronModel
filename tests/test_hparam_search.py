@@ -171,23 +171,17 @@ def test_run_trial_oom_backoff_then_success(
         search_space=hparam_search._validate_search_space(config_dict["search_space"]),
     )
 
-    class _Completed:
-        def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
     calls: list[int] = []
 
-    def _fake_run(
+    def _fake_run_command_with_streaming(
+        *,
         cmd: list[str],
         cwd: Path,
         env: dict[str, str],
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> _Completed:
-        del cwd, env, capture_output, text, check
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
         calls.append(1)
         metrics_path: Optional[Path] = None
         for idx, token in enumerate(cmd):
@@ -196,7 +190,7 @@ def test_run_trial_oom_backoff_then_success(
                 break
         assert metrics_path is not None
         if len(calls) == 1:
-            return _Completed(1, "", "CUDA out of memory")
+            return 1, "CUDA out of memory"
         metrics_path.write_text(
             json.dumps(
                 {
@@ -206,9 +200,13 @@ def test_run_trial_oom_backoff_then_success(
             ),
             encoding="utf-8",
         )
-        return _Completed(0, "ok", "")
+        return 0, "ok"
 
-    monkeypatch.setattr(hparam_search.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
 
     result = hparam_search.run_trial(
         config=config,
@@ -254,21 +252,15 @@ def test_run_trial_succeeds_with_single_task_objective(
         search_space=hparam_search._validate_search_space(config_dict["search_space"]),
     )
 
-    class _Completed:
-        def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
-    def _fake_run(
+    def _fake_run_command_with_streaming(
+        *,
         cmd: list[str],
         cwd: Path,
         env: dict[str, str],
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> _Completed:
-        del cwd, env, capture_output, text, check
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
         metrics_path: Optional[Path] = None
         for idx, token in enumerate(cmd):
             if token == "--metrics_json":
@@ -279,9 +271,13 @@ def test_run_trial_succeeds_with_single_task_objective(
             json.dumps({"donor": {"best_pr_auc": 0.82}}),
             encoding="utf-8",
         )
-        return _Completed(0, "ok", "")
+        return 0, "ok"
 
-    monkeypatch.setattr(hparam_search.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
 
     result = hparam_search.run_trial(
         config=config,
@@ -374,6 +370,20 @@ def test_load_global_best_params_skips_signature_mismatch(tmp_path: Path) -> Non
 
 def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
     output_path = tmp_path / "best_config.json"
+    donor_ckpt = tmp_path / "donor.pt"
+    donor_ckpt.write_bytes(b"donor")
+    acceptor_ckpt = tmp_path / "acceptor.pt"
+    acceptor_ckpt.write_bytes(b"acceptor")
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "donor_checkpoint_path": str(donor_ckpt),
+                "acceptor_checkpoint_path": str(acceptor_ckpt),
+            }
+        ),
+        encoding="utf-8",
+    )
     row = hparam_search.TrialResult(
         phase="full",
         trial_id=3,
@@ -390,7 +400,7 @@ def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
         error_message=None,
         return_code=0,
         duration_sec=1.0,
-        metrics_json="metrics.json",
+        metrics_json=str(metrics_path),
         log_file="trial.log",
         validation_signature="feedbeefcafe",
         validation_protocol={
@@ -411,6 +421,8 @@ def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
     assert payload["validation_signature"] == "feedbeefcafe"
     assert payload["validation_protocol"]["split_type"] == "stratified_site"
     assert float(payload["selection_score"]) == pytest.approx(0.815)
+    assert payload["donor_checkpoint_path"] == str(donor_ckpt)
+    assert payload["acceptor_checkpoint_path"] == str(acceptor_ckpt)
 
 
 def test_run_search_ignores_global_best_in_quick_and_uses_species_plot_name(
@@ -580,23 +592,17 @@ def test_run_trial_uses_model_from_base_args(
         search_space=hparam_search._validate_search_space(config_dict["search_space"]),
     )
 
-    class _Completed:
-        def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
     observed_model: list[str] = []
 
-    def _fake_run(
+    def _fake_run_command_with_streaming(
+        *,
         cmd: list[str],
         cwd: Path,
         env: dict[str, str],
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> _Completed:
-        del cwd, env, capture_output, text, check
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
         metrics_path: Optional[Path] = None
         for idx, token in enumerate(cmd):
             if token == "--model":
@@ -608,9 +614,13 @@ def test_run_trial_uses_model_from_base_args(
             json.dumps({"donor": {"best_pr_auc": 0.8}}),
             encoding="utf-8",
         )
-        return _Completed(0, "ok", "")
+        return 0, "ok"
 
-    monkeypatch.setattr(hparam_search.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
 
     result = hparam_search.run_trial(
         config=config,

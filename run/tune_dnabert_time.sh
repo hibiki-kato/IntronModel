@@ -12,13 +12,13 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="780"
 
 SPECIES="Dmel Mmus Athal"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
-DNABERT_VARIANT="2"
+DNABERT_VARIANT="6"
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
 PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
@@ -151,68 +151,29 @@ JSON
 # --------------------------
 # Runtime implementation
 # --------------------------
-# Ensure conda is available in non-interactive shells.
-if command -v conda >/dev/null 2>&1; then
-	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-	if [[ -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
-		# shellcheck source=/dev/null
-		source "${CONDA_BASE}/etc/profile.d/conda.sh"
-	fi
-fi
-
-conda activate intronmodel
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
-MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
-export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
-export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/common.sh"
+intronmodel_activate_conda "intronmodel"
+intronmodel_init_paths "${BASH_SOURCE[0]}"
+
+# Auto-run inside tmux on SSH so jobs survive disconnects.
+# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
-	local total_seconds="$1"
-	local hours=$((total_seconds / 3600))
-	local minutes=$(((total_seconds % 3600) / 60))
-	local seconds=$((total_seconds % 60))
-	printf '%02d:%02d:%02d' "${hours}" "${minutes}" "${seconds}"
+	intronmodel_format_elapsed "$1"
 }
 
 resolve_species_case() {
-	local raw_species="$1"
-	local data_root="$2"
-
-	if [[ -d "${data_root}/${raw_species}" ]]; then
-		printf '%s\n' "${raw_species}"
-		return 0
-	fi
-
-	local matches=()
-	mapfile -t matches < <(
-		find "${data_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-			| awk -v target="${raw_species}" 'tolower($0) == tolower(target)'
-	)
-	if [[ ${#matches[@]} -eq 1 ]]; then
-		printf '%s\n' "${matches[0]}"
-		return 0
-	fi
-	printf '%s\n' "${raw_species}"
-	return 0
+	intronmodel_resolve_species_case "$1" "$2" ""
 }
 
 resolve_python_bin() {
-	if command -v python3 >/dev/null 2>&1; then
-		printf '%s\n' "python3"
-		return 0
-	fi
-	if command -v python >/dev/null 2>&1; then
-		printf '%s\n' "python"
-		return 0
-	fi
-	echo "[tune_dnabert_time.sh] python interpreter not found (python3/python)." >&2
-	return 1
+	intronmodel_resolve_python_bin "tune_dnabert_time.sh"
 }
 
 resolve_dnabert_model() {
@@ -251,6 +212,7 @@ resolve_search_space_file() {
 	local project_root="$2"
 	local species="$3"
 	local target="$4"
+	local model_name="$5"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -261,13 +223,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/dnabert/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${model_name}/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/dnabert/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -300,12 +262,13 @@ run_double_descent_plot() {
 	local project_root="$2"
 	local species_name="$3"
 	local target_name="$4"
+	local model_name="$5"
 
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
 		--target "${target_name}" \
-		--model "dnabert" || true
+		--model "${model_name}" || true
 }
 
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
@@ -385,6 +348,7 @@ resolve_dnabert_model \
 	"${MODEL_ROOT}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+TUNING_MODEL_NAME="${MODEL_NAME}"
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert_time.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
 	exit 1
@@ -431,8 +395,8 @@ while true; do
 
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/dnabert/${target}/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/dnabert/${target}"\
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}"\
 "/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
@@ -440,7 +404,7 @@ while true; do
 			"tune_dnabert_time.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"dnabert" \
+			"${TUNING_MODEL_NAME}" \
 			"${species}" \
 			"${target}" \
 			"${global_best_path}" \
@@ -467,7 +431,8 @@ while true; do
 				"${SEARCH_SPACE_FILE}" \
 				"${PROJECT_ROOT}" \
 				"${species}" \
-				"${target}"
+				"${target}" \
+				"${TUNING_MODEL_NAME}"
 		)"; then
 			search_space_path="${search_space_resolved}"
 			if ! target_space_json="$(
@@ -566,7 +531,8 @@ JSON
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
-			"${target}"
+			"${target}" \
+			"${TUNING_MODEL_NAME}"
 	fi
 	cycle_duration_seconds=$((SECONDS - job_start_seconds))
 	TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))
@@ -603,7 +569,8 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${final_species}" \
-			"${final_target}"
+			"${final_target}" \
+			"${TUNING_MODEL_NAME}"
 	done
 fi
 

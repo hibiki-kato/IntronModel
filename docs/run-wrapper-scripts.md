@@ -48,6 +48,7 @@ Tuning wrappers:
 - `run/tune_cnn_resdil.sh`, `run/tune_cnn_resdil_time.sh`
 - `run/tune_tcn.sh`, `run/tune_tcn_time.sh`
 - `run/tune_bert.sh`
+- `run/tune_dnabert.sh`, `run/tune_dnabert_time.sh`
 - `run/tune_reservoir.sh`
 
 ## 2. Common Control Flags (CONFIG)
@@ -102,6 +103,11 @@ Resolution order per task:
 
 If `required`, missing/invalid config aborts execution.
 
+When `SKIP_TRAINING=1` or `CONTINUE_TRAINING=1`, wrappers also try to resolve
+checkpoint paths from the selected tuned `best_config.json` and materialize a
+strict-name checkpoint alias if needed. This keeps tuning outputs reusable even
+when strict checkpoint naming differs between tuning and normal runs.
+
 ## 5. DNABERT Variant Switching
 
 `run/dnabert.sh` supports:
@@ -115,6 +121,10 @@ The wrapper also controls:
 - `PRETRAINED_MODEL_NAME`
 - `PRETRAINED_REVISION`
 - `TRUST_REMOTE_CODE`
+
+Runtime tokenization mode is resolved inside `src/models/dnabert.py` from the
+loaded tokenizer vocabulary, so `dnabert2` and `dnabert6` can share the same
+wrapper while using different sequence preprocessing.
 
 ## 6. Performance and Device Controls
 
@@ -132,9 +142,9 @@ Common runtime knobs exposed by wrappers include:
 
 ## 6.1 Auto tmux (SSH disconnect-safe)
 
-Main wrappers (`run/cnn.sh`, `run/dnabert.sh`, etc.) automatically bootstrap
-into `tmux` when launched from an SSH TTY and not already inside `tmux`.
-This keeps long jobs running after SSH disconnect.
+All user-facing wrappers under `run/` (train/infer, tuning, and utility)
+automatically bootstrap into `tmux` when launched from an SSH TTY and not
+already inside `tmux`. This keeps long jobs running after SSH disconnect.
 
 - Default mode: `INTRONMODEL_AUTO_TMUX=auto`
 - Force always-on: `INTRONMODEL_AUTO_TMUX=on`

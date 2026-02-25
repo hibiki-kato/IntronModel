@@ -36,6 +36,7 @@ from util.validation_protocol import (
     build_validation_protocol,
     compute_validation_signature,
 )
+from util.checkpoint_io import extract_checkpoint_paths, read_json_object
 
 Scalar = int | float | str | bool
 ArgValue = Scalar | None
@@ -837,6 +838,184 @@ def _extract_best_epoch(summary: dict[str, object], task_name: str) -> Optional[
     if isinstance(best_epoch, int) and best_epoch > 0:
         return best_epoch
     return None
+
+
+def _extract_checkpoint_paths_from_metrics(
+    metrics_json_path: str,
+) -> dict[str, str]:
+    """Extract donor/acceptor checkpoint paths from one metrics JSON file."""
+    metrics_path = Path(metrics_json_path).resolve()
+    raw = read_json_object(metrics_path)
+    if raw is None:
+        return {}
+    extracted = extract_checkpoint_paths(
+        raw,
+        base_dir=metrics_path.parent,
+        existing_only=False,
+    )
+    resolved: dict[str, str] = {
+        f"{task_name}_checkpoint_path": str(path)
+        for task_name, path in extracted.items()
+    }
+    return resolved
+
+
+def _resolve_model_root(project_root: Path) -> Path:
+    """Resolve model root directory from environment or project default."""
+    raw = os.environ.get("INTRONMODEL_MODEL_ROOT", "").strip()
+    if raw == "":
+        return (project_root / "model").resolve()
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    return path.resolve()
+
+
+def _is_path_within(path: Path, root: Path) -> bool:
+    """Return whether one path is located under ``root``."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _collect_checkpoint_paths_from_row(row: TrialResult) -> set[Path]:
+    """Collect checkpoint file paths referenced by one trial result."""
+    payload = _extract_checkpoint_paths_from_metrics(row.metrics_json)
+    out: set[Path] = set()
+    for raw_path in payload.values():
+        resolved = Path(raw_path).resolve()
+        if resolved.exists():
+            out.add(resolved)
+    return out
+
+
+def _prune_non_best_trial_checkpoints(
+    *,
+    project_root: Path,
+    trial_rows: list[TrialResult],
+    best_row: Optional[TrialResult],
+    min_mtime_epoch: float,
+) -> int:
+    """Delete non-best trial checkpoints while keeping pre-existing files."""
+    if best_row is None:
+        return 0
+
+    all_paths: set[Path] = set()
+    for row in trial_rows:
+        if row.status != "success":
+            continue
+        all_paths.update(_collect_checkpoint_paths_from_row(row))
+    if not all_paths:
+        return 0
+
+    keep_paths = _collect_checkpoint_paths_from_row(best_row)
+    model_root = _resolve_model_root(project_root)
+    deleted_count = 0
+    for path in sorted(all_paths):
+        if path in keep_paths:
+            continue
+        if not path.exists() or not path.is_file():
+            continue
+        if not _is_path_within(path, model_root):
+            continue
+        try:
+            modified = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if modified < min_mtime_epoch:
+            continue
+        path.unlink()
+        deleted_count += 1
+    return deleted_count
+
+
+def _serialize_top_trials(
+    rows: list[TrialResult],
+    top_k: int,
+) -> list[dict[str, object]]:
+    """Serialize ranked top-k trials for JSON export."""
+    serialized: list[dict[str, object]] = []
+    for rank, row in enumerate(rows[:top_k], start=1):
+        serialized.append(
+            {
+                "rank": rank,
+                "phase": row.phase,
+                "trial_id": row.trial_id,
+                "objective_metric": row.objective_metric,
+                "objective_score": row.objective_score,
+                "donor_pr_auc": row.donor_pr_auc,
+                "acceptor_pr_auc": row.acceptor_pr_auc,
+                "mean_pr_auc": row.mean_pr_auc,
+                "sampled_params": row.sampled_params,
+                "metrics_json": row.metrics_json,
+                "log_file": row.log_file,
+            }
+        )
+    return serialized
+
+
+def _write_tuning_leaderboard(
+    *,
+    config: SearchConfig,
+    ranked_rows: list[TrialResult],
+    best_row: Optional[TrialResult],
+) -> None:
+    """Write tuning leaderboard JSON under run and model tuning directories."""
+    model_obj = config.base_args.get("model")
+    model_name = str(model_obj) if isinstance(model_obj, str) else "unknown"
+    target = str(config.base_args.get("train_target", "both"))
+    top_entries = _serialize_top_trials(ranked_rows, config.top_k)
+    best_checkpoint_paths = (
+        _extract_checkpoint_paths_from_metrics(best_row.metrics_json)
+        if best_row is not None
+        else {}
+    )
+    payload: dict[str, object] = {
+        "species": config.species,
+        "model": model_name,
+        "target": target,
+        "objective_metric": config.objective_metric,
+        "top_k": config.top_k,
+        "entries": top_entries,
+        "best_checkpoint_paths": best_checkpoint_paths,
+    }
+
+    run_level_path = config.output_dir / f"leaderboard_top{config.top_k}.json"
+    run_level_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    if config.output_dir.parent.name in {"donor", "acceptor", "both"}:
+        model_tuning_dir = config.output_dir.parent.parent
+    else:
+        model_tuning_dir = config.output_dir.parent
+    model_level_path = model_tuning_dir / f"leaderboard_top{config.top_k}.json"
+    existing = read_json_object(model_level_path)
+    merged: dict[str, object]
+    if (
+        existing is not None
+        and existing.get("species") == config.species
+        and existing.get("model") == model_name
+        and existing.get("top_k") == config.top_k
+        and isinstance(existing.get("targets"), dict)
+    ):
+        targets_obj = dict(existing["targets"])
+        targets_obj[target] = payload
+        merged = {
+            "species": config.species,
+            "model": model_name,
+            "top_k": config.top_k,
+            "targets": targets_obj,
+        }
+    else:
+        merged = {
+            "species": config.species,
+            "model": model_name,
+            "top_k": config.top_k,
+            "targets": {target: payload},
+        }
+    model_level_path.parent.mkdir(parents=True, exist_ok=True)
+    model_level_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
 
 
 def _read_objective_best_epoch_from_metrics(
@@ -1767,6 +1946,8 @@ def write_best_config(
     path: Path,
     row: Optional[TrialResult],
     *,
+    top_rows: Optional[list[TrialResult]] = None,
+    top_k: Optional[int] = None,
     fallback_validation_protocol: Optional[dict[str, object]] = None,
     fallback_validation_signature: Optional[str] = None,
 ) -> None:
@@ -1802,7 +1983,11 @@ def write_best_config(
         "selection_score": row.selection_score,
         "validation_signature": validation_signature,
         "validation_protocol": validation_protocol,
+        "metrics_json": row.metrics_json,
     }
+    if top_rows is not None and top_k is not None and top_k > 0:
+        payload["top_trials"] = _serialize_top_trials(top_rows, top_k)
+    payload.update(_extract_checkpoint_paths_from_metrics(row.metrics_json))
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -1957,6 +2142,7 @@ def write_visualization(
 
 def run_search(config: SearchConfig) -> int:
     """Execute the full two-phase search run."""
+    run_started_epoch = time.time()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     baseline_validation_protocol = _derive_validation_protocol_from_args(
         merged_args=dict(config.base_args),
@@ -2118,17 +2304,39 @@ def run_search(config: SearchConfig) -> int:
     ranked_full = rank_successful_trials(full_rows)
     if ranked_full:
         best_row = ranked_full[0]
+        ranked_for_export = ranked_full
     elif ranked_quick:
         best_row = ranked_quick[0]
+        ranked_for_export = ranked_quick
     else:
         best_row = None
+        ranked_for_export = []
 
     write_best_config(
         config.output_dir / "best_config.json",
         best_row,
+        top_rows=ranked_for_export,
+        top_k=config.top_k,
         fallback_validation_protocol=baseline_validation_protocol,
         fallback_validation_signature=baseline_validation_signature,
     )
+    _write_tuning_leaderboard(
+        config=config,
+        ranked_rows=ranked_for_export,
+        best_row=best_row,
+    )
+    pruned_count = _prune_non_best_trial_checkpoints(
+        project_root=config.project_root,
+        trial_rows=quick_rows + full_rows,
+        best_row=best_row,
+        min_mtime_epoch=run_started_epoch,
+    )
+    if pruned_count > 0:
+        print(
+            "[hparam_search] Pruned non-best trial checkpoints: "
+            f"deleted={pruned_count}.",
+            flush=True,
+        )
     maybe_update_global_best(
         global_best_path=config.global_best_config_path,
         best_row=best_row,

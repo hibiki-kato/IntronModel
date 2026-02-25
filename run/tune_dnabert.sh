@@ -15,7 +15,7 @@ SPECIES="Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
-DNABERT_VARIANT="2"
+DNABERT_VARIANT="6"
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
 PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
@@ -138,120 +138,36 @@ JSON
 # --------------------------
 # Runtime implementation
 # --------------------------
-# Ensure conda is available in non-interactive shells.
-if command -v conda >/dev/null 2>&1; then
-	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-	if [[ -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
-		# shellcheck source=/dev/null
-		source "${CONDA_BASE}/etc/profile.d/conda.sh"
-	fi
-fi
-
-conda activate intronmodel
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DATA_ROOT="${INTRONMODEL_DATA_ROOT:-${PROJECT_ROOT}/data}"
-MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
-export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
-export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/common.sh"
+intronmodel_activate_conda "intronmodel"
+intronmodel_init_paths "${BASH_SOURCE[0]}"
+
+# Auto-run inside tmux on SSH so jobs survive disconnects.
+# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
-	local total_seconds="$1"
-	local hours=$((total_seconds / 3600))
-	local minutes=$(((total_seconds % 3600) / 60))
-	local seconds=$((total_seconds % 60))
-	printf '%02d:%02d:%02d' "${hours}" "${minutes}" "${seconds}"
+	intronmodel_format_elapsed "$1"
 }
 
-SCRIPT_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-SCRIPT_START_SECONDS="${SECONDS}"
-
-print_script_timing() {
-	local exit_code="$?"
-	local script_end_epoch
-	script_end_epoch="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	local elapsed_seconds=$((SECONDS - SCRIPT_START_SECONDS))
-	local elapsed_hms
-	elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
-	echo "[tune_dnabert.sh] timing: start=${SCRIPT_START_EPOCH} "\
-		"end=${script_end_epoch} elapsed=${elapsed_hms} "\
-		"(${elapsed_seconds}s) exit=${exit_code}"
-	return "${exit_code}"
-}
-
-trap 'print_script_timing' EXIT
+intronmodel_start_timer "tune_dnabert.sh"
+trap 'intronmodel_print_timing' EXIT
 
 resolve_species_case() {
-	local raw_species="$1"
-	local data_root="$2"
-
-	if [[ -d "${data_root}/${raw_species}" ]]; then
-		printf '%s\n' "${raw_species}"
-		return 0
-	fi
-
-	local matches=()
-	mapfile -t matches < <(
-		find "${data_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-			| awk -v target="${raw_species}" 'tolower($0) == tolower(target)'
-	)
-	if [[ ${#matches[@]} -eq 1 ]]; then
-		echo "[tune_dnabert.sh] species case normalized: '${raw_species}' -> '${matches[0]}'" >&2
-		printf '%s\n' "${matches[0]}"
-		return 0
-	fi
-	if [[ ${#matches[@]} -gt 1 ]]; then
-		echo "[tune_dnabert.sh] ambiguous species '${raw_species}'." >&2
-		printf '[tune_dnabert.sh] case-insensitive matches: %s\n' "${matches[*]}" >&2
-		return 1
-	fi
-	printf '%s\n' "${raw_species}"
-	return 0
+	intronmodel_resolve_species_case "$1" "$2" "tune_dnabert.sh"
 }
 
 resolve_tune_targets() {
-	local raw_targets="$1"
-	local parts=()
-	local resolved=()
-
-	IFS=',' read -r -a parts <<< "${raw_targets}"
-	for part in "${parts[@]}"; do
-		local target
-		target="$(printf '%s' "${part}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-		if [[ -z "${target}" ]]; then
-			continue
-		fi
-		if [[ "${target}" != "donor" && "${target}" != "acceptor" ]]; then
-			echo "[tune_dnabert.sh] invalid target: ${target}" >&2
-			echo "[tune_dnabert.sh] TUNE_TARGETS must contain donor and/or acceptor." >&2
-			return 1
-		fi
-		resolved+=("${target}")
-	done
-
-	if [[ ${#resolved[@]} -eq 0 ]]; then
-		echo "[tune_dnabert.sh] no valid tuning targets configured." >&2
-		return 1
-	fi
-
-	printf '%s\n' "${resolved[@]}"
+	intronmodel_resolve_tune_targets "$1" "tune_dnabert.sh"
 }
 
 resolve_python_bin() {
-	if command -v python3 >/dev/null 2>&1; then
-		printf '%s\n' "python3"
-		return 0
-	fi
-	if command -v python >/dev/null 2>&1; then
-		printf '%s\n' "python"
-		return 0
-	fi
-	echo "[tune_dnabert.sh] python interpreter not found (python3/python)." >&2
-	return 1
+	intronmodel_resolve_python_bin "tune_dnabert.sh"
 }
 
 resolve_dnabert_model() {
@@ -304,6 +220,7 @@ resolve_search_space_file() {
 	local project_root="$2"
 	local species="$3"
 	local target="$4"
+	local model_name="$5"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -314,13 +231,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/dnabert/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${model_name}/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/dnabert/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -353,17 +270,19 @@ estimate_trials_for_budget() {
 	local data_root="$2"
 	local species="$3"
 	local target="$4"
-	local budget_minutes="$5"
-	local top_k="$6"
-	local quick_epochs="$7"
-	local full_epochs="$8"
-	local min_quick_trials="$9"
-	local fallback_quick_sec="${10}"
+	local model_name="$5"
+	local budget_minutes="$6"
+	local top_k="$7"
+	local quick_epochs="$8"
+	local full_epochs="$9"
+	local min_quick_trials="${10}"
+	local fallback_quick_sec="${11}"
 
 	"${python_bin}" - \
 		"${data_root}" \
 		"${species}" \
 		"${target}" \
+		"${model_name}" \
 		"${budget_minutes}" \
 		"${top_k}" \
 		"${quick_epochs}" \
@@ -421,12 +340,13 @@ def mean_duration_full(path_pattern: Path) -> tuple[float | None, int]:
 data_root = Path(sys.argv[1])
 species = sys.argv[2]
 target = sys.argv[3]
-budget_minutes = int(sys.argv[4])
-top_k = int(sys.argv[5])
-quick_epochs = int(sys.argv[6])
-full_epochs = int(sys.argv[7])
-min_quick_trials = int(sys.argv[8])
-fallback_quick_sec = float(sys.argv[9])
+model_name = sys.argv[4]
+budget_minutes = int(sys.argv[5])
+top_k = int(sys.argv[6])
+quick_epochs = int(sys.argv[7])
+full_epochs = int(sys.argv[8])
+min_quick_trials = int(sys.argv[9])
+fallback_quick_sec = float(sys.argv[10])
 
 if budget_minutes <= 0:
     raise ValueError("budget_minutes must be > 0")
@@ -441,7 +361,7 @@ if min_quick_trials <= 0:
 if not math.isfinite(fallback_quick_sec) or fallback_quick_sec <= 0.0:
     raise ValueError("fallback_quick_sec must be > 0")
 
-target_root = data_root / species / "tuning" / "dnabert" / target
+target_root = data_root / species / "tuning" / model_name / target
 quick_mean, quick_hist_n = mean_duration(target_root)
 if quick_mean is None:
     quick_mean = fallback_quick_sec
@@ -479,6 +399,7 @@ resolve_dnabert_model \
 	"${MODEL_ROOT}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+TUNING_MODEL_NAME="${MODEL_NAME}"
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
 	exit 1
@@ -556,15 +477,15 @@ echo "[tune_dnabert.sh] targets=${TARGET_LIST[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
-	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/dnabert/${TARGET}/${RUN_TIMESTAMP}"
-	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/dnabert/${TARGET}/best_config.json"
+	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
+	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
 			"tune_dnabert.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"dnabert" \
+			"${TUNING_MODEL_NAME}" \
 			"${SPECIES}" \
 			"${TARGET}" \
 			"${GLOBAL_BEST_CONFIG_PATH}" \
@@ -604,6 +525,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
 				"${DATA_ROOT}" \
 				"${SPECIES}" \
 				"${TARGET}" \
+				"${TUNING_MODEL_NAME}" \
 				"${TARGET_BUDGET_MINUTES}" \
 				"${TOP_K}" \
 				"${QUICK_EPOCHS}" \
@@ -636,7 +558,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
 			"${SEARCH_SPACE_FILE}" \
 			"${PROJECT_ROOT}" \
 			"${SPECIES}" \
-			"${TARGET}"
+			"${TARGET}" \
+			"${TUNING_MODEL_NAME}"
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(

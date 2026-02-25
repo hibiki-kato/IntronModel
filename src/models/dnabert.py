@@ -7,14 +7,25 @@ pipeline contract used by ``run_model.py``.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import random
 import shutil
 import sys
-from typing import ContextManager, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    ContextManager,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import torch
@@ -33,6 +44,32 @@ from util.data_proc import (
     validate_window_args,
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
+from util.model_task_paths import (
+    resolve_required_checkpoint_paths,
+    resolve_tasks_to_train,
+    resolve_train_target,
+)
+from util.model_runtime import (
+    bool_from_flag as _bool_from_flag,
+    configure_torch_compile_runtime as _configure_torch_compile_runtime,
+    configure_triton_tool_paths as _configure_triton_tool_paths,
+    empty_device_cache as _empty_device_cache,
+    export_model_state_dict as _export_model_state_dict,
+    fallback_average_precision as _fallback_average_precision,
+    fallback_roc_auc as _fallback_roc_auc,
+    is_compile_runtime_error as _is_compile_runtime_error,
+    is_cuda_oom_error as _is_cuda_oom_error,
+    is_mps_oom_error as _is_mps_oom_error,
+    normalize_checkpoint_state_dict as _normalize_checkpoint_state_dict,
+    pick_device,
+    resolve_amp_dtype as _resolve_amp_dtype,
+    resolve_compile_enabled as _resolve_compile_enabled,
+    resolve_mps_max_batch_size,
+    resolve_num_workers as _resolve_num_workers,
+    seed_worker as _seed_worker,
+    set_seed,
+    sigmoid_np,
+)
 from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
@@ -51,8 +88,31 @@ except ImportError:  # pragma: no cover
     AutoModel = None
     AutoTokenizer = None
 
+
+@contextmanager
+def _quiet_transformers_loading() -> Iterator[None]:
+    """Suppress Hugging Face weight-loading INFO messages temporarily.
+
+    Raises the ``transformers`` logger level to ERROR for the duration of
+    the block, then restores the previous level.  This suppresses the
+    verbose "loading weights", "unexpected keys", and "missing keys"
+    lines that ``from_pretrained`` emits at INFO level.
+    """
+    hf_logger = logging.getLogger("transformers")
+    prev_level = hf_logger.level
+    hf_logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        hf_logger.setLevel(prev_level)
+
+
 DEFAULT_MPS_MAX_BATCH_SIZE: int = 1024
 DEFAULT_PRETRAINED_MODEL_NAME: str = "zhihan1996/DNABERT-2-117M"
+DNA_BASE_SET: frozenset[str] = frozenset({"A", "C", "G", "T"})
+SPECIAL_TOKENS: frozenset[str] = frozenset(
+    {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"}
+)
 
 
 def _require_transformers() -> None:
@@ -64,331 +124,12 @@ def _require_transformers() -> None:
         )
 
 
-def _binary_clf_curve(
-    labels: np.ndarray,
-    scores: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute cumulative false/true positives at each score threshold.
-
-    Complexity:
-        O(n log n) time and O(n) additional memory.
-    """
-    if labels.ndim != 1 or scores.ndim != 1:
-        raise ValueError("labels and scores must be 1-D arrays.")
-    if labels.shape[0] != scores.shape[0]:
-        raise ValueError("labels and scores must have the same length.")
-    if labels.size == 0:
-        raise ValueError("labels and scores must be non-empty.")
-
-    order = np.argsort(-scores, kind="mergesort")
-    labels_sorted = labels[order].astype(np.int64, copy=False)
-    scores_sorted = scores[order]
-
-    distinct_indices = np.where(np.diff(scores_sorted))[0]
-    threshold_indices = np.r_[distinct_indices, labels_sorted.size - 1]
-
-    true_positives = np.cumsum(labels_sorted)[threshold_indices]
-    false_positives = (threshold_indices + 1) - true_positives
-
-    return (
-        false_positives.astype(np.float64, copy=False),
-        true_positives.astype(np.float64, copy=False),
-    )
-
-
-def _fallback_average_precision(
-    labels: np.ndarray,
-    probs: np.ndarray,
-) -> float:
-    """Compute binary average precision without scikit-learn.
-
-    Complexity:
-        O(n log n) time and O(n) memory.
-    """
-    positives = float(np.sum(labels == 1))
-    if positives <= 0.0:
-        raise ValueError("At least one positive label is required.")
-
-    false_positives, true_positives = _binary_clf_curve(labels, probs)
-    precision = true_positives / np.maximum(true_positives + false_positives, 1.0)
-    recall = true_positives / positives
-
-    precision = np.r_[1.0, precision]
-    recall = np.r_[0.0, recall]
-    return float(np.sum((recall[1:] - recall[:-1]) * precision[1:]))
-
-
-def _fallback_roc_auc(labels: np.ndarray, probs: np.ndarray) -> float:
-    """Compute binary ROC-AUC without scikit-learn.
-
-    Complexity:
-        O(n log n) time and O(n) memory.
-    """
-    positives = float(np.sum(labels == 1))
-    negatives = float(np.sum(labels == 0))
-    if positives <= 0.0 or negatives <= 0.0:
-        raise ValueError("Both positive and negative labels are required.")
-
-    false_positives, true_positives = _binary_clf_curve(labels, probs)
-    fpr = np.r_[0.0, false_positives / negatives, 1.0]
-    tpr = np.r_[0.0, true_positives / positives, 1.0]
-    return float(np.trapezoid(tpr, fpr))
-
-
-def _bool_from_flag(flag: Union[bool, int]) -> bool:
-    """Convert integer/boolean flags from CLI to a strict bool."""
-    if isinstance(flag, bool):
-        return flag
-    return int(flag) != 0
-
-
-def _resolve_num_workers(raw: Union[str, int], device: str) -> int:
-    """Resolve DataLoader worker count from int or ``auto``."""
-    if isinstance(raw, int):
-        if raw < 0:
-            raise ValueError("--num_workers must be >= 0.")
-        return raw
-
-    text = str(raw).strip().lower()
-    if text == "auto":
-        if device != "cuda":
-            return 0
-        cpu_count = os.cpu_count() or 4
-        return max(0, cpu_count // 2)
-    try:
-        parsed = int(text)
-    except ValueError as exc:
-        raise ValueError("--num_workers must be an integer or 'auto'.") from exc
-    if parsed < 0:
-        raise ValueError("--num_workers must be >= 0.")
-    return parsed
-
-
-def _resolve_amp_dtype(name: str, device: str) -> Optional[torch.dtype]:
-    """Resolve AMP dtype from a user-facing string."""
-    if device != "cuda":
-        return None
-    lowered = name.strip().lower()
-    if lowered == "bf16":
-        return torch.bfloat16
-    if lowered == "fp16":
-        return torch.float16
-    if lowered != "auto":
-        raise ValueError("--amp_dtype must be one of: auto, bf16, fp16.")
-    if torch.cuda.is_bf16_supported():
-        return torch.bfloat16
-    return torch.float16
-
-
-def _resolve_compile_enabled(
-    compile_mode: str,
-    compile_flag: bool,
-    quick_phase: bool,
-    device: str,
-    epochs: int,
-) -> bool:
-    """Resolve final torch.compile usage policy."""
-    if device != "cuda":
-        return False
-    if compile_flag:
-        return True
-    mode = compile_mode.strip().lower()
-    if mode == "on":
-        return True
-    if mode == "off":
-        return False
-    if mode != "auto":
-        raise ValueError("--compile_mode must be one of: off, on, auto.")
-    if quick_phase:
-        return False
-    if epochs < 10:
-        return False
-    ptxas_env = os.environ.get("TRITON_PTXAS_PATH")
-    ptxas_blackwell_env = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
-    if ptxas_env or ptxas_blackwell_env:
-        return True
-    return shutil.which("ptxas") is not None
-
-
-def _configure_triton_tool_paths() -> None:
-    """Configure Triton tool paths for ``torch.compile`` stability."""
-    ptxas_path = shutil.which("ptxas")
-    if ptxas_path is None:
-        return
-    if "TRITON_PTXAS_PATH" not in os.environ:
-        os.environ["TRITON_PTXAS_PATH"] = ptxas_path
-    if "TRITON_PTXAS_BLACKWELL_PATH" not in os.environ:
-        os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_path
-
-
-def _configure_torch_compile_runtime() -> None:
-    """Apply conservative torch.compile runtime settings for stability."""
-    dynamo_module = getattr(torch, "_dynamo", None)
-    if dynamo_module is None:
-        return
-    config_obj = getattr(dynamo_module, "config", None)
-    if config_obj is None:
-        return
-    capture_scalar_outputs = getattr(config_obj, "capture_scalar_outputs", None)
-    if isinstance(capture_scalar_outputs, bool) and not capture_scalar_outputs:
-        setattr(config_obj, "capture_scalar_outputs", True)
-    if "TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS" not in os.environ:
-        os.environ["TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS"] = "1"
-
-
-def _is_cuda_oom_error(exc: RuntimeError) -> bool:
-    """Return whether a runtime error is likely a CUDA OOM error."""
-    message = str(exc).lower()
-    keywords = (
-        "out of memory",
-        "cuda error: out of memory",
-        "cudnn_status_alloc_failed",
-    )
-    return any(keyword in message for keyword in keywords)
-
-
-def _is_mps_oom_error(exc: RuntimeError) -> bool:
-    """Return whether a runtime error is likely an MPS OOM error."""
-    message = str(exc).lower()
-    keywords = (
-        "mps backend out of memory",
-        "out of memory (mps)",
-        "out of memory on mps",
-        "metal out of memory",
-    )
-    return any(keyword in message for keyword in keywords)
-
-
-def _empty_device_cache(device: str) -> None:
-    """Best-effort cache cleanup for the given device."""
-    if device == "cuda" and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        return
-    if device != "mps":
-        return
-    mps_module = getattr(torch, "mps", None)
-    if mps_module is None:
-        return
-    empty_cache_fn = getattr(mps_module, "empty_cache", None)
-    if callable(empty_cache_fn):
-        empty_cache_fn()
-
-
 def _resolve_mps_max_batch_size() -> int:
     """Resolve MPS batch-size cap from env with a safe default."""
-    raw = os.environ.get("INTRONMODEL_MPS_MAX_BATCH_SIZE")
-    if raw is None or raw.strip() == "":
-        return DEFAULT_MPS_MAX_BATCH_SIZE
-    try:
-        parsed = int(raw)
-    except ValueError:
-        print(
-            "[dnabert] invalid INTRONMODEL_MPS_MAX_BATCH_SIZE. "
-            f"Use default {DEFAULT_MPS_MAX_BATCH_SIZE}.",
-        )
-        return DEFAULT_MPS_MAX_BATCH_SIZE
-    if parsed <= 0:
-        print(
-            "[dnabert] non-positive INTRONMODEL_MPS_MAX_BATCH_SIZE. "
-            f"Use default {DEFAULT_MPS_MAX_BATCH_SIZE}.",
-        )
-        return DEFAULT_MPS_MAX_BATCH_SIZE
-    return parsed
-
-
-def _is_compile_runtime_error(exc: Exception) -> bool:
-    """Return whether a runtime error is likely from ``torch.compile``."""
-    diagnostic = f"{type(exc).__module__}.{type(exc).__name__}: {exc}".lower()
-    keywords = (
-        "inductorerror",
-        "torch._inductor",
-        "torch._dynamo",
-        "torchdynamo",
-        "triton",
-        "ptxas",
-        "backend_hash",
-        "cannot copy out of meta tensor",
-        "meta tensor",
+    return resolve_mps_max_batch_size(
+        model_tag="dnabert",
+        default_batch_size=DEFAULT_MPS_MAX_BATCH_SIZE,
     )
-    return any(keyword in diagnostic for keyword in keywords)
-
-
-def _export_model_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Export model parameters in a stable, non-compiled key format."""
-    original_model = getattr(model, "_orig_mod", None)
-    if isinstance(original_model, nn.Module):
-        return dict(original_model.state_dict())
-    return dict(model.state_dict())
-
-
-def _normalize_checkpoint_state_dict(
-    raw_state_dict: Mapping[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    """Normalize legacy/compiled checkpoint keys for plain model loading."""
-    compiled_prefix = "_orig_mod."
-    normalized: dict[str, torch.Tensor] = {}
-    for key, value in raw_state_dict.items():
-        if not key.startswith(compiled_prefix):
-            normalized[key] = value
-    for key, value in raw_state_dict.items():
-        if key.startswith(compiled_prefix):
-            stripped_key = key[len(compiled_prefix) :]
-            normalized.setdefault(stripped_key, value)
-    return normalized
-
-
-def set_seed(
-    seed: int = 1337,
-    deterministic: bool = True,
-    cudnn_benchmark: bool = False,
-    allow_tf32: bool = False,
-) -> None:
-    """Set random seeds and backend runtime flags."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    if hasattr(torch, "use_deterministic_algorithms"):
-        torch.use_deterministic_algorithms(deterministic, warn_only=True)
-    if hasattr(torch.backends, "cudnn"):
-        torch.backends.cudnn.deterministic = deterministic
-        torch.backends.cudnn.benchmark = cudnn_benchmark and (not deterministic)
-        torch.backends.cudnn.allow_tf32 = allow_tf32
-    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
-        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
-
-
-def _seed_worker(worker_id: int) -> None:
-    """Seed dataloader worker-local RNG states."""
-    del worker_id
-    worker_seed = torch.initial_seed() % (2**32)
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
-def pick_device(preference: str = "auto") -> str:
-    """Resolve runtime device preference."""
-    if preference != "auto":
-        return preference
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-def sigmoid_np(x: np.ndarray) -> np.ndarray:
-    """Compute sigmoid values with numerically stable branches."""
-    logits = np.asarray(x, dtype=np.float64)
-    clipped = np.clip(logits, -500.0, 500.0)
-    out = np.empty_like(clipped, dtype=np.float64)
-    positive_mask = clipped >= 0.0
-    out[positive_mask] = 1.0 / (1.0 + np.exp(-clipped[positive_mask]))
-    negative_logits = clipped[~positive_mask]
-    exp_values = np.exp(negative_logits)
-    out[~positive_mask] = exp_values / (1.0 + exp_values)
-    return out.astype(np.float32, copy=False)
 
 
 def _normalize_revision(revision: str) -> Optional[str]:
@@ -508,19 +249,99 @@ def _resolve_tokenizer_max_length(tokenizer: object) -> Optional[int]:
     return None
 
 
+def _extract_tokenizer_vocab(tokenizer: object) -> dict[str, int]:
+    """Extract tokenizer vocabulary as a ``dict[str, int]``."""
+    get_vocab_fn = getattr(tokenizer, "get_vocab", None)
+    if callable(get_vocab_fn):
+        raw_vocab = get_vocab_fn()
+        if isinstance(raw_vocab, Mapping):
+            normalized: dict[str, int] = {}
+            for key, value in raw_vocab.items():
+                if isinstance(key, str) and isinstance(value, int):
+                    normalized[key] = value
+            return normalized
+
+    raw_vocab_obj = getattr(tokenizer, "vocab", None)
+    if isinstance(raw_vocab_obj, Mapping):
+        normalized = {}
+        for key, value in raw_vocab_obj.items():
+            if isinstance(key, str) and isinstance(value, int):
+                normalized[key] = value
+        return normalized
+    return {}
+
+
+def _infer_fixed_kmer_from_vocab(vocab: Mapping[str, int]) -> Optional[int]:
+    """Infer fixed k-mer length from vocabulary if it exists."""
+    dna_tokens = [
+        token
+        for token in vocab.keys()
+        if token not in SPECIAL_TOKENS and set(token).issubset(DNA_BASE_SET)
+    ]
+    if not dna_tokens:
+        return None
+    length_set = {len(token) for token in dna_tokens}
+    if len(length_set) != 1:
+        return None
+    kmer_k = next(iter(length_set))
+    if kmer_k <= 1:
+        return None
+    if len(dna_tokens) < (4**kmer_k):
+        return None
+    return kmer_k
+
+
+def _resolve_tokenizer_input_kmer(tokenizer: object) -> Optional[int]:
+    """Resolve sequence preprocessing k-mer from tokenizer metadata."""
+    vocab = _extract_tokenizer_vocab(tokenizer)
+    return _infer_fixed_kmer_from_vocab(vocab)
+
+
+def _to_kmer_text(sequence: str, kmer_k: int) -> str:
+    """Convert one DNA sequence to overlapping k-mer text."""
+    if kmer_k <= 0:
+        raise ValueError("kmer_k must be positive.")
+    normalized = sequence.strip().upper()
+    if len(normalized) < kmer_k:
+        return normalized
+    kmers = (
+        normalized[start : start + kmer_k]
+        for start in range(0, len(normalized) - kmer_k + 1)
+    )
+    return " ".join(kmers)
+
+
+def _prepare_sequences_for_tokenizer(
+    sequences: Sequence[str],
+    input_kmer: Optional[int],
+) -> list[str]:
+    """Prepare sequences for tokenizer input based on k-mer strategy."""
+    if input_kmer is None:
+        return [sequence.upper() for sequence in sequences]
+    return [_to_kmer_text(sequence, input_kmer) for sequence in sequences]
+
+
 def _resolve_max_tokens(
     raw: Union[str, int],
     window_len: int,
     tokenizer_limit: Optional[int],
+    input_kmer: Optional[int],
 ) -> int:
     """Resolve max token length from ``auto`` or integer input.
 
-    ``auto`` uses ``window_len + 2`` for special tokens.
+    ``auto`` uses ``window_len + 2`` for raw sequence input and
+    ``(window_len - k + 1) + 2`` for fixed k-mer preprocessing.
     """
     if window_len <= 0:
         raise ValueError("window_len must be positive.")
+    if input_kmer is not None and input_kmer <= 0:
+        raise ValueError("input_kmer must be positive when provided.")
 
-    auto_tokens = max(8, window_len + 2)
+    if input_kmer is None:
+        auto_tokens = max(8, window_len + 2)
+    else:
+        effective_token_count = max(1, window_len - input_kmer + 1)
+        auto_tokens = max(8, effective_token_count + 2)
     if isinstance(raw, int):
         resolved = raw
     else:
@@ -550,14 +371,19 @@ def _tokenize_sequences(
     tokenizer: object,
     sequences: Sequence[str],
     max_tokens: int,
+    input_kmer: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Tokenize a batch of DNA sequences to input ids and attention masks."""
     call_fn = getattr(tokenizer, "__call__", None)
     if not callable(call_fn):
         raise TypeError("Tokenizer object is not callable.")
 
+    prepared_sequences = _prepare_sequences_for_tokenizer(
+        sequences=sequences,
+        input_kmer=input_kmer,
+    )
     encoded_obj = call_fn(
-        list(sequences),
+        prepared_sequences,
         padding="max_length",
         truncation=True,
         max_length=max_tokens,
@@ -655,6 +481,8 @@ class DnaBertTokenDataset(Dataset):
         Hugging Face tokenizer instance.
     max_tokens : int
         Padded token length.
+    input_kmer : int | None
+        Fixed k-mer preprocessing length.
     pretokenize : bool, default=False
         If ``True``, pre-encode all records at initialization.
     """
@@ -664,11 +492,13 @@ class DnaBertTokenDataset(Dataset):
         examples: Sequence[Tuple[str, int]],
         tokenizer: object,
         max_tokens: int,
+        input_kmer: Optional[int],
         pretokenize: bool = False,
     ) -> None:
         self.examples: list[Tuple[str, int]] = list(examples)
         self.tokenizer: object = tokenizer
         self.max_tokens: int = max_tokens
+        self.input_kmer: Optional[int] = input_kmer
         self.pretokenize: bool = pretokenize
         self._cached_ids: Optional[torch.Tensor]
         self._cached_masks: Optional[torch.Tensor]
@@ -681,6 +511,7 @@ class DnaBertTokenDataset(Dataset):
                 tokenizer=self.tokenizer,
                 sequences=sequences,
                 max_tokens=self.max_tokens,
+                input_kmer=self.input_kmer,
             )
             self._cached_ids = input_ids
             self._cached_masks = attention_masks
@@ -713,6 +544,7 @@ class DnaBertTokenDataset(Dataset):
             tokenizer=self.tokenizer,
             sequences=[sequence],
             max_tokens=self.max_tokens,
+            input_kmer=self.input_kmer,
         )
         return (
             input_ids.squeeze(0),
@@ -737,9 +569,7 @@ class DnaBertBinaryClassifier(nn.Module):
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
         self.backbone = backbone
-        self.head_norm = (
-            nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
-        )
+        self.head_norm = nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_size, 1)
 
@@ -874,10 +704,11 @@ def _build_dnabert_model(
         }
     )
     try:
-        backbone = AutoModel.from_pretrained(
-            resolved_pretrained_model_name,
-            **model_kwargs,
-        )
+        with _quiet_transformers_loading():
+            backbone = AutoModel.from_pretrained(
+                resolved_pretrained_model_name,
+                **model_kwargs,
+            )
     except ImportError as exc:
         message = str(exc)
         if "einops" in message:
@@ -1318,11 +1149,17 @@ def train_task_model(
         pretrained_revision=revision,
         trust_remote_code=trust_remote_code_bool,
     )
+    resolved_input_kmer = _resolve_tokenizer_input_kmer(tokenizer)
+    input_mode_text = (
+        f"{resolved_input_kmer}-mer" if resolved_input_kmer is not None else "raw"
+    )
+    print(f"[{task}] tokenizer_input_mode={input_mode_text}")
     tokenizer_limit = _resolve_tokenizer_max_length(tokenizer)
     max_tokens_effective = _resolve_max_tokens(
         raw=max_tokens,
         window_len=window_len,
         tokenizer_limit=tokenizer_limit,
+        input_kmer=resolved_input_kmer,
     )
 
     pretokenize_dataset = True
@@ -1330,12 +1167,14 @@ def train_task_model(
         examples=train_ex,
         tokenizer=tokenizer,
         max_tokens=max_tokens_effective,
+        input_kmer=resolved_input_kmer,
         pretokenize=pretokenize_dataset,
     )
     val_ds = DnaBertTokenDataset(
         examples=val_ex,
         tokenizer=tokenizer,
         max_tokens=max_tokens_effective,
+        input_kmer=resolved_input_kmer,
         pretokenize=pretokenize_dataset,
     )
 
@@ -1427,24 +1266,18 @@ def train_task_model(
                 model_state_obj = ckpt.get("model_state")
                 if not isinstance(model_state_obj, dict):
                     raise ValueError(
-                        "Init checkpoint missing model_state: "
-                        f"{init_checkpoint_path}"
+                        f"Init checkpoint missing model_state: {init_checkpoint_path}"
                     )
                 normalized_state = _normalize_checkpoint_state_dict(model_state_obj)
                 model.load_state_dict(normalized_state)
                 initialized_from_checkpoint = True
-                print(
-                    f"[{task}] initialized from checkpoint: "
-                    f"{init_checkpoint_path}"
-                )
+                print(f"[{task}] initialized from checkpoint: {init_checkpoint_path}")
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, "
@@ -1620,6 +1453,7 @@ def train_task_model(
                                 "pretrained_revision": revision,
                                 "trust_remote_code": trust_remote_code_bool,
                                 "max_tokens": max_tokens_effective,
+                                "input_kmer": resolved_input_kmer,
                                 "dropout": dropout,
                                 "head_layer_norm": head_layer_norm_bool,
                             },
@@ -1647,10 +1481,7 @@ def train_task_model(
                 )
 
                 should_log = (
-                    epoch == 1
-                    or epoch == epochs
-                    or epoch % log_every == 0
-                    or improved
+                    epoch == 1 or epoch == epochs or epoch % log_every == 0 or improved
                 )
                 if should_log:
                     mark = "*" if improved else "-"
@@ -1660,7 +1491,10 @@ def train_task_model(
                         f"best={best_score:.4f} (ep {best_epoch})"
                     )
 
-                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                if (
+                    early_stop_patience > 0
+                    and epochs_since_improvement >= early_stop_patience
+                ):
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
@@ -1700,6 +1534,7 @@ def train_task_model(
                 "pretrained_revision": revision,
                 "trust_remote_code": trust_remote_code_bool,
                 "max_tokens": max_tokens_effective,
+                "input_kmer": resolved_input_kmer,
                 "dropout": dropout,
                 "head_layer_norm": head_layer_norm_bool,
                 "weight_decay": weight_decay,
@@ -1732,8 +1567,7 @@ def train_task_model(
             }
         except (RuntimeError, NotImplementedError) as exc:
             is_compile_failure = compile_enabled_attempt and (
-                isinstance(exc, NotImplementedError)
-                or _is_compile_runtime_error(exc)
+                isinstance(exc, NotImplementedError) or _is_compile_runtime_error(exc)
             )
             if is_compile_failure:
                 compile_enabled = False
@@ -1844,9 +1678,7 @@ def load_task_model(
     pretrained_model_name = str(pretrained_model_name_obj)
     pretrained_revision_obj = model_config.get("pretrained_revision", "")
     pretrained_revision_raw = (
-        ""
-        if pretrained_revision_obj is None
-        else str(pretrained_revision_obj)
+        "" if pretrained_revision_obj is None else str(pretrained_revision_obj)
     )
     pretrained_revision = _normalize_revision(pretrained_revision_raw)
     trust_remote_code_raw = model_config.get("trust_remote_code", True)
@@ -1856,6 +1688,23 @@ def load_task_model(
         else True
     )
     max_tokens = _int_from_checkpoint(model_config, "max_tokens", 128)
+    input_kmer_raw = model_config.get("input_kmer")
+    if isinstance(input_kmer_raw, bool):
+        input_kmer = None
+    elif isinstance(input_kmer_raw, int):
+        input_kmer = input_kmer_raw if input_kmer_raw > 0 else None
+    elif isinstance(input_kmer_raw, float) and input_kmer_raw.is_integer():
+        parsed_kmer = int(input_kmer_raw)
+        input_kmer = parsed_kmer if parsed_kmer > 0 else None
+    elif isinstance(input_kmer_raw, str) and input_kmer_raw.strip():
+        try:
+            parsed_kmer = int(input_kmer_raw.strip())
+        except ValueError:
+            input_kmer = None
+        else:
+            input_kmer = parsed_kmer if parsed_kmer > 0 else None
+    else:
+        input_kmer = None
     dropout = _float_from_checkpoint(model_config, "dropout", 0.1)
     if "head_layer_norm" not in model_config:
         raise ValueError(
@@ -1893,6 +1742,7 @@ def load_task_model(
         "pretrained_revision": pretrained_revision,
         "trust_remote_code": trust_remote_code,
         "max_tokens": max_tokens,
+        "input_kmer": input_kmer,
         "dropout": dropout,
         "head_layer_norm": head_layer_norm,
     }
@@ -1908,6 +1758,7 @@ def score_sequences(
     device: str,
     batch_size: int = 256,
     task_name: str = "task",
+    input_kmer: Optional[int] = None,
 ) -> np.ndarray:
     """Score input sequences with one trained task model."""
     if not sequences:
@@ -1926,6 +1777,7 @@ def score_sequences(
             tokenizer=tokenizer,
             sequences=batch_sequences,
             max_tokens=max_tokens,
+            input_kmer=input_kmer,
         )
         ids_tensor = ids_tensor.to(device)
         mask_tensor = mask_tensor.to(device)
@@ -1970,12 +1822,22 @@ def infer_site_scores(
 
     donor_max_tokens = _int_from_checkpoint(donor_config, "max_tokens", 128)
     acceptor_max_tokens = _int_from_checkpoint(acceptor_config, "max_tokens", 128)
+    donor_input_kmer_obj = donor_config.get("input_kmer")
+    donor_input_kmer = (
+        int(donor_input_kmer_obj)
+        if isinstance(donor_input_kmer_obj, int) and donor_input_kmer_obj > 0
+        else None
+    )
+    acceptor_input_kmer_obj = acceptor_config.get("input_kmer")
+    acceptor_input_kmer = (
+        int(acceptor_input_kmer_obj)
+        if isinstance(acceptor_input_kmer_obj, int) and acceptor_input_kmer_obj > 0
+        else None
+    )
 
     donor_seqs = [str(row["seq"]) for row in site_rows if row["site_type"] == "donor"]
     acceptor_seqs = [
-        str(row["seq"])
-        for row in site_rows
-        if row["site_type"] == "acceptor"
+        str(row["seq"]) for row in site_rows if row["site_type"] == "acceptor"
     ]
 
     donor_scores = score_sequences(
@@ -1986,6 +1848,7 @@ def infer_site_scores(
         device=device,
         batch_size=batch_size,
         task_name="donor",
+        input_kmer=donor_input_kmer,
     )
     acceptor_scores = score_sequences(
         model=acceptor_model,
@@ -1995,6 +1858,7 @@ def infer_site_scores(
         device=device,
         batch_size=batch_size,
         task_name="acceptor",
+        input_kmer=acceptor_input_kmer,
     )
 
     out_rows: List[Dict[str, object]] = []
@@ -2005,9 +1869,7 @@ def infer_site_scores(
         site_type = str(row["site_type"])
         if site_type == "donor":
             score = (
-                float(donor_scores[donor_idx])
-                if donor_idx < len(donor_scores)
-                else 0.0
+                float(donor_scores[donor_idx]) if donor_idx < len(donor_scores) else 0.0
             )
             donor_idx += 1
         else:
@@ -2087,7 +1949,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max_tokens",
         default="auto",
-        help="Max token length. Use integer or auto (window_len + 2).",
+        help=(
+            "Max token length. Use integer or auto. Auto follows tokenizer input "
+            "mode (raw: window_len + 2, fixed k-mer: window_len - k + 3)."
+        ),
     )
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument(
@@ -2330,20 +2195,13 @@ def train(
     donor_window_len = donor_len if donor_len is not None else 50
     acceptor_window_len = acceptor_len if acceptor_len is not None else 50
 
-    donor_checkpoint_path = str(
-        getattr(common_args, "donor_checkpoint_path", "")
-    ).strip()
-    acceptor_checkpoint_path = str(
-        getattr(common_args, "acceptor_checkpoint_path", "")
-    ).strip()
-    if not donor_checkpoint_path:
-        raise ValueError("Missing donor checkpoint path in common_args.")
-    if not acceptor_checkpoint_path:
-        raise ValueError("Missing acceptor checkpoint path in common_args.")
-
-    train_target = str(getattr(model_args, "train_target", "both")).strip().lower()
-    if train_target not in {"both", "donor", "acceptor"}:
-        raise ValueError("--train_target must be one of: both, donor, acceptor.")
+    task_checkpoint_paths = resolve_required_checkpoint_paths(
+        common_args,
+        require_exists=False,
+    )
+    donor_checkpoint_path = task_checkpoint_paths["donor"]
+    acceptor_checkpoint_path = task_checkpoint_paths["acceptor"]
+    train_target = resolve_train_target(model_args)
 
     resolved_epochs, epochs_auto = resolve_training_epoch_budget(
         epochs_arg=model_args.epochs,
@@ -2355,14 +2213,7 @@ def train(
     )
     effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
-    tasks_to_train = (
-        ["donor", "acceptor"] if train_target == "both" else [train_target]
-    )
-
-    task_checkpoint_paths = {
-        "donor": donor_checkpoint_path,
-        "acceptor": acceptor_checkpoint_path,
-    }
+    tasks_to_train = resolve_tasks_to_train(train_target)
     donor_init_checkpoint_path = str(
         getattr(common_args, "donor_init_checkpoint_path", "")
     ).strip()
@@ -2560,18 +2411,12 @@ def infer_site(
     )
 
     test_tsv = resolve_test_tsv(common_args.species, common_args.test_tsv)
-    donor_model_path = str(getattr(common_args, "donor_checkpoint_path", "")).strip()
-    acceptor_model_path = str(
-        getattr(common_args, "acceptor_checkpoint_path", "")
-    ).strip()
-    if not donor_model_path:
-        raise ValueError("Missing donor checkpoint path in common_args.")
-    if not acceptor_model_path:
-        raise ValueError("Missing acceptor checkpoint path in common_args.")
-    if not os.path.exists(donor_model_path):
-        raise FileNotFoundError(f"Donor checkpoint not found: {donor_model_path}")
-    if not os.path.exists(acceptor_model_path):
-        raise FileNotFoundError(f"Acceptor checkpoint not found: {acceptor_model_path}")
+    task_checkpoint_paths = resolve_required_checkpoint_paths(
+        common_args,
+        require_exists=True,
+    )
+    donor_model_path = task_checkpoint_paths["donor"]
+    acceptor_model_path = task_checkpoint_paths["acceptor"]
 
     site_rows, skipped_short = read_test_site_rows(
         test_tsv=test_tsv,

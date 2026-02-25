@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[bert.sh] This script is config-only. Edit top CONFIG and run without args." >&2
+	echo "[dnabert.sh] This script is config-only. Edit top CONFIG and run without args." >&2
 	exit 1
 fi
 
@@ -12,24 +12,38 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced per-task overrides are kept below.
 set -a
-MODEL="bert"
+DNABERT_VARIANT="6"
 SPECIES="Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
-EPOCHS="auto"
+PRETRAINED_MODEL_NAME=""
+PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
+PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
+PRETRAINED_REVISION=""
+TRUST_REMOTE_CODE="1"
+
+INTRON_SCORE_OP="*"
+TRANSCRIPT_SCORE_AGG="min"
+SOFTMIN_TAU="1.0"
+SEED="1337"
+NAME_FIELDS=""
+VISUALIZE="true"
+SKIP_TRAINING="0"
+CONTINUE_TRAINING="0"
+TRAIN_ONLY="0"
+PRECOMPUTED_SITE_SCORE_TSV=""
+CHECKPOINT_TOP_K="3"
+CHECKPOINT_PRUNE_DRY_RUN="0"
+
+EPOCHS="6"
 MAX_EPOCHS="100"
 EARLY_STOP_PATIENCE="12"
 EARLY_STOP_MIN_DELTA="0.0"
-BATCH_SIZE="256"
-LR="2e-4"
+BATCH_SIZE="64"
+LR="2e-5"
 LOSS="weighted_bce"
-KMER_K="3"
 MAX_TOKENS="auto"
-D_MODEL="128"
-N_HEADS="4"
-N_LAYERS="4"
-FF_MULT="4"
 DROPOUT="0.1"
 WEIGHT_DECAY="0.01"
 ETA_MIN_RATIO="0.01"
@@ -47,37 +61,14 @@ DONOR_TUNED_CONFIG_PATH=""
 ACCEPTOR_TUNED_CONFIG_PATH=""
 SHARED_TUNED_CONFIG_PATH=""
 
-INTRON_SCORE_OP="*"
-TRANSCRIPT_SCORE_AGG="min"
-SOFTMIN_TAU="1.0"
-SEED="1337"
-NAME_FIELDS=""
-VISUALIZE="true"
-SKIP_TRAINING="0"
-CONTINUE_TRAINING="1"
-TRAIN_ONLY="0"
-PRECOMPUTED_SITE_SCORE_TSV=""
-CHECKPOINT_TOP_K="3"
-CHECKPOINT_PRUNE_DRY_RUN="0"
-
 DONOR_BATCH_SIZE=""
 ACCEPTOR_BATCH_SIZE=""
 DONOR_LR=""
 ACCEPTOR_LR=""
 DONOR_LOSS=""
 ACCEPTOR_LOSS=""
-DONOR_KMER_K=""
-ACCEPTOR_KMER_K=""
 DONOR_MAX_TOKENS=""
 ACCEPTOR_MAX_TOKENS=""
-DONOR_D_MODEL=""
-ACCEPTOR_D_MODEL=""
-DONOR_N_HEADS=""
-ACCEPTOR_N_HEADS=""
-DONOR_N_LAYERS=""
-ACCEPTOR_N_LAYERS=""
-DONOR_FF_MULT=""
-ACCEPTOR_FF_MULT=""
 DONOR_DROPOUT=""
 ACCEPTOR_DROPOUT=""
 DONOR_WEIGHT_DECAY=""
@@ -114,7 +105,7 @@ PERSISTENT_WORKERS="1"
 PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="8"
-MPS_MAX_BATCH_SIZE="2048"
+MPS_MAX_BATCH_SIZE="1024"
 
 
 
@@ -123,51 +114,52 @@ set +a
 # --------------------------
 # Runtime implementation
 # --------------------------
-# Ensure conda is available in non-interactive shells.
-if command -v conda >/dev/null 2>&1; then
-	CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-	if [[ -n "${CONDA_BASE}" && -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
-		# shellcheck source=/dev/null
-		source "${CONDA_BASE}/etc/profile.d/conda.sh"
-	fi
-fi
-
-conda activate intronmodel
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/common.sh"
+intronmodel_activate_conda "intronmodel"
+intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
-# shellcheck source=/dev/null
-source "${PROJECT_ROOT}/run/_auto_tmux.sh"
-intronmodel_auto_tmux "$0" "${BASH_SOURCE[0]##*/}"
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
-format_elapsed() {
-	local total_seconds="$1"
-	local hours=$((total_seconds / 3600))
-	local minutes=$(((total_seconds % 3600) / 60))
-	local seconds=$((total_seconds % 60))
-	printf '%02d:%02d:%02d' "${hours}" "${minutes}" "${seconds}"
+resolve_dnabert_relative_path() {
+	local variant="$1"
+	local relative_path_2="$2"
+	local relative_path_6="$3"
+
+	if [[ "${variant}" != "2" && "${variant}" != "6" ]]; then
+		echo "[dnabert.sh] DNABERT_VARIANT must be 2 or 6." >&2
+		return 1
+	fi
+
+	local resolved_path
+	if [[ "${variant}" == "2" ]]; then
+		resolved_path="${relative_path_2}"
+	else
+		resolved_path="${relative_path_6}"
+	fi
+	if [[ -z "${resolved_path}" ]]; then
+		echo "[dnabert.sh] pretrained relative path is empty for variant=${variant}." >&2
+		return 1
+	fi
+	printf '%s\n' "${resolved_path}"
 }
 
-SCRIPT_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-SCRIPT_START_SECONDS="${SECONDS}"
+intronmodel_start_timer "dnabert.sh"
+trap 'intronmodel_print_timing' EXIT
 
-print_script_timing() {
-	local exit_code="$?"
-	local script_end_epoch
-	script_end_epoch="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	local elapsed_seconds=$((SECONDS - SCRIPT_START_SECONDS))
-	local elapsed_hms
-	elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
-	echo "[bert.sh] timing: start=${SCRIPT_START_EPOCH} end=${script_end_epoch} "\
-		"elapsed=${elapsed_hms} (${elapsed_seconds}s) exit=${exit_code}"
-	return "${exit_code}"
-}
-
-trap 'print_script_timing' EXIT
+if [[ -z "${PRETRAINED_MODEL_NAME}" ]]; then
+	PRETRAINED_MODEL_RELATIVE_PATH="$(
+		resolve_dnabert_relative_path \
+			"${DNABERT_VARIANT}" \
+			"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
+			"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+	)"
+	export PRETRAINED_MODEL_RELATIVE_PATH
+fi
 
 PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
 	python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \
-		--script-name "bert.sh"
+		--script-name "dnabert.sh"

@@ -90,6 +90,11 @@ Common wrapper controls:
 - `DNABERT_VARIANT="2"` -> `--model dnabert2`
 - `DNABERT_VARIANT="6"` -> `--model dnabert6`
 
+DNABERT tokenizer input mode is selected automatically in `src/models/dnabert.py`:
+
+- `dnabert2` (DNABERT-2/BPE) keeps raw DNA sequence input.
+- `dnabert6` (fixed 6-mer vocab) is converted to overlapping 6-mer text.
+
 Training/inference wrappers follow a top-first workflow:
 
 - edit the top `CONFIG (edit here)` block first

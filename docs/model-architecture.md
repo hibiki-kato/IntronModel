@@ -197,6 +197,12 @@ Registry keys:
 `dnabert2` and `dnabert6` are aliases routed to `src/models/dnabert.py`, with
 model-specific pretrained checkpoints chosen from wrapper config.
 
+Tokenizer preprocessing is auto-resolved from tokenizer vocabulary:
+
+- variable-length vocab (DNABERT-2/BPE) -> raw DNA sequence input
+- fixed-length complete DNA k-mer vocab (for example, 6-mer) -> overlapping
+  k-mer text input
+
 Backbone hidden states $H$ from AutoModel are classified via `[CLS]`:
 
 $$
