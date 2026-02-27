@@ -43,3 +43,30 @@ def test_data_root_relative_override_is_resolved_from_project_root(
     dirs = data_proc.species_data_dirs("Athal")
 
     assert Path(dirs["base"]) == expected_root
+
+
+def test_resolve_train_paths_prefers_raw_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Infer default training .err files from species raw directory."""
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(tmp_path))
+    species_root = tmp_path / "Dmel" / "raw"
+    species_root.mkdir(parents=True, exist_ok=True)
+    (species_root / "100bp.err").write_text("DEBUG donor AAAA +\n", encoding="utf-8")
+    (species_root / "100bp.neg.err").write_text(
+        "DEBUG donor CCCC +\n",
+        encoding="utf-8",
+    )
+
+    pos_path, neg_path, inferred_len = data_proc.resolve_train_paths(
+        species="Dmel",
+        train_pos_path=None,
+        train_neg_path=None,
+        donor_len=100,
+        acceptor_len=100,
+    )
+
+    assert Path(pos_path) == species_root / "100bp.err"
+    assert Path(neg_path) == species_root / "100bp.neg.err"
+    assert inferred_len == 100

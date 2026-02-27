@@ -1946,7 +1946,7 @@ def infer_site(
     if common_args.donor_len is None and common_args.acceptor_len is None:
         try:
             _, _, inferred_train_len = infer_default_train_paths(
-                train_dir=dirs["train"],
+                train_dir=dirs["raw"],
                 donor_len=None,
                 acceptor_len=None,
             )

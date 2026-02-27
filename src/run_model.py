@@ -491,7 +491,7 @@ def _infer_window_defaults(
         dirs = species_data_dirs(species)
         try:
             _, _, inferred_train_len = infer_default_train_paths(
-                train_dir=dirs["train"],
+                train_dir=dirs["raw"],
                 donor_len=donor_len,
                 acceptor_len=acceptor_len,
             )

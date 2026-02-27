@@ -9,17 +9,10 @@ This module centralizes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
-
-LINE_PAIR_LABELED_RE = re.compile(
-    r"^DEBUG\s+donor\s+([A-Za-z]+)\s+acceptor\s+([A-Za-z]+)(?:\s+[+-])?\s*$"
-)
-LINE_PAIR_SIMPLE_RE = re.compile(
-    r"^DEBUG\s+pair\s+([A-Za-z]+)\s+([A-Za-z]+)(?:\s+[+-])?\s*$"
-)
-LINE_SINGLE_RE = re.compile(r"^DEBUG\s+(donor|acceptor)\s+([A-Za-z]+)(?:\s+[+-])?\s*$")
+from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
 NAME_FIELD_CHOICES: tuple[str, ...] = (
     "bp_avg",
@@ -81,6 +74,64 @@ NAME_FIELD_LABELS: dict[str, str] = {
     "asym_alpha_pos": "aap",
     "tag": "tag",
 }
+
+TrainingRecordType = Literal["donor", "acceptor", "pair"]
+
+
+@dataclass(frozen=True)
+class ParsedTrainingRecord:
+    """Structured result from one ``DEBUG`` training-data line.
+
+    Attributes
+    ----------
+    record_type : {"donor", "acceptor", "pair"}
+        Record category parsed from the line.
+    donor_seq : str | None
+        Donor-side sequence for donor/pair records.
+    acceptor_seq : str | None
+        Acceptor-side sequence for acceptor/pair records.
+    strand : str | None
+        Strand sign when present (``+`` or ``-``).
+    transcript_id : str | None
+        Transcript identifier from new positive pair format.
+    intron_half_length : int | None
+        Half intron length from new positive/negative pair formats.
+    """
+
+    record_type: TrainingRecordType
+    donor_seq: str | None
+    acceptor_seq: str | None
+    strand: str | None
+    transcript_id: str | None
+    intron_half_length: int | None
+
+
+@dataclass(frozen=True)
+class SiteTrainingExample:
+    """One task-specific training example with optional parsed metadata.
+
+    Attributes
+    ----------
+    sequence : str
+        Task-ready sequence after donor/acceptor reshaping.
+    label : int
+        Binary class label (1: positive, 0: negative).
+    transcript_id : str | None
+        Transcript identifier when available from source line.
+    intron_half_length : int | None
+        Half intron length when available from source line.
+    source_record_type : {"donor", "acceptor", "pair"}
+        Original record category before task filtering.
+    strand : str | None
+        Strand sign from source line when present.
+    """
+
+    sequence: str
+    label: int
+    transcript_id: str | None
+    intron_half_length: int | None
+    source_record_type: TrainingRecordType
+    strand: str | None
 
 
 def project_root() -> str:
@@ -481,7 +532,7 @@ def resolve_train_paths(
 
     if train_pos_path is None or train_neg_path is None:
         default_pos, default_neg, inferred_train_len = infer_default_train_paths(
-            train_dir=dirs["train"], donor_len=donor_len, acceptor_len=acceptor_len
+            train_dir=dirs["raw"], donor_len=donor_len, acceptor_len=acceptor_len
         )
 
     pos_path = train_pos_path or default_pos
@@ -546,6 +597,135 @@ def reshape_site_sequence(
     return None
 
 
+def _parse_optional_strand(
+    tokens: Sequence[str],
+    index: int,
+) -> tuple[str | None, int]:
+    """Parse optional strand token (``+`` or ``-``) and updated index."""
+    if index < len(tokens) and tokens[index] in {"+", "-"}:
+        return tokens[index], index + 1
+    return None, index
+
+
+def _parse_required_int(token: str) -> int | None:
+    """Parse required integer token.
+
+    Parameters
+    ----------
+    token : str
+        Raw token expected to represent an integer.
+
+    Returns
+    -------
+    int | None
+        Parsed integer value, or ``None`` when parsing fails.
+    """
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
+    """Parse one training line from old/new ``DEBUG`` formats.
+
+    Parameters
+    ----------
+    line : str
+        Raw training-data line.
+
+    Returns
+    -------
+    ParsedTrainingRecord | None
+        Parsed structured record, or ``None`` for unsupported/malformed lines.
+    """
+    tokens = line.strip().split()
+    if len(tokens) < 3 or tokens[0] != "DEBUG":
+        return None
+
+    record_type = tokens[1]
+    if record_type == "pair":
+        if len(tokens) < 4:
+            return None
+        donor_seq = tokens[2].upper()
+        acceptor_seq = tokens[3].upper()
+        index = 4
+        strand, index = _parse_optional_strand(tokens, index)
+        intron_half_length: int | None = None
+        if index < len(tokens):
+            parsed = _parse_required_int(tokens[index])
+            if parsed is None:
+                return None
+            intron_half_length = parsed
+            index += 1
+        if index != len(tokens):
+            return None
+        return ParsedTrainingRecord(
+            record_type="pair",
+            donor_seq=donor_seq,
+            acceptor_seq=acceptor_seq,
+            strand=strand,
+            transcript_id=None,
+            intron_half_length=intron_half_length,
+        )
+
+    if record_type == "donor":
+        donor_seq = tokens[2].upper()
+        if len(tokens) >= 5 and tokens[3] == "acceptor":
+            acceptor_seq = tokens[4].upper()
+            index = 5
+            strand, index = _parse_optional_strand(tokens, index)
+            transcript_id: str | None = None
+            intron_half_length: int | None = None
+            if index < len(tokens):
+                if index + 1 >= len(tokens):
+                    return None
+                transcript_id = tokens[index]
+                parsed = _parse_required_int(tokens[index + 1])
+                if parsed is None:
+                    return None
+                intron_half_length = parsed
+                index += 2
+            if index != len(tokens):
+                return None
+            return ParsedTrainingRecord(
+                record_type="pair",
+                donor_seq=donor_seq,
+                acceptor_seq=acceptor_seq,
+                strand=strand,
+                transcript_id=transcript_id,
+                intron_half_length=intron_half_length,
+            )
+
+        strand, index = _parse_optional_strand(tokens, 3)
+        if index != len(tokens):
+            return None
+        return ParsedTrainingRecord(
+            record_type="donor",
+            donor_seq=donor_seq,
+            acceptor_seq=None,
+            strand=strand,
+            transcript_id=None,
+            intron_half_length=None,
+        )
+
+    if record_type == "acceptor":
+        acceptor_seq = tokens[2].upper()
+        strand, index = _parse_optional_strand(tokens, 3)
+        if index != len(tokens):
+            return None
+        return ParsedTrainingRecord(
+            record_type="acceptor",
+            donor_seq=None,
+            acceptor_seq=acceptor_seq,
+            strand=strand,
+            transcript_id=None,
+            intron_half_length=None,
+        )
+
+    return None
+
+
 def parse_pair_sequences(line: str) -> Optional[Tuple[str, str]]:
     """Parse one pair-record line into donor and acceptor sequences.
 
@@ -560,15 +740,102 @@ def parse_pair_sequences(line: str) -> Optional[Tuple[str, str]]:
         ``(donor_seq, acceptor_seq)`` when the line is a supported pair record;
         otherwise ``None``.
     """
-    m_pair_labeled = LINE_PAIR_LABELED_RE.match(line)
-    if m_pair_labeled:
-        return m_pair_labeled.groups()
+    parsed = parse_debug_training_record(line)
+    if parsed is None or parsed.record_type != "pair":
+        return None
+    if parsed.donor_seq is None or parsed.acceptor_seq is None:
+        return None
+    return parsed.donor_seq, parsed.acceptor_seq
 
-    m_pair_simple = LINE_PAIR_SIMPLE_RE.match(line)
-    if m_pair_simple:
-        return m_pair_simple.groups()
 
-    return None
+def read_examples_single_task_with_metadata(
+    pos_path: str,
+    neg_path: str,
+    task: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+) -> List[SiteTrainingExample]:
+    """Read one-task training examples with parsed line metadata.
+
+    Parameters
+    ----------
+    pos_path : str
+        Positive training file path.
+    neg_path : str
+        Negative training file path.
+    task : str
+        Target task (``"donor"`` or ``"acceptor"``).
+    donor_len : int | None
+        Donor window length. ``None`` keeps original donor-side length.
+    acceptor_len : int | None
+        Acceptor window length. ``None`` keeps original acceptor-side length.
+
+    Returns
+    -------
+    list[SiteTrainingExample]
+        Task-specific examples with optional metadata fields populated.
+
+    Raises
+    ------
+    ValueError
+        If ``task`` is neither ``"donor"`` nor ``"acceptor"``.
+    """
+    if task not in {"donor", "acceptor"}:
+        raise ValueError("task must be either 'donor' or 'acceptor'.")
+
+    examples: List[SiteTrainingExample] = []
+
+    def read_one_set(path: str, label: int) -> None:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("DEBUG"):
+                    continue
+
+                parsed = parse_debug_training_record(line)
+                if parsed is None:
+                    continue
+
+                if parsed.record_type == "pair":
+                    raw_seq = (
+                        parsed.donor_seq
+                        if task == "donor"
+                        else parsed.acceptor_seq
+                    )
+                elif parsed.record_type == task:
+                    raw_seq = (
+                        parsed.donor_seq
+                        if task == "donor"
+                        else parsed.acceptor_seq
+                    )
+                else:
+                    continue
+
+                if raw_seq is None:
+                    continue
+
+                reshaped = reshape_site_sequence(
+                    raw_seq,
+                    task,
+                    donor_len=donor_len,
+                    acceptor_len=acceptor_len,
+                )
+                if reshaped is None:
+                    continue
+                examples.append(
+                    SiteTrainingExample(
+                        sequence=reshaped,
+                        label=label,
+                        transcript_id=parsed.transcript_id,
+                        intron_half_length=parsed.intron_half_length,
+                        source_record_type=parsed.record_type,
+                        strand=parsed.strand,
+                    )
+                )
+
+    read_one_set(pos_path, label=1)
+    read_one_set(neg_path, label=0)
+    return examples
 
 
 def read_examples_single_task(
@@ -578,46 +845,18 @@ def read_examples_single_task(
     donor_len: Optional[int],
     acceptor_len: Optional[int],
 ) -> List[Tuple[str, int]]:
-    """Read training examples for one task (donor or acceptor)."""
-    examples: List[Tuple[str, int]] = []
+    """Read one-task training examples as ``(sequence, label)`` pairs.
 
-    def read_one_set(path: str, label: int):
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or not line.startswith("DEBUG"):
-                    continue
-
-                pair_sequences = parse_pair_sequences(line)
-                if pair_sequences:
-                    donor_seq, acceptor_seq = pair_sequences
-                    raw_seq = donor_seq if task == "donor" else acceptor_seq
-                    seq = reshape_site_sequence(
-                        raw_seq,
-                        task,
-                        donor_len=donor_len,
-                        acceptor_len=acceptor_len,
-                    )
-                    if seq:
-                        examples.append((seq, label))
-                    continue
-
-                m_single = LINE_SINGLE_RE.match(line)
-                if m_single:
-                    tname, seq = m_single.groups()
-                    if tname == task:
-                        reshaped = reshape_site_sequence(
-                            seq,
-                            task,
-                            donor_len=donor_len,
-                            acceptor_len=acceptor_len,
-                        )
-                        if reshaped:
-                            examples.append((reshaped, label))
-
-    read_one_set(pos_path, label=1)
-    read_one_set(neg_path, label=0)
-    return examples
+    This compatibility wrapper intentionally drops extra metadata fields.
+    """
+    examples_with_metadata = read_examples_single_task_with_metadata(
+        pos_path=pos_path,
+        neg_path=neg_path,
+        task=task,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+    return [(item.sequence, item.label) for item in examples_with_metadata]
 
 
 def read_test_site_rows(
