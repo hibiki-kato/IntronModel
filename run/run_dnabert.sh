@@ -12,8 +12,8 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced per-task overrides are kept below.
 set -a
-DNABERT_VARIANT="6"
-SPECIES="Mmus"
+DNABERT_VARIANT="2"
+SPECIES="Mmus, Dmel, Athal"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
