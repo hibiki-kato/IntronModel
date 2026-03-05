@@ -62,6 +62,8 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
             "0.0005",
             "--loss",
             "focal",
+            "--f1_lambda",
+            "0.1",
             "--conv_channels",
             "64,128,256",
             "--donor_batch_size",
@@ -70,6 +72,8 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
             "0.001",
             "--donor_loss",
             "weighted_bce",
+            "--donor_f1_lambda",
+            "0.25",
             "--donor_conv_channels",
             "128,256,512",
         ]
@@ -84,6 +88,15 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
         args.acceptor_conv_channels,
         arg_name="--acceptor_conv_channels",
     )
+    shared_kernel = cnn.parse_kernel_sizes(args.kernel_sizes)
+    donor_kernel = cnn.parse_kernel_sizes(
+        args.donor_kernel_sizes,
+        arg_name="--donor_kernel_sizes",
+    )
+    acceptor_kernel = cnn.parse_kernel_sizes(
+        args.acceptor_kernel_sizes,
+        arg_name="--acceptor_kernel_sizes",
+    )
 
     donor_params = cnn._resolve_task_train_params(
         task="donor",
@@ -91,6 +104,9 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
         shared_conv_channels=shared_conv,
         donor_conv_channels=donor_conv,
         acceptor_conv_channels=acceptor_conv,
+        shared_kernel_sizes=shared_kernel,
+        donor_kernel_sizes=donor_kernel,
+        acceptor_kernel_sizes=acceptor_kernel,
     )
     acceptor_params = cnn._resolve_task_train_params(
         task="acceptor",
@@ -98,16 +114,79 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
         shared_conv_channels=shared_conv,
         donor_conv_channels=donor_conv,
         acceptor_conv_channels=acceptor_conv,
+        shared_kernel_sizes=shared_kernel,
+        donor_kernel_sizes=donor_kernel,
+        acceptor_kernel_sizes=acceptor_kernel,
     )
 
     assert donor_params.batch_size == 1024
     assert donor_params.lr == pytest.approx(0.001)
     assert donor_params.loss_name == "weighted_bce"
+    assert donor_params.f1_lambda == pytest.approx(0.25)
     assert donor_params.conv_channels == [128, 256, 512]
     assert acceptor_params.batch_size == 512
     assert acceptor_params.lr == pytest.approx(0.0005)
     assert acceptor_params.loss_name == "focal"
+    assert acceptor_params.f1_lambda == pytest.approx(0.1)
     assert acceptor_params.conv_channels == [64, 128, 256]
+
+
+def test_resolve_task_train_params_prefers_kernel_size_overrides() -> None:
+    parser = argparse.ArgumentParser()
+    cnn.add_train_args(parser)
+    args = parser.parse_args(
+        [
+            "--conv_channels",
+            "64,128,256",
+            "--kernel_sizes",
+            "11,9,7",
+            "--donor_kernel_sizes",
+            "13,11",
+        ]
+    )
+
+    shared_conv = cnn.parse_conv_channels(args.conv_channels)
+    donor_conv = cnn.parse_conv_channels(
+        args.donor_conv_channels,
+        arg_name="--donor_conv_channels",
+    )
+    acceptor_conv = cnn.parse_conv_channels(
+        args.acceptor_conv_channels,
+        arg_name="--acceptor_conv_channels",
+    )
+    shared_kernel = cnn.parse_kernel_sizes(args.kernel_sizes)
+    donor_kernel = cnn.parse_kernel_sizes(
+        args.donor_kernel_sizes,
+        arg_name="--donor_kernel_sizes",
+    )
+    acceptor_kernel = cnn.parse_kernel_sizes(
+        args.acceptor_kernel_sizes,
+        arg_name="--acceptor_kernel_sizes",
+    )
+
+    donor_params = cnn._resolve_task_train_params(
+        task="donor",
+        model_args=args,
+        shared_conv_channels=shared_conv,
+        donor_conv_channels=donor_conv,
+        acceptor_conv_channels=acceptor_conv,
+        shared_kernel_sizes=shared_kernel,
+        donor_kernel_sizes=donor_kernel,
+        acceptor_kernel_sizes=acceptor_kernel,
+    )
+    acceptor_params = cnn._resolve_task_train_params(
+        task="acceptor",
+        model_args=args,
+        shared_conv_channels=shared_conv,
+        donor_conv_channels=donor_conv,
+        acceptor_conv_channels=acceptor_conv,
+        shared_kernel_sizes=shared_kernel,
+        donor_kernel_sizes=donor_kernel,
+        acceptor_kernel_sizes=acceptor_kernel,
+    )
+
+    assert donor_params.kernel_sizes == [13, 11]
+    assert acceptor_params.kernel_sizes == [11, 9, 7]
 
 
 def test_resolve_compile_enabled_auto_quick_phase() -> None:

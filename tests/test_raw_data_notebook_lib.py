@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+
+ANALYSIS_SRC = Path(__file__).resolve().parents[1] / "analysis" / "src"
+if str(ANALYSIS_SRC) not in sys.path:
+    sys.path.insert(0, str(ANALYSIS_SRC))
+
+from raw.raw_data_notebook_lib import (  # noqa: E402
+    build_intron_count_comparison_rows,
+    build_noncanonical_ratio_rows,
+    build_sequence_quality_rows,
+    build_species_overlap_sets,
+    build_duplicate_rate_rows,
+    collect_species_intron_length_profiles,
+    parse_final_score_intron_lengths,
+    parse_negative_pair_count,
+    parse_training_pair_records,
+    parse_training_intron_lengths,
+)
+
+
+def test_parse_training_intron_lengths_reads_tail_times_two(tmp_path: Path) -> None:
+    path = tmp_path / "100bp.err"
+    path.write_text(
+        "\n".join(
+            [
+                "DEBUG donor AAAA acceptor CCCC + TX1 10",
+                "DEBUG donor GGGG acceptor TTTT + TX2 3",
+                "DEBUG donor NNNN +",
+                "not-a-debug-line",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert parse_training_intron_lengths(path) == [20, 6]
+
+
+def test_parse_final_score_intron_lengths_pairs_donor_acceptor(
+    tmp_path: Path,
+) -> None:
+    content = "\n".join(
+        [
+            "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
+            "tx1\t1\tdonor\t100\tAAAA",
+            "tx1\t1\tacceptor\t130\tCCCC",
+            "tx2\t4\tdonor\t700\tAAAA",
+            "tx2\t4\tacceptor\t655\tCCCC",
+            "tx3\t1\tdonor\t10\tAAAA",
+        ]
+    )
+    path = tmp_path / "transcripts.tsv"
+    path.write_text(content + "\n", encoding="utf-8")
+
+    try:
+        assert parse_final_score_intron_lengths(path) == [30, 45]
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_build_noncanonical_ratio_rows_filters_requested_sources() -> None:
+    rows = [
+        {
+            "species": "A",
+            "dataset": "training",
+            "subset": "pos",
+            "pairs_total": "100",
+            "pairs_non_gt_ag_fraction": "0.2",
+        },
+        {
+            "species": "A",
+            "dataset": "transcript",
+            "subset": "all",
+            "pairs_total": "50",
+            "pairs_non_gt_ag_fraction": "0.1",
+        },
+        {
+            "species": "A",
+            "dataset": "training",
+            "subset": "all",
+            "pairs_total": "999",
+            "pairs_non_gt_ag_fraction": "0.9",
+        },
+    ]
+
+    out = build_noncanonical_ratio_rows(
+        rows,
+        sources=(
+            ("training", "pos", "train_pos"),
+            ("transcript", "all", "final_score"),
+        ),
+    )
+
+    assert len(out) == 2
+    assert out[0].species == "A"
+    assert out[0].source_label == "final_score"
+    assert out[0].noncanonical_fraction == 0.1
+    assert out[1].source_label == "train_pos"
+
+
+def test_collect_species_intron_length_profiles(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
+                "tx1\t1\tdonor\t100\tAAAA",
+                "tx1\t1\tacceptor\t120\tCCCC",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    (raw_dir / "100bp.err").write_text(
+        "DEBUG donor AAAA acceptor CCCC + TX1 10\n",
+        encoding="utf-8",
+    )
+
+    profiles = collect_species_intron_length_profiles(data_root)
+
+    assert len(profiles) == 1
+    profile = profiles[0]
+    assert profile.species == "SpX"
+    assert profile.final_score_lengths == [20]
+    assert profile.training_lengths == [20]
+
+
+def test_parse_negative_pair_count_counts_only_debug_pair(tmp_path: Path) -> None:
+    path = tmp_path / "100bp.neg.err"
+    path.write_text(
+        "\n".join(
+            [
+                "DEBUG pair AAAA CCCC + 4",
+                "DEBUG donor TTTT +",
+                "DEBUG pair GGGG TTTT - 7",
+                "DEBUG acceptor CCCC +",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert parse_negative_pair_count(path) == 2
+
+
+def test_build_intron_count_comparison_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
+                "tx1\t1\tdonor\t100\tAAAA",
+                "tx1\t1\tacceptor\t120\tCCCC",
+                "tx1\t2\tdonor\t200\tAAAA",
+                "tx1\t2\tacceptor\t230\tCCCC",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.err").write_text(
+        "\n".join(
+            [
+                "DEBUG donor AAAA acceptor CCCC + TX1 10",
+                "DEBUG donor GGGG acceptor TTTT + TX1 15",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.neg.err").write_text(
+        "\n".join(
+            [
+                "DEBUG pair AAAA CCCC + 5",
+                "DEBUG pair GGGG TTTT - 6",
+                "DEBUG donor ACGT +",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_intron_count_comparison_rows(data_root)
+
+    assert len(rows) == 3
+    counts = {(row.species, row.source_label): row.intron_count for row in rows}
+    assert counts[("SpX", "Final")] == 2
+    assert counts[("SpX", "Train (positive)")] == 2
+    assert counts[("SpX", "Train (negative_pair)")] == 2
+
+
+def test_parse_training_pair_records_supports_pair_and_pair_like(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "train_pair_records.err"
+    path.write_text(
+        "\n".join(
+            [
+                "DEBUG pair AAAA CCCC + 5",
+                "DEBUG donor GGGG acceptor TTTT - TX1 7",
+                "DEBUG donor ACGT +",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    try:
+        records = parse_training_pair_records(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+    assert len(records) == 2
+    assert records[0].donor_seq == "AAAA"
+    assert records[0].acceptor_seq == "CCCC"
+    assert records[0].transcript_id is None
+    assert records[1].transcript_id == "TX1"
+
+
+def test_quality_duplicate_and_overlap_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
+                "tx1\t1\tdonor\t100\tAAAAN",
+                "tx1\t1\tacceptor\t120\tCCCCN",
+                "tx2\t1\tdonor\t200\tGGGGG",
+                "tx2\t1\tacceptor\t230\tTTTTT",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.err").write_text(
+        "\n".join(
+            [
+                "DEBUG donor AAAAN acceptor CCCCN + tx1 10",
+                "DEBUG donor GGGGG acceptor TTTTT + tx2 15",
+                "DEBUG donor GGGGG acceptor TTTTT + tx2 15",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.neg.err").write_text(
+        "\n".join(
+            [
+                "DEBUG pair AAAAN CCCCN + 5",
+                "DEBUG pair NNNNN NNNNN - 6",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    quality_rows = build_sequence_quality_rows(data_root)
+    duplicate_rows = build_duplicate_rate_rows(data_root)
+    overlap_sets = build_species_overlap_sets(data_root)
+
+    assert len(quality_rows) == 3
+    assert len(duplicate_rows) == 3
+    assert len(overlap_sets) == 1
+
+    dup_map = {(row.species, row.source_label): row.duplicate_fraction for row in duplicate_rows}
+    assert dup_map[("SpX", "Final")] == 0.0
+    assert dup_map[("SpX", "Train (positive)")] > 0.0

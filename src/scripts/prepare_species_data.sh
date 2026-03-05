@@ -11,6 +11,7 @@ Options:
   --species <name>        Athal|Dmel|Mmus (default: Dmel)
   --donor-len <int>       Donor window length (default: 100)
   --acceptor-len <int>    Acceptor window length (default: 100)
+  --clip-short-intron     Keep intronic context within intron length
   --source-root <path>    Optional source root for raw data import
   --target-root <path>    Data root path (default: INTRONMODEL_DATA_ROOT or ./data)
   -h, --help              Show this help
@@ -26,6 +27,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 SOURCE_ROOT=""
 TARGET_ROOT="${INTRONMODEL_DATA_ROOT:-data}"
+CLIP_SHORT_INTRON="0"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -44,6 +46,10 @@ while [[ $# -gt 0 ]]; do
 	--source-root)
 		SOURCE_ROOT="$2"
 		shift 2
+		;;
+	--clip-short-intron)
+		CLIP_SHORT_INTRON="1"
+		shift
 		;;
 	--target-root)
 		TARGET_ROOT="$2"
@@ -92,11 +98,17 @@ if [[ -n "${SOURCE_ROOT}" ]]; then
 		--mode copy
 fi
 
-bash "${PROJECT_ROOT}/run/make_test_data.sh" \
-	--species "${SPECIES}" \
-	--donor-len "${DONOR_LEN}" \
-	--acceptor-len "${ACCEPTOR_LEN}" \
+make_test_args=(
+	--species "${SPECIES}"
+	--donor-len "${DONOR_LEN}"
+	--acceptor-len "${ACCEPTOR_LEN}"
 	--out-tsv "${SPECIES_DIR}/raw/transcripts.tsv"
+)
+if [[ "${CLIP_SHORT_INTRON}" == "1" ]]; then
+	make_test_args+=(--clip-short-intron)
+fi
+
+bash "${PROJECT_ROOT}/run/make_test_data.sh" "${make_test_args[@]}"
 
 echo "[prepare_species_data] prepared directories under ${SPECIES_DIR}"
 echo "[prepare_species_data] generated raw/transcripts.tsv"

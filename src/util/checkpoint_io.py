@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Mapping, Sequence
 
-TaskName = Literal["donor", "acceptor"]
-TASK_NAMES: tuple[TaskName, ...] = ("donor", "acceptor")
+TaskName = str
+TASK_NAMES: tuple[TaskName, ...] = ("donor", "acceptor", "pair")
 
 
 def read_json_object(path: Path) -> dict[str, object] | None:
@@ -67,7 +67,7 @@ def extract_task_checkpoint_path(
     ----------
     payload : Mapping[str, object]
         JSON-like payload containing checkpoint fields.
-    task : TaskName
+    task : str
         Target task name.
     base_dir : Path
         Base directory for resolving relative paths.
@@ -96,8 +96,9 @@ def extract_checkpoint_paths(
     *,
     base_dir: Path,
     existing_only: bool = False,
+    tasks: Sequence[TaskName] | None = None,
 ) -> dict[TaskName, Path]:
-    """Extract task checkpoint paths for donor and acceptor.
+    """Extract task checkpoint paths.
 
     Parameters
     ----------
@@ -107,14 +108,17 @@ def extract_checkpoint_paths(
         Base directory for resolving relative paths.
     existing_only : bool, default=False
         Whether to keep only existing files.
+    tasks : Sequence[str] | None, default=None
+        Task names to scan. Default includes donor/acceptor/pair.
 
     Returns
     -------
-    dict[TaskName, Path]
+    dict[str, Path]
         Mapping from task name to resolved checkpoint path.
     """
+    task_names = tuple(tasks) if tasks is not None else TASK_NAMES
     out: dict[TaskName, Path] = {}
-    for task in TASK_NAMES:
+    for task in task_names:
         path = extract_task_checkpoint_path(payload, task=task, base_dir=base_dir)
         if path is None:
             continue

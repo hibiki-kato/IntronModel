@@ -23,6 +23,7 @@ def _dummy_config(tmp_path: Path) -> hparam_search.SearchConfig:
         max_parallel_trials_setting=2,
         min_batch_size=64,
         max_oom_retries=1,
+        max_model_params=None,
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
         seed_best_config_path=None,

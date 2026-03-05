@@ -973,7 +973,7 @@ def train_task_model(
                 if device == "mps":
                     print(f"[{task}] epoch {epoch}/{epochs} start")
                 model.train()
-                running_loss = torch.zeros((), dtype=torch.float64)
+                running_loss = 0.0
                 train_iterator = iter(train_loader)
                 for batch_idx in range(1, len(train_loader) + 1):
                     wait_started_at = time.perf_counter()
@@ -1024,10 +1024,7 @@ def train_task_model(
                         optimizer.step()
                     if device == "mps" and batch_idx == 1:
                         print(f"[{task}] epoch {epoch}/{epochs} first batch done")
-                    running_loss = running_loss + loss.detach().to(
-                        device="cpu",
-                        dtype=torch.float64,
-                    )
+                    running_loss += float(loss.detach().item())
                     timing_sec["train_step"] += (
                         time.perf_counter() - step_started_at
                     )

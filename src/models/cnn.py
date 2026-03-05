@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import os
 import random
 import shutil
+import time
 from typing import (
     ContextManager,
     Dict,
@@ -31,10 +32,18 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+from models.cnn_common import (
+    BasicSpliceCNN as _CommonBasicSpliceCNN,
+    one_hot_encode_dna as _one_hot_encode_dna,
+    parse_conv_channels as _parse_conv_channels,
+    parse_kernel_sizes as _parse_kernel_sizes,
+    score_sequences as _score_sequences,
+)
 from util.data_proc import (
     build_run_name,
     infer_default_train_paths,
     read_examples_single_task,
+    read_examples_single_task_with_metadata,
     read_test_site_rows,
     resolve_effective_window_lengths,
     resolve_test_tsv,
@@ -73,6 +82,10 @@ from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
 )
+from util.sequence_transform import (
+    SEQUENCE_TRANSFORM_CHOICES,
+    apply_site_sequence_transform,
+)
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -92,59 +105,24 @@ def _resolve_mps_max_batch_size() -> int:
 
 
 def one_hot_encode_dna(seq: str, window_len: int = 50) -> np.ndarray:
-    mapping = {"A": 0, "C": 1, "G": 2, "T": 3}
-    encoded = np.zeros((4, window_len), dtype=np.float32)
-
-    for i, base in enumerate(seq[:window_len]):
-        if base in mapping:
-            encoded[mapping[base], i] = 1.0
-
-    return encoded
+    """Backward-compatible wrapper for shared encoder utility."""
+    return _one_hot_encode_dna(seq=seq, window_len=window_len)
 
 
 def parse_conv_channels(
     raw: Optional[str],
     arg_name: str = "--conv_channels",
 ) -> Optional[List[int]]:
-    """Parse comma-separated convolution channel sizes.
+    """Backward-compatible wrapper for shared parser utility."""
+    return _parse_conv_channels(raw=raw, arg_name=arg_name)
 
-    Parameters
-    ----------
-    raw : str | None
-        Comma-separated channel sizes like ``"64,128,256"``.
 
-    Returns
-    -------
-    list[int] | None
-        Parsed positive channel sizes, or ``None`` when not specified.
-
-    Raises
-    ------
-    ValueError
-        If the string has invalid format or non-positive sizes.
-    """
-    if raw is None:
-        return None
-    text = raw.strip()
-    if text == "":
-        return None
-
-    parts = [p.strip() for p in text.split(",") if p.strip()]
-    if not parts:
-        raise ValueError(f"{arg_name} must include at least one integer.")
-
-    channels: List[int] = []
-    for part in parts:
-        try:
-            value = int(part)
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid {arg_name} item '{part}'. Use integers like 64,128,256."
-            ) from exc
-        if value <= 0:
-            raise ValueError(f"{arg_name} values must be positive.")
-        channels.append(value)
-    return channels
+def parse_kernel_sizes(
+    raw: Optional[str],
+    arg_name: str = "--kernel_sizes",
+) -> Optional[List[int]]:
+    """Backward-compatible wrapper for shared parser utility."""
+    return _parse_kernel_sizes(raw=raw, arg_name=arg_name)
 
 
 @dataclass(frozen=True)
@@ -155,7 +133,7 @@ class TaskTrainParams:
     lr: float
     loss_name: str
     conv_channels: Optional[Sequence[int]]
-    kernel_size: int
+    kernel_sizes: Sequence[int]
     dropout: float
     fc_hidden: int
     weight_decay: float
@@ -168,6 +146,7 @@ class TaskTrainParams:
     asym_gamma_pos: float
     asym_gamma_neg: float
     asym_alpha_pos: Optional[float]
+    f1_lambda: float
 
 
 def _resolve_task_train_params(
@@ -177,6 +156,9 @@ def _resolve_task_train_params(
     shared_conv_channels: Optional[Sequence[int]],
     donor_conv_channels: Optional[Sequence[int]],
     acceptor_conv_channels: Optional[Sequence[int]],
+    shared_kernel_sizes: Optional[Sequence[int]],
+    donor_kernel_sizes: Optional[Sequence[int]],
+    acceptor_kernel_sizes: Optional[Sequence[int]],
 ) -> TaskTrainParams:
     """Resolve task-specific train parameters with fallback to shared values.
 
@@ -218,13 +200,26 @@ def _resolve_task_train_params(
     resolved_conv_channels = (
         task_specific_conv if task_specific_conv is not None else shared_conv_channels
     )
+    task_specific_kernel = (
+        donor_kernel_sizes if task == "donor" else acceptor_kernel_sizes
+    )
+    resolved_kernel_sizes = (
+        task_specific_kernel
+        if task_specific_kernel is not None
+        else shared_kernel_sizes
+    )
+    if resolved_kernel_sizes is None:
+        fallback_kernel = int(
+            _override_or_default("kernel_size", model_args.kernel_size)
+        )
+        resolved_kernel_sizes = [fallback_kernel]
 
     return TaskTrainParams(
         batch_size=int(_override_or_default("batch_size", model_args.batch_size)),
         lr=float(_override_or_default("lr", model_args.lr)),
         loss_name=str(_override_or_default("loss", model_args.loss)),
         conv_channels=resolved_conv_channels,
-        kernel_size=int(_override_or_default("kernel_size", model_args.kernel_size)),
+        kernel_sizes=list(resolved_kernel_sizes),
         dropout=float(_override_or_default("dropout", model_args.dropout)),
         fc_hidden=int(_override_or_default("fc_hidden", model_args.fc_hidden)),
         weight_decay=float(
@@ -251,6 +246,7 @@ def _resolve_task_train_params(
         asym_alpha_pos=_override_or_default(
             "asym_alpha_pos", model_args.asym_alpha_pos
         ),
+        f1_lambda=float(_override_or_default("f1_lambda", model_args.f1_lambda)),
     )
 
 
@@ -281,10 +277,7 @@ class DNADataset(Dataset):
         self._cached_y: Optional[torch.Tensor]
         if preencode:
             encoded = np.stack(
-                [
-                    one_hot_encode_dna(seq, self.window_len)
-                    for seq, _ in self.examples
-                ]
+                [one_hot_encode_dna(seq, self.window_len) for seq, _ in self.examples]
             ).astype(np.float32, copy=False)
             labels = np.asarray(
                 [label for _, label in self.examples],
@@ -307,51 +300,8 @@ class DNADataset(Dataset):
         return torch.from_numpy(x), torch.tensor(label, dtype=torch.float32)
 
 
-class BasicSpliceCNN(nn.Module):
-    def __init__(
-        self,
-        in_channels: int = 4,
-        conv_channels: Optional[Sequence[int]] = None,
-        kernel_size: int = 7,
-        dropout: float = 0.3,
-        fc_hidden: int = 128,
-    ):
-        super().__init__()
-
-        if conv_channels is None:
-            conv_channels = [64, 128, 256]
-        if not conv_channels:
-            raise ValueError("conv_channels must not be empty.")
-
-        layers = []
-        prev_ch = in_channels
-        for ch in conv_channels:
-            layers.extend(
-                [
-                    nn.Conv1d(prev_ch, ch, kernel_size, padding=kernel_size // 2),
-                    nn.BatchNorm1d(ch),
-                    nn.ReLU(inplace=True),
-                    nn.MaxPool1d(2),
-                    nn.Dropout(dropout),
-                ]
-            )
-            prev_ch = ch
-
-        self.conv_layers = nn.Sequential(*layers)
-        self.gap = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(conv_channels[-1], fc_hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(fc_hidden, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv_layers(x)
-        x = self.gap(x)
-        x = x.squeeze(-1)
-        logits = self.fc(x).squeeze(-1)
-        return logits
+class BasicSpliceCNN(_CommonBasicSpliceCNN):
+    """Backward-compatible alias of the shared CNN site classifier."""
 
 
 def stratified_split(
@@ -449,6 +399,44 @@ def evaluate(
     return metrics
 
 
+def _load_task_examples_with_transform(
+    *,
+    pos_path: str,
+    neg_path: str,
+    task: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    sequence_transform: str,
+) -> List[Tuple[str, int]]:
+    """Load one-task examples and apply configured sequence transform."""
+    if sequence_transform == "none":
+        return read_examples_single_task(
+            pos_path=pos_path,
+            neg_path=neg_path,
+            task=task,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+        )
+
+    transformed: List[Tuple[str, int]] = []
+    examples = read_examples_single_task_with_metadata(
+        pos_path=pos_path,
+        neg_path=neg_path,
+        task=task,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+    for item in examples:
+        seq = apply_site_sequence_transform(
+            item.sequence,
+            site_type=task,
+            transform_mode=sequence_transform,
+            intron_half_length=item.intron_half_length,
+        )
+        transformed.append((seq, item.label))
+    return transformed
+
+
 def train_task_model(
     task: str,
     pos_path: str,
@@ -465,7 +453,7 @@ def train_task_model(
     seed: int = 1337,
     lightweight: bool = False,
     conv_channels: Optional[Sequence[int]] = None,
-    kernel_size: int = 7,
+    kernel_sizes: Optional[Sequence[int]] = None,
     dropout: float = 0.3,
     fc_hidden: int = 128,
     weight_decay: float = 0.01,
@@ -482,6 +470,7 @@ def train_task_model(
     asym_gamma_pos: float = 0.0,
     asym_gamma_neg: float = 4.0,
     asym_alpha_pos: Optional[float] = None,
+    f1_lambda: float = 0.1,
     use_amp: Union[bool, int] = 1,
     amp_dtype: str = "auto",
     allow_tf32: Union[bool, int] = 1,
@@ -493,6 +482,7 @@ def train_task_model(
     pin_memory: Union[bool, int] = 1,
     min_batch_size: int = 64,
     max_oom_retries: int = 8,
+    sequence_transform: str = "none",
     quick_phase: bool = False,
     gpu_id: Optional[int] = None,
 ) -> Dict[str, object]:
@@ -526,8 +516,8 @@ def train_task_model(
         Use lightweight architecture preset.
     conv_channels : Sequence[int] | None, default=None
         Convolution channels.
-    kernel_size : int, default=7
-        Convolution kernel size.
+    kernel_sizes : Sequence[int] | None, default=None
+        Convolution kernel sizes. A single size is broadcast to all layers.
     dropout : float, default=0.3
         Dropout rate.
     fc_hidden : int, default=128
@@ -582,6 +572,8 @@ def train_task_model(
         Minimum batch size when retrying after CUDA OOM.
     max_oom_retries : int, default=8
         Maximum OOM retries.
+    sequence_transform : str, default="none"
+        Sequence transform mode.
     quick_phase : bool, default=False
         Whether this run is a quick-phase trial.
     gpu_id : int | None, default=None
@@ -599,8 +591,8 @@ def train_task_model(
     RuntimeError
         If training fails for non-recoverable runtime errors.
     """
-    if kernel_size <= 0:
-        raise ValueError("--kernel_size must be positive.")
+    if kernel_sizes is not None and len(kernel_sizes) == 0:
+        raise ValueError("--kernel_sizes must not be empty.")
     if fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
     if dropout < 0.0 or dropout >= 1.0:
@@ -613,6 +605,8 @@ def train_task_model(
         raise ValueError("--val_frac must satisfy 0 < val_frac < 1.")
     if grad_clip < 0.0:
         raise ValueError("--grad_clip must be non-negative.")
+    if f1_lambda < 0.0:
+        raise ValueError("--f1_lambda must be non-negative.")
     if prefetch_factor <= 0:
         raise ValueError("--prefetch_factor must be positive.")
     if min_batch_size <= 0:
@@ -621,6 +615,11 @@ def train_task_model(
         raise ValueError("--max_oom_retries must be >= 0.")
     if batch_size < min_batch_size:
         raise ValueError("--batch_size must be >= --min_batch_size.")
+    if sequence_transform not in SEQUENCE_TRANSFORM_CHOICES:
+        raise ValueError(
+            "Unsupported --sequence_transform: "
+            f"{sequence_transform}. Supported: {SEQUENCE_TRANSFORM_CHOICES}"
+        )
 
     device = pick_device(device)
     resolved_num_workers = _resolve_num_workers(num_workers, device=device)
@@ -651,12 +650,13 @@ def train_task_model(
     if checkpoint_dir:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-    examples = read_examples_single_task(
-        pos_path,
-        neg_path,
-        task,
+    examples = _load_task_examples_with_transform(
+        pos_path=pos_path,
+        neg_path=neg_path,
+        task=task,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        sequence_transform=sequence_transform,
     )
 
     n_pos = sum(y for _, y in examples)
@@ -689,6 +689,21 @@ def train_task_model(
         conv_channels = [64, 128] if lightweight else [64, 128, 256]
     else:
         conv_channels = list(conv_channels)
+    if kernel_sizes is None:
+        resolved_kernel_sizes = [7]
+    else:
+        resolved_kernel_sizes = [int(value) for value in kernel_sizes]
+    if any(value <= 0 for value in resolved_kernel_sizes):
+        raise ValueError("--kernel_sizes values must be positive.")
+    if len(resolved_kernel_sizes) == 1:
+        resolved_kernel_sizes = resolved_kernel_sizes * len(conv_channels)
+    elif len(resolved_kernel_sizes) < len(conv_channels):
+        resolved_kernel_sizes = resolved_kernel_sizes + (
+            [resolved_kernel_sizes[-1]]
+            * (len(conv_channels) - len(resolved_kernel_sizes))
+        )
+    elif len(resolved_kernel_sizes) > len(conv_channels):
+        resolved_kernel_sizes = resolved_kernel_sizes[: len(conv_channels)]
     train_pos = sum(y for _, y in train_ex)
     train_neg = len(train_ex) - train_pos
     criterion, loss_meta = build_binary_classification_loss(
@@ -702,6 +717,7 @@ def train_task_model(
         asym_gamma_pos=asym_gamma_pos,
         asym_gamma_neg=asym_gamma_neg,
         asym_alpha_pos=asym_alpha_pos,
+        f1_lambda=f1_lambda,
     )
 
     effective_batch_size = batch_size
@@ -746,6 +762,18 @@ def train_task_model(
             val_loader_kwargs["prefetch_factor"] = prefetch_factor
             val_loader_kwargs["persistent_workers"] = use_persistent_workers
         val_loader = DataLoader(**val_loader_kwargs)
+
+        train_eval_loader_kwargs: dict[str, object] = {
+            "dataset": train_ds,
+            "batch_size": effective_batch_size,
+            "shuffle": False,
+            "num_workers": resolved_num_workers,
+            "pin_memory": use_pin_memory,
+        }
+        if resolved_num_workers > 0:
+            train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
+            train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
+        train_eval_loader = DataLoader(**train_eval_loader_kwargs)
         print(
             f"[{task}] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
@@ -756,7 +784,7 @@ def train_task_model(
             model = BasicSpliceCNN(
                 in_channels=4,
                 conv_channels=conv_channels,
-                kernel_size=kernel_size,
+                kernel_size=resolved_kernel_sizes,
                 dropout=dropout,
                 fc_hidden=fc_hidden,
             ).to(device)
@@ -765,9 +793,7 @@ def train_task_model(
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, ptxas_blackwell={ptxas_blackwell_path})."
@@ -824,17 +850,17 @@ def train_task_model(
             best_roc_auc: Optional[float] = None
             best_acc_at_0_5: Optional[float] = None
             epoch_history: list[dict[str, object]] = []
-            log_every = max(1, epochs // 5)
             epochs_completed = 0
             epochs_since_improvement = 0
             stopped_early = False
 
             for epoch in range(1, epochs + 1):
                 epochs_completed = epoch
+                epoch_started_at = time.perf_counter()
                 if device == "mps":
                     print(f"[{task}] epoch {epoch}/{epochs} start")
                 model.train()
-                running_loss = torch.zeros((), dtype=torch.float64)
+                running_loss = 0.0
                 for batch_idx, (x, y) in enumerate(train_loader, start=1):
                     saw_training_batch = True
                     x = x.to(device, non_blocking=use_non_blocking)
@@ -878,10 +904,7 @@ def train_task_model(
                         optimizer.step()
                     if device == "mps" and batch_idx == 1:
                         print(f"[{task}] epoch {epoch}/{epochs} first batch done")
-                    running_loss = running_loss + loss.detach().to(
-                        device="cpu",
-                        dtype=torch.float64,
-                    )
+                    running_loss += float(loss.detach().item())
 
                 scheduler.step()
                 train_loss = float(running_loss / max(1, len(train_loader)))
@@ -896,15 +919,22 @@ def train_task_model(
                 pr_auc = val_metrics.get("pr_auc")
                 roc_auc = val_metrics.get("roc_auc")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
+                train_metrics = evaluate(
+                    model=model,
+                    loader=train_eval_loader,
+                    device=device,
+                    use_amp=use_amp_bool,
+                    amp_dtype=amp_dtype_resolved,
+                )
+                train_pr_auc = train_metrics.get("pr_auc")
+                epoch_elapsed_sec = time.perf_counter() - epoch_started_at
                 if pr_auc is not None:
                     best_pr_auc = (
                         pr_auc if best_pr_auc is None else max(best_pr_auc, pr_auc)
                     )
                 if roc_auc is not None:
                     best_roc_auc = (
-                        roc_auc
-                        if best_roc_auc is None
-                        else max(best_roc_auc, roc_auc)
+                        roc_auc if best_roc_auc is None else max(best_roc_auc, roc_auc)
                     )
                 if acc_at_0_5 is not None:
                     best_acc_at_0_5 = (
@@ -936,7 +966,7 @@ def train_task_model(
                             "window_len": window_len,
                             "model_config": {
                                 "conv_channels": list(conv_channels),
-                                "kernel_size": kernel_size,
+                                "kernel_sizes": list(resolved_kernel_sizes),
                                 "dropout": dropout,
                                 "fc_hidden": fc_hidden,
                             },
@@ -951,9 +981,12 @@ def train_task_model(
                     {
                         "epoch": epoch,
                         "train_loss": train_loss,
+                        "train_pr_auc": train_pr_auc,
+                        "test_pr_auc": pr_auc,
                         "pr_auc": pr_auc,
                         "roc_auc": roc_auc,
                         "acc@0.5": acc_at_0_5,
+                        "elapsed_sec": epoch_elapsed_sec,
                         "objective_metric": score_name,
                         "objective_score": score,
                         "improved": improved,
@@ -963,21 +996,24 @@ def train_task_model(
                     }
                 )
 
-                should_log = (
-                    epoch == 1
-                    or epoch == epochs
-                    or epoch % log_every == 0
-                    or improved
+                mark = "*" if improved else "-"
+                train_pr_auc_text = (
+                    "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
                 )
-                if should_log:
-                    mark = "*" if improved else "-"
-                    print(
-                        f"[{task}] {mark} epoch {epoch}/{epochs} "
-                        f"loss={train_loss:.4f} {score_name}={score:.4f} "
-                        f"best={best_score:.4f} (ep {best_epoch})"
-                    )
+                test_pr_auc_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
+                print(
+                    f"[{task}] {mark} epoch {epoch}/{epochs} "
+                    f"loss={train_loss:.4f} train_pr_auc={train_pr_auc_text} "
+                    f"test_pr_auc={test_pr_auc_text} "
+                    f"elapsed={epoch_elapsed_sec:.2f}s "
+                    f"{score_name}={score:.4f} best={best_score:.4f} "
+                    f"(ep {best_epoch})"
+                )
 
-                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                if (
+                    early_stop_patience > 0
+                    and epochs_since_improvement >= early_stop_patience
+                ):
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
@@ -1013,8 +1049,9 @@ def train_task_model(
                 "asym_gamma_pos": loss_meta["asym_gamma_pos"],
                 "asym_gamma_neg": loss_meta["asym_gamma_neg"],
                 "asym_alpha_pos": loss_meta["asym_alpha_pos"],
+                "f1_lambda": loss_meta["f1_lambda"],
                 "conv_channels": list(conv_channels),
-                "kernel_size": kernel_size,
+                "kernel_sizes": list(resolved_kernel_sizes),
                 "dropout": dropout,
                 "fc_hidden": fc_hidden,
                 "weight_decay": weight_decay,
@@ -1044,8 +1081,8 @@ def train_task_model(
                 "optimizer_impl": optimizer_impl,
             }
         except RuntimeError as exc:
-            is_compile_failure = (
-                compile_enabled_attempt and _is_compile_runtime_error(exc)
+            is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
+                exc
             )
             if is_compile_failure:
                 compile_enabled = False
@@ -1093,9 +1130,11 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
 
     model_config = ckpt.get("model_config", {})
     conv_channels = model_config.get("conv_channels")
-    kernel_size = int(model_config.get("kernel_size", 7))
+    kernel_sizes = model_config.get("kernel_sizes")
     dropout = float(model_config.get("dropout", 0.3))
     fc_hidden = int(model_config.get("fc_hidden", 128))
+    if kernel_sizes is None:
+        kernel_sizes = [int(model_config.get("kernel_size", 7))]
 
     if conv_channels is None:
         conv_channels = [64, 128, 256]
@@ -1108,7 +1147,7 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
     model = BasicSpliceCNN(
         in_channels=4,
         conv_channels=conv_channels,
-        kernel_size=kernel_size,
+        kernel_size=kernel_sizes,
         dropout=dropout,
         fc_hidden=fc_hidden,
     ).to(device)
@@ -1125,21 +1164,14 @@ def score_sequences(
     device: str,
     batch_size: int = 512,
 ) -> np.ndarray:
-    if not sequences:
-        return np.array([])
-
-    model.eval()
-    encoded = [one_hot_encode_dna(seq.upper(), window_len) for seq in sequences]
-    x = torch.from_numpy(np.stack(encoded)).to(device)
-
-    all_probs = []
-    for i in range(0, len(x), batch_size):
-        batch_x = x[i : i + batch_size]
-        logits = model(batch_x)
-        probs = torch.sigmoid(logits).cpu().numpy()
-        all_probs.append(probs)
-
-    return np.concatenate(all_probs)
+    """Backward-compatible wrapper for shared batch scoring utility."""
+    return _score_sequences(
+        model=model,
+        sequences=sequences,
+        window_len=window_len,
+        device=device,
+        batch_size=batch_size,
+    )
 
 
 def infer_site_scores(
@@ -1148,7 +1180,14 @@ def infer_site_scores(
     acceptor_model_path: str,
     device: str = "auto",
     batch_size: int = 512,
+    sequence_transform: str = "none",
 ) -> List[Dict[str, object]]:
+    """Run donor/acceptor site scoring with optional sequence transform."""
+    if sequence_transform not in SEQUENCE_TRANSFORM_CHOICES:
+        raise ValueError(
+            "Unsupported --sequence_transform: "
+            f"{sequence_transform}. Supported: {SEQUENCE_TRANSFORM_CHOICES}"
+        )
     device = pick_device(device)
 
     donor_model, donor_ckpt = load_task_model(donor_model_path, device)
@@ -1157,8 +1196,27 @@ def infer_site_scores(
     donor_window_len = int(donor_ckpt.get("window_len", 50))
     acceptor_window_len = int(acceptor_ckpt.get("window_len", 50))
 
-    donor_seqs = [str(r["seq"]) for r in site_rows if r["site_type"] == "donor"]
-    acceptor_seqs = [str(r["seq"]) for r in site_rows if r["site_type"] == "acceptor"]
+    transformed_rows: List[Dict[str, object]] = []
+    for row in site_rows:
+        site_type = str(row["site_type"])
+        transformed_seq = apply_site_sequence_transform(
+            str(row["seq"]),
+            site_type=site_type,
+            transform_mode=sequence_transform,
+            intron_half_length=(
+                int(row["intron_half_length"])
+                if row.get("intron_half_length") is not None
+                else None
+            ),
+        )
+        next_row = dict(row)
+        next_row["seq"] = transformed_seq
+        transformed_rows.append(next_row)
+
+    donor_seqs = [str(r["seq"]) for r in transformed_rows if r["site_type"] == "donor"]
+    acceptor_seqs = [
+        str(r["seq"]) for r in transformed_rows if r["site_type"] == "acceptor"
+    ]
 
     donor_scores = score_sequences(
         donor_model,
@@ -1178,7 +1236,7 @@ def infer_site_scores(
     out_rows: List[Dict[str, object]] = []
     donor_idx = 0
     acceptor_idx = 0
-    for row in site_rows:
+    for row in transformed_rows:
         site_type = str(row["site_type"])
         if site_type == "donor":
             if donor_idx < len(donor_scores):
@@ -1241,6 +1299,15 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
             "'donor'/'acceptor' train one task only (for tuning)."
         ),
     )
+    parser.add_argument(
+        "--sequence_transform",
+        choices=list(SEQUENCE_TRANSFORM_CHOICES),
+        default="none",
+        help=(
+            "Optional sequence preprocessing. "
+            "mask_outside_intron_n requires intron_half_length metadata."
+        ),
+    )
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--lightweight", action="store_true")
@@ -1254,10 +1321,19 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--kernel_sizes",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated per-layer kernel sizes, e.g. 11,7,5. "
+            "A single value is broadcast."
+        ),
+    )
+    parser.add_argument(
         "--kernel_size",
         type=int,
         default=7,
-        help="Convolution kernel size.",
+        help="Legacy scalar kernel size fallback when --kernel_sizes is unset.",
     )
     parser.add_argument(
         "--dropout",
@@ -1332,16 +1408,31 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Acceptor-only override for --conv_channels.",
     )
     parser.add_argument(
+        "--donor_kernel_sizes",
+        type=str,
+        default=None,
+        help="Donor-only override for --kernel_sizes.",
+    )
+    parser.add_argument(
+        "--acceptor_kernel_sizes",
+        type=str,
+        default=None,
+        help="Acceptor-only override for --kernel_sizes.",
+    )
+    parser.add_argument(
         "--donor_kernel_size",
         type=int,
         default=None,
-        help="Donor-only override for --kernel_size.",
+        help=("Legacy donor-only scalar fallback when --donor_kernel_sizes is unset."),
     )
     parser.add_argument(
         "--acceptor_kernel_size",
         type=int,
         default=None,
-        help="Acceptor-only override for --kernel_size.",
+        help=(
+            "Legacy acceptor-only scalar fallback when "
+            "--acceptor_kernel_sizes is unset."
+        ),
     )
     parser.add_argument(
         "--donor_dropout",
@@ -1557,6 +1648,26 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--f1_lambda",
+        type=float,
+        default=0.1,
+        help=(
+            "Mixing coefficient for --loss weighted_bce_f1 or focal_f1."
+        ),
+    )
+    parser.add_argument(
+        "--donor_f1_lambda",
+        type=float,
+        default=None,
+        help="Donor-only override for --f1_lambda.",
+    )
+    parser.add_argument(
+        "--acceptor_f1_lambda",
+        type=float,
+        default=None,
+        help="Acceptor-only override for --f1_lambda.",
+    )
+    parser.add_argument(
         "--asym_gamma_pos",
         type=float,
         default=0.0,
@@ -1635,6 +1746,11 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 def add_infer_args(parser: argparse.ArgumentParser) -> None:
     """Register CNN-specific inference arguments."""
     parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument(
+        "--sequence_transform",
+        choices=list(SEQUENCE_TRANSFORM_CHOICES),
+        default="none",
+    )
 
 
 def train(
@@ -1651,6 +1767,26 @@ def train(
         getattr(model_args, "acceptor_conv_channels", None),
         arg_name="--acceptor_conv_channels",
     )
+    shared_kernel_sizes = parse_kernel_sizes(
+        getattr(model_args, "kernel_sizes", None),
+        arg_name="--kernel_sizes",
+    )
+    donor_kernel_sizes = parse_kernel_sizes(
+        getattr(model_args, "donor_kernel_sizes", None),
+        arg_name="--donor_kernel_sizes",
+    )
+    acceptor_kernel_sizes = parse_kernel_sizes(
+        getattr(model_args, "acceptor_kernel_sizes", None),
+        arg_name="--acceptor_kernel_sizes",
+    )
+    if donor_kernel_sizes is None and getattr(model_args, "donor_kernel_size", None):
+        donor_kernel_sizes = [int(getattr(model_args, "donor_kernel_size"))]
+    if acceptor_kernel_sizes is None and getattr(
+        model_args, "acceptor_kernel_size", None
+    ):
+        acceptor_kernel_sizes = [int(getattr(model_args, "acceptor_kernel_size"))]
+    if shared_kernel_sizes is None and getattr(model_args, "kernel_size", None):
+        shared_kernel_sizes = [int(model_args.kernel_size)]
 
     train_pos_path, train_neg_path, inferred_train_len = resolve_train_paths(
         species=common_args.species,
@@ -1706,6 +1842,9 @@ def train(
             shared_conv_channels=shared_conv_channels,
             donor_conv_channels=donor_conv_channels,
             acceptor_conv_channels=acceptor_conv_channels,
+            shared_kernel_sizes=shared_kernel_sizes,
+            donor_kernel_sizes=donor_kernel_sizes,
+            acceptor_kernel_sizes=acceptor_kernel_sizes,
         )
         task_hparams[task] = resolved
         task_metrics[task] = train_task_model(
@@ -1724,7 +1863,7 @@ def train(
             seed=common_args.seed,
             lightweight=model_args.lightweight,
             conv_channels=resolved.conv_channels,
-            kernel_size=resolved.kernel_size,
+            kernel_sizes=resolved.kernel_sizes,
             dropout=resolved.dropout,
             fc_hidden=resolved.fc_hidden,
             weight_decay=resolved.weight_decay,
@@ -1741,6 +1880,7 @@ def train(
             asym_gamma_pos=resolved.asym_gamma_pos,
             asym_gamma_neg=resolved.asym_gamma_neg,
             asym_alpha_pos=resolved.asym_alpha_pos,
+            f1_lambda=resolved.f1_lambda,
             use_amp=model_args.use_amp,
             amp_dtype=model_args.amp_dtype,
             allow_tf32=model_args.allow_tf32,
@@ -1752,6 +1892,7 @@ def train(
             pin_memory=model_args.pin_memory,
             min_batch_size=model_args.min_batch_size,
             max_oom_retries=model_args.max_oom_retries,
+            sequence_transform=model_args.sequence_transform,
             quick_phase=bool(getattr(common_args, "quick_phase", False)),
             gpu_id=getattr(common_args, "gpu_id", None),
         )
@@ -1779,11 +1920,9 @@ def train(
             "lr": params.lr,
             "loss": params.loss_name,
             "conv_channels": (
-                None
-                if params.conv_channels is None
-                else list(params.conv_channels)
+                None if params.conv_channels is None else list(params.conv_channels)
             ),
-            "kernel_size": params.kernel_size,
+            "kernel_sizes": list(params.kernel_sizes),
             "dropout": params.dropout,
             "fc_hidden": params.fc_hidden,
             "weight_decay": params.weight_decay,
@@ -1796,6 +1935,7 @@ def train(
             "asym_gamma_pos": params.asym_gamma_pos,
             "asym_gamma_neg": params.asym_gamma_neg,
             "asym_alpha_pos": params.asym_alpha_pos,
+            "f1_lambda": params.f1_lambda,
         }
 
     summary: Dict[str, object] = {
@@ -1814,6 +1954,7 @@ def train(
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,
+        "sequence_transform": model_args.sequence_transform,
         "seed": common_args.seed,
         "device": common_args.device,
         "checkpoint_name": os.path.basename(donor_checkpoint_path),
@@ -1823,7 +1964,15 @@ def train(
         "conv_channels": (
             None if shared_conv_channels is None else list(shared_conv_channels)
         ),
-        "kernel_size": model_args.kernel_size,
+        "kernel_sizes": (
+            None if shared_kernel_sizes is None else list(shared_kernel_sizes)
+        ),
+        "donor_kernel_sizes": (
+            None if donor_kernel_sizes is None else list(donor_kernel_sizes)
+        ),
+        "acceptor_kernel_sizes": (
+            None if acceptor_kernel_sizes is None else list(acceptor_kernel_sizes)
+        ),
         "dropout": model_args.dropout,
         "fc_hidden": model_args.fc_hidden,
         "weight_decay": model_args.weight_decay,
@@ -1846,6 +1995,7 @@ def train(
         "loss": model_args.loss,
         "focal_gamma": model_args.focal_gamma,
         "focal_alpha_pos": model_args.focal_alpha_pos,
+        "f1_lambda": model_args.f1_lambda,
         "asym_gamma_pos": model_args.asym_gamma_pos,
         "asym_gamma_neg": model_args.asym_gamma_neg,
         "asym_alpha_pos": model_args.asym_alpha_pos,
@@ -1907,4 +2057,5 @@ def infer_site(
         acceptor_model_path=acceptor_model_path,
         device=common_args.device,
         batch_size=model_args.batch_size,
+        sequence_transform=model_args.sequence_transform,
     )

@@ -4,7 +4,10 @@ import math
 
 import pytest
 
-from util.transcript_eval import aggregate_transcript_scores
+from util.transcript_eval import (
+    aggregate_pair_transcript_scores,
+    aggregate_transcript_scores,
+)
 
 
 def test_aggregate_transcript_scores_softmin_exp_sum() -> None:
@@ -121,3 +124,66 @@ def test_aggregate_transcript_scores_softmin_tau_validation(tau: float) -> None:
             transcript_score_agg="softmin_wavg",
             softmin_tau=tau,
         )
+
+
+def test_aggregate_pair_transcript_scores_keeps_5col_compatibility() -> None:
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "pair",
+            "score": 0.3,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 2,
+            "site_type": "pair",
+            "score": 0.7,
+        },
+    ]
+
+    rows = aggregate_pair_transcript_scores(
+        site_score_rows=site_rows,
+        transcript_score_agg="min",
+        softmin_tau=1.0,
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "min_intron_index": 1,
+            "Score_donor": 0.3,
+            "Score_acceptor": 0.3,
+            "min_donor_plus_acceptor": 0.3,
+        }
+    ]
+
+
+def test_aggregate_pair_transcript_scores_softmin_wavg() -> None:
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "pair",
+            "score": 0.2,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 2,
+            "site_type": "pair",
+            "score": 1.2,
+        },
+    ]
+
+    rows = aggregate_pair_transcript_scores(
+        site_score_rows=site_rows,
+        transcript_score_agg="softmin_wavg",
+        softmin_tau=1.0,
+    )
+    scores = [0.2, 1.2]
+    min_score = min(scores)
+    weights = [math.exp(-(score - min_score)) for score in scores]
+    expected = (weights[0] * scores[0] + weights[1] * scores[1]) / sum(weights)
+
+    assert rows[0]["min_intron_index"] == 1
+    assert float(rows[0]["min_donor_plus_acceptor"]) == pytest.approx(expected)

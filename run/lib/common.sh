@@ -146,3 +146,202 @@ intronmodel_resolve_python_bin() {
 	echo "[${script_tag}] python interpreter not found (python3/python)." >&2
 	return 1
 }
+
+
+intronmodel_resolve_max_model_params() {
+	local script_tag="$1"
+	local setting="$2"
+	local gpu_ids_setting="$3"
+	local fallback_params="$4"
+	local mem_fraction="$5"
+	local reserve_mib="$6"
+	local bytes_per_param="$7"
+	local model_factor="$8"
+	local py_bin="${9:-python3}"
+
+	"${py_bin}" - \
+		"${script_tag}" \
+		"${setting}" \
+		"${gpu_ids_setting}" \
+		"${fallback_params}" \
+		"${mem_fraction}" \
+		"${reserve_mib}" \
+		"${bytes_per_param}" \
+		"${model_factor}" <<'PY'
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+
+
+def _fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _parse_positive_int(text: str, name: str) -> int:
+    raw = text.strip()
+    if not re.fullmatch(r"\d+", raw):
+        _fail(f"[{script_tag}] {name} must be a positive integer or auto.")
+    value = int(raw)
+    if value <= 0:
+        _fail(f"[{script_tag}] {name} must be > 0.")
+    return value
+
+
+def _parse_non_negative_int(text: str, name: str) -> int:
+    raw = text.strip()
+    if not re.fullmatch(r"\d+", raw):
+        _fail(f"[{script_tag}] {name} must be a non-negative integer.")
+    return int(raw)
+
+
+def _parse_positive_float(text: str, name: str) -> float:
+    raw = text.strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        _fail(f"[{script_tag}] {name} must be a positive number.")
+    if value <= 0.0:
+        _fail(f"[{script_tag}] {name} must be > 0.")
+    return value
+
+
+def _query_gpu_total_mib() -> list[int]:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+
+    totals: list[int] = []
+    for line in result.stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            value = int(text)
+        except ValueError:
+            continue
+        if value > 0:
+            totals.append(value)
+    return totals
+
+
+def _resolve_selected_indices(raw: str, count: int) -> list[int]:
+    text = raw.strip().lower()
+    if text == "" or text == "auto":
+        return list(range(count))
+
+    selected: list[int] = []
+    for token in raw.split(","):
+        item = token.strip()
+        if not item:
+            continue
+        if not re.fullmatch(r"\d+", item):
+            _fail(f"[{script_tag}] GPU_IDS must be auto or comma-separated integers.")
+        idx = int(item)
+        if idx < 0 or idx >= count:
+            _fail(
+                f"[{script_tag}] GPU index out of range: {idx} "
+                f"(detected {count} GPUs)."
+            )
+        selected.append(idx)
+
+    if not selected:
+        _fail(f"[{script_tag}] GPU_IDS resolved to an empty set.")
+    return selected
+
+
+script_tag = sys.argv[1]
+setting = sys.argv[2].strip()
+gpu_ids_setting = sys.argv[3]
+fallback_params = _parse_positive_int(sys.argv[4], "MAX_MODEL_PARAMS fallback")
+mem_fraction = _parse_positive_float(
+    sys.argv[5],
+    "MAX_MODEL_PARAMS_MEM_FRACTION",
+)
+if mem_fraction > 1.0:
+    _fail(
+        f"[{script_tag}] MAX_MODEL_PARAMS_MEM_FRACTION must be <= 1.0 "
+        f"(got {mem_fraction})."
+    )
+reserve_mib = _parse_non_negative_int(
+    sys.argv[6],
+    "MAX_MODEL_PARAMS_RESERVE_MIB",
+)
+bytes_per_param = _parse_positive_float(
+    sys.argv[7],
+    "MAX_MODEL_PARAMS_BYTES_PER_PARAM",
+)
+model_factor = _parse_positive_float(
+    sys.argv[8],
+    "MAX_MODEL_PARAMS_MODEL_FACTOR",
+)
+
+if setting.lower() != "auto":
+    resolved = _parse_positive_int(setting, "MAX_MODEL_PARAMS")
+    print(resolved)
+    print(
+        f"[{script_tag}] MAX_MODEL_PARAMS fixed: {resolved}.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+totals_mib = _query_gpu_total_mib()
+if not totals_mib:
+    print(fallback_params)
+    print(
+        f"[{script_tag}] MAX_MODEL_PARAMS auto: nvidia-smi unavailable; "
+        f"fallback={fallback_params}.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+selected_indices = _resolve_selected_indices(gpu_ids_setting, len(totals_mib))
+selected_totals = [totals_mib[idx] for idx in selected_indices]
+min_total_mib = min(selected_totals)
+
+usable_mib = (float(min_total_mib) * mem_fraction) - float(reserve_mib)
+if usable_mib <= 0.0:
+    print(fallback_params)
+    print(
+        f"[{script_tag}] MAX_MODEL_PARAMS auto: usable VRAM <= 0; "
+        f"fallback={fallback_params}.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+usable_bytes = usable_mib * 1024.0 * 1024.0
+estimated_params = int((usable_bytes / bytes_per_param) * model_factor)
+if estimated_params <= 0:
+    print(fallback_params)
+    print(
+        f"[{script_tag}] MAX_MODEL_PARAMS auto: estimate <= 0; "
+        f"fallback={fallback_params}.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+print(estimated_params)
+print(
+    f"[{script_tag}] MAX_MODEL_PARAMS auto: "
+    f"selected_gpu_indices={selected_indices} "
+    f"min_total_mib={min_total_mib} "
+    f"mem_fraction={mem_fraction:.2f} reserve_mib={reserve_mib} "
+    f"bytes_per_param={bytes_per_param:.1f} model_factor={model_factor:.3f} "
+    f"resolved={estimated_params}.",
+    file=sys.stderr,
+)
+PY
+}

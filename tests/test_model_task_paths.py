@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from util.model_task_paths import (
+    checkpoint_tasks_for_model,
     resolve_required_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
@@ -66,3 +67,32 @@ def test_resolve_train_target_rejects_invalid_value() -> None:
 
     with pytest.raises(ValueError, match="--train_target must be one of"):
         _ = resolve_train_target(args)
+
+
+def test_checkpoint_tasks_for_model_supports_pair_override() -> None:
+    assert checkpoint_tasks_for_model("cnn_pair") == ("pair",)
+    assert checkpoint_tasks_for_model("cnn") == ("donor", "acceptor")
+
+
+def test_resolve_required_checkpoint_paths_for_pair_task(tmp_path: Path) -> None:
+    pair = tmp_path / "pair.pt"
+    pair.write_bytes(b"p")
+    args = Namespace(pair_checkpoint_path=str(pair))
+
+    resolved = resolve_required_checkpoint_paths(
+        args,
+        require_exists=True,
+        tasks=("pair",),
+    )
+
+    assert resolved == {"pair": str(pair)}
+
+
+def test_resolve_train_target_accepts_pair_only_mode() -> None:
+    args = Namespace(train_target="pair")
+
+    target = resolve_train_target(args, allowed_targets=("pair",))
+    tasks = resolve_tasks_to_train(target, both_tasks=("pair",))
+
+    assert target == "pair"
+    assert tasks == ["pair"]

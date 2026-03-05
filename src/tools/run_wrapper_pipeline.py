@@ -30,6 +30,7 @@ from util.checkpoint_io import (
     read_json_object,
 )
 from util.data_proc import build_output_stem, parse_name_fields
+from util.model_task_paths import checkpoint_tasks_for_model
 
 
 @dataclass(frozen=True)
@@ -214,7 +215,7 @@ def _resolve_tuned_checkpoint_path(
 
 def _extract_tuned_assignments(
     config_path: Path,
-    task_prefix: str,
+    task_prefix: str | None,
     key_map: Mapping[str, str],
 ) -> dict[str, str]:
     """Extract tuned key/value assignments from best_config.json payload."""
@@ -251,8 +252,32 @@ def _extract_tuned_assignments(
         else:
             text = str(value)
 
-        assignments[f"{task_prefix}_{suffix}"] = text
+        if task_prefix is None:
+            assignments[suffix] = text
+        else:
+            assignments[f"{task_prefix}_{suffix}"] = text
     return assignments
+
+
+def _resolve_tasks_for_target(
+    *,
+    train_target: str,
+    model_tasks: tuple[TaskName, ...],
+    train_only: bool,
+) -> tuple[TaskName, ...]:
+    """Resolve required tasks from one train target and model task set."""
+    if len(model_tasks) == 1:
+        expected = model_tasks[0]
+        if train_target != expected:
+            raise ValueError(f"TRAIN_TARGET must be {expected}.")
+        return model_tasks
+
+    if train_target not in ("both", *model_tasks):
+        allowed = "|".join(("both", *model_tasks))
+        raise ValueError(f"TRAIN_TARGET must be {allowed}.")
+    if (not train_only) or train_target == "both":
+        return model_tasks
+    return (train_target,)
 
 
 def _apply_tuned_overrides(
@@ -260,7 +285,7 @@ def _apply_tuned_overrides(
     env: dict[str, str],
     data_root: Path,
 ) -> dict[TaskName, Path]:
-    """Apply per-task tuned hparam overrides to empty task env fields."""
+    """Apply tuned hparam overrides to empty wrapper env fields."""
 
     resolved_configs: dict[TaskName, Path] = {}
     use_mode = env.get("USE_TUNED_HPARAMS", "off")
@@ -279,12 +304,18 @@ def _apply_tuned_overrides(
             data_root / species / "tuning" / tuned_model_name / "best_config.json"
         )
 
+    model_tasks = checkpoint_tasks_for_model(tuned_model_name)
     train_target = env["TRAIN_TARGET"]
-    tasks: tuple[TaskName, ...]
-    if train_target in {"donor", "acceptor"}:
-        tasks = (train_target,)
+    is_single_task_model = len(model_tasks) == 1
+    if is_single_task_model:
+        if train_target != model_tasks[0]:
+            raise ValueError(f"TRAIN_TARGET must be {model_tasks[0]}.")
+        tasks = model_tasks
     else:
-        tasks = ("donor", "acceptor")
+        if train_target not in ("both", *model_tasks):
+            allowed = "|".join(("both", *model_tasks))
+            raise ValueError(f"TRAIN_TARGET must be {allowed}.")
+        tasks = model_tasks if train_target == "both" else (train_target,)
 
     for task in tasks:
         explicit_key = f"{task.upper()}_TUNED_CONFIG_PATH"
@@ -315,7 +346,7 @@ def _apply_tuned_overrides(
             )
             continue
 
-        task_prefix = task.upper()
+        task_prefix: str | None = None if is_single_task_model else task.upper()
         try:
             assignments = _extract_tuned_assignments(
                 config_path=resolved,
@@ -354,6 +385,7 @@ def _resolve_expected_checkpoint_paths_for_run(
 ) -> tuple[dict[str, str], tuple[str, ...]]:
     """Resolve strict checkpoint paths and required tasks for one run argument set."""
     args = parse_args(run_args)
+    model_tasks = checkpoint_tasks_for_model(str(args.model))
     donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
         species=args.species,
         donor_len=args.donor_len,
@@ -366,15 +398,20 @@ def _resolve_expected_checkpoint_paths_for_run(
         inferred_train_len=inferred_train_len,
         raw_params=dict(vars(args)),
     )
-    checkpoint_paths = _build_checkpoint_paths(args.species, checkpoint_stem)
-
-    train_target = str(getattr(args, "train_target", "both")).strip().lower()
-    if not bool(getattr(args, "train_only", False)):
-        required_tasks: tuple[str, ...] = ("donor", "acceptor")
-    elif train_target == "both":
-        required_tasks = ("donor", "acceptor")
-    else:
-        required_tasks = (train_target,)
+    checkpoint_paths = _build_checkpoint_paths(
+        args.species,
+        checkpoint_stem,
+        tasks=model_tasks,
+    )
+    default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
+    train_target = str(
+        getattr(args, "train_target", default_train_target)
+    ).strip().lower()
+    required_tasks = _resolve_tasks_for_target(
+        train_target=train_target,
+        model_tasks=model_tasks,
+        train_only=bool(getattr(args, "train_only", False)),
+    )
     return checkpoint_paths, required_tasks
 
 
@@ -454,10 +491,26 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         "seed": _as_int(_require_env(env, "SEED"), "SEED"),
         "train_target": _require_env(env, "TRAIN_TARGET"),
     }
+    tag_value = env.get("TAG", "").strip()
+    if tag_value != "":
+        base["tag"] = tag_value
 
     if builder in {"cnn", "cnn_resdil", "tcn"}:
         base["conv_channels"] = _require_env(env, "CONV_CHANNELS") or None
-        base["kernel_size"] = _as_int(_require_env(env, "KERNEL_SIZE"), "KERNEL_SIZE")
+        if builder in {"cnn", "cnn_resdil"}:
+            kernel_sizes_raw = _require_env(env, "KERNEL_SIZES").strip()
+            if kernel_sizes_raw != "":
+                base["kernel_sizes"] = kernel_sizes_raw
+            else:
+                base["kernel_sizes"] = _as_int(
+                    _require_env(env, "KERNEL_SIZE"),
+                    "KERNEL_SIZE",
+                )
+        else:
+            base["kernel_size"] = _as_int(
+                _require_env(env, "KERNEL_SIZE"),
+                "KERNEL_SIZE",
+            )
         base["dropout"] = _as_float(_require_env(env, "DROPOUT"), "DROPOUT")
         base["fc_hidden"] = _as_int(_require_env(env, "FC_HIDDEN"), "FC_HIDDEN")
 
@@ -486,14 +539,27 @@ def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
 
     optional_global = (
         "FOCAL_ALPHA_POS",
+        "F1_LAMBDA",
         "ASYM_ALPHA_POS",
         "ASYM_GAMMA_POS",
         "ASYM_GAMMA_NEG",
+        "KERNEL_SIZES",
+        "N_DIM",
+        "TAG",
     )
     for key in optional_global:
         value = env.get(key, "")
         if value != "":
             args.extend([f"--{key.lower()}", value])
+
+    optional_data_paths = (
+        ("TRAIN_POS_PATH", "train_pos_path"),
+        ("TRAIN_NEG_PATH", "train_neg_path"),
+    )
+    for env_key, cli_key in optional_data_paths:
+        value = env.get(env_key, "")
+        if value != "":
+            args.extend([f"--{cli_key}", value])
 
     for prefix in ("DONOR", "ACCEPTOR"):
         for key in spec.per_task_override_keys:
@@ -540,13 +606,18 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
         ("0", "1"),
         "CONTINUE_TRAINING",
     )
+    model_name = _require_env(env, "MODEL")
+    model_tasks = checkpoint_tasks_for_model(model_name)
     train_target = _require_env(env, "TRAIN_TARGET")
-    _check_choice(train_target, ("both", "donor", "acceptor"), "TRAIN_TARGET")
+    allowed_targets = (
+        ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
+    )
+    _check_choice(train_target, tuple(allowed_targets), "TRAIN_TARGET")
 
     if env["SKIP_TRAINING"] == "1" and env["CONTINUE_TRAINING"] == "1":
         raise ValueError("CONTINUE_TRAINING=1 cannot be used with SKIP_TRAINING=1.")
-    if train_target != "both" and env["TRAIN_ONLY"] != "1":
-        raise ValueError("TRAIN_TARGET donor/acceptor requires TRAIN_ONLY=1.")
+    if len(model_tasks) > 1 and train_target != "both" and env["TRAIN_ONLY"] != "1":
+        raise ValueError("TRAIN_TARGET single-task mode requires TRAIN_ONLY=1.")
 
     if spec.supports_tuned_hparams:
         _check_choice(
@@ -589,6 +660,7 @@ def _check_dnabert_skip_training_preconditions(run_args: list[str]) -> None:
     """Replicate dnabert wrapper checkpoint existence checks."""
 
     args = parse_args(run_args)
+    model_tasks = checkpoint_tasks_for_model(str(args.model))
     donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
         species=args.species,
         donor_len=args.donor_len,
@@ -601,14 +673,20 @@ def _check_dnabert_skip_training_preconditions(run_args: list[str]) -> None:
         inferred_train_len=inferred_train_len,
         raw_params=dict(vars(args)),
     )
-    checkpoint_paths = _build_checkpoint_paths(args.species, checkpoint_stem)
-
-    train_target = str(getattr(args, "train_target", "both")).strip().lower()
-    required_tasks: tuple[str, ...]
-    if train_target == "both":
-        required_tasks = ("donor", "acceptor")
-    else:
-        required_tasks = (train_target,)
+    checkpoint_paths = _build_checkpoint_paths(
+        args.species,
+        checkpoint_stem,
+        tasks=model_tasks,
+    )
+    default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
+    train_target = str(
+        getattr(args, "train_target", default_train_target)
+    ).strip().lower()
+    required_tasks = _resolve_tasks_for_target(
+        train_target=train_target,
+        model_tasks=model_tasks,
+        train_only=bool(getattr(args, "train_only", False)),
+    )
 
     missing_paths = [
         checkpoint_paths[task]
@@ -663,6 +741,15 @@ def _run_single_species(
         env,
         "MPS_MAX_BATCH_SIZE",
     )
+    for key in ("TRAIN_POS_PATH", "TRAIN_NEG_PATH"):
+        raw = env.get(key, "")
+        if raw == "":
+            continue
+        env[key] = (
+            raw.replace("{species}", species)
+            .replace("{SPECIES}", species)
+            .replace("${SPECIES}", species)
+        )
 
     tuned_config_paths: dict[TaskName, Path] = {}
     if spec.supports_tuned_hparams:
@@ -853,7 +940,9 @@ SPECS: dict[str, WrapperSpec] = {
             "lr": "LR",
             "loss": "LOSS",
             "conv_channels": "CONV_CHANNELS",
-            "kernel_size": "KERNEL_SIZE",
+            "kernel_sizes": "KERNEL_SIZES",
+            "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
+            "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
             "dropout": "DROPOUT",
             "fc_hidden": "FC_HIDDEN",
             "weight_decay": "WEIGHT_DECAY",
@@ -863,6 +952,7 @@ SPECS: dict[str, WrapperSpec] = {
             "pos_weight_cap": "POS_WEIGHT_CAP",
             "focal_gamma": "FOCAL_GAMMA",
             "focal_alpha_pos": "FOCAL_ALPHA_POS",
+            "f1_lambda": "F1_LAMBDA",
             "asym_gamma_pos": "ASYM_GAMMA_POS",
             "asym_gamma_neg": "ASYM_GAMMA_NEG",
             "asym_alpha_pos": "ASYM_ALPHA_POS",
@@ -877,11 +967,12 @@ SPECS: dict[str, WrapperSpec] = {
             "EARLY_STOP_PATIENCE",
             "EARLY_STOP_MIN_DELTA",
             "TRAIN_TARGET",
+            "SEQUENCE_TRANSFORM",
             "BATCH_SIZE",
             "LR",
             "LOSS",
             "CONV_CHANNELS",
-            "KERNEL_SIZE",
+            "KERNEL_SIZES",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -890,6 +981,7 @@ SPECS: dict[str, WrapperSpec] = {
             "VAL_FRAC",
             "POS_WEIGHT_CAP",
             "FOCAL_GAMMA",
+            "F1_LAMBDA",
             "NAME_FIELDS",
             "INTRON_SCORE_OP",
             "TRANSCRIPT_SCORE_AGG",
@@ -915,7 +1007,7 @@ SPECS: dict[str, WrapperSpec] = {
             "LR",
             "LOSS",
             "CONV_CHANNELS",
-            "KERNEL_SIZE",
+            "KERNEL_SIZES",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -925,10 +1017,86 @@ SPECS: dict[str, WrapperSpec] = {
             "POS_WEIGHT_CAP",
             "FOCAL_GAMMA",
             "FOCAL_ALPHA_POS",
+            "F1_LAMBDA",
             "ASYM_GAMMA_POS",
             "ASYM_GAMMA_NEG",
             "ASYM_ALPHA_POS",
         ),
+    ),
+    "cnn_pair.sh": WrapperSpec(
+        script_name="cnn_pair.sh",
+        model_env_name="cnn_pair",
+        supports_tuned_hparams=True,
+        tuned_key_map={
+            "batch_size": "BATCH_SIZE",
+            "lr": "LR",
+            "loss": "LOSS",
+            "conv_channels": "CONV_CHANNELS",
+            "donor_conv_channels": "DONOR_CONV_CHANNELS",
+            "acceptor_conv_channels": "ACCEPTOR_CONV_CHANNELS",
+            "kernel_sizes": "KERNEL_SIZES",
+            "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
+            "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
+            "dropout": "DROPOUT",
+            "fc_hidden": "FC_HIDDEN",
+            "weight_decay": "WEIGHT_DECAY",
+            "eta_min_ratio": "ETA_MIN_RATIO",
+            "val_frac": "VAL_FRAC",
+            "grad_clip": "GRAD_CLIP",
+            "pos_weight_cap": "POS_WEIGHT_CAP",
+            "focal_gamma": "FOCAL_GAMMA",
+            "focal_alpha_pos": "FOCAL_ALPHA_POS",
+            "f1_lambda": "F1_LAMBDA",
+            "asym_gamma_pos": "ASYM_GAMMA_POS",
+            "asym_gamma_neg": "ASYM_GAMMA_NEG",
+            "asym_alpha_pos": "ASYM_ALPHA_POS",
+        },
+        stem_param_builder="cnn",
+        required_arg_keys=(
+            "SPECIES",
+            "DONOR_LEN",
+            "ACCEPTOR_LEN",
+            "EPOCHS",
+            "MAX_EPOCHS",
+            "EARLY_STOP_PATIENCE",
+            "EARLY_STOP_MIN_DELTA",
+            "TRAIN_TARGET",
+            "SEQUENCE_TRANSFORM",
+            "BATCH_SIZE",
+            "LR",
+            "LOSS",
+            "CONV_CHANNELS",
+            "KERNEL_SIZES",
+            "DROPOUT",
+            "FC_HIDDEN",
+            "WEIGHT_DECAY",
+            "ETA_MIN_RATIO",
+            "GRAD_CLIP",
+            "VAL_FRAC",
+            "POS_WEIGHT_CAP",
+            "FOCAL_GAMMA",
+            "F1_LAMBDA",
+            "NAME_FIELDS",
+            "INTRON_SCORE_OP",
+            "TRANSCRIPT_SCORE_AGG",
+            "SOFTMIN_TAU",
+            "SEED",
+            "DEVICE",
+            "VISUALIZE",
+            "USE_AMP",
+            "AMP_DTYPE",
+            "COMPILE_MODE",
+            "ALLOW_TF32",
+            "CUDNN_BENCHMARK",
+            "DETERMINISTIC",
+            "NUM_WORKERS",
+            "PREFETCH_FACTOR",
+            "PERSISTENT_WORKERS",
+            "PIN_MEMORY",
+            "MIN_BATCH_SIZE",
+            "MAX_OOM_RETRIES",
+        ),
+        per_task_override_keys=("CONV_CHANNELS", "KERNEL_SIZES"),
     ),
     "cnn_resdil.sh": WrapperSpec(
         script_name="cnn_resdil.sh",
@@ -939,7 +1107,9 @@ SPECS: dict[str, WrapperSpec] = {
             "lr": "LR",
             "loss": "LOSS",
             "conv_channels": "CONV_CHANNELS",
-            "kernel_size": "KERNEL_SIZE",
+            "kernel_sizes": "KERNEL_SIZES",
+            "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
+            "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
             "dropout": "DROPOUT",
             "fc_hidden": "FC_HIDDEN",
             "weight_decay": "WEIGHT_DECAY",
@@ -967,7 +1137,7 @@ SPECS: dict[str, WrapperSpec] = {
             "LR",
             "LOSS",
             "CONV_CHANNELS",
-            "KERNEL_SIZE",
+            "KERNEL_SIZES",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -1001,7 +1171,7 @@ SPECS: dict[str, WrapperSpec] = {
             "LR",
             "LOSS",
             "CONV_CHANNELS",
-            "KERNEL_SIZE",
+            "KERNEL_SIZES",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -1221,6 +1391,10 @@ SPECS: dict[str, WrapperSpec] = {
             "sparsity": "SPARSITY",
             "input_scale": "INPUT_SCALE",
             "pooling": "POOLING",
+            "mts_rep": "MTS_REP",
+            "dimred_method": "DIMRED_METHOD",
+            "n_dim": "N_DIM",
+            "readout_type": "READOUT_TYPE",
             "readout_hidden": "READOUT_HIDDEN",
             "readout_dropout": "READOUT_DROPOUT",
             "washout": "WASHOUT",
@@ -1260,6 +1434,9 @@ SPECS: dict[str, WrapperSpec] = {
             "SPARSITY",
             "INPUT_SCALE",
             "POOLING",
+            "MTS_REP",
+            "DIMRED_METHOD",
+            "READOUT_TYPE",
             "READOUT_HIDDEN",
             "READOUT_DROPOUT",
             "WASHOUT",
@@ -1305,6 +1482,10 @@ SPECS: dict[str, WrapperSpec] = {
             "SPARSITY",
             "INPUT_SCALE",
             "POOLING",
+            "MTS_REP",
+            "DIMRED_METHOD",
+            "N_DIM",
+            "READOUT_TYPE",
             "READOUT_HIDDEN",
             "READOUT_DROPOUT",
             "WASHOUT",

@@ -3,30 +3,51 @@
 from __future__ import annotations
 
 import os
-from typing import Literal, cast
+from typing import Sequence
 
-TaskName = Literal["donor", "acceptor"]
-TrainTarget = Literal["both", "donor", "acceptor"]
+DEFAULT_TASKS: tuple[str, ...] = ("donor", "acceptor")
+_MODEL_TASK_OVERRIDES: dict[str, tuple[str, ...]] = {
+    "cnn_pair": ("pair",),
+}
+
+
+def checkpoint_tasks_for_model(model_name: str) -> tuple[str, ...]:
+    """Resolve checkpoint task names for one model.
+
+    Parameters
+    ----------
+    model_name : str
+        Model key from registry.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered checkpoint task names.
+    """
+    return _MODEL_TASK_OVERRIDES.get(model_name, DEFAULT_TASKS)
 
 
 def resolve_required_checkpoint_paths(
     common_args: object,
     *,
     require_exists: bool,
-) -> dict[TaskName, str]:
-    """Resolve donor/acceptor checkpoint paths from runtime args.
+    tasks: Sequence[str] | None = None,
+) -> dict[str, str]:
+    """Resolve checkpoint paths from runtime args for specified tasks.
 
     Parameters
     ----------
     common_args : object
-        Namespace-like object that may provide checkpoint path attributes.
+        Namespace-like object that may provide ``<task>_checkpoint_path`` fields.
     require_exists : bool
-        When ``True``, the function validates file existence.
+        When ``True``, validate file existence.
+    tasks : Sequence[str] | None, default=None
+        Task names. Defaults to donor/acceptor.
 
     Returns
     -------
-    dict[TaskName, str]
-        Resolved checkpoint path mapping for donor and acceptor.
+    dict[str, str]
+        Mapping from task name to checkpoint path.
 
     Raises
     ------
@@ -35,70 +56,80 @@ def resolve_required_checkpoint_paths(
     FileNotFoundError
         If ``require_exists=True`` and checkpoint files are absent.
     """
-    donor_checkpoint_path = str(
-        getattr(common_args, "donor_checkpoint_path", "")
-    ).strip()
-    acceptor_checkpoint_path = str(
-        getattr(common_args, "acceptor_checkpoint_path", "")
-    ).strip()
-    if donor_checkpoint_path == "":
-        raise ValueError("Missing donor checkpoint path in common_args.")
-    if acceptor_checkpoint_path == "":
-        raise ValueError("Missing acceptor checkpoint path in common_args.")
+    task_names = tuple(tasks) if tasks is not None else DEFAULT_TASKS
+    if not task_names:
+        raise ValueError("tasks must contain at least one task name.")
 
-    if require_exists:
-        if not os.path.exists(donor_checkpoint_path):
+    resolved: dict[str, str] = {}
+    for task in task_names:
+        key_name = f"{task}_checkpoint_path"
+        checkpoint_path = str(getattr(common_args, key_name, "")).strip()
+        if checkpoint_path == "":
+            raise ValueError(f"Missing {task} checkpoint path in common_args.")
+        if require_exists and not os.path.exists(checkpoint_path):
             raise FileNotFoundError(
-                f"Donor checkpoint not found: {donor_checkpoint_path}"
+                f"{task.capitalize()} checkpoint not found: {checkpoint_path}"
             )
-        if not os.path.exists(acceptor_checkpoint_path):
-            raise FileNotFoundError(
-                f"Acceptor checkpoint not found: {acceptor_checkpoint_path}"
-            )
-
-    return {
-        "donor": donor_checkpoint_path,
-        "acceptor": acceptor_checkpoint_path,
-    }
+        resolved[task] = checkpoint_path
+    return resolved
 
 
-def resolve_train_target(model_args: object) -> TrainTarget:
+def resolve_train_target(
+    model_args: object,
+    *,
+    allowed_targets: Sequence[str] | None = None,
+) -> str:
     """Resolve and validate train-target setting from model args.
 
     Parameters
     ----------
     model_args : object
         Namespace-like object that may provide ``train_target``.
+    allowed_targets : Sequence[str] | None, default=None
+        Allowed train-target values. Default is ``both, donor, acceptor``.
 
     Returns
     -------
-    TrainTarget
-        One of ``both``, ``donor``, or ``acceptor``.
+    str
+        Resolved train-target value.
 
     Raises
     ------
     ValueError
         If the value is outside the supported set.
     """
+    allowed = tuple(allowed_targets) if allowed_targets is not None else (
+        "both",
+        "donor",
+        "acceptor",
+    )
     train_target = str(getattr(model_args, "train_target", "both")).strip().lower()
-    if train_target not in {"both", "donor", "acceptor"}:
-        raise ValueError("--train_target must be one of: both, donor, acceptor.")
-    return cast(TrainTarget, train_target)
+    if train_target not in allowed:
+        allowed_text = ", ".join(allowed)
+        raise ValueError(f"--train_target must be one of: {allowed_text}.")
+    return train_target
 
 
-def resolve_tasks_to_train(train_target: TrainTarget) -> list[TaskName]:
+def resolve_tasks_to_train(
+    train_target: str,
+    *,
+    both_tasks: Sequence[str] | None = None,
+) -> list[str]:
     """Convert train-target mode to explicit task list.
 
     Parameters
     ----------
-    train_target : TrainTarget
-        Resolved train target mode.
+    train_target : str
+        Resolved train-target mode.
+    both_tasks : Sequence[str] | None, default=None
+        Task list to use when ``train_target == 'both'``.
 
     Returns
     -------
-    list[TaskName]
+    list[str]
         Ordered task list for training.
     """
+    expanded_both = list(both_tasks) if both_tasks is not None else list(DEFAULT_TASKS)
     if train_target == "both":
-        return ["donor", "acceptor"]
+        return expanded_both
     return [train_target]

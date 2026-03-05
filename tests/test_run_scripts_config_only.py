@@ -9,7 +9,19 @@ def _project_root() -> Path:
 
 
 def test_cnn_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "cnn.sh"
+    script_path = _project_root() / "run" / "run_cnn.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_cnn_pair_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_cnn_pair.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -32,8 +44,20 @@ def test_tune_cnn_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_tune_cnn_pair_time_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "tune_cnn_pair_time.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_cnn_resdil_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "cnn_resdil.sh"
+    script_path = _project_root() / "run" / "run_cnn_resdil.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -45,7 +69,7 @@ def test_cnn_resdil_sh_rejects_cli_arguments() -> None:
 
 
 def test_tcn_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "tcn.sh"
+    script_path = _project_root() / "run" / "run_tcn.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -57,7 +81,7 @@ def test_tcn_sh_rejects_cli_arguments() -> None:
 
 
 def test_bert_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "bert.sh"
+    script_path = _project_root() / "run" / "run_bert.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -69,7 +93,7 @@ def test_bert_sh_rejects_cli_arguments() -> None:
 
 
 def test_dnabert_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "dnabert.sh"
+    script_path = _project_root() / "run" / "run_dnabert.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -143,7 +167,7 @@ def test_tune_bert_sh_rejects_cli_arguments() -> None:
 def test_run_scripts_are_shellcheck_parsable() -> None:
     root = _project_root()
     cnn = subprocess.run(
-        ["bash", "-n", str(root / "run" / "cnn.sh")],
+        ["bash", "-n", str(root / "run" / "run_cnn.sh")],
         capture_output=True,
         text=True,
         check=False,
@@ -154,26 +178,38 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
+    tune_pair_time = subprocess.run(
+        ["bash", "-n", str(root / "run" / "tune_cnn_pair_time.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     cnn_resdil = subprocess.run(
-        ["bash", "-n", str(root / "run" / "cnn_resdil.sh")],
+        ["bash", "-n", str(root / "run" / "run_cnn_resdil.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cnn_pair = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_cnn_pair.sh")],
         capture_output=True,
         text=True,
         check=False,
     )
     tcn = subprocess.run(
-        ["bash", "-n", str(root / "run" / "tcn.sh")],
+        ["bash", "-n", str(root / "run" / "run_tcn.sh")],
         capture_output=True,
         text=True,
         check=False,
     )
     bert = subprocess.run(
-        ["bash", "-n", str(root / "run" / "bert.sh")],
+        ["bash", "-n", str(root / "run" / "run_bert.sh")],
         capture_output=True,
         text=True,
         check=False,
     )
     dnabert = subprocess.run(
-        ["bash", "-n", str(root / "run" / "dnabert.sh")],
+        ["bash", "-n", str(root / "run" / "run_dnabert.sh")],
         capture_output=True,
         text=True,
         check=False,
@@ -220,9 +256,17 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
+    eval_pair = subprocess.run(
+        ["bash", "-n", str(root / "run" / "eval_trans_score_pair.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert cnn.returncode == 0, cnn.stderr
     assert tune.returncode == 0, tune.stderr
+    assert tune_pair_time.returncode == 0, tune_pair_time.stderr
     assert cnn_resdil.returncode == 0, cnn_resdil.stderr
+    assert cnn_pair.returncode == 0, cnn_pair.stderr
     assert tcn.returncode == 0, tcn.stderr
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr
@@ -233,3 +277,4 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert tune_bert.returncode == 0, tune_bert.stderr
     assert tune_resdil_time.returncode == 0, tune_resdil_time.stderr
     assert tune_tcn_time.returncode == 0, tune_tcn_time.stderr
+    assert eval_pair.returncode == 0, eval_pair.stderr

@@ -30,6 +30,8 @@ from util.data_proc import (
     resolve_effective_window_lengths,
     species_data_dirs,
 )
+from util.model_task_paths import checkpoint_tasks_for_model
+from util.sequence_transform import SEQUENCE_TRANSFORM_CHOICES
 from util.validation_protocol import (
     build_validation_protocol,
     compute_validation_signature,
@@ -37,6 +39,7 @@ from util.validation_protocol import (
 from util.transcript_eval import (
     INTRON_SCORE_OP_CHOICES,
     TRANSCRIPT_SCORE_AGG_CHOICES,
+    aggregate_pair_transcript_scores,
     aggregate_transcript_scores,
     read_site_scores,
     write_site_scores,
@@ -46,7 +49,15 @@ from util.transcript_eval import (
 try:
     from util.losses import LOSS_NAME_CHOICES
 except ModuleNotFoundError:  # pragma: no cover
-    LOSS_NAME_CHOICES = ("bce", "weighted_bce", "focal", "asymmetric_focal")
+    LOSS_NAME_CHOICES = (
+        "bce",
+        "weighted_bce",
+        "focal",
+        "asymmetric_focal",
+        "f1",
+        "weighted_bce_f1",
+        "focal_f1",
+    )
 
 
 CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
@@ -95,6 +106,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "y_max",
         "donor_checkpoint_path",
         "acceptor_checkpoint_path",
+        "pair_checkpoint_path",
         "pretrained_model_name",
     }
 )
@@ -251,10 +263,16 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
         choices=["both", "donor", "acceptor"],
         default="both",
     )
+    parser.add_argument(
+        "--sequence_transform",
+        choices=list(SEQUENCE_TRANSFORM_CHOICES),
+        default="none",
+    )
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--lightweight", action="store_true")
     parser.add_argument("--conv_channels", type=str, default=None)
+    parser.add_argument("--kernel_sizes", default=None)
     parser.add_argument("--kernel_size", type=int, default=7)
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--fc_hidden", type=int, default=128)
@@ -268,6 +286,8 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--acceptor_lr", type=float, default=None)
     parser.add_argument("--donor_conv_channels", type=str, default=None)
     parser.add_argument("--acceptor_conv_channels", type=str, default=None)
+    parser.add_argument("--donor_kernel_sizes", default=None)
+    parser.add_argument("--acceptor_kernel_sizes", default=None)
     parser.add_argument("--donor_kernel_size", type=int, default=None)
     parser.add_argument("--acceptor_kernel_size", type=int, default=None)
     parser.add_argument("--donor_dropout", type=float, default=None)
@@ -404,6 +424,16 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--donor_focal_alpha_pos", type=float, default=None)
     parser.add_argument("--acceptor_focal_alpha_pos", type=float, default=None)
     parser.add_argument(
+        "--f1_lambda",
+        type=float,
+        default=0.1,
+        help=(
+            "Mixing coefficient for --loss weighted_bce_f1 or focal_f1."
+        ),
+    )
+    parser.add_argument("--donor_f1_lambda", type=float, default=None)
+    parser.add_argument("--acceptor_f1_lambda", type=float, default=None)
+    parser.add_argument(
         "--asym_gamma_pos",
         type=float,
         default=0.0,
@@ -436,6 +466,26 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
 def _add_cnn_fallback_infer_args(parser: argparse.ArgumentParser) -> None:
     """Add CNN infer args without importing torch-dependent modules."""
     parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument(
+        "--sequence_transform",
+        choices=list(SEQUENCE_TRANSFORM_CHOICES),
+        default="none",
+    )
+
+
+def _add_cnn_pair_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_pair train args without importing torch-dependent modules."""
+    _add_cnn_fallback_train_args(parser)
+    parser.add_argument(
+        "--train_target",
+        choices=["pair"],
+        default="pair",
+    )
+
+
+def _add_cnn_pair_fallback_infer_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_pair infer args without importing torch-dependent modules."""
+    _add_cnn_fallback_infer_args(parser)
 
 
 def _build_parser(
@@ -463,6 +513,9 @@ def _build_parser(
     elif selected_model in {"cnn", "cnn_resdil", "tcn"}:
         _add_cnn_fallback_train_args(parser)
         _add_cnn_fallback_infer_args(parser)
+    elif selected_model == "cnn_pair":
+        _add_cnn_pair_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
 
     return parser
 
@@ -582,12 +635,18 @@ def _build_checkpoint_stem_from_params(
     return f"{trimmed_prefix}{suffix}"
 
 
-def _build_checkpoint_paths(species: str, stem: str) -> dict[str, str]:
-    """Build strict donor/acceptor checkpoint paths."""
+def _build_checkpoint_paths(
+    species: str,
+    stem: str,
+    tasks: Optional[Sequence[str]] = None,
+) -> dict[str, str]:
+    """Build strict checkpoint paths for the provided tasks."""
     root = model_root()
-    donor_path = os.path.join(root, species, "donor", f"{stem}.pt")
-    acceptor_path = os.path.join(root, species, "acceptor", f"{stem}.pt")
-    return {"donor": donor_path, "acceptor": acceptor_path}
+    task_names = tuple(tasks) if tasks is not None else ("donor", "acceptor")
+    paths: dict[str, str] = {}
+    for task in task_names:
+        paths[task] = os.path.join(root, species, task, f"{stem}.pt")
+    return paths
 
 
 def _assert_checkpoint_paths_exist(
@@ -608,9 +667,6 @@ def _assert_checkpoint_paths_exist(
 
 def _latest_checkpoint_for_task(species: str, task: str) -> Optional[str]:
     """Return the newest checkpoint path for one species/task, if available."""
-    if task not in {"donor", "acceptor"}:
-        raise ValueError(f"Unknown checkpoint task requested: {task}")
-
     task_dir = os.path.join(model_root(), species, task)
     if not os.path.isdir(task_dir):
         return None
@@ -790,11 +846,13 @@ def _attach_validation_metadata(
 ) -> None:
     """Attach validation protocol/signature and per-task selection score."""
     metric_primary = "pr_auc"
-    donor = summary.get("donor")
-    if isinstance(donor, dict):
-        donor_metric = donor.get("best_metric")
-        if isinstance(donor_metric, str) and donor_metric.strip():
-            metric_primary = donor_metric.strip()
+    task_names = checkpoint_tasks_for_model(str(getattr(args, "model", "")))
+    primary_task = task_names[0] if task_names else "donor"
+    primary_task_summary = summary.get(primary_task)
+    if isinstance(primary_task_summary, dict):
+        primary_metric = primary_task_summary.get("best_metric")
+        if isinstance(primary_metric, str) and primary_metric.strip():
+            metric_primary = primary_metric.strip()
 
     protocol = build_validation_protocol(
         val_frac=getattr(args, "val_frac", None),
@@ -817,7 +875,7 @@ def _attach_validation_metadata(
     summary["validation_signature"] = signature
 
     selection_by_task: dict[str, float] = {}
-    for task in ("donor", "acceptor"):
+    for task in task_names:
         task_payload = summary.get(task)
         if not isinstance(task_payload, dict):
             continue
@@ -836,14 +894,32 @@ def run_pipeline(args: argparse.Namespace) -> None:
     from evaluate_scores import evaluate_score_file, plot_eval_scores
 
     model_module = load_model_module(args.model)
-    train_target = str(getattr(args, "train_target", "both")).strip().lower()
-    if train_target not in {"both", "donor", "acceptor"}:
-        raise ValueError("--train_target must be one of: both, donor, acceptor.")
-    if not args.train_only and train_target != "both":
+    model_tasks = checkpoint_tasks_for_model(args.model)
+    default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
+    train_target = str(
+        getattr(args, "train_target", default_train_target)
+    ).strip().lower()
+    allowed_targets = (
+        ("both", *model_tasks) if len(model_tasks) > 1 else tuple(model_tasks)
+    )
+    if train_target not in allowed_targets:
+        allowed_text = ", ".join(allowed_targets)
+        raise ValueError(f"--train_target must be one of: {allowed_text}.")
+    if len(model_tasks) > 1 and (not args.train_only) and train_target != "both":
+        task_text = "/".join(model_tasks)
         raise ValueError(
-            "--train_target donor/acceptor requires --train_only. "
-            "Inference and transcript scoring require both checkpoints."
+            f"--train_target {task_text} requires --train_only. "
+            "Inference and transcript scoring require all task checkpoints."
         )
+    if (
+        len(model_tasks) == 1
+        and (not args.train_only)
+        and train_target != model_tasks[0]
+    ):
+        raise ValueError(
+            f"--train_target must be '{model_tasks[0]}' for model {args.model}."
+        )
+    tasks_to_train = model_tasks if train_target == "both" else (train_target,)
     donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
         species=args.species,
         donor_len=args.donor_len,
@@ -857,12 +933,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         inferred_train_len=inferred_train_len,
         raw_params=dict(vars(args)),
     )
-    checkpoint_paths = _build_checkpoint_paths(args.species, checkpoint_stem)
-
-    args.donor_checkpoint_path = checkpoint_paths["donor"]
-    args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
-    args.donor_init_checkpoint_path = ""
-    args.acceptor_init_checkpoint_path = ""
+    checkpoint_paths = _build_checkpoint_paths(
+        args.species,
+        checkpoint_stem,
+        tasks=model_tasks,
+    )
+    for task in model_tasks:
+        setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
+        setattr(args, f"{task}_init_checkpoint_path", "")
 
     (
         args.test_tsv,
@@ -884,17 +962,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         print("[pipeline] Skip training (--skip_train).")
     else:
         if args.continue_train:
-            required_tasks = (
-                ("donor", "acceptor")
-                if train_target == "both"
-                else (train_target,)
-            )
             _assert_checkpoint_paths_exist(
                 checkpoint_paths,
-                required_tasks=required_tasks,
+                required_tasks=tasks_to_train,
             )
-            args.donor_init_checkpoint_path = checkpoint_paths["donor"]
-            args.acceptor_init_checkpoint_path = checkpoint_paths["acceptor"]
+            for task in tasks_to_train:
+                setattr(args, f"{task}_init_checkpoint_path", checkpoint_paths[task])
             print(
                 "[pipeline] Continue training (--continue_train): "
                 "use existing checkpoints as initialization."
@@ -913,12 +986,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
         with open(metrics_json, "w") as f:
             json.dump(summary, f, indent=2)
         print(f"Saved training summary: {metrics_json}")
-        donor_summary = summary.get("donor")
-        acceptor_summary = summary.get("acceptor")
-        if isinstance(donor_summary, dict) and "checkpoint" in donor_summary:
-            print(f"Donor checkpoint: {donor_summary['checkpoint']}")
-        if isinstance(acceptor_summary, dict) and "checkpoint" in acceptor_summary:
-            print(f"Acceptor checkpoint: {acceptor_summary['checkpoint']}")
+        for task in model_tasks:
+            task_summary = summary.get(task)
+            if isinstance(task_summary, dict) and "checkpoint" in task_summary:
+                print(f"{task.capitalize()} checkpoint: {task_summary['checkpoint']}")
         top_k = int(getattr(args, "checkpoint_top_k", 3))
         if top_k <= 0:
             raise ValueError("--checkpoint_top_k must be > 0.")
@@ -939,21 +1010,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     if args.train_only:
         if args.skip_train:
-            required_tasks = (
-                ("donor", "acceptor")
-                if train_target == "both"
-                else (train_target,)
-            )
             checkpoint_paths = _resolve_missing_checkpoints_for_skip_train(
                 species=args.species,
                 paths=checkpoint_paths,
-                required_tasks=required_tasks,
+                required_tasks=tasks_to_train,
             )
-            args.donor_checkpoint_path = checkpoint_paths["donor"]
-            args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
+            for task in model_tasks:
+                setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
             _assert_checkpoint_paths_exist(
                 checkpoint_paths,
-                required_tasks=required_tasks,
+                required_tasks=tasks_to_train,
             )
             print("[pipeline] --train_only with --skip_train: checkpoints verified.")
         print("[pipeline] --train_only requested. Stop after training stage.")
@@ -967,22 +1033,29 @@ def run_pipeline(args: argparse.Namespace) -> None:
         checkpoint_paths = _resolve_missing_checkpoints_for_skip_train(
             species=args.species,
             paths=checkpoint_paths,
-            required_tasks=("donor", "acceptor"),
+            required_tasks=model_tasks,
         )
-        args.donor_checkpoint_path = checkpoint_paths["donor"]
-        args.acceptor_checkpoint_path = checkpoint_paths["acceptor"]
-        _assert_checkpoint_paths_exist(checkpoint_paths)
+        for task in model_tasks:
+            setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
+        _assert_checkpoint_paths_exist(checkpoint_paths, required_tasks=model_tasks)
         site_rows = model_module.infer_site(common_args=args, model_args=args)
         write_site_scores(site_output_tsv, site_rows)
         site_score_tsv = site_output_tsv
         print(f"Saved site scores: {site_output_tsv}")
 
-    transcript_rows = aggregate_transcript_scores(
-        site_score_rows=site_rows,
-        intron_score_op=args.intron_score_op,
-        transcript_score_agg=args.transcript_score_agg,
-        softmin_tau=args.softmin_tau,
-    )
+    if model_tasks == ("pair",):
+        transcript_rows = aggregate_pair_transcript_scores(
+            site_score_rows=site_rows,
+            transcript_score_agg=args.transcript_score_agg,
+            softmin_tau=args.softmin_tau,
+        )
+    else:
+        transcript_rows = aggregate_transcript_scores(
+            site_score_rows=site_rows,
+            intron_score_op=args.intron_score_op,
+            transcript_score_agg=args.transcript_score_agg,
+            softmin_tau=args.softmin_tau,
+        )
     write_transcript_scores(transcript_output_tsv, transcript_rows)
     print(f"Saved transcript scores: {transcript_output_tsv}")
     print(f"Total transcripts: {len(transcript_rows)}")

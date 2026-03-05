@@ -16,12 +16,12 @@ Each row must contain:
 
 - `transcript_id`: `str`
 - `intron_index`: `int`
-- `site_type`: `str` (`donor` or `acceptor`)
+- `site_type`: `str` (`donor`, `acceptor`, or `pair`)
 - `score`: `float`
 
 ## Recommended `train` Summary Keys
 
-For donor/acceptor tuning workflows, include task-level keys in
+For task-level tuning workflows, include task-level keys in
 `train(...)->dict[str, object]` summaries:
 
 - `best_pr_auc`: `float | None`
@@ -29,6 +29,9 @@ For donor/acceptor tuning workflows, include task-level keys in
 - `best_acc_at_0_5`: `float | None`
 - `best_metric`: `str`
 - `best_score`: `float`
+
+Task keys should match the model checkpoint task names
+(for example `donor`/`acceptor` or `pair`).
 
 ## Pipeline Compatibility Rules
 

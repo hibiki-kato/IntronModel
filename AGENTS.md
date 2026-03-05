@@ -51,6 +51,7 @@
 - Avoid global state in tests.
 - Tests must be deterministic.
 - Use fixed random seeds where randomness is involved.
+Pytest is installed in conda intronmodel.
 
 ---
 

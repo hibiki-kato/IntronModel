@@ -38,6 +38,12 @@ PERSISTENT_WORKERS="1"
 PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="8"
+MAX_MODEL_PARAMS="auto"
+MAX_MODEL_PARAMS_FALLBACK="30000000"
+MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
+MAX_MODEL_PARAMS_RESERVE_MIB="2048"
+MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
+MAX_MODEL_PARAMS_MODEL_FACTOR="1.00"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
@@ -76,31 +82,28 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-2, "scale": "log"},
   "loss": {
     "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+    "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "conv_channels": {
+  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"},
+  "conv_depth": {
+    "type": "categorical",
+    "values": [2, 3, 4, 5]
+  },
+  "channel_candidates": {
     "type": "categorical",
     "values": [
-      "96,192,384",
-      "64,128",
-      "64,128,256",
-      "64,128,256,512",
-      "128,256,512",
-      "192,384,768",
-      "192,384,768,1536",
-      "128,256,512,1024",
-      "256,512,1024,2048",
-      "256,512,1024",
-      "384,768,1536",
-      "384,768,1536,3072",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "256,512,1024,2048,3072"
+      "64,96,128,192,256,384,512",
+      "96,128,192,256,384,512,768",
+      "128,192,256,384,512,768,1024"
     ]
   },
-  "kernel_size": {
+  "kernel_candidates": {
     "type": "categorical",
-    "values": [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]
+    "values": [
+      "3,5,7,9,11,13,15",
+      "5,7,9,11,13,15,17",
+      "7,9,11,13,15,17,19"
+    ]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -121,28 +124,28 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
   "loss": {
     "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+    "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "conv_channels": {
+  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"},
+  "conv_depth": {
+    "type": "categorical",
+    "values": [2, 3, 4, 5]
+  },
+  "channel_candidates": {
     "type": "categorical",
     "values": [
-      "128,256,512",
-      "128,256,512,1024",
-      "192,384,768",
-      "192,384,768,1536",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "256,512,1024,2048,3072",
-      "384,768,1536",
-      "384,768,1536,3072",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "768,1536,3072"
+      "64,96,128,192,256,384,512",
+      "96,128,192,256,384,512,768",
+      "128,192,256,384,512,768,1024"
     ]
   },
-  "kernel_size": {
+  "kernel_candidates": {
     "type": "categorical",
-    "values": [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27]
+    "values": [
+      "3,5,7,9,11,13,15",
+      "5,7,9,11,13,15,17",
+      "7,9,11,13,15,17,19"
+    ]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -299,6 +302,18 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 fi
 
 PYTHON_BIN="$(resolve_python_bin)"
+RESOLVED_MAX_MODEL_PARAMS="$(
+	intronmodel_resolve_max_model_params \
+		"temp_tune_cnn_6h.sh" \
+		"${MAX_MODEL_PARAMS}" \
+		"${GPU_IDS}" \
+		"${MAX_MODEL_PARAMS_FALLBACK}" \
+		"${MAX_MODEL_PARAMS_MEM_FRACTION}" \
+		"${MAX_MODEL_PARAMS_RESERVE_MIB}" \
+		"${MAX_MODEL_PARAMS_BYTES_PER_PARAM}" \
+		"${MAX_MODEL_PARAMS_MODEL_FACTOR}" \
+		"${PYTHON_BIN}"
+)"
 START_SECONDS="${SECONDS}"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -421,12 +436,16 @@ while true; do
   "guided_mutation_rate": ${GUIDED_MUTATION_RATE},
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
+  "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
   "base_args": {
     "model": "cnn",
     "species": "${species}",
     "train_target": "${target}",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "conv_depth": 3,
+    "channel_candidates": "64,96,128,192,256,384,512",
+    "kernel_candidates": "3,5,7,9,11,13,15",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

@@ -1038,7 +1038,7 @@ def train_task_model(
                     print(f"[{task}] epoch {epoch}/{epochs} start")
 
                 model.train()
-                running_loss = torch.zeros((), dtype=torch.float64)
+                running_loss = 0.0
                 for batch_idx, (input_ids, attention_mask, labels) in enumerate(
                     train_loader,
                     start=1,
@@ -1093,10 +1093,7 @@ def train_task_model(
 
                     if device == "mps" and batch_idx == 1:
                         print(f"[{task}] epoch {epoch}/{epochs} first batch done")
-                    running_loss = running_loss + loss.detach().to(
-                        device="cpu",
-                        dtype=torch.float64,
-                    )
+                    running_loss += float(loss.detach().item())
 
                 scheduler.step()
                 train_loss = float(running_loss / max(1, len(train_loader)))

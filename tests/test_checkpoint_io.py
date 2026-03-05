@@ -83,3 +83,13 @@ def test_extract_checkpoint_paths_respects_existing_only(tmp_path: Path) -> None
 def test_normalize_checkpoint_path_resolves_relative_path(tmp_path: Path) -> None:
     resolved = normalize_checkpoint_path("relative/file.pt", base_dir=tmp_path)
     assert resolved == (tmp_path / "relative" / "file.pt").resolve()
+
+
+def test_extract_checkpoint_paths_supports_pair_task(tmp_path: Path) -> None:
+    pair = tmp_path / "pair.pt"
+    pair.write_bytes(b"pair")
+    payload = {"pair_checkpoint_path": "pair.pt"}
+
+    paths = extract_checkpoint_paths(payload, base_dir=tmp_path, existing_only=True)
+
+    assert paths == {"pair": pair.resolve()}

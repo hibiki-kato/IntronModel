@@ -5,8 +5,10 @@ from pathlib import Path
 import pytest
 
 from util.data_proc import (
+    read_examples_pair_task_with_metadata,
     read_examples_single_task,
     read_examples_single_task_with_metadata,
+    read_test_pair_rows,
 )
 
 
@@ -222,3 +224,86 @@ def test_read_examples_single_task_with_metadata_rejects_unknown_task(
             donor_len=4,
             acceptor_len=4,
         )
+
+
+def test_read_examples_pair_task_negative_pair_only_filter(tmp_path: Path) -> None:
+    """When enabled, keep negative rows that start with ``DEBUG pair`` only."""
+    pos_path = tmp_path / "pos.err"
+    neg_path = tmp_path / "neg.err"
+
+    _write_text(
+        pos_path,
+        "\n".join(
+            [
+                "DEBUG pair AACCAA TTGGTT + 56",
+                "",
+            ]
+        ),
+    )
+    _write_text(
+        neg_path,
+        "\n".join(
+            [
+                "DEBUG pair GGGGTT CCCCAA - 31",
+                "DEBUG donor TTTTAA acceptor AAAACC - TX123 31",
+                "",
+            ]
+        ),
+    )
+
+    filtered = read_examples_pair_task_with_metadata(
+        str(pos_path),
+        str(neg_path),
+        donor_len=4,
+        acceptor_len=4,
+        negative_pair_only=True,
+    )
+    unfiltered = read_examples_pair_task_with_metadata(
+        str(pos_path),
+        str(neg_path),
+        donor_len=4,
+        acceptor_len=4,
+        negative_pair_only=False,
+    )
+
+    assert len(filtered) == 2
+    assert len(unfiltered) == 3
+    assert [item.label for item in filtered] == [1, 0]
+    assert [item.label for item in unfiltered] == [1, 0, 0]
+
+
+def test_read_test_pair_rows_pairs_and_skips_rows(tmp_path: Path) -> None:
+    """Pair donor/acceptor rows by transcript and intron index."""
+    tsv_path = tmp_path / "transcripts.tsv"
+    _write_text(
+        tsv_path,
+        "\n".join(
+            [
+                "transcript_id\tsite_type\tintron_index\tseq\tintron_half_length",
+                "tx1\tdonor\t1\tAAAACCCC\t5",
+                "tx1\tacceptor\t1\tGGGGTTTT\t5",
+                "tx2\tdonor\t1\tAA\t3",
+                "tx2\tacceptor\t1\tTTTTTT\t3",
+                "tx3\tdonor\t2\tCCCCAAAA\t4",
+                "",
+            ]
+        ),
+    )
+
+    rows, skipped_short, skipped_unpaired = read_test_pair_rows(
+        test_tsv=str(tsv_path),
+        donor_len=4,
+        acceptor_len=4,
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "donor_seq": "AAAA",
+            "acceptor_seq": "TTTT",
+            "intron_half_length": 5,
+        }
+    ]
+    assert skipped_short == 1
+    assert skipped_unpaired == 2

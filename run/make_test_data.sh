@@ -9,6 +9,7 @@ Options:
   --species <name>        Species folder under data/ (default: Dmel)
   --donor-len <int>       Donor window length (default: 100)
   --acceptor-len <int>    Acceptor window length (default: 100)
+  --clip-short-intron     Keep intronic context within intron length
   --fasta <path>          Override FASTA path (.fna)
   --gtf <path>            Override GTF path
   --out-tsv <path>        Output TSV path
@@ -35,6 +36,7 @@ GTF_PATH=""
 OUT_TSV=""
 FEATURE="exon"
 LIMIT="0"
+CLIP_SHORT_INTRON="0"
 
 # --------------------------
 # Runtime implementation
@@ -66,6 +68,10 @@ while [[ $# -gt 0 ]]; do
 	--fasta)
 		FASTA_PATH="$2"
 		shift 2
+		;;
+	--clip-short-intron)
+		CLIP_SHORT_INTRON="1"
+		shift
 		;;
 	--gtf)
 		GTF_PATH="$2"
@@ -146,12 +152,20 @@ echo "[make_test_data.sh] species=${SPECIES}"
 echo "[make_test_data.sh] fasta=${FASTA_PATH}"
 echo "[make_test_data.sh] gtf=${GTF_PATH}"
 echo "[make_test_data.sh] out_tsv=${OUT_TSV}"
+echo "[make_test_data.sh] clip_short_intron=${CLIP_SHORT_INTRON}"
 
-python3 "${PROJECT_ROOT}/src/util/make_test_data_from_gtf.py" \
-	--fasta "${FASTA_PATH}" \
-	--gtf "${GTF_PATH}" \
-	--out_tsv "${OUT_TSV}" \
-	--donor_len "${DONOR_LEN}" \
-	--acceptor_len "${ACCEPTOR_LEN}" \
-	--feature "${FEATURE}" \
+args=(
+	--fasta "${FASTA_PATH}"
+	--gtf "${GTF_PATH}"
+	--out_tsv "${OUT_TSV}"
+	--donor_len "${DONOR_LEN}"
+	--acceptor_len "${ACCEPTOR_LEN}"
+	--feature "${FEATURE}"
 	--limit "${LIMIT}"
+)
+
+if [[ "${CLIP_SHORT_INTRON}" == "1" ]]; then
+	args+=(--clip-short-intron)
+fi
+
+python3 "${PROJECT_ROOT}/src/util/make_test_data_from_gtf.py" "${args[@]}"

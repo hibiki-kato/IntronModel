@@ -10,7 +10,7 @@ from typing import Optional
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
 from util.validation_protocol import LEGACY_VALIDATION_SIGNATURE
 
-_TASKS: tuple[str, ...] = ("donor", "acceptor")
+_TASKS: tuple[str, ...] = ("donor", "acceptor", "pair")
 
 
 @dataclass(frozen=True)

@@ -77,6 +77,17 @@ def test_load_config_accepts_history_guided_settings(tmp_path: Path) -> None:
     assert loaded.guided_mutation_rate == pytest.approx(0.4)
 
 
+def test_load_config_accepts_pair_objective_metric(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    config["objective_metric"] = "pair_pr_auc"
+    config_path = tmp_path / "pair_metric.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.objective_metric == "pair_pr_auc"
+
+
 def test_load_config_rejects_invalid_search_algo(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     config["search_algo"] = "surrogate"
@@ -92,6 +103,30 @@ def test_sample_trial_params_is_deterministic(tmp_path: Path) -> None:
     first = hparam_search.sample_trial_params(space, seed=2026)
     second = hparam_search.sample_trial_params(space, seed=2026)
     assert first == second
+
+
+def test_build_run_model_command_skips_architecture_helper_keys(
+    tmp_path: Path,
+) -> None:
+    cmd = hparam_search._build_run_model_command(
+        tmp_path,
+        {
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 256,
+            "conv_channels": "64,128,256",
+            "kernel_sizes": "3,5,7",
+            "conv_depth": 3,
+            "channel_candidates": "64,128,256",
+            "kernel_candidates": "3,5,7",
+        },
+    )
+
+    assert "--conv_channels" in cmd
+    assert "--kernel_sizes" in cmd
+    assert "--conv_depth" not in cmd
+    assert "--channel_candidates" not in cmd
+    assert "--kernel_candidates" not in cmd
 
 
 def test_rank_successful_trials_prefers_high_mean_pr_auc() -> None:
@@ -162,6 +197,7 @@ def test_run_trial_oom_backoff_then_success(
         max_parallel_trials_setting="auto",
         min_batch_size=64,
         max_oom_retries=4,
+        max_model_params=None,
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
         seed_best_config_path=None,
@@ -243,6 +279,7 @@ def test_run_trial_succeeds_with_single_task_objective(
         max_parallel_trials_setting="auto",
         min_batch_size=64,
         max_oom_retries=0,
+        max_model_params=None,
         objective_metric="donor_pr_auc",
         global_best_config_path=None,
         seed_best_config_path=None,
@@ -296,10 +333,160 @@ def test_run_trial_succeeds_with_single_task_objective(
     assert result.mean_pr_auc is None
 
 
-def test_load_global_best_params_accepts_valid_file(tmp_path: Path) -> None:
-    search_space = hparam_search._validate_search_space(
-        _base_config_dict(tmp_path)["search_space"]
+def test_run_trial_succeeds_with_pair_objective(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn_pair", "species": "Dmel", "batch_size": 512},
+        quick_overrides={},
+        full_overrides={},
+        search_space=hparam_search._validate_search_space(config_dict["search_space"]),
     )
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        metrics_path: Optional[Path] = None
+        for idx, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[idx + 1])
+                break
+        assert metrics_path is not None
+        metrics_path.write_text(
+            json.dumps({"pair": {"best_pr_auc": 0.88}}),
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+
+    result = hparam_search.run_trial(
+        config=config,
+        phase="quick",
+        trial_id=0,
+        sampled_params={"batch_size": 512, "lr": 1e-4},
+        overrides={"epochs": 1},
+        assigned_gpu_id=None,
+        metrics_json=tmp_path / "metrics_pair.json",
+        log_file=tmp_path / "trial_pair.log",
+    )
+
+    assert result.status == "success"
+    assert result.objective_metric == "pair_pr_auc"
+    assert result.objective_score == pytest.approx(0.88)
+
+
+def test_run_trial_ignores_architecture_helper_keys_in_base_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="donor_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 512,
+            "conv_depth": 3,
+            "channel_candidates": "64,128,256",
+            "kernel_candidates": "3,5,7",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=hparam_search._validate_search_space(config_dict["search_space"]),
+    )
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        assert "--conv_depth" not in cmd
+        assert "--channel_candidates" not in cmd
+        assert "--kernel_candidates" not in cmd
+        metrics_path: Optional[Path] = None
+        for idx, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[idx + 1])
+                break
+        assert metrics_path is not None
+        metrics_path.write_text(
+            json.dumps({"donor": {"best_pr_auc": 0.77}}),
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+
+    result = hparam_search.run_trial(
+        config=config,
+        phase="quick",
+        trial_id=0,
+        sampled_params={"batch_size": 512, "lr": 1e-4},
+        overrides={"epochs": 1},
+        assigned_gpu_id=None,
+        metrics_json=tmp_path / "metrics_filtered.json",
+        log_file=tmp_path / "trial_filtered.log",
+    )
+
+    assert result.status == "success"
+    assert result.objective_score == pytest.approx(0.77)
+
+
+def test_load_global_best_params_accepts_valid_file(tmp_path: Path) -> None:
+    base_config = _base_config_dict(tmp_path)
+    search_space = hparam_search._validate_search_space(base_config["search_space"])
     path = tmp_path / "best_config.json"
     payload = {
         "status": "ok",
@@ -315,6 +502,7 @@ def test_load_global_best_params_accepts_valid_file(tmp_path: Path) -> None:
     loaded = hparam_search.load_global_best_params(
         path=path,
         search_space=search_space,
+        base_args=base_config["base_args"],
     )
 
     assert loaded == payload["sampled_params"]
@@ -323,9 +511,8 @@ def test_load_global_best_params_accepts_valid_file(tmp_path: Path) -> None:
 def test_load_global_best_params_rejects_out_of_range_value(
     tmp_path: Path,
 ) -> None:
-    search_space = hparam_search._validate_search_space(
-        _base_config_dict(tmp_path)["search_space"]
-    )
+    base_config = _base_config_dict(tmp_path)
+    search_space = hparam_search._validate_search_space(base_config["search_space"])
     path = tmp_path / "best_config.json"
     payload = {
         "status": "ok",
@@ -341,13 +528,13 @@ def test_load_global_best_params_rejects_out_of_range_value(
         _ = hparam_search.load_global_best_params(
             path=path,
             search_space=search_space,
+            base_args=base_config["base_args"],
         )
 
 
 def test_load_global_best_params_skips_signature_mismatch(tmp_path: Path) -> None:
-    search_space = hparam_search._validate_search_space(
-        _base_config_dict(tmp_path)["search_space"]
-    )
+    base_config = _base_config_dict(tmp_path)
+    search_space = hparam_search._validate_search_space(base_config["search_space"])
     path = tmp_path / "best_config.json"
     payload = {
         "status": "ok",
@@ -363,9 +550,38 @@ def test_load_global_best_params_skips_signature_mismatch(tmp_path: Path) -> Non
     loaded = hparam_search.load_global_best_params(
         path=path,
         search_space=search_space,
+        base_args=base_config["base_args"],
         expected_validation_signature="deadbeefcafe",
     )
     assert loaded is None
+
+
+def test_load_global_best_params_keeps_sampled_params_for_missing_keys(
+    tmp_path: Path,
+) -> None:
+    base_config = _base_config_dict(tmp_path)
+    base_config["base_args"]["kernel_size"] = 7
+    search_space = hparam_search._validate_search_space(base_config["search_space"])
+    path = tmp_path / "best_config.json"
+    payload = {
+        "status": "ok",
+        "sampled_params": {
+            "batch_size": 1024,
+            "lr": 2e-4,
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = hparam_search.load_global_best_params(
+        path=path,
+        search_space=search_space,
+        base_args=base_config["base_args"],
+    )
+
+    assert loaded is not None
+    assert loaded["batch_size"] == 1024
+    assert loaded["lr"] == pytest.approx(2e-4)
+    assert "kernel_size" not in loaded
 
 
 def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
@@ -462,6 +678,7 @@ def test_run_search_ignores_global_best_in_quick_and_uses_species_plot_name(
         max_parallel_trials_setting="auto",
         min_batch_size=64,
         max_oom_retries=2,
+        max_model_params=None,
         objective_metric="mean_pr_auc",
         global_best_config_path=global_best_path,
         seed_best_config_path=None,
@@ -583,6 +800,7 @@ def test_run_trial_uses_model_from_base_args(
         max_parallel_trials_setting="auto",
         min_batch_size=64,
         max_oom_retries=0,
+        max_model_params=None,
         objective_metric="donor_pr_auc",
         global_best_config_path=None,
         seed_best_config_path=None,
@@ -673,6 +891,20 @@ def test_estimate_tcn_param_complexity_known_configuration() -> None:
     assert complexity == 533889
 
 
+def test_estimate_cnn_pair_param_complexity_known_configuration() -> None:
+    sampled_params: dict[str, hparam_search.Scalar] = {
+        "donor_conv_channels": "64,128",
+        "acceptor_conv_channels": "128,256",
+        "kernel_size": 7,
+        "fc_hidden": 128,
+    }
+    complexity = hparam_search.estimate_cnn_pair_param_complexity(
+        sampled_params=sampled_params,
+        base_args={},
+    )
+    assert complexity == 343233
+
+
 def test_load_historical_trials_reads_and_ranks_sibling_runs(
     tmp_path: Path,
 ) -> None:
@@ -759,6 +991,7 @@ def test_build_trial_params_history_guided_is_reproducible(
         max_parallel_trials_setting="auto",
         min_batch_size=64,
         max_oom_retries=1,
+        max_model_params=None,
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
         seed_best_config_path=None,
@@ -795,3 +1028,121 @@ def test_build_trial_params_history_guided_is_reproducible(
     anchors = [row[1] for row in history_trials]
     for params in first:
         assert params in anchors
+
+
+def test_build_trial_params_materializes_independent_cnn_architecture(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "conv_depth": {"type": "categorical", "values": [3]},
+            "channel_candidates": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "kernel_candidates": {
+                "type": "categorical",
+                "values": ["3,5,7"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=7,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 256},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=2,
+        seed_offset=0,
+    )
+
+    for row in params:
+        assert "conv_channels" in row
+        assert "kernel_sizes" in row
+        assert "conv_depth" not in row
+        assert "channel_candidates" not in row
+        assert "kernel_candidates" not in row
+        channels = [int(value) for value in str(row["conv_channels"]).split(",")]
+        kernels = [int(value) for value in str(row["kernel_sizes"]).split(",")]
+        assert len(channels) == 3
+        assert len(kernels) == 3
+        assert all(value in {64, 128, 256} for value in channels)
+        assert all(value in {3, 5, 7} for value in kernels)
+
+
+def test_build_trial_params_respects_max_model_params(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [128]},
+            "fc_hidden": {"type": "categorical", "values": [128]},
+            "conv_depth": {"type": "categorical", "values": [5]},
+            "channel_candidates": {
+                "type": "categorical",
+                "values": ["2048,3072", "32,64"],
+            },
+            "kernel_candidates": {
+                "type": "categorical",
+                "values": ["15", "3,5"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=3,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=13,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=1_000_000,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 128},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=3,
+        seed_offset=0,
+    )
+    for row in params:
+        complexity = hparam_search.estimate_model_param_complexity(
+            model_name="cnn",
+            sampled_params=row,
+            base_args=config.base_args,
+        )
+        assert complexity is not None
+        assert complexity <= 1_000_000

@@ -232,22 +232,94 @@ def aggregate_min_intron_scores(
     )
 
 
+def aggregate_pair_transcript_scores(
+    site_score_rows: Iterable[Dict[str, object]],
+    transcript_score_agg: str = "min",
+    softmin_tau: float = 1.0,
+) -> List[Dict[str, object]]:
+    """Aggregate pair-model site scores into transcript-level rows.
+
+    Parameters
+    ----------
+    site_score_rows : Iterable[dict[str, object]]
+        Input row format:
+        ``transcript_id``, ``intron_index``, ``score``.
+    transcript_score_agg : str, default="min"
+        Transcript aggregation over per-intron pair scores.
+    softmin_tau : float, default=1.0
+        Temperature for ``softmin`` and ``softmin_wavg``. Must be positive.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Compatibility schema:
+        ``transcript_id``, ``min_intron_index``, ``Score_donor``,
+        ``Score_acceptor``, ``min_donor_plus_acceptor``.
+        ``Score_donor`` and ``Score_acceptor`` are identical for pair mode.
+    """
+    if transcript_score_agg not in TRANSCRIPT_SCORE_AGG_CHOICES:
+        raise ValueError(
+            "Unsupported transcript score aggregation: "
+            f"{transcript_score_agg}. Supported: {TRANSCRIPT_SCORE_AGG_CHOICES}"
+        )
+    if softmin_tau <= 0.0:
+        raise ValueError(f"softmin_tau must be positive, got: {softmin_tau}")
+
+    transcript_introns: dict[str, dict[int, float]] = defaultdict(dict)
+    for row in site_score_rows:
+        tid = str(row["transcript_id"])
+        iidx = int(row["intron_index"])
+        score = float(row["score"])
+        transcript_introns[tid][iidx] = score
+
+    results: List[Dict[str, object]] = []
+    for tid, introns in transcript_introns.items():
+        if not introns:
+            continue
+        min_iidx = min(introns.keys(), key=lambda idx: introns[idx])
+        min_score = float(introns[min_iidx])
+        transcript_score = _aggregate_transcript_score(
+            scores=list(introns.values()),
+            agg=transcript_score_agg,
+            softmin_tau=softmin_tau,
+        )
+        results.append(
+            {
+                "transcript_id": tid,
+                "min_intron_index": min_iidx,
+                "Score_donor": min_score,
+                "Score_acceptor": min_score,
+                "min_donor_plus_acceptor": transcript_score,
+            }
+        )
+
+    results.sort(key=lambda x: str(x["transcript_id"]))
+    return results
+
+
 def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
+    """Write transcript-level score rows to a 5-column TSV file."""
     outdir = os.path.dirname(output_tsv)
     if outdir:
         os.makedirs(outdir, exist_ok=True)
 
     with open(output_tsv, "w") as f:
         f.write(
-            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\tmin_donor_plus_acceptor\n"
+            "transcript_id\tmin_intron_index\tScore_donor\t"
+            "Score_acceptor\tmin_donor_plus_acceptor\n"
         )
         for r in rows:
             f.write(
-                f"{r['transcript_id']}\t{r['min_intron_index']}\t{float(r['Score_donor']):.6f}\t{float(r['Score_acceptor']):.6f}\t{float(r['min_donor_plus_acceptor']):.6f}\n"
+                f"{r['transcript_id']}\t"
+                f"{r['min_intron_index']}\t"
+                f"{float(r['Score_donor']):.6f}\t"
+                f"{float(r['Score_acceptor']):.6f}\t"
+                f"{float(r['min_donor_plus_acceptor']):.6f}\n"
             )
 
 
 def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
+    """Write site-level score rows to a TSV file."""
     outdir = os.path.dirname(output_tsv)
     if outdir:
         os.makedirs(outdir, exist_ok=True)
@@ -256,11 +328,15 @@ def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
         f.write("transcript_id\tintron_index\tsite_type\tscore\n")
         for r in rows:
             f.write(
-                f"{r['transcript_id']}\t{r['intron_index']}\t{r['site_type']}\t{float(r['score']):.6f}\n"
+                f"{r['transcript_id']}\t"
+                f"{r['intron_index']}\t"
+                f"{r['site_type']}\t"
+                f"{float(r['score']):.6f}\n"
             )
 
 
 def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
+    """Read site-level score TSV into row dictionaries."""
     rows: List[Dict[str, object]] = []
     with open(site_score_tsv, "r") as f:
         _ = next(f, None)

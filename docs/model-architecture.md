@@ -3,11 +3,14 @@
 This page documents the current implementation in:
 
 - `src/models/cnn.py`
+- `src/models/cnn_common.py`
+- `src/models/cnn_pair.py`
 - `src/models/cnn_resdil.py`
 - `src/models/tcn.py`
 - `src/models/bert.py`
 - `src/models/dnabert.py`
 - `src/models/reservoir.py`
+- `src/util/sequence_transform.py`
 - `src/util/losses.py`
 - `src/util/transcript_eval.py`
 - `src/evaluate_scores.py`
@@ -16,7 +19,7 @@ This page documents the current implementation in:
 
 The unified entrypoint `src/run_model.py` runs:
 
-1. train donor/acceptor classifiers
+1. train task models (donor/acceptor independent or pair)
 2. infer site-level scores
 3. aggregate site scores into transcript scores
 4. evaluate SN/PR/F1
@@ -40,6 +43,12 @@ Batch shape:
 $$
 X_{batch} \in \mathbb{R}^{B \times 4 \times L}
 $$
+
+Optional sequence transforms (`cnn`, `cnn_pair`):
+
+- `none`: no masking (default)
+- `mask_outside_intron_n`: replace outside-boundary region with `N`
+  using `intron_half_length + 3bp` boundary-local keep span
 
 ### 2.2 Transformer-family (`bert`, `dnabert*`)
 
@@ -69,8 +78,14 @@ Reservoir supports two tokenization modes:
 - `onehot`: per-base token stream
 - `kmer`: overlapping k-mer token stream
 
-Both modes produce `(input_ids, attention_mask)` and are then mapped through a
-fixed random token projection before reservoir recurrence.
+Both modes produce a time-series tensor:
+
+$$
+X \in \mathbb{R}^{B \times T \times V}
+$$
+
+where $V$ is base- or k-mer feature size. If `input_dim` is smaller than $V$,
+the implementation applies a fixed random projection before recurrence.
 
 ## 3. CNN Baseline (`src/models/cnn.py`)
 
@@ -86,6 +101,9 @@ $$
 
 with $H^{(0)} = X$.
 
+Kernel size is configured per stage by `kernel_sizes` (comma-separated list).
+If only one value is given, it is broadcast to all stages.
+
 Global pooling + head:
 
 $$
@@ -99,6 +117,22 @@ $$
 $$
 p = \sigma(\ell)
 $$
+
+### 3.1 CNN Pair (`src/models/cnn_pair.py`)
+
+Donor and acceptor are encoded independently up to GAP:
+
+$$
+z_d = \mathrm{GAP}(f_d(X_d)),\quad z_a = \mathrm{GAP}(f_a(X_a))
+$$
+
+Then features are concatenated and scored by one shared MLP:
+
+$$
+\ell_{pair} = g([z_d;z_a]),\quad p_{pair}=\sigma(\ell_{pair})
+$$
+
+This produces one score per donor/acceptor intron pair.
 
 ## 4. Residual Dilated CNN (`src/models/cnn_resdil.py`)
 
@@ -225,21 +259,28 @@ $$
 
 where:
 
-- $u_t$ is fixed random projected token input,
+- $u_t$ is one-hot or k-mer input (optionally fixed-projected),
 - $W_{res}$ is sparse random recurrent matrix scaled to target spectral radius,
 - $\lambda$ is leak rate.
 
-`washout` removes early transient steps from pooling. `preroll_steps` warms the
-reservoir before consuming sequence tokens.
+`washout` removes early transient steps from state sequences.
 
-Supported pooling/readout modes include:
+Representation and readout options:
 
-- `last`, `mean`, `max`, `mean_max`
-- `attention`
-- `logit_sum`, `weighted_logit_sum`
+- `mts_rep`: `last`, `mean`, `output`, `reservoir`
+- optional dim-reduction: `none`, `pca`, `tenpca`
+- readout: `lin`, `mlp`, `svm`
 
-Trainable parameters are in readout layers; reservoir matrices and token
-projection are fixed random buffers.
+Reservoir states are computed in float32 and readout fitting is done with
+scikit-learn.
+
+Memory pressure is dominated by the state tensor:
+
+$$
+\text{state bytes} \approx N \cdot T \cdot D_{res} \cdot 4
+$$
+
+where `4` is bytes per float32 element.
 
 ## 9. Loss Functions (`src/util/losses.py`)
 
@@ -302,6 +343,12 @@ Transcript aggregation over $\{s_i\}_{i=1}^n$:
 
 with $\tau>0$.
 
+Pair model compatibility:
+
+- Pair site scores are aggregated directly per intron.
+- Output TSV keeps the same 5-column schema as independent models.
+- `Score_donor` and `Score_acceptor` are both filled with the pair score.
+
 ## 11. Evaluation Sweep (`src/evaluate_scores.py`)
 
 ![Evaluation sweep](./_static/figures/eval_sweep.svg)
@@ -331,8 +378,8 @@ $$
 
 ![Training optimization flow](./_static/figures/training_optimization.svg)
 
-The training loop family (`cnn`, `cnn_resdil`, `tcn`, `bert`, `dnabert`,
-`reservoir`) shares:
+The neural training-loop family (`cnn`, `cnn_resdil`, `tcn`, `bert`, `dnabert`)
+shares:
 
 - AdamW optimizer
 - cosine annealing scheduler
@@ -374,6 +421,14 @@ Current implementation note:
 
 For all models, `--continue_train` is invalid with `--skip_train`.
 
+### 12.3 Reservoir training semantics
+
+- `reservoir` uses a single-fit RC path (`model.fit`) instead of AdamW epochs.
+- Wrapper compatibility flags for AMP/compile are accepted, but not used by the
+  RC fit path.
+- `--continue_train` is accepted by wrappers, but current RC training refits
+  from data.
+
 ## 13. Model-by-Model Tensor Shape Reference
 
 | Model | Input | Core latent shape | Logit output |
@@ -383,7 +438,7 @@ For all models, `--continue_train` is invalid with `--skip_train`.
 | `tcn` | $(B, 4, L)$ | $(B, C_M)$ after GAP | $(B,)$ |
 | `bert` | `(ids, mask): (B, T)` | $(B, T, d_{model})$ | $(B,)$ |
 | `dnabert*` | `(ids, mask): (B, T)` | $(B, T, d_{backbone})$ | $(B,)$ |
-| `reservoir` | `(ids, mask): (B, T)` | $(B, T, D_{res})$ then pooled | $(B,)$ |
+| `reservoir` | $(B, T, V)$ | $(B, T, D_{res})$ then readout repr | $(B,)$ |
 
 ## 14. Complexity Notes
 
@@ -392,4 +447,5 @@ For all models, `--continue_train` is invalid with `--skip_train`.
 - `bert`: attention is quadratic in token length.
 - `dnabert*`: dominated by pretrained backbone complexity.
 - `reservoir`: recurrent update is $O(T \cdot D_{res}^2)$ in dense form.
+- `reservoir`: state memory is $O(N \cdot T \cdot D_{res})$.
 - Transcript aggregation and eval sweep are linear after sorting.

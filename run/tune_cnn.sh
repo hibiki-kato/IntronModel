@@ -11,7 +11,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-SPECIES="Athal"
+SPECIES="Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
@@ -46,6 +46,12 @@ PERSISTENT_WORKERS="1"
 PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="8"
+MAX_MODEL_PARAMS="auto"
+MAX_MODEL_PARAMS_FALLBACK="30000000"
+MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
+MAX_MODEL_PARAMS_RESERVE_MIB="2048"
+MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
+MAX_MODEL_PARAMS_MODEL_FACTOR="1.00"
 SEARCH_SPACE_FILE="auto"
 
 CROSS_SPECIES_BEST_MODE="auto"
@@ -62,34 +68,32 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
     "type": "categorical",
     "values": [128, 256, 512, 1024, 2048, 4096]
   },
-  "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-2, "scale": "log"},
+  "dropout": {"type": "float", "min": 0.0, "max": 0.7, "scale": "linear"},
+  "weight_decay": {"type": "float", "min": 1e-6, "max": 1e-2, "scale": "log"},
   "loss": {
     "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+    "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "conv_channels": {
+  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"},
+  "conv_depth": {
+    "type": "categorical",
+    "values": [2, 3, 4, 5]
+  },
+  "channel_candidates": {
     "type": "categorical",
     "values": [
-      "96,192,384",
-      "64,128",
-      "64,128,256",
-      "64,128,256,512",
-      "128,256,512",
-      "192,384,768,1536",
-      "128,256,512,1024",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "384,768,1536",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "384,768,1536,3072",
-      "256,512,1024,2048,3072"
+      "64,96,128,192,256,384,512",
+      "96,128,192,256,384,512,768",
+      "128,192,256,384,512,768,1024"
     ]
   },
-  "kernel_size": {
+  "kernel_candidates": {
     "type": "categorical",
-    "values": [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]
+    "values": [
+      "3,5,7,9,11,13,15",
+      "5,7,9,11,13,15,17",
+      "7,9,11,13,15,17,19"
+    ]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -110,28 +114,28 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
   "loss": {
     "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal"]
+    "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "conv_channels": {
+  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"},
+  "conv_depth": {
+    "type": "categorical",
+    "values": [2, 3, 4, 5]
+  },
+  "channel_candidates": {
     "type": "categorical",
     "values": [
-      "128,256,512",
-      "128,256,512,1024",
-      "192,384,768",
-      "192,384,768,1536",
-      "256,512,1024",
-      "256,512,1024,2048",
-      "256,512,1024,2048,3072",
-      "384,768,1536",
-      "384,768,1536,3072",
-      "512,1024,2048",
-      "512,1024,2048,3072",
-      "768,1536,3072"
+      "64,96,128,192,256,384,512",
+      "96,128,192,256,384,512,768",
+      "128,192,256,384,512,768,1024"
     ]
   },
-  "kernel_size": {
+  "kernel_candidates": {
     "type": "categorical",
-    "values": [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27]
+    "values": [
+      "3,5,7,9,11,13,15",
+      "5,7,9,11,13,15,17",
+      "7,9,11,13,15,17,19"
+    ]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -153,6 +157,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+INTRONMODEL_AUTO_TMUX="off"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 # shellcheck source=/dev/null
@@ -349,6 +354,18 @@ PY
 SPECIES="$(resolve_species_case "${SPECIES}" "${DATA_ROOT}")"
 mapfile -t TARGET_LIST < <(resolve_tune_targets "${TUNE_TARGETS}")
 PYTHON_BIN="$(resolve_python_bin)"
+RESOLVED_MAX_MODEL_PARAMS="$(
+	intronmodel_resolve_max_model_params \
+		"tune_cnn.sh" \
+		"${MAX_MODEL_PARAMS}" \
+		"${GPU_IDS}" \
+		"${MAX_MODEL_PARAMS_FALLBACK}" \
+		"${MAX_MODEL_PARAMS_MEM_FRACTION}" \
+		"${MAX_MODEL_PARAMS_RESERVE_MIB}" \
+		"${MAX_MODEL_PARAMS_BYTES_PER_PARAM}" \
+		"${MAX_MODEL_PARAMS_MODEL_FACTOR}" \
+		"${PYTHON_BIN}"
+)"
 
 if [[ "${QUICK_TRIALS_MODE}" != "fixed" && "${QUICK_TRIALS_MODE}" != "budget" ]]; then
 	echo "[tune_cnn.sh] QUICK_TRIALS_MODE must be fixed|budget." >&2
@@ -536,12 +553,16 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "guided_mutation_rate": ${GUIDED_MUTATION_RATE},
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
+  "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
   "base_args": {
     "model": "cnn",
     "species": "${SPECIES}",
     "train_target": "${TARGET}",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "conv_depth": 3,
+    "channel_candidates": "64,96,128,192,256,384,512",
+    "kernel_candidates": "3,5,7,9,11,13,15",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

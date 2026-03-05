@@ -84,6 +84,7 @@ class SearchConfig:
     max_parallel_trials_setting: object
     min_batch_size: int
     max_oom_retries: int
+    max_model_params: Optional[int]
     objective_metric: str
     global_best_config_path: Optional[Path]
     seed_best_config_path: Optional[Path]
@@ -250,6 +251,15 @@ def load_config(path: Path) -> SearchConfig:
         raw.get("max_oom_retries", 8),
         "max_oom_retries",
     )
+    max_model_params_raw = raw.get("max_model_params")
+    max_model_params: Optional[int]
+    if max_model_params_raw is None:
+        max_model_params = None
+    else:
+        max_model_params = _validate_positive_int(
+            max_model_params_raw,
+            "max_model_params",
+        )
     search_algo = str(raw.get("search_algo", "random")).strip()
     if search_algo not in {"random", "history_guided"}:
         raise ValueError("search_algo must be one of: random, history_guided.")
@@ -270,10 +280,11 @@ def load_config(path: Path) -> SearchConfig:
         "mean_pr_auc",
         "donor_pr_auc",
         "acceptor_pr_auc",
+        "pair_pr_auc",
     }:
         raise ValueError(
             "objective_metric must be one of: "
-            "mean_pr_auc, donor_pr_auc, acceptor_pr_auc."
+            "mean_pr_auc, donor_pr_auc, acceptor_pr_auc, pair_pr_auc."
         )
     normalized_space = _validate_search_space(search_space)
     global_best_config_raw = raw.get("global_best_config_path")
@@ -317,6 +328,7 @@ def load_config(path: Path) -> SearchConfig:
         max_parallel_trials_setting=raw.get("max_parallel_trials", "auto"),
         min_batch_size=min_batch_size,
         max_oom_retries=max_oom_retries,
+        max_model_params=max_model_params,
         objective_metric=objective_metric,
         global_best_config_path=global_best_config_path,
         seed_best_config_path=seed_best_config_path,
@@ -361,6 +373,7 @@ def load_global_best_params(
     *,
     path: Optional[Path],
     search_space: dict[str, dict[str, object]],
+    base_args: dict[str, ArgValue],
     expected_validation_signature: Optional[str] = None,
 ) -> Optional[dict[str, Scalar]]:
     """Load and validate previous best sampled params for forced inclusion."""
@@ -391,22 +404,31 @@ def load_global_best_params(
         raise ValueError("Global best config missing sampled_params object.")
 
     normalized: dict[str, Scalar] = {}
-    for key in sorted(search_space):
-        if key not in sampled:
-            raise ValueError(
-                f"Global best config missing required key: sampled_params.{key}"
-            )
-        value = sampled[key]
+    for key, value in sampled.items():
         if not isinstance(value, (int, float, str, bool)):
             raise ValueError(
                 f"Global best sampled_params.{key} must be a scalar value."
             )
-        if not _value_matches_spec(value, search_space[key]):
+        if key in search_space and not _value_matches_spec(value, search_space[key]):
             raise ValueError(
                 f"Global best sampled_params.{key}={value} is not in current "
                 "search space."
             )
         normalized[key] = value
+
+    for key, spec in search_space.items():
+        if key in sampled:
+            continue
+        if key not in base_args:
+            continue
+        base_value = base_args[key]
+        if not isinstance(base_value, (int, float, str, bool)):
+            raise ValueError(f"Global best base_args.{key} must be a scalar value.")
+        if not _value_matches_spec(base_value, spec):
+            raise ValueError(
+                f"Global best base_args.{key}={base_value} is not in current "
+                "search space."
+            )
     return normalized
 
 
@@ -415,6 +437,7 @@ def _select_objective_score(
     donor_pr_auc: Optional[float],
     acceptor_pr_auc: Optional[float],
     mean_pr_auc: Optional[float],
+    pair_pr_auc: Optional[float],
 ) -> Optional[float]:
     """Return the configured objective score from extracted metrics."""
     if objective_metric == "mean_pr_auc":
@@ -423,6 +446,8 @@ def _select_objective_score(
         return donor_pr_auc
     if objective_metric == "acceptor_pr_auc":
         return acceptor_pr_auc
+    if objective_metric == "pair_pr_auc":
+        return pair_pr_auc
     raise ValueError(f"Unsupported objective metric: {objective_metric}")
 
 
@@ -800,8 +825,21 @@ def _build_run_model_command(
     args: dict[str, ArgValue],
 ) -> list[str]:
     """Build command list for ``src/run_model.py`` execution."""
+    helper_keys = {
+        "conv_depth",
+        "channel_candidates",
+        "kernel_candidates",
+        "donor_conv_depth",
+        "acceptor_conv_depth",
+        "donor_channel_candidates",
+        "acceptor_channel_candidates",
+        "donor_kernel_candidates",
+        "acceptor_kernel_candidates",
+    }
     cmd = [sys.executable, "-u", str(project_root / "src" / "run_model.py")]
     for key in sorted(args):
+        if key in helper_keys:
+            continue
         value = args[key]
         if value is None:
             continue
@@ -1041,6 +1079,8 @@ def _read_objective_best_epoch_from_metrics(
         if donor_epoch is None or acceptor_epoch is None:
             return None
         return max(donor_epoch, acceptor_epoch)
+    if objective_metric == "pair_pr_auc":
+        return _extract_best_epoch(raw, "pair")
     return None
 
 
@@ -1274,11 +1314,12 @@ def run_trial(
 
     donor_pr_auc = _extract_pr_auc(summary, "donor")
     acceptor_pr_auc = _extract_pr_auc(summary, "acceptor")
+    pair_pr_auc = _extract_pr_auc(summary, "pair")
     validation_protocol = _extract_validation_protocol(summary)
     validation_signature = _extract_validation_signature(summary)
     mean_pr_auc: Optional[float]
     if donor_pr_auc is None or acceptor_pr_auc is None:
-        mean_pr_auc = None
+        mean_pr_auc = pair_pr_auc if config.objective_metric == "pair_pr_auc" else None
     else:
         mean_pr_auc = (donor_pr_auc + acceptor_pr_auc) / 2.0
 
@@ -1287,6 +1328,7 @@ def run_trial(
         donor_pr_auc,
         acceptor_pr_auc,
         mean_pr_auc,
+        pair_pr_auc,
     )
     if objective_score is None:
         error_message = (
@@ -1479,6 +1521,237 @@ def _parse_conv_channels(value: object) -> Optional[list[int]]:
     return channels
 
 
+def _resolve_kernel_sizes_for_depth(
+    *,
+    kernel_raw: object,
+    fallback_scalar_raw: object,
+    depth: int,
+) -> Optional[list[int]]:
+    """Resolve one kernel-size list aligned to the given depth."""
+    parsed = _parse_conv_channels(kernel_raw)
+    if parsed is None:
+        fallback = _to_positive_int(kernel_raw)
+        if fallback is None:
+            fallback = _to_positive_int(fallback_scalar_raw)
+        if fallback is None:
+            return None
+        parsed = [fallback]
+
+    if len(parsed) == 1:
+        return parsed * depth
+    if len(parsed) < depth:
+        return parsed + ([parsed[-1]] * (depth - len(parsed)))
+    if len(parsed) > depth:
+        return parsed[:depth]
+    return parsed
+
+
+def _coerce_positive_int_list(value: object) -> Optional[list[int]]:
+    """Coerce one value into a positive integer list."""
+    parsed = _parse_conv_channels(value)
+    if parsed is not None:
+        return parsed
+    scalar = _to_positive_int(value)
+    if scalar is None:
+        return None
+    return [scalar]
+
+
+def _default_conv_depth(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+    conv_key: str,
+) -> int:
+    """Infer fallback CNN depth from conv_channels or use default depth."""
+    conv_raw = sampled_params.get(conv_key)
+    if conv_raw is None:
+        conv_raw = base_args.get(conv_key)
+    parsed = _parse_conv_channels(conv_raw)
+    if parsed is not None and parsed:
+        return len(parsed)
+    return 3
+
+
+def _sample_list_by_depth(
+    *,
+    candidates: list[int],
+    depth: int,
+    rng: random.Random,
+) -> list[int]:
+    """Sample one depth-aligned list from candidates independently."""
+    sampled: list[int] = []
+    for _ in range(depth):
+        sampled.append(candidates[rng.randrange(len(candidates))])
+    return sampled
+
+
+def _resolve_candidate_pool(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+    key: str,
+) -> Optional[list[int]]:
+    """Resolve one positive-integer candidate pool from sampled/base args."""
+    raw = sampled_params.get(key)
+    if raw is None:
+        raw = base_args.get(key)
+    return _coerce_positive_int_list(raw)
+
+
+def _stringify_int_list(values: list[int]) -> str:
+    """Serialize one integer list to comma-separated string."""
+    return ",".join(str(value) for value in values)
+
+
+def _materialize_cnn_architecture_params(
+    *,
+    model_name: str,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+    rng: random.Random,
+) -> dict[str, Scalar]:
+    """Derive CNN architecture arguments from independent search keys."""
+    out = dict(sampled_params)
+
+    def _materialize_branch(
+        *,
+        depth_key: str,
+        channel_pool_key: str,
+        kernel_pool_key: str,
+        conv_out_key: str,
+        kernel_out_key: str,
+        shared_depth_key: Optional[str] = None,
+        shared_channel_key: Optional[str] = None,
+        shared_kernel_key: Optional[str] = None,
+    ) -> None:
+        depth_raw = out.get(depth_key)
+        if depth_raw is None:
+            depth_raw = base_args.get(depth_key)
+        if depth_raw is None and shared_depth_key is not None:
+            depth_raw = out.get(shared_depth_key)
+            if depth_raw is None:
+                depth_raw = base_args.get(shared_depth_key)
+        depth = _to_positive_int(depth_raw)
+        if depth is None:
+            depth = _default_conv_depth(
+                sampled_params=out,
+                base_args=base_args,
+                conv_key=conv_out_key,
+            )
+
+        channel_candidates = _resolve_candidate_pool(
+            sampled_params=out,
+            base_args=base_args,
+            key=channel_pool_key,
+        )
+        if channel_candidates is None and shared_channel_key is not None:
+            channel_candidates = _resolve_candidate_pool(
+                sampled_params=out,
+                base_args=base_args,
+                key=shared_channel_key,
+            )
+        if channel_candidates is None:
+            channel_candidates = [64, 96, 128, 192, 256, 384, 512]
+
+        kernel_candidates = _resolve_candidate_pool(
+            sampled_params=out,
+            base_args=base_args,
+            key=kernel_pool_key,
+        )
+        if kernel_candidates is None and shared_kernel_key is not None:
+            kernel_candidates = _resolve_candidate_pool(
+                sampled_params=out,
+                base_args=base_args,
+                key=shared_kernel_key,
+            )
+        if kernel_candidates is None:
+            kernel_candidates = [3, 5, 7, 9, 11, 13, 15]
+        kernel_candidates = [value for value in kernel_candidates if value % 2 == 1]
+        if not kernel_candidates:
+            raise ValueError("kernel_candidates must include at least one odd value.")
+
+        out[conv_out_key] = _stringify_int_list(
+            _sample_list_by_depth(
+                candidates=channel_candidates,
+                depth=depth,
+                rng=rng,
+            )
+        )
+        out[kernel_out_key] = _stringify_int_list(
+            _sample_list_by_depth(
+                candidates=kernel_candidates,
+                depth=depth,
+                rng=rng,
+            )
+        )
+
+    if model_name in {"cnn", "cnn_resdil"}:
+        has_arch_keys = any(
+            key in out or key in base_args
+            for key in ("conv_depth", "channel_candidates", "kernel_candidates")
+        )
+        if has_arch_keys:
+            _materialize_branch(
+                depth_key="conv_depth",
+                channel_pool_key="channel_candidates",
+                kernel_pool_key="kernel_candidates",
+                conv_out_key="conv_channels",
+                kernel_out_key="kernel_sizes",
+            )
+    elif model_name == "cnn_pair":
+        has_arch_keys = any(
+            key in out or key in base_args
+            for key in (
+                "conv_depth",
+                "channel_candidates",
+                "kernel_candidates",
+                "donor_conv_depth",
+                "acceptor_conv_depth",
+                "donor_channel_candidates",
+                "acceptor_channel_candidates",
+                "donor_kernel_candidates",
+                "acceptor_kernel_candidates",
+            )
+        )
+        if has_arch_keys:
+            _materialize_branch(
+                depth_key="donor_conv_depth",
+                channel_pool_key="donor_channel_candidates",
+                kernel_pool_key="donor_kernel_candidates",
+                conv_out_key="donor_conv_channels",
+                kernel_out_key="donor_kernel_sizes",
+                shared_depth_key="conv_depth",
+                shared_channel_key="channel_candidates",
+                shared_kernel_key="kernel_candidates",
+            )
+            _materialize_branch(
+                depth_key="acceptor_conv_depth",
+                channel_pool_key="acceptor_channel_candidates",
+                kernel_pool_key="acceptor_kernel_candidates",
+                conv_out_key="acceptor_conv_channels",
+                kernel_out_key="acceptor_kernel_sizes",
+                shared_depth_key="conv_depth",
+                shared_channel_key="channel_candidates",
+                shared_kernel_key="kernel_candidates",
+            )
+
+    helper_keys = {
+        "conv_depth",
+        "channel_candidates",
+        "kernel_candidates",
+        "donor_conv_depth",
+        "acceptor_conv_depth",
+        "donor_channel_candidates",
+        "acceptor_channel_candidates",
+        "donor_kernel_candidates",
+        "acceptor_kernel_candidates",
+    }
+    for key in helper_keys:
+        out.pop(key, None)
+    return out
+
+
 def estimate_cnn_param_complexity(
     sampled_params: dict[str, Scalar],
     base_args: dict[str, ArgValue],
@@ -1497,11 +1770,18 @@ def estimate_cnn_param_complexity(
         lightweight = _to_bool(base_args.get("lightweight"))
         conv_channels = [64, 128] if lightweight else [64, 128, 256]
 
-    kernel_raw = sampled_params.get("kernel_size")
+    kernel_raw = sampled_params.get("kernel_sizes")
     if kernel_raw is None:
-        kernel_raw = base_args.get("kernel_size", 7)
-    kernel_size = _to_positive_int(kernel_raw)
-    if kernel_size is None:
+        kernel_raw = base_args.get("kernel_sizes")
+    scalar_kernel_raw = sampled_params.get("kernel_size")
+    if scalar_kernel_raw is None:
+        scalar_kernel_raw = base_args.get("kernel_size", 7)
+    kernel_sizes = _resolve_kernel_sizes_for_depth(
+        kernel_raw=kernel_raw,
+        fallback_scalar_raw=scalar_kernel_raw,
+        depth=len(conv_channels),
+    )
+    if kernel_sizes is None:
         return None
 
     fc_hidden_raw = sampled_params.get("fc_hidden")
@@ -1511,14 +1791,11 @@ def estimate_cnn_param_complexity(
     if fc_hidden is None:
         return None
 
-    total_params = 0
-    prev_channels = 4
-    for channel in conv_channels:
-        conv_params = (prev_channels * channel * kernel_size) + channel
-        batch_norm_params = 2 * channel
-        total_params += conv_params + batch_norm_params
-        prev_channels = channel
-
+    total_params = _estimate_cnn_encoder_params_layerwise(
+        conv_channels=conv_channels,
+        kernel_sizes=kernel_sizes,
+    )
+    prev_channels = conv_channels[-1]
     total_params += (prev_channels * fc_hidden) + fc_hidden
     total_params += fc_hidden + 1
     return total_params
@@ -1543,11 +1820,18 @@ def estimate_cnn_resdil_param_complexity(
         lightweight = _to_bool(base_args.get("lightweight"))
         conv_channels = [64, 128] if lightweight else [64, 128, 256]
 
-    kernel_raw = sampled_params.get("kernel_size")
+    kernel_raw = sampled_params.get("kernel_sizes")
     if kernel_raw is None:
-        kernel_raw = base_args.get("kernel_size", 7)
-    kernel_size = _to_positive_int(kernel_raw)
-    if kernel_size is None:
+        kernel_raw = base_args.get("kernel_sizes")
+    scalar_kernel_raw = sampled_params.get("kernel_size")
+    if scalar_kernel_raw is None:
+        scalar_kernel_raw = base_args.get("kernel_size", 7)
+    kernel_sizes = _resolve_kernel_sizes_for_depth(
+        kernel_raw=kernel_raw,
+        fallback_scalar_raw=scalar_kernel_raw,
+        depth=len(conv_channels),
+    )
+    if kernel_sizes is None:
         return None
 
     fc_hidden_raw = sampled_params.get("fc_hidden")
@@ -1561,11 +1845,12 @@ def estimate_cnn_resdil_param_complexity(
     total_params = 0
 
     # Stem Conv1d(4 -> stem) + stem BatchNorm affine params.
-    total_params += (4 * stem_channels * kernel_size) + stem_channels
+    stem_kernel_size = kernel_sizes[0]
+    total_params += (4 * stem_channels * stem_kernel_size) + stem_channels
     total_params += 2 * stem_channels
 
     prev_channels = stem_channels
-    for channel in conv_channels:
+    for channel, kernel_size in zip(conv_channels, kernel_sizes):
         # Residual block conv1 + bn1.
         total_params += (prev_channels * channel * kernel_size) + channel
         total_params += 2 * channel
@@ -1652,6 +1937,157 @@ def estimate_tcn_param_complexity(
     return total_params
 
 
+def _estimate_cnn_encoder_params(
+    *,
+    conv_channels: list[int],
+    kernel_size: int,
+) -> int:
+    """Estimate one CNN encoder parameter count (conv+batch norm blocks)."""
+    total_params = 0
+    prev_channels = 4
+    for channel in conv_channels:
+        conv_params = (prev_channels * channel * kernel_size) + channel
+        batch_norm_params = 2 * channel
+        total_params += conv_params + batch_norm_params
+        prev_channels = channel
+    return total_params
+
+
+def _estimate_cnn_encoder_params_layerwise(
+    *,
+    conv_channels: list[int],
+    kernel_sizes: list[int],
+) -> int:
+    """Estimate one CNN encoder parameter count with layer-wise kernels."""
+    if len(conv_channels) != len(kernel_sizes):
+        raise ValueError("conv_channels and kernel_sizes lengths must match.")
+    total_params = 0
+    prev_channels = 4
+    for channel, kernel_size in zip(conv_channels, kernel_sizes):
+        conv_params = (prev_channels * channel * kernel_size) + channel
+        batch_norm_params = 2 * channel
+        total_params += conv_params + batch_norm_params
+        prev_channels = channel
+    return total_params
+
+
+def _resolve_branch_kernel_sizes(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+    branch_key: str,
+    depth: int,
+    shared_kernel_raw: object,
+    scalar_kernel_raw: object,
+) -> Optional[list[int]]:
+    """Resolve one branch kernel-size list from branch/shared/scalar settings."""
+    branch_raw: object = sampled_params.get(branch_key)
+    if branch_raw is None:
+        branch_raw = base_args.get(branch_key)
+    if branch_raw is None:
+        branch_raw = shared_kernel_raw
+    if branch_raw is None:
+        branch_raw = scalar_kernel_raw
+
+    parsed_list = _parse_conv_channels(branch_raw)
+    if parsed_list is None:
+        scalar_kernel = _to_positive_int(branch_raw)
+        if scalar_kernel is None:
+            return None
+        parsed_list = [scalar_kernel]
+
+    if len(parsed_list) == 1:
+        return parsed_list * depth
+    if len(parsed_list) < depth:
+        return parsed_list + ([parsed_list[-1]] * (depth - len(parsed_list)))
+    if len(parsed_list) > depth:
+        return parsed_list[:depth]
+    return parsed_list
+
+
+def estimate_cnn_pair_param_complexity(
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> Optional[int]:
+    """Estimate trainable parameters for ``cnn_pair``.
+
+    Pair architecture uses two independent CNN encoders (donor/acceptor),
+    then concatenates pooled features and applies one MLP head.
+    """
+    shared_conv_channels_raw = sampled_params.get("conv_channels")
+    if shared_conv_channels_raw is None:
+        shared_conv_channels_raw = base_args.get("conv_channels")
+    shared_conv_channels = _parse_conv_channels(shared_conv_channels_raw)
+
+    donor_conv_channels_raw = sampled_params.get("donor_conv_channels")
+    if donor_conv_channels_raw is None:
+        donor_conv_channels_raw = base_args.get("donor_conv_channels")
+    donor_conv_channels = _parse_conv_channels(donor_conv_channels_raw)
+    if donor_conv_channels is None:
+        donor_conv_channels = shared_conv_channels
+
+    acceptor_conv_channels_raw = sampled_params.get("acceptor_conv_channels")
+    if acceptor_conv_channels_raw is None:
+        acceptor_conv_channels_raw = base_args.get("acceptor_conv_channels")
+    acceptor_conv_channels = _parse_conv_channels(acceptor_conv_channels_raw)
+    if acceptor_conv_channels is None:
+        acceptor_conv_channels = shared_conv_channels
+
+    if donor_conv_channels is None:
+        lightweight = _to_bool(base_args.get("lightweight"))
+        donor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+    if acceptor_conv_channels is None:
+        lightweight = _to_bool(base_args.get("lightweight"))
+        acceptor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+    shared_kernel_raw = sampled_params.get("kernel_sizes")
+    if shared_kernel_raw is None:
+        shared_kernel_raw = base_args.get("kernel_sizes")
+    scalar_kernel_raw = sampled_params.get("kernel_size")
+    if scalar_kernel_raw is None:
+        scalar_kernel_raw = base_args.get("kernel_size", 7)
+
+    donor_kernel_sizes = _resolve_branch_kernel_sizes(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        branch_key="donor_kernel_sizes",
+        depth=len(donor_conv_channels),
+        shared_kernel_raw=shared_kernel_raw,
+        scalar_kernel_raw=scalar_kernel_raw,
+    )
+    if donor_kernel_sizes is None:
+        return None
+    acceptor_kernel_sizes = _resolve_branch_kernel_sizes(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        branch_key="acceptor_kernel_sizes",
+        depth=len(acceptor_conv_channels),
+        shared_kernel_raw=shared_kernel_raw,
+        scalar_kernel_raw=scalar_kernel_raw,
+    )
+    if acceptor_kernel_sizes is None:
+        return None
+
+    fc_hidden_raw = sampled_params.get("fc_hidden")
+    if fc_hidden_raw is None:
+        fc_hidden_raw = base_args.get("fc_hidden", 128)
+    fc_hidden = _to_positive_int(fc_hidden_raw)
+    if fc_hidden is None:
+        return None
+
+    donor_params = _estimate_cnn_encoder_params_layerwise(
+        conv_channels=donor_conv_channels,
+        kernel_sizes=donor_kernel_sizes,
+    )
+    acceptor_params = _estimate_cnn_encoder_params_layerwise(
+        conv_channels=acceptor_conv_channels,
+        kernel_sizes=acceptor_kernel_sizes,
+    )
+    pair_dim = donor_conv_channels[-1] + acceptor_conv_channels[-1]
+    head_params = (pair_dim * fc_hidden) + fc_hidden + fc_hidden + 1
+    return donor_params + acceptor_params + head_params
+
+
 def estimate_model_param_complexity(
     *,
     model_name: str,
@@ -1671,6 +2107,11 @@ def estimate_model_param_complexity(
         )
     if model_name == "tcn":
         return estimate_tcn_param_complexity(
+            sampled_params=sampled_params,
+            base_args=base_args,
+        )
+    if model_name == "cnn_pair":
+        return estimate_cnn_pair_param_complexity(
             sampled_params=sampled_params,
             base_args=base_args,
         )
@@ -1800,6 +2241,29 @@ def write_summary_markdown(
             ]
         )
     else:
+        metric_lines: list[str] = []
+        if best_row.objective_metric == "pair_pr_auc":
+            metric_lines.append(
+                "- Pair PR-AUC: "
+                f"`{_format_float(best_row.mean_pr_auc) or 'n/a'}`"
+            )
+        else:
+            metric_lines.extend(
+                [
+                    (
+                        "- Mean PR-AUC: "
+                        f"`{_format_float(best_row.mean_pr_auc) or 'n/a'}`"
+                    ),
+                    (
+                        "- Donor PR-AUC: "
+                        f"`{_format_float(best_row.donor_pr_auc) or 'n/a'}`"
+                    ),
+                    (
+                        "- Acceptor PR-AUC: "
+                        f"`{_format_float(best_row.acceptor_pr_auc) or 'n/a'}`"
+                    ),
+                ]
+            )
         lines.extend(
             [
                 "## Best Trial",
@@ -1810,19 +2274,13 @@ def write_summary_markdown(
                     f"- Objective ({best_row.objective_metric}): "
                     f"`{best_row.objective_score:.6f}`"
                 ),
-                (
-                    "- Mean PR-AUC: "
-                    f"`{_format_float(best_row.mean_pr_auc) or 'n/a'}`"
-                ),
-                (
-                    "- Donor PR-AUC: "
-                    f"`{_format_float(best_row.donor_pr_auc) or 'n/a'}`"
-                ),
-                (
-                    "- Acceptor PR-AUC: "
-                    f"`{_format_float(best_row.acceptor_pr_auc) or 'n/a'}`"
-                ),
                 f"- Effective batch size: `{best_row.effective_batch_size}`",
+                "",
+            ]
+        )
+        lines.extend(metric_lines)
+        lines.extend(
+            [
                 "",
                 "### Parameters",
                 "",
@@ -1919,25 +2377,53 @@ def build_trial_params(
     if seed_source is not None:
         return [dict(row.sampled_params) for row in seed_source[:count]]
     sampled: list[dict[str, Scalar]] = []
+    max_resample_attempts = 64
+    model_name = str(config.base_args.get("model", ""))
     for trial_id in range(count):
         trial_seed = config.base_seed + seed_offset + trial_id
-        if (
-            phase == "quick"
-            and config.search_algo == "history_guided"
-            and history_trials
-        ):
-            params = sample_trial_params_history_guided(
-                search_space=config.search_space,
-                seed=trial_seed,
-                history_trials=history_trials,
-                random_fraction=config.guided_random_fraction,
-                mutation_rate=config.guided_mutation_rate,
+        rng = random.Random(trial_seed)
+        params: dict[str, Scalar]
+        best_under_cap_params: Optional[dict[str, Scalar]] = None
+        best_under_cap_complexity: Optional[int] = None
+        for _attempt in range(max_resample_attempts):
+            if (
+                phase == "quick"
+                and config.search_algo == "history_guided"
+                and history_trials
+            ):
+                params = sample_trial_params_history_guided(
+                    search_space=config.search_space,
+                    seed=rng.randrange(1 << 30),
+                    history_trials=history_trials,
+                    random_fraction=config.guided_random_fraction,
+                    mutation_rate=config.guided_mutation_rate,
+                )
+            else:
+                params = _sample_trial_params_with_rng(config.search_space, rng)
+            params = _materialize_cnn_architecture_params(
+                model_name=model_name,
+                sampled_params=params,
+                base_args=config.base_args,
+                rng=rng,
             )
+            if config.max_model_params is None:
+                break
+            complexity = estimate_model_param_complexity(
+                model_name=model_name,
+                sampled_params=params,
+                base_args=config.base_args,
+            )
+            if complexity is None or complexity <= config.max_model_params:
+                break
+            if (
+                best_under_cap_complexity is None
+                or complexity < best_under_cap_complexity
+            ):
+                best_under_cap_params = dict(params)
+                best_under_cap_complexity = complexity
         else:
-            params = sample_trial_params(
-                search_space=config.search_space,
-                seed=trial_seed,
-            )
+            if best_under_cap_params is not None:
+                params = best_under_cap_params
         sampled.append(params)
     return sampled
 
@@ -2206,6 +2692,7 @@ def run_search(config: SearchConfig) -> int:
             seed_best_params = load_global_best_params(
                 path=config.seed_best_config_path,
                 search_space=config.search_space,
+                base_args=config.base_args,
                 expected_validation_signature=baseline_validation_signature,
             )
         except ValueError as exc:

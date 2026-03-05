@@ -5,7 +5,7 @@ Unified splice-site modeling and transcript scoring pipeline.
 ## Environment (Conda)
 
 Python target: 3.12 (pinned)
-012
+
 Create the environment from `environment.yml`:
 
 ```bash
@@ -37,10 +37,10 @@ python src/run_model.py \
   --acceptor_len 100
 ```
 
-Wrapper run (config-only; edit `run/cnn.sh` CONFIG first):
+Wrapper run (config-only; edit `run/run_cnn.sh` CONFIG first):
 
 ```bash
-bash run/cnn.sh
+bash run/run_cnn.sh
 ```
 
 Optional data preparation helper:
@@ -52,11 +52,48 @@ bash src/scripts/prepare_species_data.sh \
   --acceptor-len 100
 ```
 
+Generate full-intron positive training data
+(`intron + 10bp flank` by default):
+
+```bash
+bash run/make_intron_training_data.sh --species Dmel,Mmus,Athal
+```
+
+Generate variable-length pair datasets trimmed by intron half-length:
+
+```bash
+bash run/make_trimmed_pair_data.sh --species Dmel,Mmus,Athal
+```
+
+Generate test-site TSV with short-intron clipping enabled
+(keep donor/acceptor intronic context inside intron length):
+
+```bash
+bash run/make_test_data.sh \
+  --species Dmel \
+  --donor-len 100 \
+  --acceptor-len 100 \
+  --clip-short-intron
+```
+
+Build intron-candidate evaluation data with intron-level labels:
+
+```bash
+bash run/make_labeled_intron_eval_data.sh --species Dmel
+```
+
+Evaluate intron-level PR-AUC from labeled introns and model site scores:
+
+```bash
+bash run/eval_intron_pr_auc.sh --species Dmel
+```
+
 ## Available Models
 
 Registered in `src/models/registry.py`:
 
 - `cnn`
+- `cnn_pair`
 - `cnn_resdil`
 - `tcn`
 - `bert`
@@ -64,16 +101,18 @@ Registered in `src/models/registry.py`:
 - `dnabert2`
 - `dnabert6`
 - `reservoir`
+- `reservoir_legacy` (previous implementation kept for compatibility)
 
 ## Wrapper Scripts
 
 Config-only training/inference wrappers:
 
-- `run/cnn.sh`
-- `run/cnn_resdil.sh`
-- `run/tcn.sh`
-- `run/bert.sh`
-- `run/dnabert.sh`
+- `run/run_cnn.sh`
+- `run/run_cnn_pair.sh`
+- `run/run_cnn_resdil.sh`
+- `run/run_tcn.sh`
+- `run/run_bert.sh`
+- `run/run_dnabert.sh`
 - `run/reservoir.sh`
 
 Common wrapper controls:
@@ -81,11 +120,42 @@ Common wrapper controls:
 - `SKIP_TRAINING=1`
 - `CONTINUE_TRAINING=1`
 - `TRAIN_ONLY=1`
-- `USE_TUNED_HPARAMS=off|auto|required` (except `run/dnabert.sh`)
+- `USE_TUNED_HPARAMS=off|auto|required` (except `run/run_dnabert.sh`)
 - `EPOCHS=<int|auto>` with `MAX_EPOCHS`, `EARLY_STOP_PATIENCE`,
   `EARLY_STOP_MIN_DELTA`
+- `SEQUENCE_TRANSFORM=none|mask_outside_intron_n` (`run/run_cnn.sh`,
+  `run/run_cnn_pair.sh`)
+- CNN-family kernel config uses layer-wise lists:
+  `KERNEL_SIZES`, `DONOR_KERNEL_SIZES`, `ACCEPTOR_KERNEL_SIZES`
 
-`run/dnabert.sh` variant switch:
+Transcript score TSV compatibility:
+
+- Output schema is fixed to 5 columns:
+  `transcript_id`, `min_intron_index`, `Score_donor`,
+  `Score_acceptor`, `min_donor_plus_acceptor`.
+- `cnn_pair` keeps this schema by writing the same pair score into both
+  `Score_donor` and `Score_acceptor`.
+
+Reservoir-specific notes:
+
+- `run/reservoir.sh` defaults to `INTRONMODEL_RC_STATE_BUDGET_GB="auto"`.
+- `auto` resolves a state-memory budget from detected system RAM.
+- Reservoir training uses a Torch ESN state generator and a scikit-learn
+  readout (`lin|mlp|svm`).
+- `USE_TUNED_HPARAMS=auto|required` can override `INPUT_MODE` per task when
+  task-specific fields are left empty.
+- To force one-hot input with tuned configs, set
+  `DONOR_INPUT_MODE="onehot"` and `ACCEPTOR_INPUT_MODE="onehot"` explicitly.
+
+Data utility wrappers:
+
+- `run/make_test_data.sh`
+- `run/make_intron_training_data.sh`
+- `run/make_trimmed_pair_data.sh`
+- `run/make_labeled_intron_eval_data.sh`
+- `run/eval_intron_pr_auc.sh`
+
+`run/run_dnabert.sh` variant switch:
 
 - `DNABERT_VARIANT="2"` -> `--model dnabert2`
 - `DNABERT_VARIANT="6"` -> `--model dnabert6`
@@ -98,12 +168,21 @@ DNABERT tokenizer input mode is selected automatically in `src/models/dnabert.py
 Training/inference wrappers follow a top-first workflow:
 
 - edit the top `CONFIG (edit here)` block first
-- then run without arguments (`bash run/cnn.sh`, etc.)
+- then run without arguments (`bash run/run_cnn.sh`, etc.)
 
 Tuning wrappers (`run/tune_*.sh`) follow the same pattern:
 
 - edit the top `CONFIG (edit here)` block first
 - then run without arguments (`bash run/tune_cnn.sh`, etc.)
+- pair time-budget tuning: `bash run/tune_cnn_pair_time.sh`
+- CNN-family tuning now samples architecture with independent pools:
+  `conv_depth` (layer count), `channel_candidates`, and `kernel_candidates`
+  (`donor_*` / `acceptor_*` variants for `cnn_pair`)
+- OOM protection in tuning uses both batch-size backoff and
+  `max_model_params` pre-filtering in the generated search config
+- CNN-family tuning supports `MAX_MODEL_PARAMS=auto`; it estimates a safe
+  parameter cap from selected GPU VRAM (`GPU_IDS`) using conservative runtime
+  factors and falls back to model-specific defaults if detection fails
 
 ## Documentation
 
@@ -150,7 +229,7 @@ These overrides affect:
 - training/inference input and output under `data/<species>/...`
 - tuning outputs and `best_config.json` under
   `data/<species>/tuning/<model>/<target>/`
-- checkpoint paths under `model/<species>/{donor,acceptor}/`
+- checkpoint paths under `model/<species>/{donor,acceptor,pair}/`
 
 ## Development
 

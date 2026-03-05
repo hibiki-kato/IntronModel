@@ -9,6 +9,7 @@ This module centralizes:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 import os
 import re
@@ -23,6 +24,7 @@ NAME_FIELD_CHOICES: tuple[str, ...] = (
     "batch_size",
     "lr",
     "conv_channels",
+    "kernel_sizes",
     "kernel_size",
     "dropout",
     "fc_hidden",
@@ -52,6 +54,7 @@ NAME_FIELD_LABELS: dict[str, str] = {
     "batch_size": "bs",
     "lr": "lr",
     "conv_channels": "ch",
+    "kernel_sizes": "kss",
     "kernel_size": "ks",
     "dropout": "do",
     "fc_hidden": "fch",
@@ -127,6 +130,37 @@ class SiteTrainingExample:
     """
 
     sequence: str
+    label: int
+    transcript_id: str | None
+    intron_half_length: int | None
+    source_record_type: TrainingRecordType
+    strand: str | None
+
+
+@dataclass(frozen=True)
+class PairTrainingExample:
+    """One pair-task training example with optional parsed metadata.
+
+    Attributes
+    ----------
+    donor_sequence : str
+        Donor-side sequence after donor-window reshaping.
+    acceptor_sequence : str
+        Acceptor-side sequence after acceptor-window reshaping.
+    label : int
+        Binary class label (1: positive, 0: negative).
+    transcript_id : str | None
+        Transcript identifier when available from source line.
+    intron_half_length : int | None
+        Half intron length when available from source line.
+    source_record_type : {"pair"}
+        Original record category before pair-task filtering.
+    strand : str | None
+        Strand sign from source line when present.
+    """
+
+    donor_sequence: str
+    acceptor_sequence: str
     label: int
     transcript_id: str | None
     intron_half_length: int | None
@@ -859,6 +893,131 @@ def read_examples_single_task(
     return [(item.sequence, item.label) for item in examples_with_metadata]
 
 
+def read_examples_pair_task_with_metadata(
+    pos_path: str,
+    neg_path: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    *,
+    negative_pair_only: bool = True,
+) -> List[PairTrainingExample]:
+    """Read pair-task training examples with parsed metadata.
+
+    Parameters
+    ----------
+    pos_path : str
+        Positive training file path.
+    neg_path : str
+        Negative training file path.
+    donor_len : int | None
+        Donor window length. ``None`` keeps original donor-side length.
+    acceptor_len : int | None
+        Acceptor window length. ``None`` keeps original acceptor-side length.
+    negative_pair_only : bool, default=True
+        If ``True``, negative examples are restricted to ``DEBUG pair`` rows.
+
+    Returns
+    -------
+    list[PairTrainingExample]
+        Pair-task examples with optional metadata fields populated.
+    """
+    examples: List[PairTrainingExample] = []
+
+    def read_one_set(path: str, label: int) -> None:
+        with open(path, "r", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or not line.startswith("DEBUG"):
+                    continue
+                parsed = parse_debug_training_record(line)
+                if parsed is None or parsed.record_type != "pair":
+                    continue
+                if label == 0 and negative_pair_only and not line.startswith(
+                    "DEBUG pair "
+                ):
+                    continue
+                if parsed.donor_seq is None or parsed.acceptor_seq is None:
+                    continue
+
+                donor_seq = reshape_site_sequence(
+                    parsed.donor_seq,
+                    "donor",
+                    donor_len=donor_len,
+                    acceptor_len=acceptor_len,
+                )
+                acceptor_seq = reshape_site_sequence(
+                    parsed.acceptor_seq,
+                    "acceptor",
+                    donor_len=donor_len,
+                    acceptor_len=acceptor_len,
+                )
+                if donor_seq is None or acceptor_seq is None:
+                    continue
+
+                examples.append(
+                    PairTrainingExample(
+                        donor_sequence=donor_seq,
+                        acceptor_sequence=acceptor_seq,
+                        label=label,
+                        transcript_id=parsed.transcript_id,
+                        intron_half_length=parsed.intron_half_length,
+                        source_record_type=parsed.record_type,
+                        strand=parsed.strand,
+                    )
+                )
+
+    read_one_set(pos_path, label=1)
+    read_one_set(neg_path, label=0)
+    return examples
+
+
+def read_examples_pair_task(
+    pos_path: str,
+    neg_path: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    *,
+    negative_pair_only: bool = True,
+) -> List[Tuple[Tuple[str, str], int]]:
+    """Read pair-task examples as ``((donor_seq, acceptor_seq), label)`` tuples."""
+    examples_with_metadata = read_examples_pair_task_with_metadata(
+        pos_path=pos_path,
+        neg_path=neg_path,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        negative_pair_only=negative_pair_only,
+    )
+    return [
+        ((item.donor_sequence, item.acceptor_sequence), item.label)
+        for item in examples_with_metadata
+    ]
+
+
+def _parse_test_header_indices(header_line: str) -> Dict[str, int]:
+    """Resolve required and optional column indices for ``transcripts.tsv``."""
+    header = header_line.rstrip("\n").split("\t")
+    index_by_name = {name: idx for idx, name in enumerate(header)}
+
+    required = ("transcript_id", "site_type", "intron_index", "seq")
+    missing = [name for name in required if name not in index_by_name]
+    if missing:
+        missing_text = ", ".join(missing)
+        raise ValueError(
+            "Missing required columns in test TSV header: "
+            f"{missing_text}. Found: {header}"
+        )
+
+    out = {
+        "transcript_id": index_by_name["transcript_id"],
+        "site_type": index_by_name["site_type"],
+        "intron_index": index_by_name["intron_index"],
+        "seq": index_by_name["seq"],
+    }
+    if "intron_half_length" in index_by_name:
+        out["intron_half_length"] = index_by_name["intron_half_length"]
+    return out
+
+
 def read_test_site_rows(
     test_tsv: str,
     donor_len: Optional[int],
@@ -868,15 +1027,19 @@ def read_test_site_rows(
     skipped_short = 0
 
     with open(test_tsv, "r") as f:
-        _ = next(f, None)
+        header_line = next(f, None)
+        if header_line is None:
+            return rows, skipped_short
+        idx = _parse_test_header_indices(header_line)
+        required_max_index = max(idx.values())
         for line in f:
-            parts = line.strip().split("\t")
-            if len(parts) < 8:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) <= required_max_index:
                 continue
 
-            site_type = parts[2]
+            site_type = parts[idx["site_type"]]
             reshaped = reshape_site_sequence(
-                parts[7],
+                parts[idx["seq"]],
                 site_type,
                 donor_len=donor_len,
                 acceptor_len=acceptor_len,
@@ -885,13 +1048,129 @@ def read_test_site_rows(
                 skipped_short += 1
                 continue
 
+            intron_half_length: int | None = None
+            intron_half_length_idx = idx.get("intron_half_length")
+            if intron_half_length_idx is not None:
+                raw_value = parts[intron_half_length_idx].strip()
+                if raw_value != "":
+                    intron_half_length = _parse_required_int(raw_value)
+                    if intron_half_length is None:
+                        raise ValueError(
+                            "Invalid intron_half_length value in test TSV: "
+                            f"{raw_value}"
+                        )
+
             rows.append(
                 {
-                    "transcript_id": parts[0],
+                    "transcript_id": parts[idx["transcript_id"]],
                     "site_type": site_type,
-                    "intron_index": int(parts[3]),
+                    "intron_index": int(parts[idx["intron_index"]]),
                     "seq": reshaped,
+                    "intron_half_length": intron_half_length,
                 }
             )
 
     return rows, skipped_short
+
+
+def read_test_pair_rows(
+    test_tsv: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+) -> Tuple[List[Dict[str, object]], int, int]:
+    """Read and pair donor/acceptor test rows into pair-task records.
+
+    Parameters
+    ----------
+    test_tsv : str
+        Test TSV path generated by test-data utilities.
+    donor_len : int | None
+        Donor window length.
+    acceptor_len : int | None
+        Acceptor window length.
+
+    Returns
+    -------
+    tuple[list[dict[str, object]], int, int]
+        ``(rows, skipped_short, skipped_unpaired)`` where each row includes
+        ``transcript_id``, ``intron_index``, ``donor_seq``, ``acceptor_seq``,
+        and optional ``intron_half_length``.
+    """
+    grouped: dict[tuple[str, int], dict[str, object]] = defaultdict(dict)
+    skipped_short = 0
+
+    with open(test_tsv, "r") as handle:
+        header_line = next(handle, None)
+        if header_line is None:
+            return [], 0, 0
+        idx = _parse_test_header_indices(header_line)
+        required_max_index = max(idx.values())
+
+        for raw_line in handle:
+            parts = raw_line.rstrip("\n").split("\t")
+            if len(parts) <= required_max_index:
+                continue
+
+            site_type = parts[idx["site_type"]]
+            if site_type not in {"donor", "acceptor"}:
+                continue
+            reshaped = reshape_site_sequence(
+                parts[idx["seq"]],
+                site_type,
+                donor_len=donor_len,
+                acceptor_len=acceptor_len,
+            )
+            if reshaped is None:
+                skipped_short += 1
+                continue
+
+            transcript_id = parts[idx["transcript_id"]]
+            intron_index = int(parts[idx["intron_index"]])
+            key = (transcript_id, intron_index)
+            bucket = grouped[key]
+            bucket["transcript_id"] = transcript_id
+            bucket["intron_index"] = intron_index
+            bucket[f"{site_type}_seq"] = reshaped
+
+            intron_half_length_idx = idx.get("intron_half_length")
+            if intron_half_length_idx is not None:
+                raw_value = parts[intron_half_length_idx].strip()
+                if raw_value != "":
+                    parsed_half = _parse_required_int(raw_value)
+                    if parsed_half is None:
+                        raise ValueError(
+                            "Invalid intron_half_length value in test TSV: "
+                            f"{raw_value}"
+                        )
+                    existing = bucket.get("intron_half_length")
+                    if (
+                        existing is not None
+                        and isinstance(existing, int)
+                        and existing != parsed_half
+                    ):
+                        raise ValueError(
+                            "Mismatched intron_half_length within one pair: "
+                            f"{existing} != {parsed_half}"
+                        )
+                    bucket["intron_half_length"] = parsed_half
+
+    rows: List[Dict[str, object]] = []
+    skipped_unpaired = 0
+    for key in sorted(grouped.keys(), key=lambda item: (item[0], item[1])):
+        bucket = grouped[key]
+        donor_seq = bucket.get("donor_seq")
+        acceptor_seq = bucket.get("acceptor_seq")
+        if not isinstance(donor_seq, str) or not isinstance(acceptor_seq, str):
+            skipped_unpaired += 1
+            continue
+        rows.append(
+            {
+                "transcript_id": str(bucket["transcript_id"]),
+                "intron_index": int(bucket["intron_index"]),
+                "donor_seq": donor_seq,
+                "acceptor_seq": acceptor_seq,
+                "intron_half_length": bucket.get("intron_half_length"),
+            }
+        )
+
+    return rows, skipped_short, skipped_unpaired

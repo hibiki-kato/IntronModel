@@ -7,6 +7,7 @@ unified `run_model.py` registry path.
 
 - `src/models/bert_drosophila.py`
 - `src/models/cnn_v2.py`
+- `src/models/reservoir_rc.py`
 
 ## Integrated Models (in registry)
 
@@ -18,6 +19,7 @@ unified `run_model.py` registry path.
 - `dnabert2`
 - `dnabert6`
 - `reservoir`
+- `reservoir_legacy`
 
 ## Policy
 
