@@ -12,15 +12,15 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="420"
+TIME_BUDGET_MINUTES="60"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
 
-QUICK_TRIALS="8"
-QUICK_EPOCHS="2"
-TOP_K="2"
+QUICK_TRIALS="32"
+QUICK_EPOCHS="3"
+TOP_K="8"
 FULL_EPOCHS="10"
 
 GPU_IDS="auto"
@@ -79,30 +79,26 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
     "values": [128, 256, 512, 1024, 2048, 4096]
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-2, "scale": "log"},
+  "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-1, "scale": "log"},
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"},
+  "f1_lambda": {"type": "float", "min": 0.01, "max": 0.8, "scale": "linear"},
   "conv_depth": {
     "type": "categorical",
-    "values": [2, 3, 4, 5]
+    "values": [2, 3, 4, 5, 6]
   },
   "channel_candidates": {
     "type": "categorical",
     "values": [
-      "64,96,128,192,256,384,512",
-      "96,128,192,256,384,512,768",
-      "128,192,256,384,512,768,1024"
+      "64,96,128,192,256,384,512,768,1024"
     ]
   },
   "kernel_candidates": {
     "type": "categorical",
     "values": [
-      "3,5,7,9,11,13,15",
-      "5,7,9,11,13,15,17",
-      "7,9,11,13,15,17,19"
+      "3,5,7,9,11,13,15,17,19"
     ]
   },
   "fc_hidden": {
@@ -134,17 +130,13 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "channel_candidates": {
     "type": "categorical",
     "values": [
-      "64,96,128,192,256,384,512",
-      "96,128,192,256,384,512,768",
-      "128,192,256,384,512,768,1024"
+      "64,96,128,192,256,384,512,768,1024"
     ]
   },
   "kernel_candidates": {
     "type": "categorical",
     "values": [
-      "3,5,7,9,11,13,15",
-      "5,7,9,11,13,15,17",
-      "7,9,11,13,15,17,19"
+      "3,5,7,9,11,13,15,17,19"
     ]
   },
   "fc_hidden": {

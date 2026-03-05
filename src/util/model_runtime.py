@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import random
 import shutil
+from pathlib import Path
 from typing import Mapping
 
 import numpy as np
@@ -80,6 +81,28 @@ def fallback_roc_auc(labels: np.ndarray, probs: np.ndarray) -> float:
     fpr = np.r_[0.0, false_positives / negatives, 1.0]
     tpr = np.r_[0.0, true_positives / positives, 1.0]
     return float(np.trapezoid(tpr, fpr))
+
+
+def fallback_max_f1(labels: np.ndarray, probs: np.ndarray) -> float:
+    """Compute binary max-F1 over score thresholds without scikit-learn.
+
+    Complexity
+    ----------
+    O(n log n) time and O(n) memory.
+    """
+    positives = float(np.sum(labels == 1))
+    if positives <= 0.0:
+        raise ValueError("At least one positive label is required.")
+
+    false_positives, true_positives = binary_clf_curve(labels, probs)
+    false_negatives = positives - true_positives
+
+    precision = true_positives / np.maximum(true_positives + false_positives, 1.0)
+    recall = true_positives / np.maximum(true_positives + false_negatives, 1.0)
+    f1 = (2.0 * precision * recall) / np.maximum(precision + recall, 1e-12)
+    if f1.size == 0:
+        raise ValueError("At least one prediction is required.")
+    return float(np.max(f1))
 
 
 def bool_from_flag(flag: bool | int) -> bool:
@@ -158,15 +181,142 @@ def resolve_compile_enabled(
     return shutil.which("ptxas") is not None
 
 
+def _iter_cuda_root_candidates() -> list[Path]:
+    """Return plausible CUDA toolkit root directories."""
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def _append(candidate: Path) -> None:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    env_roots = (
+        os.environ.get("CUDA_HOME"),
+        os.environ.get("CUDA_PATH"),
+        os.environ.get("CONDA_PREFIX"),
+    )
+    for root in env_roots:
+        if root is None or not root.strip():
+            continue
+        _append(Path(root.strip()))
+
+    tool_names = ("ptxas", "nvcc")
+    for tool_name in tool_names:
+        tool_path_text = shutil.which(tool_name)
+        if tool_path_text is None:
+            continue
+        tool_path = Path(tool_path_text).resolve()
+        if tool_path.parent.name == "bin":
+            _append(tool_path.parent.parent)
+
+    explicit_tool_env = (
+        os.environ.get("TRITON_PTXAS_PATH"),
+        os.environ.get("TRITON_PTXAS_BLACKWELL_PATH"),
+    )
+    for path_text in explicit_tool_env:
+        if path_text is None or not path_text.strip():
+            continue
+        tool_path = Path(path_text.strip()).expanduser().resolve()
+        if tool_path.parent.name == "bin":
+            _append(tool_path.parent.parent)
+
+    common_roots = (
+        Path("/usr/local/cuda"),
+        Path("/opt/cuda"),
+    )
+    for root in common_roots:
+        _append(root)
+    return roots
+
+
+def _iter_cuda_header_candidates() -> list[Path]:
+    """Return plausible ``cuda.h`` candidates for multiple toolkit layouts."""
+    headers: list[Path] = []
+    seen: set[Path] = set()
+
+    def _append(candidate: Path) -> None:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        headers.append(resolved)
+
+    for root in _iter_cuda_root_candidates():
+        _append(root / "include" / "cuda.h")
+        targets_root = root / "targets"
+        _append(targets_root / "x86_64-linux" / "include" / "cuda.h")
+        if targets_root.exists():
+            for include_dir in targets_root.glob("*/include"):
+                _append(include_dir / "cuda.h")
+
+    _append(Path("/usr/include/cuda.h"))
+    return headers
+
+
+def _find_cuda_header() -> Path | None:
+    """Return first existing ``cuda.h`` path from known candidate locations."""
+    for candidate in _iter_cuda_header_candidates():
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_cuda_root_from_header(cuda_header: Path) -> Path:
+    """Infer CUDA toolkit root from ``cuda.h`` location."""
+    include_dir = cuda_header.parent
+    arch_dir = include_dir.parent
+    targets_dir = arch_dir.parent
+    if include_dir.name == "include" and targets_dir.name == "targets":
+        return targets_dir.parent
+    return include_dir.parent
+
+
+def _prepend_env_path(key: str, new_path: Path) -> None:
+    """Prepend a path-like environment variable entry without duplicates."""
+    resolved_new = str(new_path.expanduser().resolve())
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        os.environ[key] = resolved_new
+        return
+    parts: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split(os.pathsep):
+        text = item.strip()
+        if not text:
+            continue
+        resolved = str(Path(text).expanduser().resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        parts.append(text)
+    if resolved_new in seen:
+        return
+    os.environ[key] = os.pathsep.join([resolved_new, *parts])
+
+
 def configure_triton_tool_paths() -> None:
-    """Configure Triton tool paths for ``torch.compile`` stability."""
+    """Configure Triton/CUDA tool paths for ``torch.compile`` stability."""
     ptxas_path = shutil.which("ptxas")
     if ptxas_path is None:
-        return
-    if "TRITON_PTXAS_PATH" not in os.environ:
+        pass
+    elif "TRITON_PTXAS_PATH" not in os.environ:
         os.environ["TRITON_PTXAS_PATH"] = ptxas_path
-    if "TRITON_PTXAS_BLACKWELL_PATH" not in os.environ:
+    if ptxas_path is not None and "TRITON_PTXAS_BLACKWELL_PATH" not in os.environ:
         os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_path
+
+    cuda_header = _find_cuda_header()
+    if cuda_header is None:
+        return
+    cuda_include_dir = cuda_header.parent
+    cuda_root = _resolve_cuda_root_from_header(cuda_header)
+    if "CUDA_HOME" not in os.environ:
+        os.environ["CUDA_HOME"] = str(cuda_root)
+    if "CUDA_PATH" not in os.environ:
+        os.environ["CUDA_PATH"] = str(cuda_root)
+    _prepend_env_path("CPATH", cuda_include_dir)
 
 
 def configure_torch_compile_runtime() -> None:

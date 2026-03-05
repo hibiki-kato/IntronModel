@@ -16,9 +16,9 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
 
-QUICK_TRIALS="8"
+QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
-TOP_K="3"
+TOP_K="8"
 FULL_EPOCHS="10"
 TUNE_TARGETS="donor,acceptor"
 QUICK_TRIALS_MODE="fixed"
@@ -82,17 +82,13 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   "channel_candidates": {
     "type": "categorical",
     "values": [
-      "64,96,128,192,256,384,512",
-      "96,128,192,256,384,512,768",
-      "128,192,256,384,512,768,1024"
+      "64,96,128,192,256,384,512,768,1024"
     ]
   },
   "kernel_candidates": {
     "type": "categorical",
     "values": [
-      "3,5,7,9,11,13,15",
-      "5,7,9,11,13,15,17",
-      "7,9,11,13,15,17,19"
+      "3,5,7,9,11,13,15,17,19"
     ]
   },
   "fc_hidden": {
@@ -124,17 +120,13 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "channel_candidates": {
     "type": "categorical",
     "values": [
-      "64,96,128,192,256,384,512",
-      "96,128,192,256,384,512,768",
-      "128,192,256,384,512,768,1024"
+      "64,96,128,192,256,384,512,768,1024"
     ]
   },
   "kernel_candidates": {
     "type": "categorical",
     "values": [
-      "3,5,7,9,11,13,15",
-      "5,7,9,11,13,15,17",
-      "7,9,11,13,15,17,19"
+      "3,5,7,9,11,13,15,17,19"
     ]
   },
   "fc_hidden": {

@@ -50,6 +50,7 @@ from util.model_runtime import (
     empty_device_cache as _empty_device_cache,
     export_model_state_dict as _export_model_state_dict,
     fallback_average_precision as _fallback_average_precision,
+    fallback_max_f1 as _fallback_max_f1,
     fallback_roc_auc as _fallback_roc_auc,
     is_compile_runtime_error as _is_compile_runtime_error,
     is_cuda_oom_error as _is_cuda_oom_error,
@@ -315,6 +316,13 @@ def evaluate_pair(
     metrics: Dict[str, float] = {}
     if labels.size:
         metrics["acc@0.5"] = float(np.mean((probs >= 0.5) == (labels >= 0.5)))
+        max_f1_value: Optional[float] = None
+        try:
+            max_f1_value = _fallback_max_f1(labels, probs)
+        except ValueError:
+            max_f1_value = None
+        if max_f1_value is not None:
+            metrics["max_f1"] = max_f1_value
 
         if len(np.unique(labels)) > 1:
             roc_auc_value: Optional[float] = None
@@ -727,6 +735,7 @@ def train_pair_model(
             best_epoch = 0
             best_pr_auc: Optional[float] = None
             best_roc_auc: Optional[float] = None
+            best_max_f1: Optional[float] = None
             best_acc_at_0_5: Optional[float] = None
             epoch_history: list[dict[str, object]] = []
             epochs_completed = 0
@@ -814,6 +823,7 @@ def train_pair_model(
                 )
                 pr_auc = val_metrics.get("pr_auc")
                 roc_auc = val_metrics.get("roc_auc")
+                max_f1 = val_metrics.get("max_f1")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
                 train_pr_auc = train_metrics.get("pr_auc")
                 epoch_elapsed_sec = time.perf_counter() - epoch_started_at
@@ -825,6 +835,10 @@ def train_pair_model(
                 if roc_auc is not None:
                     best_roc_auc = (
                         roc_auc if best_roc_auc is None else max(best_roc_auc, roc_auc)
+                    )
+                if max_f1 is not None:
+                    best_max_f1 = (
+                        max_f1 if best_max_f1 is None else max(best_max_f1, max_f1)
                     )
                 if acc_at_0_5 is not None:
                     best_acc_at_0_5 = (
@@ -898,6 +912,7 @@ def train_pair_model(
                         "test_pr_auc": pr_auc,
                         "pr_auc": pr_auc,
                         "roc_auc": roc_auc,
+                        "max_f1": max_f1,
                         "acc@0.5": acc_at_0_5,
                         "elapsed_sec": epoch_elapsed_sec,
                         "objective_metric": score_name,
@@ -914,12 +929,15 @@ def train_pair_model(
                     "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
                 )
                 test_pr_auc_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
+                objective_text = (
+                    "" if score_name == "pr_auc" else f"{score_name}={score:.4f} "
+                )
                 print(
                     f"[pair] {mark} epoch {epoch}/{epochs} "
                     f"loss={train_loss:.4f} train_pr_auc={train_pr_auc_text} "
                     f"test_pr_auc={test_pr_auc_text} "
                     f"elapsed={epoch_elapsed_sec:.2f}s "
-                    f"{score_name}={score:.4f} best={best_score:.4f} "
+                    f"{objective_text}best={best_score:.4f} "
                     f"(ep {best_epoch})"
                 )
 
@@ -949,6 +967,7 @@ def train_pair_model(
                 "best_score": float(best_score),
                 "best_pr_auc": best_pr_auc,
                 "best_roc_auc": best_roc_auc,
+                "best_max_f1": best_max_f1,
                 "best_acc_at_0_5": best_acc_at_0_5,
                 "epoch_history": epoch_history,
                 "epochs_completed": epochs_completed,

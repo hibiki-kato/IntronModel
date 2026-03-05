@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Mapping
 
 import numpy as np
@@ -8,7 +10,9 @@ import torch
 
 from util.model_runtime import (
     bool_from_flag,
+    configure_triton_tool_paths,
     fallback_average_precision,
+    fallback_max_f1,
     fallback_roc_auc,
     is_compile_runtime_error,
     normalize_checkpoint_state_dict,
@@ -47,6 +51,40 @@ def test_is_compile_runtime_error_matches_known_keyword() -> None:
     assert is_compile_runtime_error(exc) is True
 
 
+def test_configure_triton_tool_paths_sets_cuda_env_for_conda_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_root = tmp_path / "env"
+    ptxas_path = env_root / "bin" / "ptxas"
+    ptxas_path.parent.mkdir(parents=True, exist_ok=True)
+    ptxas_path.write_text("", encoding="utf-8")
+    cuda_header = env_root / "targets" / "x86_64-linux" / "include" / "cuda.h"
+    cuda_header.parent.mkdir(parents=True, exist_ok=True)
+    cuda_header.write_text("", encoding="utf-8")
+
+    def _fake_which(name: str) -> str | None:
+        if name == "ptxas":
+            return str(ptxas_path)
+        return None
+
+    monkeypatch.setattr("util.model_runtime.shutil.which", _fake_which)
+    monkeypatch.delenv("TRITON_PTXAS_PATH", raising=False)
+    monkeypatch.delenv("TRITON_PTXAS_BLACKWELL_PATH", raising=False)
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.delenv("CPATH", raising=False)
+    monkeypatch.setenv("CONDA_PREFIX", str(env_root))
+
+    configure_triton_tool_paths()
+
+    assert os.environ["TRITON_PTXAS_PATH"] == str(ptxas_path)
+    assert os.environ["TRITON_PTXAS_BLACKWELL_PATH"] == str(ptxas_path)
+    assert os.environ["CUDA_HOME"] == str(env_root.resolve())
+    assert os.environ["CUDA_PATH"] == str(env_root.resolve())
+    assert os.environ["CPATH"] == str(cuda_header.parent.resolve())
+
+
 def test_normalize_checkpoint_state_dict_strips_orig_mod_prefix() -> None:
     raw_state: Mapping[str, torch.Tensor] = {
         "_orig_mod.layer.weight": torch.tensor([1.0]),
@@ -70,5 +108,14 @@ def test_fallback_metrics_raise_for_invalid_labels() -> None:
     probs = np.array([0.1, 0.2, 0.3], dtype=np.float64)
     with pytest.raises(ValueError, match="positive"):
         _ = fallback_average_precision(labels, probs)
+    with pytest.raises(ValueError, match="positive"):
+        _ = fallback_max_f1(labels, probs)
     with pytest.raises(ValueError, match="Both positive and negative"):
         _ = fallback_roc_auc(labels, probs)
+
+
+def test_fallback_max_f1_returns_high_score_for_separable_data() -> None:
+    labels = np.array([0, 0, 1, 1], dtype=np.int32)
+    probs = np.array([0.1, 0.2, 0.8, 0.9], dtype=np.float64)
+    max_f1 = fallback_max_f1(labels, probs)
+    assert max_f1 == pytest.approx(1.0)

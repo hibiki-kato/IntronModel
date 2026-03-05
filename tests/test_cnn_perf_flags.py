@@ -342,6 +342,7 @@ def test_train_task_model_includes_pr_auc_fields(
 
     assert "best_pr_auc" in summary
     assert "best_roc_auc" in summary
+    assert "best_max_f1" in summary
     assert "best_acc_at_0_5" in summary
     assert "effective_batch_size" in summary
     assert "oom_retries" in summary
@@ -397,8 +398,10 @@ def test_evaluate_fallback_metrics_without_sklearn(
 
     assert "pr_auc" in metrics
     assert "roc_auc" in metrics
+    assert "max_f1" in metrics
     assert 0.0 <= metrics["pr_auc"] <= 1.0
     assert 0.0 <= metrics["roc_auc"] <= 1.0
+    assert 0.0 <= metrics["max_f1"] <= 1.0
 
 
 def test_sigmoid_np_handles_extreme_logits_without_overflow() -> None:

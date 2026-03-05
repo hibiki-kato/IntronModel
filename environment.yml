@@ -8,6 +8,8 @@ dependencies:
   - matplotlib
   - biopython
   - pytorch
+  - cuda-cudart-dev
+  - cuda-nvcc-tools
   - transformers
   - einops
   - huggingface_hub

@@ -16,6 +16,7 @@ import json
 import math
 import os
 import random
+import shutil
 import shlex
 import subprocess
 import sys
@@ -34,12 +35,29 @@ if str(SRC_ROOT) not in sys.path:
 from util.validation_protocol import (
     LEGACY_VALIDATION_SIGNATURE,
     build_validation_protocol,
-    compute_validation_signature,
 )
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
 
 Scalar = int | float | str | bool
 ArgValue = Scalar | None
+
+TRIAL_STREAM_MODE_CHOICES: set[str] = {"auto", "full", "errors", "silent"}
+_ACTIVE_TRIAL_STREAM_MODE: str = "full"
+SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
+    "mean_pr_auc",
+    "donor_pr_auc",
+    "acceptor_pr_auc",
+    "pair_pr_auc",
+    "mean_roc_auc",
+    "donor_roc_auc",
+    "acceptor_roc_auc",
+    "pair_roc_auc",
+    "mean_max_f1",
+    "donor_max_f1",
+    "acceptor_max_f1",
+    "pair_max_f1",
+)
+SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
 
 
 @dataclass(frozen=True)
@@ -99,6 +117,18 @@ class SearchConfig:
     surrogate_warmup_trials: int = 8
     surrogate_candidates_per_step: int = 128
     surrogate_min_observations: int = 8
+    trial_stream_mode: str = "auto"
+
+
+@dataclass(frozen=True)
+class SeedBestConfig:
+    """Validated seed-best payload for optional injection into full trials."""
+
+    sampled_params: dict[str, Scalar]
+    objective_score: Optional[float]
+    objective_metric: Optional[str]
+    objective_best_epoch: Optional[int]
+    hparam_context: Optional[dict[str, object]]
 
 
 def _validate_positive_int(value: object, name: str) -> int:
@@ -126,6 +156,20 @@ def _validate_unit_interval(value: object, name: str) -> float:
     parsed = float(value)
     if parsed < 0.0 or parsed > 1.0:
         raise ValueError(f"{name} must be in [0.0, 1.0].")
+    return parsed
+
+
+def _validate_trial_stream_mode(value: object, name: str) -> str:
+    """Validate trial stream mode for subprocess output control."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{name} must be one of: {', '.join(sorted(TRIAL_STREAM_MODE_CHOICES))}."
+        )
+    parsed = value.strip().lower()
+    if parsed not in TRIAL_STREAM_MODE_CHOICES:
+        raise ValueError(
+            f"{name} must be one of: {', '.join(sorted(TRIAL_STREAM_MODE_CHOICES))}."
+        )
     return parsed
 
 
@@ -275,16 +319,15 @@ def load_config(path: Path) -> SearchConfig:
         raw.get("guided_mutation_rate", 0.25),
         "guided_mutation_rate",
     )
+    trial_stream_mode = _validate_trial_stream_mode(
+        raw.get("trial_stream_mode", "auto"),
+        "trial_stream_mode",
+    )
     objective_metric = str(raw.get("objective_metric", "mean_pr_auc"))
-    if objective_metric not in {
-        "mean_pr_auc",
-        "donor_pr_auc",
-        "acceptor_pr_auc",
-        "pair_pr_auc",
-    }:
+    if objective_metric not in SUPPORTED_OBJECTIVE_METRICS:
         raise ValueError(
             "objective_metric must be one of: "
-            "mean_pr_auc, donor_pr_auc, acceptor_pr_auc, pair_pr_auc."
+            f"{', '.join(SUPPORTED_OBJECTIVE_METRIC_NAMES)}."
         )
     normalized_space = _validate_search_space(search_space)
     global_best_config_raw = raw.get("global_best_config_path")
@@ -340,6 +383,7 @@ def load_config(path: Path) -> SearchConfig:
         history_top_n=history_top_n,
         guided_random_fraction=guided_random_fraction,
         guided_mutation_rate=guided_mutation_rate,
+        trial_stream_mode=trial_stream_mode,
     )
 
 
@@ -369,36 +413,71 @@ def _value_matches_spec(value: Scalar, spec: dict[str, object]) -> bool:
     return False
 
 
-def load_global_best_params(
+def _normalize_context_object(value: object) -> object:
+    """Normalize one JSON-like value for deterministic context comparison."""
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key in sorted(value):
+            normalized[str(key)] = _normalize_context_object(value[key])
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_context_object(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize_context_object(item) for item in value]
+    return value
+
+
+def _context_digest(context: dict[str, object]) -> str:
+    """Serialize one context mapping to a canonical digest string."""
+    normalized = _normalize_context_object(context)
+    if not isinstance(normalized, dict):
+        raise ValueError("context must normalize to an object.")
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
+
+def _contexts_match(
+    left: Optional[dict[str, object]],
+    right: Optional[dict[str, object]],
+) -> bool:
+    """Return whether two optional context mappings are equivalent."""
+    if left is None or right is None:
+        return False
+    return _context_digest(left) == _context_digest(right)
+
+
+def _build_hparam_context(
     *,
-    path: Optional[Path],
+    objective_metric: str,
+    full_epochs: int,
+    validation_protocol: dict[str, object],
+) -> dict[str, object]:
+    """Build comparison context used for global-best compatibility checks."""
+    return {
+        "version": 1,
+        "objective_metric": objective_metric,
+        "full_epochs": full_epochs,
+        "validation_protocol": _normalize_context_object(validation_protocol),
+    }
+
+
+def _extract_hparam_context(raw: dict[str, object]) -> Optional[dict[str, object]]:
+    """Extract optional HPO context from one best-config payload."""
+    context_obj = raw.get("hparam_context")
+    if not isinstance(context_obj, dict):
+        return None
+    normalized = _normalize_context_object(context_obj)
+    if not isinstance(normalized, dict):
+        return None
+    return normalized
+
+
+def _extract_sampled_params_from_best_config(
+    *,
+    raw: dict[str, object],
     search_space: dict[str, dict[str, object]],
     base_args: dict[str, ArgValue],
-    expected_validation_signature: Optional[str] = None,
-) -> Optional[dict[str, Scalar]]:
-    """Load and validate previous best sampled params for forced inclusion."""
-    if path is None or not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid global best config JSON: {path}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError("Global best config must be an object.")
-    if raw.get("status") != "ok":
-        return None
-    if expected_validation_signature is not None:
-        signature = raw.get("validation_signature")
-        if isinstance(signature, str) and signature.strip():
-            if signature.strip() != expected_validation_signature:
-                print(
-                    "[hparam_search] Skip global best due to validation "
-                    "signature mismatch: "
-                    f"{signature.strip()} != {expected_validation_signature}.",
-                    flush=True,
-                )
-                return None
-
+) -> dict[str, Scalar]:
+    """Validate and normalize sampled params loaded from best_config.json."""
     sampled = raw.get("sampled_params")
     if not isinstance(sampled, dict):
         raise ValueError("Global best config missing sampled_params object.")
@@ -432,44 +511,130 @@ def load_global_best_params(
     return normalized
 
 
+def load_global_best_params(
+    *,
+    path: Optional[Path],
+    search_space: dict[str, dict[str, object]],
+    base_args: dict[str, ArgValue],
+) -> Optional[dict[str, Scalar]]:
+    """Load and validate previous best sampled params for forced inclusion."""
+    if path is None or not path.exists():
+        return None
+    raw = read_json_object(path)
+    if raw is None:
+        raise ValueError(f"Invalid global best config JSON: {path}")
+    if raw.get("status") != "ok":
+        return None
+    return _extract_sampled_params_from_best_config(
+        raw=raw,
+        search_space=search_space,
+        base_args=base_args,
+    )
+
+
+def load_seed_best_config(
+    *,
+    path: Optional[Path],
+    search_space: dict[str, dict[str, object]],
+    base_args: dict[str, ArgValue],
+    default_objective_metric: str,
+) -> Optional[SeedBestConfig]:
+    """Load rich seed-best metadata for context-aware full-phase injection."""
+    if path is None or not path.exists():
+        return None
+    raw = read_json_object(path)
+    if raw is None:
+        raise ValueError(f"Invalid global best config JSON: {path}")
+    if raw.get("status") != "ok":
+        return None
+
+    sampled_params = _extract_sampled_params_from_best_config(
+        raw=raw,
+        search_space=search_space,
+        base_args=base_args,
+    )
+    objective_metric = raw.get("objective_metric")
+    metric_name: Optional[str]
+    if isinstance(objective_metric, str) and objective_metric.strip():
+        metric_name = objective_metric.strip()
+    else:
+        metric_name = default_objective_metric
+
+    objective_score: Optional[float] = None
+    score_raw = raw.get("objective_score")
+    if isinstance(score_raw, (int, float)):
+        objective_score = float(score_raw)
+    elif metric_name is not None:
+        metric_score_raw = raw.get(metric_name)
+        if isinstance(metric_score_raw, (int, float)):
+            objective_score = float(metric_score_raw)
+
+    objective_best_epoch = _to_positive_int(raw.get("objective_best_epoch"))
+    if objective_best_epoch is None:
+        metrics_json_raw = raw.get("metrics_json")
+        if isinstance(metrics_json_raw, str) and metrics_json_raw.strip():
+            objective_best_epoch = _read_objective_best_epoch_from_metrics(
+                metrics_json_path=metrics_json_raw,
+                objective_metric=metric_name or default_objective_metric,
+            )
+
+    hparam_context = _extract_hparam_context(raw)
+    return SeedBestConfig(
+        sampled_params=sampled_params,
+        objective_score=objective_score,
+        objective_metric=metric_name,
+        objective_best_epoch=objective_best_epoch,
+        hparam_context=hparam_context,
+    )
+
+
+def _parse_objective_metric_name(objective_metric: str) -> tuple[str, str]:
+    """Split one objective metric into scope and metric name."""
+    if objective_metric not in SUPPORTED_OBJECTIVE_METRICS:
+        raise ValueError(f"Unsupported objective metric: {objective_metric}")
+    scope, metric_name = objective_metric.split("_", maxsplit=1)
+    return scope, metric_name
+
+
 def _select_objective_score(
     objective_metric: str,
-    donor_pr_auc: Optional[float],
-    acceptor_pr_auc: Optional[float],
-    mean_pr_auc: Optional[float],
-    pair_pr_auc: Optional[float],
+    objective_values: dict[str, Optional[float]],
 ) -> Optional[float]:
-    """Return the configured objective score from extracted metrics."""
-    if objective_metric == "mean_pr_auc":
-        return mean_pr_auc
-    if objective_metric == "donor_pr_auc":
-        return donor_pr_auc
-    if objective_metric == "acceptor_pr_auc":
-        return acceptor_pr_auc
-    if objective_metric == "pair_pr_auc":
-        return pair_pr_auc
-    raise ValueError(f"Unsupported objective metric: {objective_metric}")
+    """Return one objective score from a normalized objective-value mapping."""
+    _ = _parse_objective_metric_name(objective_metric)
+    return objective_values.get(objective_metric)
+
+
+def _compute_mean_metric(
+    donor_metric: Optional[float],
+    acceptor_metric: Optional[float],
+    pair_metric: Optional[float],
+    objective_metric: str,
+    pair_objective_metric: str,
+) -> Optional[float]:
+    """Compute donor/acceptor mean metric with pair fallback for pair objectives."""
+    if donor_metric is None or acceptor_metric is None:
+        if objective_metric == pair_objective_metric:
+            return pair_metric
+        return None
+    return (donor_metric + acceptor_metric) / 2.0
 
 
 def _read_best_objective_score(
-    path: Path,
+    path: Optional[Path],
     objective_metric: str,
-    expected_validation_signature: Optional[str] = None,
+    expected_hparam_context: Optional[dict[str, object]] = None,
 ) -> Optional[float]:
     """Read objective score from a best_config.json payload."""
-    if not path.exists():
+    if path is None:
         return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    raw = read_json_object(path)
+    if raw is None:
         return None
-    if not isinstance(raw, dict):
-        return None
-    if expected_validation_signature is not None:
-        signature = raw.get("validation_signature")
-        if isinstance(signature, str) and signature.strip():
-            if signature.strip() != expected_validation_signature:
-                return None
+    if expected_hparam_context is not None:
+        existing_context = _extract_hparam_context(raw)
+        if not _contexts_match(existing_context, expected_hparam_context):
+            return None
     value = raw.get("objective_score")
     if isinstance(value, (int, float)):
         return float(value)
@@ -792,6 +957,80 @@ def resolve_max_parallel(setting: object, gpu_count: int) -> int:
     return parsed
 
 
+def _iter_cuda_header_candidates() -> Iterator[Path]:
+    """Yield plausible filesystem candidates for ``cuda.h``."""
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> Iterator[Path]:
+        resolved = path.expanduser().resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        yield resolved
+
+    env_roots = (
+        os.environ.get("CUDA_HOME"),
+        os.environ.get("CUDA_PATH"),
+        os.environ.get("CONDA_PREFIX"),
+    )
+    for root in env_roots:
+        if root is None or not root.strip():
+            continue
+        root_path = Path(root.strip())
+        yield from _add(root_path / "include" / "cuda.h")
+        targets_root = root_path / "targets"
+        yield from _add(targets_root / "x86_64-linux" / "include" / "cuda.h")
+        if targets_root.exists():
+            for include_dir in targets_root.glob("*/include"):
+                yield from _add(include_dir / "cuda.h")
+
+    tool_names = ("ptxas", "nvcc")
+    for tool_name in tool_names:
+        tool_path_text = shutil.which(tool_name)
+        if tool_path_text is None:
+            continue
+        tool_path = Path(tool_path_text).resolve()
+        if tool_path.parent.name == "bin":
+            yield from _add(tool_path.parent.parent / "include" / "cuda.h")
+            targets_root = tool_path.parent.parent / "targets"
+            yield from _add(targets_root / "x86_64-linux" / "include" / "cuda.h")
+            if targets_root.exists():
+                for include_dir in targets_root.glob("*/include"):
+                    yield from _add(include_dir / "cuda.h")
+
+    explicit_tool_env = (
+        os.environ.get("TRITON_PTXAS_PATH"),
+        os.environ.get("TRITON_PTXAS_BLACKWELL_PATH"),
+    )
+    for path_text in explicit_tool_env:
+        if path_text is None or not path_text.strip():
+            continue
+        tool_path = Path(path_text.strip())
+        if tool_path.parent.name == "bin":
+            yield from _add(tool_path.parent.parent / "include" / "cuda.h")
+            targets_root = tool_path.parent.parent / "targets"
+            yield from _add(targets_root / "x86_64-linux" / "include" / "cuda.h")
+            if targets_root.exists():
+                for include_dir in targets_root.glob("*/include"):
+                    yield from _add(include_dir / "cuda.h")
+
+    common_candidates = (
+        Path("/usr/local/cuda/include/cuda.h"),
+        Path("/usr/include/cuda.h"),
+        Path("/opt/cuda/include/cuda.h"),
+    )
+    for candidate in common_candidates:
+        yield from _add(candidate)
+
+
+def _find_cuda_header() -> Optional[Path]:
+    """Return first discovered ``cuda.h`` candidate path that exists."""
+    for candidate in _iter_cuda_header_candidates():
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _is_oom_text(text: str) -> bool:
     """Return whether text includes a CUDA OOM pattern."""
     lowered = text.lower()
@@ -852,19 +1091,39 @@ def _build_run_model_command(
     return cmd
 
 
-def _extract_pr_auc(summary: dict[str, object], task_name: str) -> Optional[float]:
-    """Extract PR-AUC for one task from train summary JSON."""
+def _extract_task_metric(
+    summary: dict[str, object],
+    task_name: str,
+    metric_name: str,
+) -> Optional[float]:
+    """Extract one task-level best metric from a train summary JSON payload."""
     raw_task = summary.get(task_name)
     if not isinstance(raw_task, dict):
         return None
-    best_pr_auc = raw_task.get("best_pr_auc")
-    if isinstance(best_pr_auc, (int, float)):
-        return float(best_pr_auc)
+    best_metric_key = f"best_{metric_name}"
+    best_metric_value = raw_task.get(best_metric_key)
+    if isinstance(best_metric_value, (int, float)):
+        return float(best_metric_value)
     best_metric = raw_task.get("best_metric")
     best_score = raw_task.get("best_score")
-    if best_metric == "pr_auc" and isinstance(best_score, (int, float)):
+    if best_metric == metric_name and isinstance(best_score, (int, float)):
         return float(best_score)
     return None
+
+
+def _extract_pr_auc(summary: dict[str, object], task_name: str) -> Optional[float]:
+    """Extract PR-AUC for one task from train summary JSON."""
+    return _extract_task_metric(summary, task_name, "pr_auc")
+
+
+def _extract_roc_auc(summary: dict[str, object], task_name: str) -> Optional[float]:
+    """Extract ROC-AUC for one task from train summary JSON."""
+    return _extract_task_metric(summary, task_name, "roc_auc")
+
+
+def _extract_max_f1(summary: dict[str, object], task_name: str) -> Optional[float]:
+    """Extract max-F1 for one task from train summary JSON."""
+    return _extract_task_metric(summary, task_name, "max_f1")
 
 
 def _extract_best_epoch(summary: dict[str, object], task_name: str) -> Optional[int]:
@@ -874,6 +1133,67 @@ def _extract_best_epoch(summary: dict[str, object], task_name: str) -> Optional[
         return None
     best_epoch = raw_task.get("best_epoch")
     if isinstance(best_epoch, int) and best_epoch > 0:
+        return best_epoch
+    return None
+
+
+def _extract_metric_best_epoch_from_history(
+    history: object,
+    metric_name: str,
+) -> Optional[int]:
+    """Extract metric-best epoch from one epoch-history style payload."""
+    if not isinstance(history, list):
+        return None
+    best_value: Optional[float] = None
+    best_epoch: Optional[int] = None
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        metric_value = row.get(metric_name)
+        if not isinstance(metric_value, (int, float)):
+            continue
+        metric_float = float(metric_value)
+        if not math.isfinite(metric_float):
+            continue
+        epoch_value = _to_positive_int(row.get("epoch"))
+        if epoch_value is None:
+            continue
+        if best_value is None or metric_float > best_value:
+            best_value = metric_float
+            best_epoch = epoch_value
+    return best_epoch
+
+
+def _extract_best_epoch_for_metric(
+    summary: dict[str, object],
+    task_name: str,
+    metric_name: str,
+) -> Optional[int]:
+    """Extract metric-aligned best epoch for one task."""
+    raw_task = summary.get(task_name)
+    if not isinstance(raw_task, dict):
+        return None
+    history_best_epoch = _extract_metric_best_epoch_from_history(
+        raw_task.get("epoch_history"),
+        metric_name,
+    )
+    if history_best_epoch is not None:
+        return history_best_epoch
+    legacy_history_best_epoch = _extract_metric_best_epoch_from_history(
+        raw_task.get("epochs"),
+        metric_name,
+    )
+    if legacy_history_best_epoch is not None:
+        return legacy_history_best_epoch
+    best_metric = raw_task.get("best_metric")
+    best_epoch = _to_positive_int(raw_task.get("best_epoch"))
+    if best_metric == metric_name and best_epoch is not None:
+        return best_epoch
+    if (
+        metric_name == "pr_auc"
+        and best_epoch is not None
+        and isinstance(raw_task.get("best_pr_auc"), (int, float))
+    ):
         return best_epoch
     return None
 
@@ -1069,19 +1389,20 @@ def _read_objective_best_epoch_from_metrics(
     if not isinstance(raw, dict):
         return None
 
-    if objective_metric == "donor_pr_auc":
-        return _extract_best_epoch(raw, "donor")
-    if objective_metric == "acceptor_pr_auc":
-        return _extract_best_epoch(raw, "acceptor")
-    if objective_metric == "mean_pr_auc":
-        donor_epoch = _extract_best_epoch(raw, "donor")
-        acceptor_epoch = _extract_best_epoch(raw, "acceptor")
-        if donor_epoch is None or acceptor_epoch is None:
-            return None
-        return max(donor_epoch, acceptor_epoch)
-    if objective_metric == "pair_pr_auc":
-        return _extract_best_epoch(raw, "pair")
-    return None
+    scope, metric_name = _parse_objective_metric_name(objective_metric)
+    if scope == "donor":
+        return _extract_best_epoch_for_metric(raw, "donor", metric_name)
+    if scope == "acceptor":
+        return _extract_best_epoch_for_metric(raw, "acceptor", metric_name)
+    if scope == "pair":
+        return _extract_best_epoch_for_metric(raw, "pair", metric_name)
+    if scope != "mean":
+        return None
+    donor_epoch = _extract_best_epoch_for_metric(raw, "donor", metric_name)
+    acceptor_epoch = _extract_best_epoch_for_metric(raw, "acceptor", metric_name)
+    if donor_epoch is None or acceptor_epoch is None:
+        return None
+    return max(donor_epoch, acceptor_epoch)
 
 
 def _iter_stream_lines(stream: object) -> Iterator[str]:
@@ -1091,6 +1412,43 @@ def _iter_stream_lines(stream: object) -> Iterator[str]:
     for raw_line in stream:
         if isinstance(raw_line, str):
             yield raw_line
+
+
+def _set_active_trial_stream_mode(mode: str) -> str:
+    """Set global trial stream mode and return previous mode."""
+    global _ACTIVE_TRIAL_STREAM_MODE
+    previous_mode = _ACTIVE_TRIAL_STREAM_MODE
+    _ACTIVE_TRIAL_STREAM_MODE = mode
+    return previous_mode
+
+
+def _resolve_trial_stream_mode(setting: str, max_parallel_trials: int) -> str:
+    """Resolve effective trial stream mode from setting and runtime parallelism."""
+    parsed = _validate_trial_stream_mode(setting, "trial_stream_mode")
+    if parsed != "auto":
+        return parsed
+    if max_parallel_trials > 1:
+        return "errors"
+    return "full"
+
+
+def _should_stream_trial_line(line: str, mode: str) -> bool:
+    """Return whether one trial subprocess output line should be mirrored."""
+    if mode == "full":
+        return True
+    if mode == "silent":
+        return False
+    lowered = line.lower()
+    keywords = (
+        "traceback",
+        "error",
+        "failed",
+        "exception",
+        "oom",
+        "nan",
+        "inf",
+    )
+    return any(keyword in lowered for keyword in keywords)
 
 
 def _run_command_with_streaming(
@@ -1114,14 +1472,15 @@ def _run_command_with_streaming(
     assert proc.stdout is not None
 
     collected: list[str] = []
+    stream_mode = _ACTIVE_TRIAL_STREAM_MODE
     prefix = f"[hparam_search][{phase} {trial_id:04d}] "
     for line in _iter_stream_lines(proc.stdout):
         collected.append(line)
         stripped = line.rstrip("\n")
-        if stripped:
+        if not stripped:
+            continue
+        if _should_stream_trial_line(stripped, stream_mode):
             print(f"{prefix}{stripped}", flush=True)
-        else:
-            print(prefix, flush=True)
 
     return_code = int(proc.wait())
     return return_code, "".join(collected)
@@ -1315,20 +1674,54 @@ def run_trial(
     donor_pr_auc = _extract_pr_auc(summary, "donor")
     acceptor_pr_auc = _extract_pr_auc(summary, "acceptor")
     pair_pr_auc = _extract_pr_auc(summary, "pair")
+    donor_roc_auc = _extract_roc_auc(summary, "donor")
+    acceptor_roc_auc = _extract_roc_auc(summary, "acceptor")
+    pair_roc_auc = _extract_roc_auc(summary, "pair")
+    donor_max_f1 = _extract_max_f1(summary, "donor")
+    acceptor_max_f1 = _extract_max_f1(summary, "acceptor")
+    pair_max_f1 = _extract_max_f1(summary, "pair")
     validation_protocol = _extract_validation_protocol(summary)
     validation_signature = _extract_validation_signature(summary)
     mean_pr_auc: Optional[float]
-    if donor_pr_auc is None or acceptor_pr_auc is None:
-        mean_pr_auc = pair_pr_auc if config.objective_metric == "pair_pr_auc" else None
-    else:
-        mean_pr_auc = (donor_pr_auc + acceptor_pr_auc) / 2.0
+    mean_pr_auc = _compute_mean_metric(
+        donor_metric=donor_pr_auc,
+        acceptor_metric=acceptor_pr_auc,
+        pair_metric=pair_pr_auc,
+        objective_metric=config.objective_metric,
+        pair_objective_metric="pair_pr_auc",
+    )
+    mean_roc_auc = _compute_mean_metric(
+        donor_metric=donor_roc_auc,
+        acceptor_metric=acceptor_roc_auc,
+        pair_metric=pair_roc_auc,
+        objective_metric=config.objective_metric,
+        pair_objective_metric="pair_roc_auc",
+    )
+    mean_max_f1 = _compute_mean_metric(
+        donor_metric=donor_max_f1,
+        acceptor_metric=acceptor_max_f1,
+        pair_metric=pair_max_f1,
+        objective_metric=config.objective_metric,
+        pair_objective_metric="pair_max_f1",
+    )
+    objective_values: dict[str, Optional[float]] = {
+        "mean_pr_auc": mean_pr_auc,
+        "donor_pr_auc": donor_pr_auc,
+        "acceptor_pr_auc": acceptor_pr_auc,
+        "pair_pr_auc": pair_pr_auc,
+        "mean_roc_auc": mean_roc_auc,
+        "donor_roc_auc": donor_roc_auc,
+        "acceptor_roc_auc": acceptor_roc_auc,
+        "pair_roc_auc": pair_roc_auc,
+        "mean_max_f1": mean_max_f1,
+        "donor_max_f1": donor_max_f1,
+        "acceptor_max_f1": acceptor_max_f1,
+        "pair_max_f1": pair_max_f1,
+    }
 
     objective_score = _select_objective_score(
         config.objective_metric,
-        donor_pr_auc,
-        acceptor_pr_auc,
-        mean_pr_auc,
-        pair_pr_auc,
+        objective_values,
     )
     if objective_score is None:
         error_message = (
@@ -2242,10 +2635,10 @@ def write_summary_markdown(
         )
     else:
         metric_lines: list[str] = []
-        if best_row.objective_metric == "pair_pr_auc":
+        if best_row.objective_metric.startswith("pair_"):
             metric_lines.append(
-                "- Pair PR-AUC: "
-                f"`{_format_float(best_row.mean_pr_auc) or 'n/a'}`"
+                "- Pair objective score: "
+                f"`{best_row.objective_score:.6f}`"
             )
         else:
             metric_lines.extend(
@@ -2304,6 +2697,9 @@ def run_phase(
 ) -> list[TrialResult]:
     """Run one phase with slot-based parallel scheduling."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    previous_stream_mode = _set_active_trial_stream_mode(
+        _resolve_trial_stream_mode(config.trial_stream_mode, max_parallel_trials)
+    )
     if gpu_ids:
         slots: list[Optional[str]] = list(gpu_ids[:max_parallel_trials])
     else:
@@ -2313,54 +2709,59 @@ def run_phase(
     running: dict[Future[TrialResult], Optional[str]] = {}
     collected: list[TrialResult] = []
 
-    with ThreadPoolExecutor(max_workers=max_parallel_trials) as executor:
-        while pending_indices or running:
-            while pending_indices and slots:
-                trial_id = pending_indices.pop(0)
-                assigned_gpu = slots.pop(0)
-                metrics_json = out_dir / f"{phase}_trial_{trial_id:04d}.metrics.json"
-                log_file = out_dir / f"{phase}_trial_{trial_id:04d}.log.txt"
-                future = executor.submit(
-                    run_trial,
-                    config=config,
-                    phase=phase,
-                    trial_id=trial_id,
-                    sampled_params=trial_params[trial_id],
-                    overrides=overrides,
-                    assigned_gpu_id=assigned_gpu,
-                    metrics_json=metrics_json,
-                    log_file=log_file,
-                )
-                running[future] = assigned_gpu
-                slot_label = (
-                    "cpu" if assigned_gpu is None else f"gpu:{assigned_gpu}"
-                )
-                print(
-                    f"[hparam_search] {phase} trial {trial_id:04d} started "
-                    f"on {slot_label}.",
-                    flush=True,
-                )
+    try:
+        with ThreadPoolExecutor(max_workers=max_parallel_trials) as executor:
+            while pending_indices or running:
+                while pending_indices and slots:
+                    trial_id = pending_indices.pop(0)
+                    assigned_gpu = slots.pop(0)
+                    metrics_json = (
+                        out_dir / f"{phase}_trial_{trial_id:04d}.metrics.json"
+                    )
+                    log_file = out_dir / f"{phase}_trial_{trial_id:04d}.log.txt"
+                    future = executor.submit(
+                        run_trial,
+                        config=config,
+                        phase=phase,
+                        trial_id=trial_id,
+                        sampled_params=trial_params[trial_id],
+                        overrides=overrides,
+                        assigned_gpu_id=assigned_gpu,
+                        metrics_json=metrics_json,
+                        log_file=log_file,
+                    )
+                    running[future] = assigned_gpu
+                    slot_label = (
+                        "cpu" if assigned_gpu is None else f"gpu:{assigned_gpu}"
+                    )
+                    print(
+                        f"[hparam_search] {phase} trial {trial_id:04d} started "
+                        f"on {slot_label}.",
+                        flush=True,
+                    )
 
-            done, _ = wait(
-                running.keys(),
-                return_when=FIRST_COMPLETED,
-            )
-            for future in done:
-                assigned_gpu = running.pop(future)
-                slots.append(assigned_gpu)
-                result = future.result()
-                collected.append(result)
-                metric_text = (
-                    "-"
-                    if result.objective_score is None
-                    else f"{result.objective_score:.6f}"
+                done, _ = wait(
+                    running.keys(),
+                    return_when=FIRST_COMPLETED,
                 )
-                print(
-                    f"[hparam_search] {phase} trial {result.trial_id:04d} "
-                    f"{result.status} ({len(collected)}/{trial_count}) "
-                    f"{result.objective_metric}={metric_text}.",
-                    flush=True,
-                )
+                for future in done:
+                    assigned_gpu = running.pop(future)
+                    slots.append(assigned_gpu)
+                    result = future.result()
+                    collected.append(result)
+                    metric_text = (
+                        "-"
+                        if result.objective_score is None
+                        else f"{result.objective_score:.6f}"
+                    )
+                    print(
+                        f"[hparam_search] {phase} trial {result.trial_id:04d} "
+                        f"{result.status} ({len(collected)}/{trial_count}) "
+                        f"{result.objective_metric}={metric_text}.",
+                        flush=True,
+                    )
+    finally:
+        _set_active_trial_stream_mode(previous_stream_mode)
     return collected
 
 
@@ -2435,7 +2836,7 @@ def write_best_config(
     top_rows: Optional[list[TrialResult]] = None,
     top_k: Optional[int] = None,
     fallback_validation_protocol: Optional[dict[str, object]] = None,
-    fallback_validation_signature: Optional[str] = None,
+    hparam_context: Optional[dict[str, object]] = None,
 ) -> None:
     """Write best-trial config JSON."""
     if row is None:
@@ -2447,12 +2848,10 @@ def write_best_config(
         if row.validation_protocol is not None
         else fallback_validation_protocol
     )
-    validation_signature = row.validation_signature
-    if (
-        validation_signature == LEGACY_VALIDATION_SIGNATURE
-        and fallback_validation_signature is not None
-    ):
-        validation_signature = fallback_validation_signature
+    objective_best_epoch = _read_objective_best_epoch_from_metrics(
+        metrics_json_path=row.metrics_json,
+        objective_metric=row.objective_metric,
+    )
     payload = {
         "status": "ok",
         "phase": row.phase,
@@ -2467,8 +2866,9 @@ def write_best_config(
         "oom_retries": row.oom_retries,
         "sampled_params": row.sampled_params,
         "selection_score": row.selection_score,
-        "validation_signature": validation_signature,
+        "objective_best_epoch": objective_best_epoch,
         "validation_protocol": validation_protocol,
+        "hparam_context": hparam_context,
         "metrics_json": row.metrics_json,
     }
     if top_rows is not None and top_k is not None and top_k > 0:
@@ -2482,7 +2882,7 @@ def maybe_update_global_best(
     global_best_path: Optional[Path],
     best_row: Optional[TrialResult],
     fallback_validation_protocol: Optional[dict[str, object]] = None,
-    fallback_validation_signature: Optional[str] = None,
+    hparam_context: Optional[dict[str, object]] = None,
 ) -> None:
     """Update global best config if current run improves the best score."""
     if (
@@ -2494,11 +2894,7 @@ def maybe_update_global_best(
     previous_score = _read_best_objective_score(
         global_best_path,
         best_row.objective_metric,
-        expected_validation_signature=(
-            best_row.validation_signature
-            if best_row.validation_signature != LEGACY_VALIDATION_SIGNATURE
-            else fallback_validation_signature
-        ),
+        expected_hparam_context=hparam_context,
     )
     if previous_score is not None and previous_score > best_row.objective_score:
         print(
@@ -2513,7 +2909,7 @@ def maybe_update_global_best(
         global_best_path,
         best_row,
         fallback_validation_protocol=fallback_validation_protocol,
-        fallback_validation_signature=fallback_validation_signature,
+        hparam_context=hparam_context,
     )
     print(
         "[hparam_search] Updated global best config: "
@@ -2634,13 +3030,25 @@ def run_search(config: SearchConfig) -> int:
         merged_args=dict(config.base_args),
         objective_metric=config.objective_metric,
     )
-    baseline_validation_signature = compute_validation_signature(
-        baseline_validation_protocol
+    full_overrides = dict(config.full_overrides)
+    full_overrides.setdefault("epochs", config.full_epochs)
+    full_overrides.setdefault("compile_mode", "auto")
+    full_epochs_value = _to_positive_int(full_overrides.get("epochs"))
+    if full_epochs_value is None:
+        full_epochs_value = config.full_epochs
+    current_hparam_context = _build_hparam_context(
+        objective_metric=config.objective_metric,
+        full_epochs=full_epochs_value,
+        validation_protocol=baseline_validation_protocol,
     )
     gpu_ids = detect_gpu_ids(config.gpu_ids_setting)
     max_parallel_trials = resolve_max_parallel(
         setting=config.max_parallel_trials_setting,
         gpu_count=len(gpu_ids),
+    )
+    resolved_trial_stream_mode = _resolve_trial_stream_mode(
+        config.trial_stream_mode,
+        max_parallel_trials,
     )
     if gpu_ids:
         gpu_summary = ",".join(gpu_ids[:max_parallel_trials])
@@ -2655,10 +3063,15 @@ def run_search(config: SearchConfig) -> int:
             f"(parallel={max_parallel_trials}).",
             flush=True,
         )
+    print(
+        "[hparam_search] Trial stdout stream mode: "
+        f"{resolved_trial_stream_mode} (logs are still saved per trial).",
+        flush=True,
+    )
     previous_global_best_score = _read_best_objective_score(
         config.global_best_config_path,
         config.objective_metric,
-        expected_validation_signature=baseline_validation_signature,
+        expected_hparam_context=current_hparam_context,
     )
     if previous_global_best_score is not None:
         print(
@@ -2686,28 +3099,52 @@ def run_search(config: SearchConfig) -> int:
     else:
         print("[hparam_search] Search algorithm: random.", flush=True)
 
+    seed_best_config: Optional[SeedBestConfig] = None
     seed_best_params: Optional[dict[str, Scalar]] = None
+    seed_best_context_mismatch = False
     if config.seed_best_config_path is not None:
         try:
-            seed_best_params = load_global_best_params(
+            seed_best_config = load_seed_best_config(
                 path=config.seed_best_config_path,
                 search_space=config.search_space,
                 base_args=config.base_args,
-                expected_validation_signature=baseline_validation_signature,
+                default_objective_metric=config.objective_metric,
             )
         except ValueError as exc:
             print(
-                "[hparam_search] Seed best config ignored due to validation "
+                "[hparam_search] Seed best config ignored due to parse "
                 f"error: {exc}",
                 flush=True,
             )
         else:
-            if seed_best_params is not None:
+            if seed_best_config is not None:
+                seed_best_params = dict(seed_best_config.sampled_params)
+                seed_best_context_mismatch = not _contexts_match(
+                    seed_best_config.hparam_context,
+                    current_hparam_context,
+                )
                 print(
                     "[hparam_search] Loaded seed best sampled params from "
                     f"{config.seed_best_config_path}.",
                     flush=True,
                 )
+                if seed_best_context_mismatch:
+                    score_text = (
+                        "-"
+                        if seed_best_config.objective_score is None
+                        else f"{seed_best_config.objective_score:.6f}"
+                    )
+                    epoch_text = (
+                        "-"
+                        if seed_best_config.objective_best_epoch is None
+                        else str(seed_best_config.objective_best_epoch)
+                    )
+                    print(
+                        "[hparam_search] Seed best context changed. "
+                        "Schedule one full-phase recheck with stored seed: "
+                        f"prev_score={score_text}, prev_best_epoch={epoch_text}.",
+                        flush=True,
+                    )
 
     quick_params = build_trial_params(
         config=config,
@@ -2745,13 +3182,40 @@ def run_search(config: SearchConfig) -> int:
     ranked_quick = rank_successful_trials(quick_rows)
 
     selected_for_full = ranked_quick[: config.top_k]
-    full_overrides = dict(config.full_overrides)
-    full_overrides.setdefault("epochs", config.full_epochs)
-    full_overrides.setdefault("compile_mode", "auto")
-    full_epochs_value = _to_positive_int(full_overrides.get("epochs"))
+    full_compile_mode = str(full_overrides.get("compile_mode", "auto")).strip().lower()
+    if full_compile_mode == "auto" and gpu_ids:
+        cuda_header_path = _find_cuda_header()
+        if cuda_header_path is None:
+            full_overrides["compile_mode"] = "off"
+            print(
+                "[hparam_search] Full phase compile_mode auto -> off: "
+                "cuda.h not found. Install CUDA toolkit headers (or set "
+                "CUDA_HOME/CUDA_PATH) to enable torch.compile.",
+                flush=True,
+            )
     filtered_for_full: list[TrialResult] = []
     skipped_same_best_epoch = 0
+    skipped_seed_context_match = 0
+    seed_best_key: Optional[str] = None
+    if seed_best_params is not None:
+        seed_best_key = json.dumps(
+            seed_best_params,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     for row in selected_for_full:
+        row_key = json.dumps(
+            row.sampled_params,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if (
+            seed_best_key is not None
+            and row_key == seed_best_key
+            and not seed_best_context_mismatch
+        ):
+            skipped_seed_context_match += 1
+            continue
         quick_best_epoch = _read_objective_best_epoch_from_metrics(
             metrics_json_path=row.metrics_json,
             objective_metric=config.objective_metric,
@@ -2765,10 +3229,21 @@ def run_search(config: SearchConfig) -> int:
             continue
         filtered_for_full.append(row)
     full_params = [dict(row.sampled_params) for row in filtered_for_full]
+    injected_seed_full_recheck = False
+    if seed_best_params is not None and seed_best_context_mismatch:
+        existing_param_keys = {
+            json.dumps(params, sort_keys=True, separators=(",", ":"))
+            for params in full_params
+        }
+        if seed_best_key not in existing_param_keys:
+            full_params.append(dict(seed_best_params))
+            injected_seed_full_recheck = True
     full_count = len(full_params)
     print(
         f"[hparam_search] Full phase: top_k={config.top_k}, "
         f"selected={full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
+        f"skipped_seed_context_match={skipped_seed_context_match}, "
+        f"injected_seed_full_recheck={injected_seed_full_recheck}, "
         f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}.",
         flush=True,
     )
@@ -2805,7 +3280,7 @@ def run_search(config: SearchConfig) -> int:
         top_rows=ranked_for_export,
         top_k=config.top_k,
         fallback_validation_protocol=baseline_validation_protocol,
-        fallback_validation_signature=baseline_validation_signature,
+        hparam_context=current_hparam_context,
     )
     _write_tuning_leaderboard(
         config=config,
@@ -2828,7 +3303,7 @@ def run_search(config: SearchConfig) -> int:
         global_best_path=config.global_best_config_path,
         best_row=best_row,
         fallback_validation_protocol=baseline_validation_protocol,
-        fallback_validation_signature=baseline_validation_signature,
+        hparam_context=current_hparam_context,
     )
     viz_path = config.output_dir / f"{config.species}_snpr.png"
     viz_error = write_visualization(

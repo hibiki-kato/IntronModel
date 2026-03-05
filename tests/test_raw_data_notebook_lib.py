@@ -9,7 +9,9 @@ if str(ANALYSIS_SRC) not in sys.path:
     sys.path.insert(0, str(ANALYSIS_SRC))
 
 from raw.raw_data_notebook_lib import (  # noqa: E402
+    SiteLabelCountRow,
     build_intron_count_comparison_rows,
+    build_site_label_count_rows,
     build_noncanonical_ratio_rows,
     build_sequence_quality_rows,
     build_species_overlap_sets,
@@ -19,6 +21,7 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     parse_negative_pair_count,
     parse_training_pair_records,
     parse_training_intron_lengths,
+    plot_site_label_count_comparison,
 )
 
 
@@ -281,3 +284,120 @@ def test_quality_duplicate_and_overlap_rows(tmp_path: Path) -> None:
     dup_map = {(row.species, row.source_label): row.duplicate_fraction for row in duplicate_rows}
     assert dup_map[("SpX", "Final")] == 0.0
     assert dup_map[("SpX", "Train (positive)")] > 0.0
+
+
+def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "100bp.err").write_text(
+        "\n".join(
+            [
+                "DEBUG donor AAAA acceptor CCCC + TX1 10",
+                "DEBUG donor GGGG +",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.neg.err").write_text(
+        "\n".join(
+            [
+                "DEBUG pair AAAA CCCC + 10",
+                "DEBUG donor TTTT +",
+                "DEBUG acceptor GGGG -",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                "species\ttranscript_id\tintron_index\tdonor_label\tacceptor_label",
+                "SpX\ttx1\t1\t1\t0",
+                "SpX\ttx2\t2\t0\t1",
+                "SpX\ttx3\t3\t1\t1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_site_label_count_rows(data_root)
+    result = {
+        (row.species, row.split, row.site_type): (row.positive_count, row.negative_count)
+        for row in rows
+    }
+
+    assert result[("SpX", "train", "donor")] == (2, 2)
+    assert result[("SpX", "train", "acceptor")] == (1, 2)
+    assert result[("SpX", "test", "donor")] == (2, 1)
+    assert result[("SpX", "test", "acceptor")] == (2, 1)
+
+
+def test_build_site_label_count_rows_handles_large_tsv_fields(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    large_context = "A" * 150_000
+    (raw_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "species\ttranscript_id\tintron_index\tdonor_label\t"
+                    "acceptor_label\tcontext"
+                ),
+                f"SpX\ttx1\t1\t1\t0\t{large_context}",
+                f"SpX\ttx2\t2\t0\t1\t{large_context}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_site_label_count_rows(data_root)
+    result = {
+        (row.species, row.split, row.site_type): (
+            row.positive_count,
+            row.negative_count,
+        )
+        for row in rows
+    }
+
+    assert result[("SpX", "test", "donor")] == (1, 1)
+    assert result[("SpX", "test", "acceptor")] == (1, 1)
+
+
+def test_plot_site_label_count_comparison_raises_on_empty_rows() -> None:
+    try:
+        plot_site_label_count_comparison([], title="test")
+        assert False, "Expected ValueError for empty site-label rows."
+    except ValueError as exc:
+        assert "No site-label rows" in str(exc)
+
+
+def test_plot_site_label_count_comparison_runs_with_single_panel() -> None:
+    rows = [
+        SiteLabelCountRow(
+            species="SpX",
+            split="train",
+            site_type="donor",
+            positive_count=3,
+            negative_count=5,
+        ),
+        SiteLabelCountRow(
+            species="SpY",
+            split="train",
+            site_type="donor",
+            positive_count=7,
+            negative_count=2,
+        ),
+    ]
+    plot_site_label_count_comparison(rows, title="site-label counts")
