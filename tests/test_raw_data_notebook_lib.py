@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ANALYSIS_SRC = Path(__file__).resolve().parents[1] / "analysis" / "src"
 if str(ANALYSIS_SRC) not in sys.path:
@@ -383,7 +385,13 @@ def test_plot_site_label_count_comparison_raises_on_empty_rows() -> None:
         assert "No site-label rows" in str(exc)
 
 
-def test_plot_site_label_count_comparison_runs_with_single_panel() -> None:
+def test_plot_site_label_count_comparison_runs_with_single_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+
     rows = [
         SiteLabelCountRow(
             species="SpX",
@@ -401,3 +409,39 @@ def test_plot_site_label_count_comparison_runs_with_single_panel() -> None:
         ),
     ]
     plot_site_label_count_comparison(rows, title="site-label counts")
+
+
+def test_plot_site_label_count_comparison_saves_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+
+    rows = [
+        SiteLabelCountRow(
+            species="SpX",
+            split="train",
+            site_type="donor",
+            positive_count=3,
+            negative_count=5,
+        ),
+        SiteLabelCountRow(
+            species="SpY",
+            split="train",
+            site_type="donor",
+            positive_count=7,
+            negative_count=2,
+        ),
+    ]
+    output_path = tmp_path / "site_label_counts.png"
+
+    plot_site_label_count_comparison(
+        rows,
+        title="site-label counts",
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
