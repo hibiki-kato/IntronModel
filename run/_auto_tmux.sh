@@ -25,6 +25,21 @@ _intronmodel_tmux_sync_env() {
 	if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
 		_intronmodel_tmux_set_env_var "LD_LIBRARY_PATH" "${LD_LIBRARY_PATH}"
 	fi
+	if [[ -n "${DISPLAY:-}" ]]; then
+		_intronmodel_tmux_set_env_var "DISPLAY" "${DISPLAY}"
+	fi
+	if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+		_intronmodel_tmux_set_env_var "WAYLAND_DISPLAY" "${WAYLAND_DISPLAY}"
+	fi
+	if [[ -n "${XAUTHORITY:-}" ]]; then
+		_intronmodel_tmux_set_env_var "XAUTHORITY" "${XAUTHORITY}"
+	fi
+	if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+		_intronmodel_tmux_set_env_var "XDG_RUNTIME_DIR" "${XDG_RUNTIME_DIR}"
+	fi
+	if [[ -n "${MPLBACKEND:-}" ]]; then
+		_intronmodel_tmux_set_env_var "MPLBACKEND" "${MPLBACKEND}"
+	fi
 
 	if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
 		_intronmodel_tmux_set_env_var "CUDA_VISIBLE_DEVICES" \
@@ -54,6 +69,7 @@ _intronmodel_tmux_attach_or_exit() {
 intronmodel_auto_tmux() {
 	local script_path="$1"
 	local script_name="$2"
+	shift 2
 
 	local mode="${INTRONMODEL_AUTO_TMUX:-auto}"
 	if [[ "${mode}" != "off" && "${mode}" != "on" && "${mode}" != "auto" ]]; then
@@ -82,15 +98,25 @@ intronmodel_auto_tmux() {
 
 	local cwd_q
 	local script_q
+	local arg_q
 	local cwd
 	cwd="$(pwd)"
 	printf -v cwd_q "%q" "${cwd}"
 	printf -v script_q "%q" "${script_path}"
+	arg_q=""
+	while [[ $# -gt 0 ]]; do
+		local next_arg_q
+		printf -v next_arg_q "%q" "$1"
+		arg_q+=" ${next_arg_q}"
+		shift
+	done
 
 	local start_cmd
-	printf -v start_cmd "cd %s && INTRONMODEL_TMUX_BOOTSTRAPPED=1 bash %s" \
+	printf -v start_cmd \
+		"cd %s && INTRONMODEL_TMUX_BOOTSTRAPPED=1 bash %s%s" \
 		"${cwd_q}" \
-		"${script_q}"
+		"${script_q}" \
+		"${arg_q}"
 	local session_default="intronmodel_${script_name%.*}"
 	session_default="${session_default//[^a-zA-Z0-9_]/_}"
 	local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-${session_default}}"
@@ -103,16 +129,12 @@ intronmodel_auto_tmux() {
 		_intronmodel_tmux_attach_or_exit "${session_name}" "${script_name}"
 	fi
 
-	if ! tmux new-session -d -s "${session_name}" -c "${cwd}"; then
+	if ! tmux new-session -d -s "${session_name}" -c "${cwd}" "${start_cmd}"; then
 		echo "[${script_name}] failed to create tmux session." >&2
 		return 1
 	fi
 	tmux set-option -t "${session_name}:0" remain-on-exit on >/dev/null 2>&1 \
 		|| true
-	if ! tmux send-keys -t "${session_name}:0" "${start_cmd}" C-m; then
-		echo "[${script_name}] failed to start command in tmux session." >&2
-		return 1
-	fi
 
 	echo "[${script_name}] auto tmux session: ${session_name}"
 	echo "[${script_name}] attach: tmux attach -t ${session_name}"

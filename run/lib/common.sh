@@ -124,9 +124,10 @@ intronmodel_enable_auto_tmux() {
 	local project_root="$1"
 	local entrypoint="$2"
 	local script_name="$3"
+	shift 3
 	# shellcheck source=/dev/null
 	source "${project_root}/run/_auto_tmux.sh"
-	intronmodel_auto_tmux "${entrypoint}" "${script_name}"
+	intronmodel_auto_tmux "${entrypoint}" "${script_name}" "$@"
 }
 
 

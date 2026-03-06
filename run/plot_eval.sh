@@ -26,7 +26,7 @@ EOT
 # USER DEFAULTS (optional edit)
 # --------------------------
 CONDA_ENV="intronmodel"
-SPECIES="Mmus, Athal, Dmel"
+SPECIES="Dmel"
 OUTPUT_PNG=""
 INTERACTIVE="1"
 X_MIN=""
@@ -45,7 +45,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
-intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}" "$@"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in

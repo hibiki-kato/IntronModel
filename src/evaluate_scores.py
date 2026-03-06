@@ -5,10 +5,17 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.artist import Artist
+from matplotlib.backend_bases import PickEvent
+from matplotlib.figure import Figure
+from matplotlib.legend import Legend
+from matplotlib.text import Text
 
 PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
     "Athal": (10.0, 52.0, 48.0, 75.0),
@@ -21,6 +28,9 @@ LEGEND_FONT_SIZE = 14
 AXIS_TICK_FONT_SIZE = 16
 AXIS_LABEL_FONT_SIZE = 18
 TITLE_FONT_SIZE = 20
+LEGEND_HIDDEN_ALPHA = 0.2
+LEGEND_VISIBLE_ALPHA = 1.0
+NON_GUI_BACKENDS: set[str] = {"agg", "cairo", "pdf", "pgf", "ps", "svg", "template"}
 
 
 def load_class_dict(class_file: str | Path) -> dict[str, str]:
@@ -294,6 +304,100 @@ def resolve_plot_bounds(
     return resolved_x_min, resolved_x_max, resolved_y_min, resolved_y_max
 
 
+def _sync_legend_entry_visibility(
+    legend_handle: Artist,
+    legend_text: Text,
+    plotted_artist: Artist,
+) -> None:
+    """Match legend entry opacity to the plotted artist visibility."""
+
+    alpha = LEGEND_VISIBLE_ALPHA
+    if not plotted_artist.get_visible():
+        alpha = LEGEND_HIDDEN_ALPHA
+    legend_handle.set_alpha(alpha)
+    legend_text.set_alpha(alpha)
+
+
+def _connect_interactive_legend_toggle(
+    fig: Figure,
+    legend: Legend,
+    labeled_artists: dict[str, Artist],
+) -> Callable[[PickEvent], None]:
+    """Attach legend click handlers that toggle plotted artist visibility.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figure that owns the legend and receives pick events.
+    legend : matplotlib.legend.Legend
+        Legend whose handles and texts should be clickable.
+    labeled_artists : dict[str, matplotlib.artist.Artist]
+        Mapping from legend label text to the plotted artist that should be
+        shown or hidden.
+
+    Returns
+    -------
+    collections.abc.Callable[[matplotlib.backend_bases.PickEvent], None]
+        The registered pick-event callback.
+
+    Raises
+    ------
+    ValueError
+        If a legend label does not have a matching plotted artist.
+    """
+
+    legend_targets: dict[Artist, tuple[Artist, Text, Artist]] = {}
+    legend_handles = list(legend.legend_handles)
+    legend_texts = list(legend.get_texts())
+
+    for legend_handle, legend_text in zip(legend_handles, legend_texts, strict=True):
+        label = legend_text.get_text()
+        plotted_artist = labeled_artists.get(label)
+        if plotted_artist is None:
+            raise ValueError(
+                f"Legend label '{label}' does not match a plotted artist."
+            )
+        legend_handle.set_picker(True)
+        legend_text.set_picker(True)
+        _sync_legend_entry_visibility(
+            legend_handle=legend_handle,
+            legend_text=legend_text,
+            plotted_artist=plotted_artist,
+        )
+        legend_targets[legend_handle] = (legend_handle, legend_text, plotted_artist)
+        legend_targets[legend_text] = (legend_handle, legend_text, plotted_artist)
+
+    def on_pick(event: PickEvent) -> None:
+        """Toggle the artist associated with a picked legend entry."""
+
+        target = legend_targets.get(event.artist)
+        if target is None:
+            return
+        legend_handle, legend_text, plotted_artist = target
+        plotted_artist.set_visible(not plotted_artist.get_visible())
+        _sync_legend_entry_visibility(
+            legend_handle=legend_handle,
+            legend_text=legend_text,
+            plotted_artist=plotted_artist,
+        )
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("pick_event", on_pick)
+    return on_pick
+
+
+def _validate_interactive_backend() -> None:
+    """Fail clearly when interactive plotting uses a non-GUI backend."""
+
+    backend = matplotlib.get_backend().lower()
+    if backend in NON_GUI_BACKENDS:
+        raise RuntimeError(
+            "Interactive plotting requires a GUI Matplotlib backend, "
+            f"but the current backend is '{matplotlib.get_backend()}'. "
+            "Ensure DISPLAY/XAUTHORITY are available or disable auto tmux."
+        )
+
+
 def plot_eval_scores(
     species: str,
     output_png: str | None = None,
@@ -304,6 +408,9 @@ def plot_eval_scores(
     y_max: float | None = None,
 ) -> None:
     """Plot sensitivity/precision points from all eval text files."""
+
+    if interactive:
+        _validate_interactive_backend()
 
     eval_dir = resolve_eval_dir(species)
     if not os.path.isdir(eval_dir):
@@ -316,6 +423,7 @@ def plot_eval_scores(
 
     fig, ax = plt.subplots(figsize=(16, 12), dpi=100)
     markers = ["o", "s", "^", "D", "v", "p", "*", "h", "x", "+"]
+    labeled_artists: dict[str, Artist] = {}
 
     for index, filename in enumerate(files):
         data = np.loadtxt(os.path.join(eval_dir, filename), usecols=(3, 4))
@@ -323,13 +431,17 @@ def plot_eval_scores(
             data = np.expand_dims(data, axis=0)
         sensitivity = data[:, 0]
         precision = data[:, 1]
-        ax.scatter(
+        label = filename[:-4]
+        scatter_artist = ax.scatter(
             sensitivity,
             precision,
             s=2,
             marker=markers[index % len(markers)],
-            label=filename[:-4],
+            label=label,
         )
+        if label in labeled_artists:
+            raise ValueError(f"Duplicate legend label detected: {label}")
+        labeled_artists[label] = scatter_artist
 
     (
         x_min_resolved,
@@ -358,7 +470,13 @@ def plot_eval_scores(
     ax.tick_params(axis="both", labelsize=AXIS_TICK_FONT_SIZE)
     ax.set_aspect("equal")
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(markerscale=7, fontsize=LEGEND_FONT_SIZE, loc="lower left")
+    legend = ax.legend(markerscale=7, fontsize=LEGEND_FONT_SIZE, loc="lower left")
+    if interactive:
+        _connect_interactive_legend_toggle(
+            fig=fig,
+            legend=legend,
+            labeled_artists=labeled_artists,
+        )
 
     final_output = resolve_plot_output(species, output_png)
     out_dir = os.path.dirname(final_output)
@@ -367,7 +485,7 @@ def plot_eval_scores(
     plt.savefig(final_output)
     print(f"Saved plot to {final_output}")
     if interactive:
-        plt.show()
+        plt.show(block=True)
 
 
 def run_eval_command(args: argparse.Namespace) -> None:
