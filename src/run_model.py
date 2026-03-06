@@ -489,7 +489,7 @@ def _add_cnn_pair_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     _add_cnn_fallback_train_args(parser)
     parser.add_argument(
         "--fusion_mode",
-        choices=["late", "early_channel"],
+        choices=["late", "mid", "early", "early_channel"],
         default="late",
     )
     parser.add_argument(

@@ -2131,6 +2131,14 @@ def _to_bool(value: object) -> bool:
     return False
 
 
+def _normalize_cnn_pair_fusion_mode(raw_mode: object) -> str:
+    """Normalize cnn_pair fusion mode with backward-compatible aliases."""
+    mode = str(raw_mode).strip().lower()
+    if mode == "early_channel":
+        return "early"
+    return mode
+
+
 def _derive_validation_protocol_from_args(
     *,
     merged_args: dict[str, ArgValue],
@@ -2391,7 +2399,8 @@ def _materialize_cnn_architecture_params(
         fusion_mode_raw = out.get("fusion_mode")
         if fusion_mode_raw is None:
             fusion_mode_raw = base_args.get("fusion_mode", "late")
-        fusion_mode = str(fusion_mode_raw).strip().lower()
+        fusion_mode = _normalize_cnn_pair_fusion_mode(fusion_mode_raw)
+        out["fusion_mode"] = fusion_mode
         has_arch_keys = any(
             key in out or key in base_args
             for key in (
@@ -2423,7 +2432,7 @@ def _materialize_cnn_architecture_params(
                     "acceptor_kernel_candidates",
                 )
             )
-            if fusion_mode == "early_channel":
+            if fusion_mode in {"early", "mid"}:
                 if donor_has_arch_keys:
                     _materialize_branch(
                         depth_key="donor_conv_depth",
@@ -2758,13 +2767,14 @@ def estimate_cnn_pair_param_complexity(
 
     Pair architecture supports:
     - late fusion: independent donor/acceptor encoders then MLP head
-    - early_channel fusion: one shared encoder over concatenated channels
+    - mid fusion: branch-specific prefix then shared fused tail
+    - early fusion: one shared encoder over concatenated channels
     """
     fusion_mode_raw: object = sampled_params.get("fusion_mode")
     if fusion_mode_raw is None:
         fusion_mode_raw = base_args.get("fusion_mode", "late")
-    fusion_mode = str(fusion_mode_raw).strip().lower()
-    if fusion_mode not in {"late", "early_channel"}:
+    fusion_mode = _normalize_cnn_pair_fusion_mode(fusion_mode_raw)
+    if fusion_mode not in {"late", "mid", "early"}:
         return None
 
     shared_conv_channels_raw = sampled_params.get("conv_channels")
@@ -2828,7 +2838,7 @@ def estimate_cnn_pair_param_complexity(
     if fc_hidden is None:
         return None
 
-    if fusion_mode == "early_channel":
+    if fusion_mode == "early":
         if donor_conv_channels != acceptor_conv_channels:
             return None
         if donor_kernel_sizes != acceptor_kernel_sizes:
@@ -2841,6 +2851,39 @@ def estimate_cnn_pair_param_complexity(
         pair_dim = donor_conv_channels[-1]
         head_params = (pair_dim * fc_hidden) + fc_hidden + fc_hidden + 1
         return encoder_params + head_params
+
+    if fusion_mode == "mid":
+        if donor_conv_channels != acceptor_conv_channels:
+            return None
+        if donor_kernel_sizes != acceptor_kernel_sizes:
+            return None
+        split_index = max(1, len(donor_conv_channels) // 2)
+        prefix_channels = donor_conv_channels[:split_index]
+        prefix_kernels = donor_kernel_sizes[:split_index]
+        suffix_channels = donor_conv_channels[split_index:]
+        suffix_kernels = donor_kernel_sizes[split_index:]
+
+        donor_prefix_params = _estimate_cnn_encoder_params_layerwise(
+            conv_channels=prefix_channels,
+            kernel_sizes=prefix_kernels,
+            in_channels=4,
+        )
+        acceptor_prefix_params = _estimate_cnn_encoder_params_layerwise(
+            conv_channels=prefix_channels,
+            kernel_sizes=prefix_kernels,
+            in_channels=4,
+        )
+        tail_params = 0
+        pair_dim = 2 * prefix_channels[-1]
+        if suffix_channels:
+            tail_params = _estimate_cnn_encoder_params_layerwise(
+                conv_channels=suffix_channels,
+                kernel_sizes=suffix_kernels,
+                in_channels=2 * prefix_channels[-1],
+            )
+            pair_dim = suffix_channels[-1]
+        head_params = (pair_dim * fc_hidden) + fc_hidden + fc_hidden + 1
+        return donor_prefix_params + acceptor_prefix_params + tail_params + head_params
 
     donor_params = _estimate_cnn_encoder_params_layerwise(
         conv_channels=donor_conv_channels,

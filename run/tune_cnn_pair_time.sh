@@ -118,7 +118,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   },
   "fusion_mode": {
     "type": "categorical",
-    "values": ["late", "early_channel"]
+    "values": ["late", "mid", "early"]
   },
   "fc_hidden": {
     "type": "categorical",

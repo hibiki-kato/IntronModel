@@ -1888,9 +1888,9 @@ def test_estimate_cnn_pair_param_complexity_known_configuration() -> None:
     assert complexity == 343233
 
 
-def test_estimate_cnn_pair_param_complexity_early_channel_configuration() -> None:
+def test_estimate_cnn_pair_param_complexity_early_configuration() -> None:
     sampled_params: dict[str, hparam_search.Scalar] = {
-        "fusion_mode": "early_channel",
+        "fusion_mode": "early",
         "donor_conv_channels": "64,128",
         "acceptor_conv_channels": "64,128",
         "donor_kernel_sizes": "7,7",
@@ -1902,6 +1902,22 @@ def test_estimate_cnn_pair_param_complexity_early_channel_configuration() -> Non
         base_args={},
     )
     assert complexity == 78145
+
+
+def test_estimate_cnn_pair_param_complexity_mid_configuration() -> None:
+    sampled_params: dict[str, hparam_search.Scalar] = {
+        "fusion_mode": "mid",
+        "donor_conv_channels": "64,128",
+        "acceptor_conv_channels": "64,128",
+        "donor_kernel_sizes": "7,7",
+        "acceptor_kernel_sizes": "7,7",
+        "fc_hidden": 128,
+    }
+    complexity = hparam_search.estimate_cnn_pair_param_complexity(
+        sampled_params=sampled_params,
+        base_args={},
+    )
+    assert complexity == 135681
 
 
 def test_load_historical_trials_reads_and_ranks_sibling_runs(
@@ -2090,13 +2106,15 @@ def test_build_trial_params_materializes_independent_cnn_architecture(
         assert all(value in {3, 5, 7} for value in kernels)
 
 
-def test_build_trial_params_materializes_early_channel_pair_architecture(
+@pytest.mark.parametrize("fusion_mode", ["early", "mid"])
+def test_build_trial_params_materializes_shared_pair_architecture_for_fusion_modes(
     tmp_path: Path,
+    fusion_mode: str,
 ) -> None:
     search_space = hparam_search._validate_search_space(
         {
             "batch_size": {"type": "categorical", "values": [256]},
-            "fusion_mode": {"type": "categorical", "values": ["early_channel"]},
+            "fusion_mode": {"type": "categorical", "values": [fusion_mode]},
             "donor_conv_depth": {"type": "categorical", "values": [3]},
             "donor_channel_candidates": {
                 "type": "categorical",
@@ -2148,7 +2166,7 @@ def test_build_trial_params_materializes_early_channel_pair_architecture(
     )
 
     for row in params:
-        assert row["fusion_mode"] == "early_channel"
+        assert row["fusion_mode"] == fusion_mode
         assert row["donor_conv_channels"] == row["acceptor_conv_channels"]
         assert row["donor_kernel_sizes"] == row["acceptor_kernel_sizes"]
         assert "donor_conv_depth" not in row

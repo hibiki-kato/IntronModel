@@ -108,27 +108,36 @@ def test_resolve_pair_train_params_accepts_f1_lambda() -> None:
 def test_add_train_args_accepts_fusion_mode() -> None:
     parser = argparse.ArgumentParser()
     cnn_pair.add_train_args(parser)
-    args = parser.parse_args(["--fusion_mode", "early_channel"])
+    args = parser.parse_args(["--fusion_mode", "early"])
 
-    assert args.fusion_mode == "early_channel"
+    assert args.fusion_mode == "early"
 
 
 def test_resolve_pair_train_params_accepts_fusion_mode() -> None:
     parser = argparse.ArgumentParser()
     cnn_pair.add_train_args(parser)
+    args = parser.parse_args(["--fusion_mode", "early"])
+
+    resolved = cnn_pair._resolve_pair_train_params(args)
+    assert resolved.fusion_mode == "early"
+
+
+def test_resolve_pair_train_params_normalizes_early_channel_alias() -> None:
+    parser = argparse.ArgumentParser()
+    cnn_pair.add_train_args(parser)
     args = parser.parse_args(["--fusion_mode", "early_channel"])
 
     resolved = cnn_pair._resolve_pair_train_params(args)
-    assert resolved.fusion_mode == "early_channel"
+    assert resolved.fusion_mode == "early"
 
 
-def test_pair_splice_cnn_supports_early_channel_fusion() -> None:
+def test_pair_splice_cnn_supports_early_fusion() -> None:
     model = cnn_pair.PairSpliceCNN(
         donor_conv_channels=[64, 128],
         acceptor_conv_channels=[64, 128],
         donor_kernel_sizes=[7, 5],
         acceptor_kernel_sizes=[7, 5],
-        fusion_mode="early_channel",
+        fusion_mode="early",
     )
     donor_x = torch.rand(4, 4, 100)
     acceptor_x = torch.rand(4, 4, 100)
@@ -136,11 +145,37 @@ def test_pair_splice_cnn_supports_early_channel_fusion() -> None:
     assert logits.shape == (4,)
 
 
-def test_pair_splice_cnn_early_channel_requires_matching_lengths() -> None:
+def test_pair_splice_cnn_early_requires_matching_lengths() -> None:
     model = cnn_pair.PairSpliceCNN(
         donor_conv_channels=[64, 128],
         acceptor_conv_channels=[64, 128],
-        fusion_mode="early_channel",
+        fusion_mode="early",
+    )
+    donor_x = torch.rand(2, 4, 100)
+    acceptor_x = torch.rand(2, 4, 90)
+    with pytest.raises(ValueError, match="requires donor and acceptor lengths"):
+        _ = model(donor_x, acceptor_x)
+
+
+def test_pair_splice_cnn_supports_mid_fusion() -> None:
+    model = cnn_pair.PairSpliceCNN(
+        donor_conv_channels=[64, 128, 256],
+        acceptor_conv_channels=[64, 128, 256],
+        donor_kernel_sizes=[7, 5, 3],
+        acceptor_kernel_sizes=[7, 5, 3],
+        fusion_mode="mid",
+    )
+    donor_x = torch.rand(4, 4, 100)
+    acceptor_x = torch.rand(4, 4, 100)
+    logits = model(donor_x, acceptor_x)
+    assert logits.shape == (4,)
+
+
+def test_pair_splice_cnn_mid_requires_matching_lengths() -> None:
+    model = cnn_pair.PairSpliceCNN(
+        donor_conv_channels=[64, 128, 256],
+        acceptor_conv_channels=[64, 128, 256],
+        fusion_mode="mid",
     )
     donor_x = torch.rand(2, 4, 100)
     acceptor_x = torch.rand(2, 4, 90)

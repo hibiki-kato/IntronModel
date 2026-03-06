@@ -76,10 +76,10 @@ def test_build_run_args_forwards_pair_fusion_mode() -> None:
     )
     env = {
         "MODEL": "cnn_pair",
-        "FUSION_MODE": "early_channel",
+        "FUSION_MODE": "early",
     }
 
     args = _build_run_args(spec, env)
 
     assert "--fusion_mode" in args
-    assert "early_channel" in args
+    assert "early" in args
