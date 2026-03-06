@@ -492,6 +492,7 @@ def train_task_model(
     max_oom_retries: int = 8,
     sequence_transform: str = "none",
     quick_phase: bool = False,
+    report_train_metrics: Union[bool, int] = 1,
     gpu_id: Optional[int] = None,
 ) -> Dict[str, object]:
     """Train one task model with GPU-oriented runtime settings.
@@ -584,6 +585,9 @@ def train_task_model(
         Sequence transform mode.
     quick_phase : bool, default=False
         Whether this run is a quick-phase trial.
+    report_train_metrics : bool | int, default=1
+        Whether to compute train-split PR-AUC each epoch.
+        Set to 0 to skip the extra train evaluation pass.
     gpu_id : int | None, default=None
         Assigned GPU id for sweep logs.
 
@@ -647,6 +651,7 @@ def train_task_model(
         device=device,
         epochs=epochs,
     )
+    report_train_metrics_bool = _bool_from_flag(report_train_metrics)
 
     set_seed(
         seed=seed,
@@ -771,21 +776,26 @@ def train_task_model(
             val_loader_kwargs["persistent_workers"] = use_persistent_workers
         val_loader = DataLoader(**val_loader_kwargs)
 
-        train_eval_loader_kwargs: dict[str, object] = {
-            "dataset": train_ds,
-            "batch_size": effective_batch_size,
-            "shuffle": False,
-            "num_workers": resolved_num_workers,
-            "pin_memory": use_pin_memory,
-        }
-        if resolved_num_workers > 0:
-            train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-            train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
-        train_eval_loader = DataLoader(**train_eval_loader_kwargs)
+        train_eval_loader: Optional[DataLoader] = None
+        if report_train_metrics_bool:
+            train_eval_loader_kwargs: dict[str, object] = {
+                "dataset": train_ds,
+                "batch_size": effective_batch_size,
+                "shuffle": False,
+                "num_workers": resolved_num_workers,
+                "pin_memory": use_pin_memory,
+            }
+            if resolved_num_workers > 0:
+                train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
+                train_eval_loader_kwargs["persistent_workers"] = (
+                    use_persistent_workers
+                )
+            train_eval_loader = DataLoader(**train_eval_loader_kwargs)
         print(
             f"[{task}] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
-            f"workers={resolved_num_workers}"
+            f"workers={resolved_num_workers} "
+            f"train_eval={'on' if report_train_metrics_bool else 'off'}"
         )
 
         try:
@@ -929,14 +939,16 @@ def train_task_model(
                 roc_auc = val_metrics.get("roc_auc")
                 max_f1 = val_metrics.get("max_f1")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
-                train_metrics = evaluate(
-                    model=model,
-                    loader=train_eval_loader,
-                    device=device,
-                    use_amp=use_amp_bool,
-                    amp_dtype=amp_dtype_resolved,
-                )
-                train_pr_auc = train_metrics.get("pr_auc")
+                train_pr_auc: Optional[float] = None
+                if report_train_metrics_bool and train_eval_loader is not None:
+                    train_metrics = evaluate(
+                        model=model,
+                        loader=train_eval_loader,
+                        device=device,
+                        use_amp=use_amp_bool,
+                        amp_dtype=amp_dtype_resolved,
+                    )
+                    train_pr_auc = train_metrics.get("pr_auc")
                 epoch_elapsed_sec = time.perf_counter() - epoch_started_at
                 if pr_auc is not None:
                     best_pr_auc = (
@@ -1097,6 +1109,7 @@ def train_task_model(
                 "oom_retries": oom_retries,
                 "gpu_id": gpu_id,
                 "quick_phase": quick_phase,
+                "report_train_metrics": report_train_metrics_bool,
                 "optimizer_impl": optimizer_impl,
             }
         except RuntimeError as exc:
@@ -1592,6 +1605,16 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Enable DataLoader pin_memory when set to 1.",
     )
     parser.add_argument(
+        "--report_train_metrics",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help=(
+            "Compute train-split PR-AUC every epoch when set to 1. "
+            "Set to 0 to skip extra train-eval pass."
+        ),
+    )
+    parser.add_argument(
         "--min_batch_size",
         type=int,
         default=64,
@@ -1913,6 +1936,7 @@ def train(
             max_oom_retries=model_args.max_oom_retries,
             sequence_transform=model_args.sequence_transform,
             quick_phase=bool(getattr(common_args, "quick_phase", False)),
+            report_train_metrics=model_args.report_train_metrics,
             gpu_id=getattr(common_args, "gpu_id", None),
         )
 
@@ -2009,6 +2033,7 @@ def train(
         "prefetch_factor": model_args.prefetch_factor,
         "persistent_workers": bool(model_args.persistent_workers),
         "pin_memory": bool(model_args.pin_memory),
+        "report_train_metrics": bool(model_args.report_train_metrics),
         "min_batch_size": model_args.min_batch_size,
         "max_oom_retries": model_args.max_oom_retries,
         "loss": model_args.loss,

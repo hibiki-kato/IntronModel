@@ -1037,6 +1037,8 @@ def _resolve_hparam_auto_num_workers(max_parallel_trials: int) -> int:
     parallel = max(1, int(max_parallel_trials))
     per_trial_cpu_budget = max(1, cpu_count // parallel)
     workers = max(1, per_trial_cpu_budget // 4)
+    if cpu_count >= 64 and parallel >= 4:
+        workers = max(workers, 4)
     return min(8, workers)
 
 
@@ -1775,6 +1777,8 @@ def _run_trial_with_command_runner(
     model_name = merged_args.get("model")
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("base_args.model must be a non-empty string.")
+    if model_name.strip().lower() == "cnn":
+        merged_args.setdefault("report_train_metrics", 0)
     merged_args["species"] = config.species
     merged_args["train_only"] = True
     merged_args["metrics_json"] = str(metrics_json)

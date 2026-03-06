@@ -88,6 +88,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "prefetch_factor",
         "persistent_workers",
         "pin_memory",
+        "report_train_metrics",
         "compile",
         "compile_mode",
         "min_batch_size",
@@ -367,6 +368,16 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
         choices=[0, 1],
         default=1,
         help="Enable DataLoader pin_memory when set to 1.",
+    )
+    parser.add_argument(
+        "--report_train_metrics",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help=(
+            "Compute train-split PR-AUC every epoch when set to 1. "
+            "Set to 0 to skip extra train-eval pass."
+        ),
     )
     parser.add_argument(
         "--min_batch_size",

@@ -37,6 +37,8 @@ def test_add_train_args_includes_perf_flags() -> None:
             "0",
             "--pin_memory",
             "0",
+            "--report_train_metrics",
+            "0",
         ]
     )
     assert args.use_amp == 0
@@ -49,6 +51,7 @@ def test_add_train_args_includes_perf_flags() -> None:
     assert args.prefetch_factor == 3
     assert args.persistent_workers == 0
     assert args.pin_memory == 0
+    assert args.report_train_metrics == 0
 
 
 def test_resolve_task_train_params_prefers_task_overrides() -> None:
@@ -346,6 +349,73 @@ def test_train_task_model_includes_pr_auc_fields(
     assert "best_acc_at_0_5" in summary
     assert "effective_batch_size" in summary
     assert "oom_retries" in summary
+
+
+def test_train_task_model_can_skip_train_eval_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    examples: list[tuple[str, int]] = []
+    for _ in range(16):
+        examples.append(("ACGT" * 16, 1))
+        examples.append(("TGCA" * 16, 0))
+
+    def _fake_read_examples_single_task(
+        pos_path: str,
+        neg_path: str,
+        task: str,
+        donor_len: int | None,
+        acceptor_len: int | None,
+    ) -> list[tuple[str, int]]:
+        del pos_path, neg_path, task, donor_len, acceptor_len
+        return examples
+
+    evaluate_calls: list[int] = []
+
+    def _fake_evaluate(
+        model: torch.nn.Module,
+        loader: DataLoader,
+        device: str,
+        use_amp: bool,
+        amp_dtype: torch.dtype | None,
+    ) -> dict[str, float]:
+        del model, loader, device, use_amp, amp_dtype
+        evaluate_calls.append(1)
+        return {"pr_auc": 0.5, "acc@0.5": 0.5}
+
+    monkeypatch.setattr(
+        cnn,
+        "read_examples_single_task",
+        _fake_read_examples_single_task,
+    )
+    monkeypatch.setattr(cnn, "evaluate", _fake_evaluate)
+
+    checkpoint_path = tmp_path / "donor_skip_train_eval.pt"
+    summary = cnn.train_task_model(
+        task="donor",
+        pos_path="unused_pos",
+        neg_path="unused_neg",
+        checkpoint_path=str(checkpoint_path),
+        window_len=32,
+        donor_len=32,
+        acceptor_len=32,
+        epochs=2,
+        batch_size=8,
+        lr=1e-3,
+        seed=7,
+        compile_mode="off",
+        use_amp=0,
+        num_workers=0,
+        pin_memory=0,
+        persistent_workers=0,
+        report_train_metrics=0,
+        min_batch_size=8,
+    )
+
+    assert len(evaluate_calls) == 2
+    assert summary["report_train_metrics"] is False
+    for row in summary["epoch_history"]:
+        assert row["train_pr_auc"] is None
 
 
 def test_evaluate_handles_bfloat16_logits() -> None:
