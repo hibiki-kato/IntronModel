@@ -87,12 +87,12 @@ intronmodel_auto_tmux() {
 
 	local bash_cmd
 	printf -v bash_cmd \
-		'cd %s && export INTRONMODEL_TMUX_BOOTSTRAPPED=1 && exec bash -l %s' \
+		'cd %s && export INTRONMODEL_TMUX_BOOTSTRAPPED=1 && exec bash %s' \
 		"${cwd_q}" \
 		"${script_q}"
 
 	local start_cmd
-	printf -v start_cmd "bash -lc %q" "${bash_cmd}"
+	printf -v start_cmd "bash -c %q" "${bash_cmd}"
 	local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-0}"
 
 	_intronmodel_tmux_sync_env
