@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from util.data_proc import (
+    clear_training_example_caches,
     read_examples_pair_task_with_metadata,
     read_examples_single_task,
     read_examples_single_task_with_metadata,
@@ -270,6 +271,36 @@ def test_read_examples_pair_task_negative_pair_only_filter(tmp_path: Path) -> No
     assert len(unfiltered) == 3
     assert [item.label for item in filtered] == [1, 0]
     assert [item.label for item in unfiltered] == [1, 0, 0]
+
+
+def test_read_examples_single_task_cache_tracks_file_updates(tmp_path: Path) -> None:
+    """Reload updated file content when cache key changes by file signature."""
+    clear_training_example_caches()
+    pos_path = tmp_path / "pos.err"
+    neg_path = tmp_path / "neg.err"
+    _write_text(pos_path, "DEBUG donor AAAAAC +\n")
+    _write_text(neg_path, "DEBUG donor CCCCCC +\n")
+
+    first = read_examples_single_task(
+        str(pos_path),
+        str(neg_path),
+        "donor",
+        donor_len=4,
+        acceptor_len=4,
+    )
+    assert first == [("AAAA", 1), ("CCCC", 0)]
+
+    _write_text(pos_path, "DEBUG donor TTTTGG +\n")
+    second = read_examples_single_task(
+        str(pos_path),
+        str(neg_path),
+        "donor",
+        donor_len=4,
+        acceptor_len=4,
+    )
+    assert second == [("TTTT", 1), ("CCCC", 0)]
+
+    clear_training_example_caches()
 
 
 def test_read_test_pair_rows_pairs_and_skips_rows(tmp_path: Path) -> None:

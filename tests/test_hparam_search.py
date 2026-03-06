@@ -108,6 +108,75 @@ def test_load_config_rejects_invalid_search_algo(tmp_path: Path) -> None:
         _ = hparam_search.load_config(config_path)
 
 
+def test_load_config_accepts_trial_process_mode(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    config["trial_process_mode"] = "persistent_quick"
+    config_path = tmp_path / "trial_process_mode.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.trial_process_mode == "persistent_quick"
+
+
+def test_load_config_rejects_invalid_trial_process_mode(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    config["trial_process_mode"] = "persistent"
+    config_path = tmp_path / "bad_trial_process_mode.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="trial_process_mode"):
+        _ = hparam_search.load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("mode", "phase", "expected"),
+    [
+        ("subprocess", "quick", "subprocess"),
+        ("subprocess", "full", "subprocess"),
+        ("persistent_quick", "quick", "persistent"),
+        ("persistent_quick", "full", "subprocess"),
+        ("persistent_all", "quick", "persistent"),
+        ("persistent_all", "full", "persistent"),
+    ],
+)
+def test_resolve_phase_execution_mode(
+    mode: str,
+    phase: str,
+    expected: str,
+) -> None:
+    resolved = hparam_search._resolve_phase_execution_mode(
+        process_mode=mode,
+        phase=phase,
+    )
+
+    assert resolved == expected
+
+
+@pytest.mark.parametrize(
+    ("phase_execution_mode", "trial_count", "max_parallel_trials", "expected"),
+    [
+        ("subprocess", 1, 8, "subprocess"),
+        ("persistent", 1, 8, "subprocess"),
+        ("persistent", 8, 8, "subprocess"),
+        ("persistent", 9, 8, "persistent"),
+    ],
+)
+def test_resolve_workload_execution_mode(
+    phase_execution_mode: str,
+    trial_count: int,
+    max_parallel_trials: int,
+    expected: str,
+) -> None:
+    resolved = hparam_search._resolve_workload_execution_mode(
+        phase_execution_mode=phase_execution_mode,
+        trial_count=trial_count,
+        max_parallel_trials=max_parallel_trials,
+    )
+
+    assert resolved == expected
+
+
 def test_sample_trial_params_is_deterministic(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     space = hparam_search._validate_search_space(config["search_space"])
@@ -1082,8 +1151,10 @@ def test_run_search_ignores_global_best_in_quick_and_uses_species_plot_name(
         gpu_ids: list[str],
         max_parallel_trials: int,
         out_dir: Path,
+        execution_mode: str,
     ) -> list[hparam_search.TrialResult]:
         del config, overrides, gpu_ids, max_parallel_trials, out_dir
+        assert execution_mode == "subprocess"
         if phase == "quick":
             captured["quick_params"] = [dict(params) for params in trial_params]
             captured["quick_first"] = dict(trial_params[0])
@@ -1160,6 +1231,186 @@ def test_run_search_ignores_global_best_in_quick_and_uses_species_plot_name(
     assert cast(Path, captured["viz_path"]).name == "Dmel_snpr.png"
 
 
+def test_run_search_uses_trial_process_mode_per_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        _base_config_dict(tmp_path)["search_space"]
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=2,
+        top_k=1,
+        full_epochs=4,
+        base_seed=1337,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=2,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={"compile_mode": "off"},
+        full_overrides={"compile_mode": "off"},
+        search_space=search_space,
+        trial_process_mode="persistent_quick",
+    )
+    captured_modes: dict[str, str] = {}
+
+    def _fake_detect_gpu_ids(setting: object) -> list[str]:
+        del setting
+        return []
+
+    def _fake_run_phase(
+        *,
+        phase: str,
+        config: hparam_search.SearchConfig,
+        trial_count: int,
+        trial_params: list[dict[str, hparam_search.Scalar]],
+        overrides: dict[str, hparam_search.ArgValue],
+        gpu_ids: list[str],
+        max_parallel_trials: int,
+        out_dir: Path,
+        execution_mode: str,
+    ) -> list[hparam_search.TrialResult]:
+        del config, overrides, gpu_ids, max_parallel_trials, out_dir
+        captured_modes[phase] = execution_mode
+        rows: list[hparam_search.TrialResult] = []
+        for trial_id in range(trial_count):
+            score = 0.7 + (0.1 * trial_id)
+            rows.append(
+                hparam_search.TrialResult(
+                    phase=phase,
+                    trial_id=trial_id,
+                    status="success",
+                    gpu_id=None,
+                    sampled_params=dict(trial_params[trial_id]),
+                    effective_batch_size=512,
+                    oom_retries=0,
+                    donor_pr_auc=score,
+                    acceptor_pr_auc=score,
+                    mean_pr_auc=score,
+                    objective_metric="mean_pr_auc",
+                    objective_score=score,
+                    error_message=None,
+                    return_code=0,
+                    duration_sec=0.1,
+                    metrics_json=str(tmp_path / f"{phase}_{trial_id}.metrics.json"),
+                    log_file=f"{phase}_{trial_id}.log",
+                )
+            )
+        return rows
+
+    monkeypatch.setattr(hparam_search, "detect_gpu_ids", _fake_detect_gpu_ids)
+    monkeypatch.setattr(hparam_search, "run_phase", _fake_run_phase)
+    monkeypatch.setattr(
+        hparam_search,
+        "write_visualization",
+        lambda *args, **kwargs: None,
+    )
+
+    exit_code = hparam_search.run_search(config)
+
+    assert exit_code == 0
+    assert captured_modes == {"quick": "persistent", "full": "subprocess"}
+
+
+def test_run_search_downgrades_persistent_when_trials_fit_one_wave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        _base_config_dict(tmp_path)["search_space"]
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=2,
+        top_k=1,
+        full_epochs=4,
+        base_seed=1337,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=2,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={"compile_mode": "off"},
+        full_overrides={"compile_mode": "off"},
+        search_space=search_space,
+        trial_process_mode="persistent_all",
+    )
+    captured_modes: dict[str, str] = {}
+
+    def _fake_detect_gpu_ids(setting: object) -> list[str]:
+        del setting
+        return ["0", "1"]
+
+    def _fake_run_phase(
+        *,
+        phase: str,
+        config: hparam_search.SearchConfig,
+        trial_count: int,
+        trial_params: list[dict[str, hparam_search.Scalar]],
+        overrides: dict[str, hparam_search.ArgValue],
+        gpu_ids: list[str],
+        max_parallel_trials: int,
+        out_dir: Path,
+        execution_mode: str,
+    ) -> list[hparam_search.TrialResult]:
+        del config, overrides, gpu_ids, max_parallel_trials, out_dir
+        captured_modes[phase] = execution_mode
+        rows: list[hparam_search.TrialResult] = []
+        for trial_id in range(trial_count):
+            score = 0.7 + (0.1 * trial_id)
+            rows.append(
+                hparam_search.TrialResult(
+                    phase=phase,
+                    trial_id=trial_id,
+                    status="success",
+                    gpu_id=None,
+                    sampled_params=dict(trial_params[trial_id]),
+                    effective_batch_size=512,
+                    oom_retries=0,
+                    donor_pr_auc=score,
+                    acceptor_pr_auc=score,
+                    mean_pr_auc=score,
+                    objective_metric="mean_pr_auc",
+                    objective_score=score,
+                    error_message=None,
+                    return_code=0,
+                    duration_sec=0.1,
+                    metrics_json=str(tmp_path / f"{phase}_{trial_id}.metrics.json"),
+                    log_file=f"{phase}_{trial_id}.log",
+                )
+            )
+        return rows
+
+    monkeypatch.setattr(hparam_search, "detect_gpu_ids", _fake_detect_gpu_ids)
+    monkeypatch.setattr(hparam_search, "run_phase", _fake_run_phase)
+    monkeypatch.setattr(
+        hparam_search,
+        "write_visualization",
+        lambda *args, **kwargs: None,
+    )
+
+    exit_code = hparam_search.run_search(config)
+
+    assert exit_code == 0
+    assert captured_modes == {"quick": "subprocess", "full": "subprocess"}
+
+
 def test_run_search_injects_seed_into_full_when_context_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1229,8 +1480,10 @@ def test_run_search_injects_seed_into_full_when_context_mismatch(
         gpu_ids: list[str],
         max_parallel_trials: int,
         out_dir: Path,
+        execution_mode: str,
     ) -> list[hparam_search.TrialResult]:
         del config, overrides, gpu_ids, max_parallel_trials, out_dir
+        assert execution_mode == "subprocess"
         if phase == "quick":
             captured["quick_params"] = [dict(params) for params in trial_params]
         if phase == "full":
@@ -1356,8 +1609,10 @@ def test_run_search_skips_seed_full_recheck_when_context_matches(
         gpu_ids: list[str],
         max_parallel_trials: int,
         out_dir: Path,
+        execution_mode: str,
     ) -> list[hparam_search.TrialResult]:
         del config, overrides, gpu_ids, max_parallel_trials, out_dir
+        assert execution_mode == "subprocess"
         if phase == "quick":
             captured["quick_params"] = [dict(params) for params in trial_params]
         if phase == "full":

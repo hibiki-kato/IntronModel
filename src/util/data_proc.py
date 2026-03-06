@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 import re
 from typing import Dict, List, Literal, Optional, Sequence, Tuple
@@ -79,6 +80,8 @@ NAME_FIELD_LABELS: dict[str, str] = {
 }
 
 TrainingRecordType = Literal["donor", "acceptor", "pair"]
+TrainingFileSignature = Tuple[str, int, int]
+_TRAINING_EXAMPLE_CACHE_MAXSIZE: int = 4
 
 
 @dataclass(frozen=True)
@@ -782,6 +785,115 @@ def parse_pair_sequences(line: str) -> Optional[Tuple[str, str]]:
     return parsed.donor_seq, parsed.acceptor_seq
 
 
+def _resolve_training_file_signature(path: str) -> TrainingFileSignature:
+    """Return cache key tuple for one training file.
+
+    Parameters
+    ----------
+    path : str
+        Input file path.
+
+    Returns
+    -------
+    tuple[str, int, int]
+        Real path, mtime in nanoseconds, and file size in bytes.
+    """
+    resolved_path = os.path.realpath(path)
+    stat_result = os.stat(resolved_path)
+    return (
+        resolved_path,
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_size),
+    )
+
+
+def clear_training_example_caches() -> None:
+    """Clear in-memory caches for parsed training examples."""
+    _read_examples_single_task_with_metadata_cached.cache_clear()
+    _read_examples_pair_task_with_metadata_cached.cache_clear()
+
+
+def _read_examples_single_task_with_metadata_uncached(
+    *,
+    pos_path: str,
+    neg_path: str,
+    task: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+) -> Tuple[SiteTrainingExample, ...]:
+    """Read one-task examples from disk without cache lookup."""
+    if task not in {"donor", "acceptor"}:
+        raise ValueError("task must be either 'donor' or 'acceptor'.")
+
+    examples: List[SiteTrainingExample] = []
+
+    def read_one_set(path: str, label: int) -> None:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("DEBUG"):
+                    continue
+
+                parsed = parse_debug_training_record(line)
+                if parsed is None:
+                    continue
+
+                if parsed.record_type == "pair":
+                    raw_seq = (
+                        parsed.donor_seq if task == "donor" else parsed.acceptor_seq
+                    )
+                elif parsed.record_type == task:
+                    raw_seq = (
+                        parsed.donor_seq if task == "donor" else parsed.acceptor_seq
+                    )
+                else:
+                    continue
+
+                if raw_seq is None:
+                    continue
+
+                reshaped = reshape_site_sequence(
+                    raw_seq,
+                    task,
+                    donor_len=donor_len,
+                    acceptor_len=acceptor_len,
+                )
+                if reshaped is None:
+                    continue
+                examples.append(
+                    SiteTrainingExample(
+                        sequence=reshaped,
+                        label=label,
+                        transcript_id=parsed.transcript_id,
+                        intron_half_length=parsed.intron_half_length,
+                        source_record_type=parsed.record_type,
+                        strand=parsed.strand,
+                    )
+                )
+
+    read_one_set(pos_path, label=1)
+    read_one_set(neg_path, label=0)
+    return tuple(examples)
+
+
+@lru_cache(maxsize=_TRAINING_EXAMPLE_CACHE_MAXSIZE)
+def _read_examples_single_task_with_metadata_cached(
+    pos_signature: TrainingFileSignature,
+    neg_signature: TrainingFileSignature,
+    task: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+) -> Tuple[SiteTrainingExample, ...]:
+    """Read one-task examples with cache keyed by file signatures."""
+    return _read_examples_single_task_with_metadata_uncached(
+        pos_path=pos_signature[0],
+        neg_path=neg_signature[0],
+        task=task,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+
+
 def read_examples_single_task_with_metadata(
     pos_path: str,
     neg_path: str,
@@ -814,62 +926,16 @@ def read_examples_single_task_with_metadata(
     ValueError
         If ``task`` is neither ``"donor"`` nor ``"acceptor"``.
     """
-    if task not in {"donor", "acceptor"}:
-        raise ValueError("task must be either 'donor' or 'acceptor'.")
-
-    examples: List[SiteTrainingExample] = []
-
-    def read_one_set(path: str, label: int) -> None:
-        with open(path, "r", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or not line.startswith("DEBUG"):
-                    continue
-
-                parsed = parse_debug_training_record(line)
-                if parsed is None:
-                    continue
-
-                if parsed.record_type == "pair":
-                    raw_seq = (
-                        parsed.donor_seq
-                        if task == "donor"
-                        else parsed.acceptor_seq
-                    )
-                elif parsed.record_type == task:
-                    raw_seq = (
-                        parsed.donor_seq
-                        if task == "donor"
-                        else parsed.acceptor_seq
-                    )
-                else:
-                    continue
-
-                if raw_seq is None:
-                    continue
-
-                reshaped = reshape_site_sequence(
-                    raw_seq,
-                    task,
-                    donor_len=donor_len,
-                    acceptor_len=acceptor_len,
-                )
-                if reshaped is None:
-                    continue
-                examples.append(
-                    SiteTrainingExample(
-                        sequence=reshaped,
-                        label=label,
-                        transcript_id=parsed.transcript_id,
-                        intron_half_length=parsed.intron_half_length,
-                        source_record_type=parsed.record_type,
-                        strand=parsed.strand,
-                    )
-                )
-
-    read_one_set(pos_path, label=1)
-    read_one_set(neg_path, label=0)
-    return examples
+    pos_signature = _resolve_training_file_signature(pos_path)
+    neg_signature = _resolve_training_file_signature(neg_path)
+    cached_examples = _read_examples_single_task_with_metadata_cached(
+        pos_signature,
+        neg_signature,
+        task,
+        donor_len,
+        acceptor_len,
+    )
+    return list(cached_examples)
 
 
 def read_examples_single_task(
@@ -921,6 +987,27 @@ def read_examples_pair_task_with_metadata(
     list[PairTrainingExample]
         Pair-task examples with optional metadata fields populated.
     """
+    pos_signature = _resolve_training_file_signature(pos_path)
+    neg_signature = _resolve_training_file_signature(neg_path)
+    cached_examples = _read_examples_pair_task_with_metadata_cached(
+        pos_signature,
+        neg_signature,
+        donor_len,
+        acceptor_len,
+        negative_pair_only,
+    )
+    return list(cached_examples)
+
+
+def _read_examples_pair_task_with_metadata_uncached(
+    *,
+    pos_path: str,
+    neg_path: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    negative_pair_only: bool,
+) -> Tuple[PairTrainingExample, ...]:
+    """Read pair-task examples from disk without cache lookup."""
     examples: List[PairTrainingExample] = []
 
     def read_one_set(path: str, label: int) -> None:
@@ -968,7 +1055,25 @@ def read_examples_pair_task_with_metadata(
 
     read_one_set(pos_path, label=1)
     read_one_set(neg_path, label=0)
-    return examples
+    return tuple(examples)
+
+
+@lru_cache(maxsize=_TRAINING_EXAMPLE_CACHE_MAXSIZE)
+def _read_examples_pair_task_with_metadata_cached(
+    pos_signature: TrainingFileSignature,
+    neg_signature: TrainingFileSignature,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    negative_pair_only: bool,
+) -> Tuple[PairTrainingExample, ...]:
+    """Read pair-task examples with cache keyed by file signatures."""
+    return _read_examples_pair_task_with_metadata_uncached(
+        pos_path=pos_signature[0],
+        neg_path=neg_signature[0],
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        negative_pair_only=negative_pair_only,
+    )
 
 
 def read_examples_pair_task(

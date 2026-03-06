@@ -25,6 +25,7 @@ FULL_EPOCHS="10"
 
 GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="auto"
+TRIAL_PROCESS_MODE="persistent_all"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -262,6 +263,13 @@ if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; t
 	echo "[temp_tune_cnn_6h.sh] SEARCH_ALGO must be random|history_guided." >&2
 	exit 1
 fi
+if [[ "${TRIAL_PROCESS_MODE}" != "subprocess" && \
+	"${TRIAL_PROCESS_MODE}" != "persistent_quick" && \
+	"${TRIAL_PROCESS_MODE}" != "persistent_all" ]]; then
+	echo "[temp_tune_cnn_6h.sh] TRIAL_PROCESS_MODE must be "\
+		"subprocess|persistent_quick|persistent_all." >&2
+	exit 1
+fi
 if ! [[ "${HISTORY_TOP_N}" =~ ^[0-9]+$ ]] || [[ "${HISTORY_TOP_N}" -le 0 ]]; then
 	echo "[temp_tune_cnn_6h.sh] HISTORY_TOP_N must be a positive integer." >&2
 	exit 1
@@ -419,6 +427,7 @@ while true; do
   "base_seed": ${BASE_SEED},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
+  "trial_process_mode": "${TRIAL_PROCESS_MODE}",
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},

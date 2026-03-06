@@ -12,20 +12,25 @@ from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+import io
 import json
 import math
+import multiprocessing as mp
 import os
+from queue import Empty
 import random
 import shutil
 import shlex
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 SRC_ROOT: Path = PROJECT_ROOT / "src"
@@ -42,8 +47,15 @@ Scalar = int | float | str | bool
 ArgValue = Scalar | None
 
 TRIAL_STREAM_MODE_CHOICES: set[str] = {"auto", "full", "errors", "silent"}
+TRIAL_PROCESS_MODE_CHOICES: set[str] = {
+    "subprocess",
+    "persistent_quick",
+    "persistent_all",
+}
 _ACTIVE_TRIAL_STREAM_MODE: str = "full"
 _ACTIVE_MAX_PARALLEL_TRIALS: int = 1
+_DEFAULT_PHASE_EXECUTION_MODE: str = "subprocess"
+_PERSISTENT_PHASE_EXECUTION_MODE: str = "persistent"
 SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "mean_pr_auc",
     "donor_pr_auc",
@@ -119,6 +131,7 @@ class SearchConfig:
     surrogate_candidates_per_step: int = 128
     surrogate_min_observations: int = 8
     trial_stream_mode: str = "auto"
+    trial_process_mode: str = "subprocess"
 
 
 @dataclass(frozen=True)
@@ -130,6 +143,24 @@ class SeedBestConfig:
     objective_metric: Optional[str]
     objective_best_epoch: Optional[int]
     hparam_context: Optional[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class PersistentTrialTask:
+    """One task payload submitted to a persistent trial worker."""
+
+    trial_id: int
+    sampled_params: dict[str, Scalar]
+    metrics_json: str
+    log_file: str
+
+
+@dataclass(frozen=True)
+class PersistentTrialOutcome:
+    """One completed trial payload returned from a persistent worker."""
+
+    slot_index: int
+    result: TrialResult
 
 
 def _validate_positive_int(value: object, name: str) -> int:
@@ -170,6 +201,22 @@ def _validate_trial_stream_mode(value: object, name: str) -> str:
     if parsed not in TRIAL_STREAM_MODE_CHOICES:
         raise ValueError(
             f"{name} must be one of: {', '.join(sorted(TRIAL_STREAM_MODE_CHOICES))}."
+        )
+    return parsed
+
+
+def _validate_trial_process_mode(value: object, name: str) -> str:
+    """Validate trial process mode for phase execution backend selection."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{name} must be one of: "
+            f"{', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
+        )
+    parsed = value.strip().lower()
+    if parsed not in TRIAL_PROCESS_MODE_CHOICES:
+        raise ValueError(
+            f"{name} must be one of: "
+            f"{', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
         )
     return parsed
 
@@ -324,6 +371,10 @@ def load_config(path: Path) -> SearchConfig:
         raw.get("trial_stream_mode", "auto"),
         "trial_stream_mode",
     )
+    trial_process_mode = _validate_trial_process_mode(
+        raw.get("trial_process_mode", "subprocess"),
+        "trial_process_mode",
+    )
     objective_metric = str(raw.get("objective_metric", "mean_pr_auc"))
     if objective_metric not in SUPPORTED_OBJECTIVE_METRICS:
         raise ValueError(
@@ -385,6 +436,7 @@ def load_config(path: Path) -> SearchConfig:
         guided_random_fraction=guided_random_fraction,
         guided_mutation_rate=guided_mutation_rate,
         trial_stream_mode=trial_stream_mode,
+        trial_process_mode=trial_process_mode,
     )
 
 
@@ -1470,6 +1522,52 @@ def _resolve_trial_stream_mode(setting: str, max_parallel_trials: int) -> str:
     return "full"
 
 
+def _resolve_phase_execution_mode(
+    *,
+    process_mode: str,
+    phase: str,
+) -> str:
+    """Resolve per-phase execution backend from process-mode policy."""
+    if process_mode == "subprocess":
+        return _DEFAULT_PHASE_EXECUTION_MODE
+    if process_mode == "persistent_all":
+        return _PERSISTENT_PHASE_EXECUTION_MODE
+    if process_mode == "persistent_quick":
+        if phase == "quick":
+            return _PERSISTENT_PHASE_EXECUTION_MODE
+        return _DEFAULT_PHASE_EXECUTION_MODE
+    raise ValueError(
+        "trial_process_mode must be one of: "
+        f"{', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
+    )
+
+
+def _resolve_workload_execution_mode(
+    *,
+    phase_execution_mode: str,
+    trial_count: int,
+    max_parallel_trials: int,
+) -> str:
+    """Resolve effective execution mode from phase policy and workload size.
+
+    Persistent workers are beneficial when one slot processes multiple trials.
+    If the workload fits in a single wave (``trial_count <= max_parallel_trials``),
+    this resolver falls back to subprocess mode to avoid persistent queue/process
+    overhead.
+    """
+    if phase_execution_mode == _DEFAULT_PHASE_EXECUTION_MODE:
+        return _DEFAULT_PHASE_EXECUTION_MODE
+    if phase_execution_mode != _PERSISTENT_PHASE_EXECUTION_MODE:
+        raise ValueError(
+            "phase_execution_mode must be one of: "
+            f"{_DEFAULT_PHASE_EXECUTION_MODE}, "
+            f"{_PERSISTENT_PHASE_EXECUTION_MODE}."
+        )
+    if trial_count <= max(1, int(max_parallel_trials)):
+        return _DEFAULT_PHASE_EXECUTION_MODE
+    return _PERSISTENT_PHASE_EXECUTION_MODE
+
+
 def _should_stream_trial_line(line: str, mode: str) -> bool:
     """Return whether one trial subprocess output line should be mirrored."""
     if mode == "full":
@@ -1487,6 +1585,54 @@ def _should_stream_trial_line(line: str, mode: str) -> bool:
         "inf",
     )
     return any(keyword in lowered for keyword in keywords)
+
+
+def _emit_trial_output_lines(
+    *,
+    output_text: str,
+    phase: str,
+    trial_id: int,
+    stream_mode: str,
+) -> None:
+    """Mirror collected trial output lines to stdout based on stream mode."""
+    prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+    for raw_line in output_text.splitlines():
+        if raw_line == "":
+            continue
+        if _should_stream_trial_line(raw_line, stream_mode):
+            print(f"{prefix}{raw_line}", flush=True)
+
+
+def _extract_run_model_argv(cmd: list[str]) -> list[str]:
+    """Extract ``run_model.py`` argv from one built command list."""
+    for index, token in enumerate(cmd):
+        if token.endswith("run_model.py"):
+            return cmd[index + 1 :]
+    raise ValueError("run_model.py entrypoint not found in command.")
+
+
+@contextmanager
+def _temporary_cwd(cwd: Path) -> Iterator[None]:
+    """Temporarily switch process working directory for in-process execution."""
+    previous = Path.cwd()
+    os.chdir(cwd)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
+@contextmanager
+def _temporary_env(env: dict[str, str]) -> Iterator[None]:
+    """Temporarily replace process environment for in-process execution."""
+    previous = os.environ.copy()
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def _run_command_with_streaming(
@@ -1524,7 +1670,91 @@ def _run_command_with_streaming(
     return return_code, "".join(collected)
 
 
-def run_trial(
+def _run_command_inprocess(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    phase: str,
+    trial_id: int,
+) -> tuple[int, str]:
+    """Run ``run_model.py`` in-process while capturing merged output."""
+    from run_model import main as run_model_main
+
+    run_model_argv = _extract_run_model_argv(cmd)
+    captured = io.StringIO()
+    return_code = 0
+    with (
+        _temporary_cwd(cwd),
+        _temporary_env(env),
+        redirect_stdout(captured),
+        redirect_stderr(captured),
+    ):
+        try:
+            run_model_main(run_model_argv)
+        except SystemExit as exc:
+            if isinstance(exc.code, int):
+                return_code = int(exc.code)
+            else:
+                return_code = 1
+        except Exception:
+            traceback.print_exc()
+            return_code = 1
+
+    combined_output = captured.getvalue()
+    _emit_trial_output_lines(
+        output_text=combined_output,
+        phase=phase,
+        trial_id=trial_id,
+        stream_mode=_ACTIVE_TRIAL_STREAM_MODE,
+    )
+    return return_code, combined_output
+
+
+TrialCommandRunner = Callable[..., tuple[int, str]]
+
+
+def _build_failed_trial_result(
+    *,
+    config: SearchConfig,
+    phase: str,
+    trial_id: int,
+    assigned_gpu_id: Optional[str],
+    sampled_params: dict[str, Scalar],
+    effective_batch_size: int,
+    oom_retries: int,
+    error_message: str,
+    return_code: int,
+    duration_sec: float,
+    metrics_json: Path,
+    log_file: Path,
+    donor_pr_auc: Optional[float] = None,
+    acceptor_pr_auc: Optional[float] = None,
+    mean_pr_auc: Optional[float] = None,
+) -> TrialResult:
+    """Build one standardized failed trial result payload."""
+    return TrialResult(
+        phase=phase,
+        trial_id=trial_id,
+        status="failed",
+        gpu_id=assigned_gpu_id,
+        sampled_params=sampled_params,
+        effective_batch_size=effective_batch_size,
+        oom_retries=oom_retries,
+        donor_pr_auc=donor_pr_auc,
+        acceptor_pr_auc=acceptor_pr_auc,
+        mean_pr_auc=mean_pr_auc,
+        objective_metric=config.objective_metric,
+        objective_score=None,
+        error_message=error_message,
+        return_code=return_code,
+        duration_sec=duration_sec,
+        metrics_json=str(metrics_json),
+        log_file=str(log_file),
+    )
+
+
+def _run_trial_with_command_runner(
     *,
     config: SearchConfig,
     phase: str,
@@ -1534,8 +1764,9 @@ def run_trial(
     assigned_gpu_id: Optional[str],
     metrics_json: Path,
     log_file: Path,
+    command_runner: TrialCommandRunner,
 ) -> TrialResult:
-    """Run one trial with OOM backoff and return structured result."""
+    """Run one trial with the provided command runner backend."""
     merged_args: dict[str, ArgValue] = dict(config.base_args)
     for key, value in sampled_params.items():
         merged_args[key] = value
@@ -1547,9 +1778,7 @@ def run_trial(
     merged_args["species"] = config.species
     merged_args["train_only"] = True
     merged_args["metrics_json"] = str(metrics_json)
-    resolved_num_workers = _resolve_trial_num_workers(
-        merged_args.get("num_workers")
-    )
+    resolved_num_workers = _resolve_trial_num_workers(merged_args.get("num_workers"))
     if resolved_num_workers is not None:
         merged_args["num_workers"] = resolved_num_workers
 
@@ -1559,7 +1788,6 @@ def run_trial(
     current_batch = base_batch
     oom_retries = 0
     started_at = time.time()
-    error_message: Optional[str] = None
     return_code = -1
 
     while True:
@@ -1578,16 +1806,15 @@ def run_trial(
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(attempt_header)
 
-        return_code, combined_output = _run_command_with_streaming(
+        return_code, combined_output = command_runner(
             cmd=cmd,
             cwd=config.project_root,
             env=env,
             phase=phase,
             trial_id=trial_id,
         )
-        log_header = f"return_code={return_code}\n"
         with log_file.open("a", encoding="utf-8") as handle:
-            handle.write(log_header)
+            handle.write(f"return_code={return_code}\n")
             handle.write("\n[combined]\n")
             handle.write(combined_output)
             handle.write("\n")
@@ -1613,8 +1840,8 @@ def run_trial(
                 )
             elif is_oom and has_internal_backoff:
                 error_message = (
-                    f"Training failed after internal OOM backoff (exit={return_code}). "
-                    "See trial log for details."
+                    "Training failed after internal OOM backoff "
+                    f"(exit={return_code}). See trial log for details."
                 )
             else:
                 error_message = (
@@ -1622,48 +1849,39 @@ def run_trial(
                     "See trial log for details."
                 )
             duration_sec = time.time() - started_at
-            return TrialResult(
+            return _build_failed_trial_result(
+                config=config,
                 phase=phase,
                 trial_id=trial_id,
-                status="failed",
-                gpu_id=assigned_gpu_id,
+                assigned_gpu_id=assigned_gpu_id,
                 sampled_params=sampled_params,
                 effective_batch_size=current_batch,
                 oom_retries=oom_retries,
-                donor_pr_auc=None,
-                acceptor_pr_auc=None,
-                mean_pr_auc=None,
-                objective_metric=config.objective_metric,
-                objective_score=None,
                 error_message=error_message,
                 return_code=return_code,
                 duration_sec=duration_sec,
-                metrics_json=str(metrics_json),
-                log_file=str(log_file),
+                metrics_json=metrics_json,
+                log_file=log_file,
             )
 
         next_batch = max(config.min_batch_size, current_batch // 2)
         if next_batch >= current_batch:
-            error_message = "CUDA OOM encountered, but cannot reduce batch further."
             duration_sec = time.time() - started_at
-            return TrialResult(
+            return _build_failed_trial_result(
+                config=config,
                 phase=phase,
                 trial_id=trial_id,
-                status="failed",
-                gpu_id=assigned_gpu_id,
+                assigned_gpu_id=assigned_gpu_id,
                 sampled_params=sampled_params,
                 effective_batch_size=current_batch,
                 oom_retries=oom_retries,
-                donor_pr_auc=None,
-                acceptor_pr_auc=None,
-                mean_pr_auc=None,
-                objective_metric=config.objective_metric,
-                objective_score=None,
-                error_message=error_message,
+                error_message=(
+                    "CUDA OOM encountered, but cannot reduce batch further."
+                ),
                 return_code=return_code,
                 duration_sec=duration_sec,
-                metrics_json=str(metrics_json),
-                log_file=str(log_file),
+                metrics_json=metrics_json,
+                log_file=log_file,
             )
         oom_retries += 1
         current_batch = next_batch
@@ -1672,46 +1890,34 @@ def run_trial(
     try:
         summary = json.loads(metrics_json.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        error_message = "Metrics JSON missing or invalid."
-        return TrialResult(
+        return _build_failed_trial_result(
+            config=config,
             phase=phase,
             trial_id=trial_id,
-            status="failed",
-            gpu_id=assigned_gpu_id,
+            assigned_gpu_id=assigned_gpu_id,
             sampled_params=sampled_params,
             effective_batch_size=current_batch,
             oom_retries=oom_retries,
-            donor_pr_auc=None,
-            acceptor_pr_auc=None,
-            mean_pr_auc=None,
-            objective_metric=config.objective_metric,
-            objective_score=None,
-            error_message=error_message,
+            error_message="Metrics JSON missing or invalid.",
             return_code=return_code,
             duration_sec=duration_sec,
-            metrics_json=str(metrics_json),
-            log_file=str(log_file),
+            metrics_json=metrics_json,
+            log_file=log_file,
         )
     if not isinstance(summary, dict):
-        error_message = "Metrics JSON top-level value must be an object."
-        return TrialResult(
+        return _build_failed_trial_result(
+            config=config,
             phase=phase,
             trial_id=trial_id,
-            status="failed",
-            gpu_id=assigned_gpu_id,
+            assigned_gpu_id=assigned_gpu_id,
             sampled_params=sampled_params,
             effective_batch_size=current_batch,
             oom_retries=oom_retries,
-            donor_pr_auc=None,
-            acceptor_pr_auc=None,
-            mean_pr_auc=None,
-            objective_metric=config.objective_metric,
-            objective_score=None,
-            error_message=error_message,
+            error_message="Metrics JSON top-level value must be an object.",
             return_code=return_code,
             duration_sec=duration_sec,
-            metrics_json=str(metrics_json),
-            log_file=str(log_file),
+            metrics_json=metrics_json,
+            log_file=log_file,
         )
 
     donor_pr_auc = _extract_pr_auc(summary, "donor")
@@ -1725,7 +1931,6 @@ def run_trial(
     pair_max_f1 = _extract_max_f1(summary, "pair")
     validation_protocol = _extract_validation_protocol(summary)
     validation_signature = _extract_validation_signature(summary)
-    mean_pr_auc: Optional[float]
     mean_pr_auc = _compute_mean_metric(
         donor_metric=donor_pr_auc,
         acceptor_metric=acceptor_pr_auc,
@@ -1761,34 +1966,27 @@ def run_trial(
         "acceptor_max_f1": acceptor_max_f1,
         "pair_max_f1": pair_max_f1,
     }
-
-    objective_score = _select_objective_score(
-        config.objective_metric,
-        objective_values,
-    )
+    objective_score = _select_objective_score(config.objective_metric, objective_values)
     if objective_score is None:
-        error_message = (
-            "Missing objective metric in training summary: "
-            f"{config.objective_metric}."
-        )
-        return TrialResult(
+        return _build_failed_trial_result(
+            config=config,
             phase=phase,
             trial_id=trial_id,
-            status="failed",
-            gpu_id=assigned_gpu_id,
+            assigned_gpu_id=assigned_gpu_id,
             sampled_params=sampled_params,
             effective_batch_size=current_batch,
             oom_retries=oom_retries,
+            error_message=(
+                "Missing objective metric in training summary: "
+                f"{config.objective_metric}."
+            ),
+            return_code=return_code,
+            duration_sec=duration_sec,
+            metrics_json=metrics_json,
+            log_file=log_file,
             donor_pr_auc=donor_pr_auc,
             acceptor_pr_auc=acceptor_pr_auc,
             mean_pr_auc=mean_pr_auc,
-            objective_metric=config.objective_metric,
-            objective_score=None,
-            error_message=error_message,
-            return_code=return_code,
-            duration_sec=duration_sec,
-            metrics_json=str(metrics_json),
-            log_file=str(log_file),
         )
 
     return TrialResult(
@@ -1812,6 +2010,56 @@ def run_trial(
         validation_signature=validation_signature,
         validation_protocol=validation_protocol,
         selection_score=objective_score,
+    )
+
+
+def run_trial(
+    *,
+    config: SearchConfig,
+    phase: str,
+    trial_id: int,
+    sampled_params: dict[str, Scalar],
+    overrides: dict[str, ArgValue],
+    assigned_gpu_id: Optional[str],
+    metrics_json: Path,
+    log_file: Path,
+) -> TrialResult:
+    """Run one trial using subprocess command execution."""
+    return _run_trial_with_command_runner(
+        config=config,
+        phase=phase,
+        trial_id=trial_id,
+        sampled_params=sampled_params,
+        overrides=overrides,
+        assigned_gpu_id=assigned_gpu_id,
+        metrics_json=metrics_json,
+        log_file=log_file,
+        command_runner=_run_command_with_streaming,
+    )
+
+
+def run_trial_inprocess(
+    *,
+    config: SearchConfig,
+    phase: str,
+    trial_id: int,
+    sampled_params: dict[str, Scalar],
+    overrides: dict[str, ArgValue],
+    assigned_gpu_id: Optional[str],
+    metrics_json: Path,
+    log_file: Path,
+) -> TrialResult:
+    """Run one trial by calling ``run_model.main`` in the same process."""
+    return _run_trial_with_command_runner(
+        config=config,
+        phase=phase,
+        trial_id=trial_id,
+        sampled_params=sampled_params,
+        overrides=overrides,
+        assigned_gpu_id=assigned_gpu_id,
+        metrics_json=metrics_json,
+        log_file=log_file,
+        command_runner=_run_command_inprocess,
     )
 
 
@@ -2727,6 +2975,281 @@ def write_summary_markdown(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _print_trial_start(
+    *,
+    phase: str,
+    trial_id: int,
+    assigned_gpu: Optional[str],
+) -> None:
+    """Print one standardized trial start line."""
+    slot_label = "cpu" if assigned_gpu is None else f"gpu:{assigned_gpu}"
+    print(
+        f"[hparam_search] {phase} trial {trial_id:04d} started on {slot_label}.",
+        flush=True,
+    )
+
+
+def _print_trial_result(
+    *,
+    phase: str,
+    trial_count: int,
+    completed_count: int,
+    result: TrialResult,
+) -> None:
+    """Print one standardized trial completion line."""
+    metric_text = (
+        "-"
+        if result.objective_score is None
+        else f"{result.objective_score:.6f}"
+    )
+    print(
+        f"[hparam_search] {phase} trial {result.trial_id:04d} "
+        f"{result.status} ({completed_count}/{trial_count}) "
+        f"{result.objective_metric}={metric_text}.",
+        flush=True,
+    )
+
+
+def _run_phase_subprocess(
+    *,
+    phase: str,
+    config: SearchConfig,
+    trial_count: int,
+    trial_params: list[dict[str, Scalar]],
+    overrides: dict[str, ArgValue],
+    slots: list[Optional[str]],
+    out_dir: Path,
+) -> list[TrialResult]:
+    """Run one phase using subprocess-backed trials."""
+    pending_indices = list(range(trial_count))
+    running: dict[Future[TrialResult], Optional[str]] = {}
+    collected: list[TrialResult] = []
+    with ThreadPoolExecutor(max_workers=max(1, len(slots))) as executor:
+        while pending_indices or running:
+            while pending_indices and slots:
+                trial_id = pending_indices.pop(0)
+                assigned_gpu = slots.pop(0)
+                metrics_json = out_dir / f"{phase}_trial_{trial_id:04d}.metrics.json"
+                log_file = out_dir / f"{phase}_trial_{trial_id:04d}.log.txt"
+                future = executor.submit(
+                    run_trial,
+                    config=config,
+                    phase=phase,
+                    trial_id=trial_id,
+                    sampled_params=trial_params[trial_id],
+                    overrides=overrides,
+                    assigned_gpu_id=assigned_gpu,
+                    metrics_json=metrics_json,
+                    log_file=log_file,
+                )
+                running[future] = assigned_gpu
+                _print_trial_start(
+                    phase=phase,
+                    trial_id=trial_id,
+                    assigned_gpu=assigned_gpu,
+                )
+
+            done, _ = wait(running.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                assigned_gpu = running.pop(future)
+                slots.append(assigned_gpu)
+                result = future.result()
+                collected.append(result)
+                _print_trial_result(
+                    phase=phase,
+                    trial_count=trial_count,
+                    completed_count=len(collected),
+                    result=result,
+                )
+    return collected
+
+
+def _build_worker_failure_result(
+    *,
+    config: SearchConfig,
+    phase: str,
+    task: PersistentTrialTask,
+    assigned_gpu_id: Optional[str],
+    error_message: str,
+) -> TrialResult:
+    """Build one failed result when a persistent worker hits an internal error."""
+    return TrialResult(
+        phase=phase,
+        trial_id=task.trial_id,
+        status="failed",
+        gpu_id=assigned_gpu_id,
+        sampled_params=task.sampled_params,
+        effective_batch_size=0,
+        oom_retries=0,
+        donor_pr_auc=None,
+        acceptor_pr_auc=None,
+        mean_pr_auc=None,
+        objective_metric=config.objective_metric,
+        objective_score=None,
+        error_message=error_message,
+        return_code=1,
+        duration_sec=0.0,
+        metrics_json=task.metrics_json,
+        log_file=task.log_file,
+    )
+
+
+def _persistent_trial_worker_main(
+    *,
+    slot_index: int,
+    assigned_gpu_id: Optional[str],
+    config: SearchConfig,
+    phase: str,
+    overrides: dict[str, ArgValue],
+    stream_mode: str,
+    max_parallel_trials: int,
+    task_queue: object,
+    result_queue: object,
+) -> None:
+    """Persistent worker loop that executes multiple trials in one process."""
+    previous_stream_mode = _set_active_trial_stream_mode(stream_mode)
+    previous_parallel = _set_active_max_parallel_trials(max_parallel_trials)
+    try:
+        while True:
+            task = task_queue.get()
+            if task is None:
+                return
+            if not isinstance(task, PersistentTrialTask):
+                continue
+            try:
+                result = run_trial_inprocess(
+                    config=config,
+                    phase=phase,
+                    trial_id=task.trial_id,
+                    sampled_params=task.sampled_params,
+                    overrides=overrides,
+                    assigned_gpu_id=assigned_gpu_id,
+                    metrics_json=Path(task.metrics_json),
+                    log_file=Path(task.log_file),
+                )
+            except Exception as exc:
+                result = _build_worker_failure_result(
+                    config=config,
+                    phase=phase,
+                    task=task,
+                    assigned_gpu_id=assigned_gpu_id,
+                    error_message=(
+                        "Persistent trial worker failed with "
+                        f"{exc.__class__.__name__}: {exc}"
+                    ),
+                )
+            result_queue.put(
+                PersistentTrialOutcome(
+                    slot_index=slot_index,
+                    result=result,
+                )
+            )
+    finally:
+        _set_active_max_parallel_trials(previous_parallel)
+        _set_active_trial_stream_mode(previous_stream_mode)
+
+
+def _run_phase_persistent(
+    *,
+    phase: str,
+    config: SearchConfig,
+    trial_count: int,
+    trial_params: list[dict[str, Scalar]],
+    overrides: dict[str, ArgValue],
+    slots: list[Optional[str]],
+    out_dir: Path,
+    max_parallel_trials: int,
+    stream_mode: str,
+) -> list[TrialResult]:
+    """Run one phase using persistent in-process trial workers."""
+    context = mp.get_context("spawn")
+    task_queues = [context.Queue() for _ in slots]
+    result_queue = context.Queue()
+    workers: list[mp.Process] = []
+    slot_busy = [False for _ in slots]
+    slot_active_trial: list[Optional[int]] = [None for _ in slots]
+    collected: list[TrialResult] = []
+    pending_indices = list(range(trial_count))
+    for slot_index, assigned_gpu in enumerate(slots):
+        worker = context.Process(
+            target=_persistent_trial_worker_main,
+            kwargs={
+                "slot_index": slot_index,
+                "assigned_gpu_id": assigned_gpu,
+                "config": config,
+                "phase": phase,
+                "overrides": dict(overrides),
+                "stream_mode": stream_mode,
+                "max_parallel_trials": max_parallel_trials,
+                "task_queue": task_queues[slot_index],
+                "result_queue": result_queue,
+            },
+        )
+        worker.start()
+        workers.append(worker)
+
+    try:
+        while pending_indices or any(slot_busy):
+            for slot_index, assigned_gpu in enumerate(slots):
+                if not pending_indices or slot_busy[slot_index]:
+                    continue
+                trial_id = pending_indices.pop(0)
+                metrics_json = out_dir / f"{phase}_trial_{trial_id:04d}.metrics.json"
+                log_file = out_dir / f"{phase}_trial_{trial_id:04d}.log.txt"
+                task = PersistentTrialTask(
+                    trial_id=trial_id,
+                    sampled_params=trial_params[trial_id],
+                    metrics_json=str(metrics_json),
+                    log_file=str(log_file),
+                )
+                task_queues[slot_index].put(task)
+                slot_busy[slot_index] = True
+                slot_active_trial[slot_index] = trial_id
+                _print_trial_start(
+                    phase=phase,
+                    trial_id=trial_id,
+                    assigned_gpu=assigned_gpu,
+                )
+
+            if not any(slot_busy):
+                continue
+
+            try:
+                outcome_raw = result_queue.get(timeout=1.0)
+            except Empty:
+                for slot_index, worker in enumerate(workers):
+                    if slot_busy[slot_index] and not worker.is_alive():
+                        trial_id = slot_active_trial[slot_index]
+                        raise RuntimeError(
+                            "Persistent trial worker exited unexpectedly "
+                            f"(slot={slot_index}, trial={trial_id})."
+                        )
+                continue
+
+            if not isinstance(outcome_raw, PersistentTrialOutcome):
+                continue
+            outcome = outcome_raw
+            slot_index = outcome.slot_index
+            slot_busy[slot_index] = False
+            slot_active_trial[slot_index] = None
+            collected.append(outcome.result)
+            _print_trial_result(
+                phase=phase,
+                trial_count=trial_count,
+                completed_count=len(collected),
+                result=outcome.result,
+            )
+    finally:
+        for queue_obj in task_queues:
+            queue_obj.put(None)
+        for worker in workers:
+            worker.join(timeout=5.0)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=5.0)
+    return collected
+
+
 def run_phase(
     *,
     phase: str,
@@ -2737,12 +3260,15 @@ def run_phase(
     gpu_ids: list[str],
     max_parallel_trials: int,
     out_dir: Path,
+    execution_mode: str = "subprocess",
 ) -> list[TrialResult]:
-    """Run one phase with slot-based parallel scheduling."""
+    """Run one phase with slot-based scheduling and selectable execution mode."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    previous_stream_mode = _set_active_trial_stream_mode(
-        _resolve_trial_stream_mode(config.trial_stream_mode, max_parallel_trials)
+    resolved_stream_mode = _resolve_trial_stream_mode(
+        config.trial_stream_mode,
+        max_parallel_trials,
     )
+    previous_stream_mode = _set_active_trial_stream_mode(resolved_stream_mode)
     previous_max_parallel_trials = _set_active_max_parallel_trials(
         max_parallel_trials
     )
@@ -2750,66 +3276,37 @@ def run_phase(
         slots: list[Optional[str]] = list(gpu_ids[:max_parallel_trials])
     else:
         slots = [None for _ in range(max_parallel_trials)]
-
-    pending_indices = list(range(trial_count))
-    running: dict[Future[TrialResult], Optional[str]] = {}
-    collected: list[TrialResult] = []
-
     try:
-        with ThreadPoolExecutor(max_workers=max_parallel_trials) as executor:
-            while pending_indices or running:
-                while pending_indices and slots:
-                    trial_id = pending_indices.pop(0)
-                    assigned_gpu = slots.pop(0)
-                    metrics_json = (
-                        out_dir / f"{phase}_trial_{trial_id:04d}.metrics.json"
-                    )
-                    log_file = out_dir / f"{phase}_trial_{trial_id:04d}.log.txt"
-                    future = executor.submit(
-                        run_trial,
-                        config=config,
-                        phase=phase,
-                        trial_id=trial_id,
-                        sampled_params=trial_params[trial_id],
-                        overrides=overrides,
-                        assigned_gpu_id=assigned_gpu,
-                        metrics_json=metrics_json,
-                        log_file=log_file,
-                    )
-                    running[future] = assigned_gpu
-                    slot_label = (
-                        "cpu" if assigned_gpu is None else f"gpu:{assigned_gpu}"
-                    )
-                    print(
-                        f"[hparam_search] {phase} trial {trial_id:04d} started "
-                        f"on {slot_label}.",
-                        flush=True,
-                    )
-
-                done, _ = wait(
-                    running.keys(),
-                    return_when=FIRST_COMPLETED,
-                )
-                for future in done:
-                    assigned_gpu = running.pop(future)
-                    slots.append(assigned_gpu)
-                    result = future.result()
-                    collected.append(result)
-                    metric_text = (
-                        "-"
-                        if result.objective_score is None
-                        else f"{result.objective_score:.6f}"
-                    )
-                    print(
-                        f"[hparam_search] {phase} trial {result.trial_id:04d} "
-                        f"{result.status} ({len(collected)}/{trial_count}) "
-                        f"{result.objective_metric}={metric_text}.",
-                        flush=True,
-                    )
+        if execution_mode == _DEFAULT_PHASE_EXECUTION_MODE:
+            return _run_phase_subprocess(
+                phase=phase,
+                config=config,
+                trial_count=trial_count,
+                trial_params=trial_params,
+                overrides=overrides,
+                slots=slots,
+                out_dir=out_dir,
+            )
+        if execution_mode == _PERSISTENT_PHASE_EXECUTION_MODE:
+            return _run_phase_persistent(
+                phase=phase,
+                config=config,
+                trial_count=trial_count,
+                trial_params=trial_params,
+                overrides=overrides,
+                slots=slots,
+                out_dir=out_dir,
+                max_parallel_trials=max_parallel_trials,
+                stream_mode=resolved_stream_mode,
+            )
+        raise ValueError(
+            "execution_mode must be one of: "
+            f"{_DEFAULT_PHASE_EXECUTION_MODE}, "
+            f"{_PERSISTENT_PHASE_EXECUTION_MODE}."
+        )
     finally:
         _set_active_max_parallel_trials(previous_max_parallel_trials)
         _set_active_trial_stream_mode(previous_stream_mode)
-    return collected
 
 
 def build_trial_params(
@@ -3097,6 +3594,19 @@ def run_search(config: SearchConfig) -> int:
         config.trial_stream_mode,
         max_parallel_trials,
     )
+    quick_mode_policy = _resolve_phase_execution_mode(
+        process_mode=config.trial_process_mode,
+        phase="quick",
+    )
+    full_mode_policy = _resolve_phase_execution_mode(
+        process_mode=config.trial_process_mode,
+        phase="full",
+    )
+    quick_execution_mode = _resolve_workload_execution_mode(
+        phase_execution_mode=quick_mode_policy,
+        trial_count=config.quick_trials,
+        max_parallel_trials=max_parallel_trials,
+    )
     if gpu_ids:
         gpu_summary = ",".join(gpu_ids[:max_parallel_trials])
         print(
@@ -3113,6 +3623,12 @@ def run_search(config: SearchConfig) -> int:
     print(
         "[hparam_search] Trial stdout stream mode: "
         f"{resolved_trial_stream_mode} (logs are still saved per trial).",
+        flush=True,
+    )
+    print(
+        "[hparam_search] Trial process mode: "
+        f"{config.trial_process_mode} (quick_policy={quick_mode_policy}, "
+        f"full_policy={full_mode_policy}, quick={quick_execution_mode}).",
         flush=True,
     )
     uses_auto_num_workers = any(
@@ -3243,6 +3759,7 @@ def run_search(config: SearchConfig) -> int:
         gpu_ids=gpu_ids,
         max_parallel_trials=max_parallel_trials,
         out_dir=config.output_dir,
+        execution_mode=quick_execution_mode,
     )
     write_trials_tsv(config.output_dir / "quick_trials.tsv", quick_rows)
     ranked_quick = rank_successful_trials(quick_rows)
@@ -3305,12 +3822,18 @@ def run_search(config: SearchConfig) -> int:
             full_params.append(dict(seed_best_params))
             injected_seed_full_recheck = True
     full_count = len(full_params)
+    full_execution_mode = _resolve_workload_execution_mode(
+        phase_execution_mode=full_mode_policy,
+        trial_count=full_count,
+        max_parallel_trials=max_parallel_trials,
+    )
     print(
         f"[hparam_search] Full phase: top_k={config.top_k}, "
         f"selected={full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
         f"skipped_seed_context_match={skipped_seed_context_match}, "
         f"injected_seed_full_recheck={injected_seed_full_recheck}, "
-        f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}.",
+        f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}, "
+        f"execution_mode={full_execution_mode}.",
         flush=True,
     )
     full_rows: list[TrialResult]
@@ -3324,6 +3847,7 @@ def run_search(config: SearchConfig) -> int:
             gpu_ids=gpu_ids,
             max_parallel_trials=max_parallel_trials,
             out_dir=config.output_dir,
+            execution_mode=full_execution_mode,
         )
     else:
         full_rows = []
