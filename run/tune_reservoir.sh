@@ -33,7 +33,7 @@ GUIDED_MUTATION_RATE="0.25"
 
 GPU_IDS="auto"
 # Keep one concurrent trial by default for stable single-GPU throughput.
-MAX_PARALLEL_TRIALS="1"
+MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"
 USE_AMP="1"

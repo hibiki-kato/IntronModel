@@ -27,7 +27,7 @@ FULL_COMPILE_MODE="off"
 
 GPU_IDS="auto"
 # Keep default conservative for single-GPU runs.
-MAX_PARALLEL_TRIALS="1"
+MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"
 USE_AMP="1"

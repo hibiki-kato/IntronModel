@@ -28,7 +28,7 @@ FULL_COMPILE_MODE="on"
 GPU_IDS="auto"
 # Keep the default to one concurrent trial for stable single-GPU throughput.
 # Increase manually when you intentionally run multi-GPU parallel tuning.
-MAX_PARALLEL_TRIALS="1"
+MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"
 USE_AMP="1"
