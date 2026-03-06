@@ -18,12 +18,12 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="1337"
 
-QUICK_TRIALS="6"
+QUICK_TRIALS="32"
 QUICK_EPOCHS="2"
-TOP_K="3"
-FULL_EPOCHS="10"
+TOP_K="8"
+FULL_EPOCHS="8"
 QUICK_COMPILE_MODE="off"
-FULL_COMPILE_MODE="auto"
+FULL_COMPILE_MODE="off"
 
 GPU_IDS="auto"
 # Keep default conservative for single-GPU runs.
@@ -68,7 +68,6 @@ JOB_ORDER=(
 	"Dmel"
 	"Mmus"
 	"Athal"
-	"Mmus"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
@@ -95,19 +94,11 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   },
   "donor_channel_candidates": {
     "type": "categorical",
-    "values": [
-      "64,96,128,192,256,384,512",
-      "96,128,192,256,384,512,768",
-      "128,192,256,384,512,768,1024"
-    ]
+    "values": ["64,96,128,192,256,384,512"]
   },
   "acceptor_channel_candidates": {
     "type": "categorical",
-    "values": [
-      "64,96,128,192,256,384,512",
-      "96,128,192,256,384,512,768",
-      "128,192,256,384,512,768,1024"
-    ]
+    "values": ["64,96,128,192,256,384,512"]
   },
   "donor_kernel_candidates": {
     "type": "categorical",
@@ -124,6 +115,10 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
       "5,7,9,11,13,15,17",
       "7,9,11,13,15,17,19"
     ]
+  },
+  "fusion_mode": {
+    "type": "categorical",
+    "values": ["late", "early_channel"]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -424,6 +419,7 @@ while true; do
     "acceptor_channel_candidates": "64,96,128,192,256,384,512",
     "donor_kernel_candidates": "3,5,7,9,11,13,15",
     "acceptor_kernel_candidates": "3,5,7,9,11,13,15",
+    "fusion_mode": "late",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

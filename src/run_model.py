@@ -488,6 +488,11 @@ def _add_cnn_pair_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     """Add cnn_pair train args without importing torch-dependent modules."""
     _add_cnn_fallback_train_args(parser)
     parser.add_argument(
+        "--fusion_mode",
+        choices=["late", "early_channel"],
+        default="late",
+    )
+    parser.add_argument(
         "--train_target",
         choices=["pair"],
         default="pair",

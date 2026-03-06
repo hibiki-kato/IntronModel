@@ -82,6 +82,7 @@ except ImportError:  # pragma: no cover
     roc_auc_score = None
 
 DEFAULT_MPS_MAX_BATCH_SIZE: int = 1024
+FUSION_MODE_CHOICES: tuple[str, str] = ("late", "early_channel")
 
 
 def _resolve_mps_max_batch_size() -> int:
@@ -104,6 +105,7 @@ class PairTrainParams:
     kernel_size: int
     donor_kernel_sizes: Optional[Sequence[int]]
     acceptor_kernel_sizes: Optional[Sequence[int]]
+    fusion_mode: str
     dropout: float
     fc_hidden: int
     weight_decay: float
@@ -191,7 +193,7 @@ class PairDNADataset(Dataset):
 
 
 class PairSpliceCNN(nn.Module):
-    """Pair-scoring CNN with independent donor/acceptor encoders."""
+    """Pair-scoring CNN with configurable donor/acceptor fusion mode."""
 
     def __init__(
         self,
@@ -200,29 +202,53 @@ class PairSpliceCNN(nn.Module):
         kernel_size: int = 7,
         donor_kernel_sizes: Optional[Sequence[int]] = None,
         acceptor_kernel_sizes: Optional[Sequence[int]] = None,
+        fusion_mode: str = "late",
         dropout: float = 0.3,
         fc_hidden: int = 128,
     ) -> None:
         super().__init__()
+        normalized_fusion_mode = str(fusion_mode).strip().lower()
+        if normalized_fusion_mode not in FUSION_MODE_CHOICES:
+            raise ValueError(
+                "fusion_mode must be one of: "
+                f"{', '.join(FUSION_MODE_CHOICES)}."
+            )
+        self.fusion_mode = normalized_fusion_mode
+
         donor_kernel_spec: int | Sequence[int] = (
             donor_kernel_sizes if donor_kernel_sizes is not None else kernel_size
         )
         acceptor_kernel_spec: int | Sequence[int] = (
             acceptor_kernel_sizes if acceptor_kernel_sizes is not None else kernel_size
         )
-        self.donor_encoder = CnnGapEncoder(
-            in_channels=4,
-            conv_channels=donor_conv_channels,
-            kernel_size=donor_kernel_spec,
-            dropout=dropout,
-        )
-        self.acceptor_encoder = CnnGapEncoder(
-            in_channels=4,
-            conv_channels=acceptor_conv_channels,
-            kernel_size=acceptor_kernel_spec,
-            dropout=dropout,
-        )
-        pair_dim = self.donor_encoder.output_dim + self.acceptor_encoder.output_dim
+
+        self.donor_encoder: Optional[CnnGapEncoder] = None
+        self.acceptor_encoder: Optional[CnnGapEncoder] = None
+        self.fused_encoder: Optional[CnnGapEncoder] = None
+        if self.fusion_mode == "late":
+            self.donor_encoder = CnnGapEncoder(
+                in_channels=4,
+                conv_channels=donor_conv_channels,
+                kernel_size=donor_kernel_spec,
+                dropout=dropout,
+            )
+            self.acceptor_encoder = CnnGapEncoder(
+                in_channels=4,
+                conv_channels=acceptor_conv_channels,
+                kernel_size=acceptor_kernel_spec,
+                dropout=dropout,
+            )
+            pair_dim = (
+                self.donor_encoder.output_dim + self.acceptor_encoder.output_dim
+            )
+        else:
+            self.fused_encoder = CnnGapEncoder(
+                in_channels=8,
+                conv_channels=donor_conv_channels,
+                kernel_size=donor_kernel_spec,
+                dropout=dropout,
+            )
+            pair_dim = self.fused_encoder.output_dim
         self.fc = nn.Sequential(
             nn.Linear(pair_dim, fc_hidden),
             nn.ReLU(inplace=True),
@@ -245,9 +271,21 @@ class PairSpliceCNN(nn.Module):
         torch.Tensor
             Logits with shape ``(batch,)``.
         """
-        donor_features = self.donor_encoder(donor_x)
-        acceptor_features = self.acceptor_encoder(acceptor_x)
-        mixed = torch.cat([donor_features, acceptor_features], dim=1)
+        if self.fusion_mode == "late":
+            if self.donor_encoder is None or self.acceptor_encoder is None:
+                raise RuntimeError("late fusion encoders are not initialized.")
+            donor_features = self.donor_encoder(donor_x)
+            acceptor_features = self.acceptor_encoder(acceptor_x)
+            mixed = torch.cat([donor_features, acceptor_features], dim=1)
+        else:
+            if self.fused_encoder is None:
+                raise RuntimeError("early fusion encoder is not initialized.")
+            if donor_x.shape[2] != acceptor_x.shape[2]:
+                raise ValueError(
+                    "early_channel fusion requires donor and acceptor lengths "
+                    "to match."
+                )
+            mixed = self.fused_encoder(torch.cat([donor_x, acceptor_x], dim=1))
         return self.fc(mixed).squeeze(-1)
 
 
@@ -358,6 +396,11 @@ def evaluate_pair(
 
 def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParams:
     """Resolve pair train-time hyperparameters from CLI args."""
+    fusion_mode = str(getattr(model_args, "fusion_mode", "late")).strip().lower()
+    if fusion_mode not in FUSION_MODE_CHOICES:
+        choices = ", ".join(FUSION_MODE_CHOICES)
+        raise ValueError(f"--fusion_mode must be one of: {choices}.")
+
     shared_conv_channels = parse_conv_channels(model_args.conv_channels)
     shared_kernel_sizes = parse_kernel_sizes(
         getattr(model_args, "kernel_sizes", None),
@@ -404,6 +447,7 @@ def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParam
             if acceptor_kernel_sizes is not None
             else shared_kernel_sizes
         ),
+        fusion_mode=fusion_mode,
         dropout=float(model_args.dropout),
         fc_hidden=int(model_args.fc_hidden),
         weight_decay=float(model_args.weight_decay),
@@ -591,6 +635,23 @@ def train_pair_model(
         if train_params.acceptor_kernel_sizes is None
         else list(train_params.acceptor_kernel_sizes)
     )
+    if train_params.fusion_mode == "early_channel":
+        if donor_window_len != acceptor_window_len:
+            raise ValueError(
+                "--fusion_mode=early_channel requires donor_len == acceptor_len."
+            )
+        if donor_conv_channels != acceptor_conv_channels:
+            raise ValueError(
+                "--fusion_mode=early_channel requires matching donor/acceptor "
+                "conv channels. Use --conv_channels or provide identical "
+                "--donor_conv_channels and --acceptor_conv_channels."
+            )
+        if donor_kernel_sizes != acceptor_kernel_sizes:
+            raise ValueError(
+                "--fusion_mode=early_channel requires matching donor/acceptor "
+                "kernel sizes. Use --kernel_sizes or provide identical "
+                "--donor_kernel_sizes and --acceptor_kernel_sizes."
+            )
 
     train_pos = sum(label for _, _, label in train_ex)
     train_neg = len(train_ex) - train_pos
@@ -677,6 +738,7 @@ def train_pair_model(
                 kernel_size=train_params.kernel_size,
                 donor_kernel_sizes=donor_kernel_sizes,
                 acceptor_kernel_sizes=acceptor_kernel_sizes,
+                fusion_mode=train_params.fusion_mode,
                 dropout=train_params.dropout,
                 fc_hidden=train_params.fc_hidden,
             ).to(device)
@@ -894,6 +956,7 @@ def train_pair_model(
                                     if acceptor_kernel_sizes is None
                                     else list(acceptor_kernel_sizes)
                                 ),
+                                "fusion_mode": train_params.fusion_mode,
                                 "dropout": train_params.dropout,
                                 "fc_hidden": train_params.fc_hidden,
                             },
@@ -1086,6 +1149,7 @@ def load_pair_model(
     shared_kernel_sizes = model_config.get("kernel_sizes")
     donor_kernel_sizes = model_config.get("donor_kernel_sizes")
     acceptor_kernel_sizes = model_config.get("acceptor_kernel_sizes")
+    fusion_mode = str(model_config.get("fusion_mode", "late"))
     dropout = float(model_config.get("dropout", 0.3))
     fc_hidden = int(model_config.get("fc_hidden", 128))
 
@@ -1108,6 +1172,7 @@ def load_pair_model(
         kernel_size=kernel_size,
         donor_kernel_sizes=donor_kernel_sizes,
         acceptor_kernel_sizes=acceptor_kernel_sizes,
+        fusion_mode=fusion_mode,
         dropout=dropout,
         fc_hidden=fc_hidden,
     ).to(device)
@@ -1257,6 +1322,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help="Acceptor-branch override for --kernel_sizes.",
+    )
+    parser.add_argument(
+        "--fusion_mode",
+        choices=list(FUSION_MODE_CHOICES),
+        default="late",
+        help="Pair feature fusion mode: late or early_channel.",
     )
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--fc_hidden", type=int, default=128)
@@ -1452,6 +1523,7 @@ def train(
             if train_params.acceptor_conv_channels is None
             else list(train_params.acceptor_conv_channels)
         ),
+        "fusion_mode": train_params.fusion_mode,
         "kernel_size": train_params.kernel_size,
         "kernel_sizes": shared_kernel_sizes_summary,
         "donor_kernel_sizes": (
@@ -1509,6 +1581,7 @@ def train(
                     if train_params.acceptor_conv_channels is None
                     else list(train_params.acceptor_conv_channels)
                 ),
+                "fusion_mode": train_params.fusion_mode,
                 "kernel_size": train_params.kernel_size,
                 "kernel_sizes": shared_kernel_sizes_summary,
                 "donor_kernel_sizes": (

@@ -62,3 +62,24 @@ def test_build_run_args_accepts_train_data_path_overrides() -> None:
     assert "13,9,5" in args
     assert "--acceptor_kernel_sizes" in args
     assert "9,7,5" in args
+
+
+def test_build_run_args_forwards_pair_fusion_mode() -> None:
+    spec = WrapperSpec(
+        script_name="unit.sh",
+        model_env_name="cnn_pair",
+        supports_tuned_hparams=False,
+        tuned_key_map={},
+        stem_param_builder="cnn",
+        required_arg_keys=("FUSION_MODE",),
+        per_task_override_keys=(),
+    )
+    env = {
+        "MODEL": "cnn_pair",
+        "FUSION_MODE": "early_channel",
+    }
+
+    args = _build_run_args(spec, env)
+
+    assert "--fusion_mode" in args
+    assert "early_channel" in args

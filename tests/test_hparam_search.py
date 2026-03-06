@@ -1888,6 +1888,22 @@ def test_estimate_cnn_pair_param_complexity_known_configuration() -> None:
     assert complexity == 343233
 
 
+def test_estimate_cnn_pair_param_complexity_early_channel_configuration() -> None:
+    sampled_params: dict[str, hparam_search.Scalar] = {
+        "fusion_mode": "early_channel",
+        "donor_conv_channels": "64,128",
+        "acceptor_conv_channels": "64,128",
+        "donor_kernel_sizes": "7,7",
+        "acceptor_kernel_sizes": "7,7",
+        "fc_hidden": 128,
+    }
+    complexity = hparam_search.estimate_cnn_pair_param_complexity(
+        sampled_params=sampled_params,
+        base_args={},
+    )
+    assert complexity == 78145
+
+
 def test_load_historical_trials_reads_and_ranks_sibling_runs(
     tmp_path: Path,
 ) -> None:
@@ -2072,6 +2088,75 @@ def test_build_trial_params_materializes_independent_cnn_architecture(
         assert len(kernels) == 3
         assert all(value in {64, 128, 256} for value in channels)
         assert all(value in {3, 5, 7} for value in kernels)
+
+
+def test_build_trial_params_materializes_early_channel_pair_architecture(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "fusion_mode": {"type": "categorical", "values": ["early_channel"]},
+            "donor_conv_depth": {"type": "categorical", "values": [3]},
+            "donor_channel_candidates": {
+                "type": "categorical",
+                "values": ["64,96,128"],
+            },
+            "donor_kernel_candidates": {
+                "type": "categorical",
+                "values": ["3,5,7"],
+            },
+            "acceptor_conv_depth": {"type": "categorical", "values": [5]},
+            "acceptor_channel_candidates": {
+                "type": "categorical",
+                "values": ["512,768,1024"],
+            },
+            "acceptor_kernel_candidates": {
+                "type": "categorical",
+                "values": ["11,13,15"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=7,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn_pair", "species": "Dmel", "batch_size": 256},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=2,
+        seed_offset=0,
+    )
+
+    for row in params:
+        assert row["fusion_mode"] == "early_channel"
+        assert row["donor_conv_channels"] == row["acceptor_conv_channels"]
+        assert row["donor_kernel_sizes"] == row["acceptor_kernel_sizes"]
+        assert "donor_conv_depth" not in row
+        assert "acceptor_conv_depth" not in row
+        assert "donor_channel_candidates" not in row
+        assert "acceptor_channel_candidates" not in row
+        assert "donor_kernel_candidates" not in row
+        assert "acceptor_kernel_candidates" not in row
 
 
 def test_build_trial_params_respects_max_model_params(

@@ -2388,6 +2388,10 @@ def _materialize_cnn_architecture_params(
                 kernel_out_key="kernel_sizes",
             )
     elif model_name == "cnn_pair":
+        fusion_mode_raw = out.get("fusion_mode")
+        if fusion_mode_raw is None:
+            fusion_mode_raw = base_args.get("fusion_mode", "late")
+        fusion_mode = str(fusion_mode_raw).strip().lower()
         has_arch_keys = any(
             key in out or key in base_args
             for key in (
@@ -2403,26 +2407,76 @@ def _materialize_cnn_architecture_params(
             )
         )
         if has_arch_keys:
-            _materialize_branch(
-                depth_key="donor_conv_depth",
-                channel_pool_key="donor_channel_candidates",
-                kernel_pool_key="donor_kernel_candidates",
-                conv_out_key="donor_conv_channels",
-                kernel_out_key="donor_kernel_sizes",
-                shared_depth_key="conv_depth",
-                shared_channel_key="channel_candidates",
-                shared_kernel_key="kernel_candidates",
+            donor_has_arch_keys = any(
+                key in out or key in base_args
+                for key in (
+                    "donor_conv_depth",
+                    "donor_channel_candidates",
+                    "donor_kernel_candidates",
+                )
             )
-            _materialize_branch(
-                depth_key="acceptor_conv_depth",
-                channel_pool_key="acceptor_channel_candidates",
-                kernel_pool_key="acceptor_kernel_candidates",
-                conv_out_key="acceptor_conv_channels",
-                kernel_out_key="acceptor_kernel_sizes",
-                shared_depth_key="conv_depth",
-                shared_channel_key="channel_candidates",
-                shared_kernel_key="kernel_candidates",
+            acceptor_has_arch_keys = any(
+                key in out or key in base_args
+                for key in (
+                    "acceptor_conv_depth",
+                    "acceptor_channel_candidates",
+                    "acceptor_kernel_candidates",
+                )
             )
+            if fusion_mode == "early_channel":
+                if donor_has_arch_keys:
+                    _materialize_branch(
+                        depth_key="donor_conv_depth",
+                        channel_pool_key="donor_channel_candidates",
+                        kernel_pool_key="donor_kernel_candidates",
+                        conv_out_key="donor_conv_channels",
+                        kernel_out_key="donor_kernel_sizes",
+                        shared_depth_key="conv_depth",
+                        shared_channel_key="channel_candidates",
+                        shared_kernel_key="kernel_candidates",
+                    )
+                elif acceptor_has_arch_keys:
+                    _materialize_branch(
+                        depth_key="acceptor_conv_depth",
+                        channel_pool_key="acceptor_channel_candidates",
+                        kernel_pool_key="acceptor_kernel_candidates",
+                        conv_out_key="donor_conv_channels",
+                        kernel_out_key="donor_kernel_sizes",
+                        shared_depth_key="conv_depth",
+                        shared_channel_key="channel_candidates",
+                        shared_kernel_key="kernel_candidates",
+                    )
+                else:
+                    _materialize_branch(
+                        depth_key="conv_depth",
+                        channel_pool_key="channel_candidates",
+                        kernel_pool_key="kernel_candidates",
+                        conv_out_key="donor_conv_channels",
+                        kernel_out_key="donor_kernel_sizes",
+                    )
+                out["acceptor_conv_channels"] = out["donor_conv_channels"]
+                out["acceptor_kernel_sizes"] = out["donor_kernel_sizes"]
+            else:
+                _materialize_branch(
+                    depth_key="donor_conv_depth",
+                    channel_pool_key="donor_channel_candidates",
+                    kernel_pool_key="donor_kernel_candidates",
+                    conv_out_key="donor_conv_channels",
+                    kernel_out_key="donor_kernel_sizes",
+                    shared_depth_key="conv_depth",
+                    shared_channel_key="channel_candidates",
+                    shared_kernel_key="kernel_candidates",
+                )
+                _materialize_branch(
+                    depth_key="acceptor_conv_depth",
+                    channel_pool_key="acceptor_channel_candidates",
+                    kernel_pool_key="acceptor_kernel_candidates",
+                    conv_out_key="acceptor_conv_channels",
+                    kernel_out_key="acceptor_kernel_sizes",
+                    shared_depth_key="conv_depth",
+                    shared_channel_key="channel_candidates",
+                    shared_kernel_key="kernel_candidates",
+                )
 
     helper_keys = {
         "conv_depth",
@@ -2645,12 +2699,15 @@ def _estimate_cnn_encoder_params_layerwise(
     *,
     conv_channels: list[int],
     kernel_sizes: list[int],
+    in_channels: int = 4,
 ) -> int:
     """Estimate one CNN encoder parameter count with layer-wise kernels."""
     if len(conv_channels) != len(kernel_sizes):
         raise ValueError("conv_channels and kernel_sizes lengths must match.")
+    if in_channels <= 0:
+        raise ValueError("in_channels must be positive.")
     total_params = 0
-    prev_channels = 4
+    prev_channels = in_channels
     for channel, kernel_size in zip(conv_channels, kernel_sizes):
         conv_params = (prev_channels * channel * kernel_size) + channel
         batch_norm_params = 2 * channel
@@ -2699,9 +2756,17 @@ def estimate_cnn_pair_param_complexity(
 ) -> Optional[int]:
     """Estimate trainable parameters for ``cnn_pair``.
 
-    Pair architecture uses two independent CNN encoders (donor/acceptor),
-    then concatenates pooled features and applies one MLP head.
+    Pair architecture supports:
+    - late fusion: independent donor/acceptor encoders then MLP head
+    - early_channel fusion: one shared encoder over concatenated channels
     """
+    fusion_mode_raw: object = sampled_params.get("fusion_mode")
+    if fusion_mode_raw is None:
+        fusion_mode_raw = base_args.get("fusion_mode", "late")
+    fusion_mode = str(fusion_mode_raw).strip().lower()
+    if fusion_mode not in {"late", "early_channel"}:
+        return None
+
     shared_conv_channels_raw = sampled_params.get("conv_channels")
     if shared_conv_channels_raw is None:
         shared_conv_channels_raw = base_args.get("conv_channels")
@@ -2762,6 +2827,20 @@ def estimate_cnn_pair_param_complexity(
     fc_hidden = _to_positive_int(fc_hidden_raw)
     if fc_hidden is None:
         return None
+
+    if fusion_mode == "early_channel":
+        if donor_conv_channels != acceptor_conv_channels:
+            return None
+        if donor_kernel_sizes != acceptor_kernel_sizes:
+            return None
+        encoder_params = _estimate_cnn_encoder_params_layerwise(
+            conv_channels=donor_conv_channels,
+            kernel_sizes=donor_kernel_sizes,
+            in_channels=8,
+        )
+        pair_dim = donor_conv_channels[-1]
+        head_params = (pair_dim * fc_hidden) + fc_hidden + fc_hidden + 1
+        return encoder_params + head_params
 
     donor_params = _estimate_cnn_encoder_params_layerwise(
         conv_channels=donor_conv_channels,
