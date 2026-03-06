@@ -82,18 +82,18 @@ intronmodel_auto_tmux() {
 
 	local cwd_q
 	local script_q
-	printf -v cwd_q "%q" "$(pwd)"
+	local cwd
+	cwd="$(pwd)"
+	printf -v cwd_q "%q" "${cwd}"
 	printf -v script_q "%q" "${script_path}"
 
-	local bash_cmd
-	printf -v bash_cmd \
-		'cd %s && export INTRONMODEL_TMUX_BOOTSTRAPPED=1 && exec bash %s' \
+	local start_cmd
+	printf -v start_cmd "cd %s && INTRONMODEL_TMUX_BOOTSTRAPPED=1 bash %s" \
 		"${cwd_q}" \
 		"${script_q}"
-
-	local start_cmd
-	printf -v start_cmd "bash -c %q" "${bash_cmd}"
-	local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-0}"
+	local session_default="intronmodel_${script_name%.*}"
+	session_default="${session_default//[^a-zA-Z0-9_]/_}"
+	local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-${session_default}}"
 
 	_intronmodel_tmux_sync_env
 
@@ -103,8 +103,14 @@ intronmodel_auto_tmux() {
 		_intronmodel_tmux_attach_or_exit "${session_name}" "${script_name}"
 	fi
 
-	if ! tmux new-session -d -s "${session_name}" "${start_cmd}"; then
+	if ! tmux new-session -d -s "${session_name}" -c "${cwd}"; then
 		echo "[${script_name}] failed to create tmux session." >&2
+		return 1
+	fi
+	tmux set-option -t "${session_name}:0" remain-on-exit on >/dev/null 2>&1 \
+		|| true
+	if ! tmux send-keys -t "${session_name}:0" "${start_cmd}" C-m; then
+		echo "[${script_name}] failed to start command in tmux session." >&2
 		return 1
 	fi
 
