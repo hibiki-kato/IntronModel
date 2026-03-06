@@ -1,17 +1,95 @@
 #!/usr/bin/env bash
 
+_intronmodel_source_conda_sh() {
+	local conda_sh_path="$1"
+	if [[ -z "${conda_sh_path}" || ! -f "${conda_sh_path}" ]]; then
+		return 1
+	fi
+	# shellcheck source=/dev/null
+	source "${conda_sh_path}"
+	return 0
+}
+
+
+_intronmodel_conda_base_from_exec() {
+	local conda_exec_path="$1"
+	if [[ -z "${conda_exec_path}" ]]; then
+		return 1
+	fi
+	local resolved_path
+	resolved_path="$(readlink -f "${conda_exec_path}" 2>/dev/null || true)"
+	if [[ -z "${resolved_path}" ]]; then
+		resolved_path="${conda_exec_path}"
+	fi
+	local bin_dir
+	bin_dir="$(dirname "${resolved_path}")"
+	local bin_name
+	bin_name="$(basename "${bin_dir}")"
+	if [[ "${bin_name}" != "bin" && "${bin_name}" != "condabin" ]]; then
+		return 1
+	fi
+	printf '%s\n' "$(dirname "${bin_dir}")"
+	return 0
+}
+
+
 intronmodel_activate_conda() {
 	local env_name="${1:-intronmodel}"
+	local conda_base=""
+	local conda_exec_path=""
+	local candidate
+	local fallback_paths=()
+
+	if [[ -n "${INTRONMODEL_CONDA_SH:-}" ]]; then
+		fallback_paths+=("${INTRONMODEL_CONDA_SH}")
+	fi
+	if [[ -n "${CONDA_EXE:-}" ]]; then
+		fallback_paths+=(
+			"$(dirname "$(dirname "${CONDA_EXE}")")/etc/profile.d/conda.sh"
+		)
+	fi
 
 	if command -v conda >/dev/null 2>&1; then
-		local conda_base
-		conda_base="$(conda info --base 2>/dev/null || true)"
-		if [[ -n "${conda_base}" && -f "${conda_base}/etc/profile.d/conda.sh" ]]; then
-			# shellcheck source=/dev/null
-			source "${conda_base}/etc/profile.d/conda.sh"
+		conda_exec_path="$(command -v conda)"
+		conda_base="$(
+			CONDA_NO_PLUGINS=true conda info --base 2>/dev/null || true
+		)"
+		if [[ -z "${conda_base}" ]]; then
+			conda_base="$(
+				_intronmodel_conda_base_from_exec "${conda_exec_path}" || true
+			)"
+		fi
+		if [[ -n "${conda_base}" ]]; then
+			fallback_paths+=("${conda_base}/etc/profile.d/conda.sh")
 		fi
 	fi
-	conda activate "${env_name}"
+
+	fallback_paths+=(
+		"${HOME}/miniforge3/etc/profile.d/conda.sh"
+		"${HOME}/mambaforge/etc/profile.d/conda.sh"
+		"${HOME}/miniconda3/etc/profile.d/conda.sh"
+		"${HOME}/anaconda3/etc/profile.d/conda.sh"
+		"/export/${USER}/miniforge3/etc/profile.d/conda.sh"
+		"/export/${USER}/mambaforge/etc/profile.d/conda.sh"
+		"/export/${USER}/miniconda3/etc/profile.d/conda.sh"
+		"/export/${USER}/anaconda3/etc/profile.d/conda.sh"
+	)
+
+	for candidate in "${fallback_paths[@]}"; do
+		_intronmodel_source_conda_sh "${candidate}" || true
+		if command -v conda >/dev/null 2>&1 \
+			&& conda activate "${env_name}" >/dev/null 2>&1; then
+			return 0
+		fi
+	done
+	if ! command -v conda >/dev/null 2>&1; then
+		echo "[common.sh] conda command not found." \
+			"Set INTRONMODEL_CONDA_SH or add conda to PATH." >&2
+		return 127
+	fi
+	echo "[common.sh] failed to activate conda env '${env_name}'." \
+		"Set INTRONMODEL_CONDA_SH explicitly if needed." >&2
+	return 1
 }
 
 
