@@ -190,6 +190,107 @@ def test_resolve_max_parallel_accepts_numeric_string() -> None:
     assert resolved == 3
 
 
+def test_resolve_trial_num_workers_auto_is_parallel_aware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tools.hparam_search.os.cpu_count", lambda: 128)
+    previous_parallel = hparam_search._set_active_max_parallel_trials(8)
+    try:
+        resolved = hparam_search._resolve_trial_num_workers("auto")
+    finally:
+        _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
+    assert resolved == 4
+
+
+def test_run_trial_rewrites_auto_num_workers_to_effective_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 512,
+            "num_workers": "auto",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=hparam_search._validate_search_space(config_dict["search_space"]),
+    )
+
+    captured_num_workers: list[str] = []
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        for index, token in enumerate(cmd):
+            if token == "--num_workers":
+                captured_num_workers.append(cmd[index + 1])
+                break
+        metrics_path: Optional[Path] = None
+        for index, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[index + 1])
+                break
+        assert metrics_path is not None
+        payload = {
+            "donor": {"best_pr_auc": 0.8},
+            "acceptor": {"best_pr_auc": 0.7},
+        }
+        metrics_path.write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+    monkeypatch.setattr("tools.hparam_search.os.cpu_count", lambda: 128)
+
+    previous_parallel = hparam_search._set_active_max_parallel_trials(8)
+    try:
+        _ = hparam_search.run_trial(
+            config=config,
+            phase="quick",
+            trial_id=0,
+            sampled_params={"batch_size": 512, "lr": 1e-4},
+            overrides={"epochs": 1},
+            assigned_gpu_id="0",
+            metrics_json=tmp_path / "metrics.json",
+            log_file=tmp_path / "trial.log",
+        )
+    finally:
+        _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
+
+    assert captured_num_workers == ["4"]
+
+
 def test_find_cuda_header_supports_conda_targets_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

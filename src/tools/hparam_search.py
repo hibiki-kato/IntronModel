@@ -43,6 +43,7 @@ ArgValue = Scalar | None
 
 TRIAL_STREAM_MODE_CHOICES: set[str] = {"auto", "full", "errors", "silent"}
 _ACTIVE_TRIAL_STREAM_MODE: str = "full"
+_ACTIVE_MAX_PARALLEL_TRIALS: int = 1
 SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "mean_pr_auc",
     "donor_pr_auc",
@@ -957,6 +958,43 @@ def resolve_max_parallel(setting: object, gpu_count: int) -> int:
     return parsed
 
 
+def _set_active_max_parallel_trials(value: int) -> int:
+    """Set global active parallel-trial count and return previous value."""
+    global _ACTIVE_MAX_PARALLEL_TRIALS
+    previous_value = _ACTIVE_MAX_PARALLEL_TRIALS
+    _ACTIVE_MAX_PARALLEL_TRIALS = max(1, int(value))
+    return previous_value
+
+
+def _is_auto_num_workers(value: ArgValue) -> bool:
+    """Return whether one ``num_workers`` value requests auto resolution."""
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() == "auto"
+
+
+def _resolve_hparam_auto_num_workers(max_parallel_trials: int) -> int:
+    """Resolve conservative per-trial workers for parallel HPO workloads.
+
+    The hparam sweep launches many trials concurrently, and each model trial may
+    create multiple DataLoaders. A direct ``cpu_count // 2`` per trial often
+    oversubscribes CPU resources heavily. This resolver allocates a per-trial
+    worker budget and keeps a conservative cap for stability.
+    """
+    cpu_count = os.cpu_count() or 4
+    parallel = max(1, int(max_parallel_trials))
+    per_trial_cpu_budget = max(1, cpu_count // parallel)
+    workers = max(1, per_trial_cpu_budget // 4)
+    return min(8, workers)
+
+
+def _resolve_trial_num_workers(num_workers_value: ArgValue) -> Optional[int]:
+    """Resolve effective trial ``num_workers`` override when value is ``auto``."""
+    if not _is_auto_num_workers(num_workers_value):
+        return None
+    return _resolve_hparam_auto_num_workers(_ACTIVE_MAX_PARALLEL_TRIALS)
+
+
 def _iter_cuda_header_candidates() -> Iterator[Path]:
     """Yield plausible filesystem candidates for ``cuda.h``."""
     seen: set[Path] = set()
@@ -1509,6 +1547,11 @@ def run_trial(
     merged_args["species"] = config.species
     merged_args["train_only"] = True
     merged_args["metrics_json"] = str(metrics_json)
+    resolved_num_workers = _resolve_trial_num_workers(
+        merged_args.get("num_workers")
+    )
+    if resolved_num_workers is not None:
+        merged_args["num_workers"] = resolved_num_workers
 
     base_batch = merged_args.get("batch_size")
     if not isinstance(base_batch, int):
@@ -2700,6 +2743,9 @@ def run_phase(
     previous_stream_mode = _set_active_trial_stream_mode(
         _resolve_trial_stream_mode(config.trial_stream_mode, max_parallel_trials)
     )
+    previous_max_parallel_trials = _set_active_max_parallel_trials(
+        max_parallel_trials
+    )
     if gpu_ids:
         slots: list[Optional[str]] = list(gpu_ids[:max_parallel_trials])
     else:
@@ -2761,6 +2807,7 @@ def run_phase(
                         flush=True,
                     )
     finally:
+        _set_active_max_parallel_trials(previous_max_parallel_trials)
         _set_active_trial_stream_mode(previous_stream_mode)
     return collected
 
@@ -3068,6 +3115,25 @@ def run_search(config: SearchConfig) -> int:
         f"{resolved_trial_stream_mode} (logs are still saved per trial).",
         flush=True,
     )
+    uses_auto_num_workers = any(
+        _is_auto_num_workers(value)
+        for value in (
+            config.base_args.get("num_workers"),
+            config.quick_overrides.get("num_workers"),
+            config.full_overrides.get("num_workers"),
+        )
+    )
+    if uses_auto_num_workers:
+        resolved_auto_workers = _resolve_hparam_auto_num_workers(
+            max_parallel_trials
+        )
+        cpu_count = os.cpu_count() or 4
+        print(
+            "[hparam_search] num_workers auto resolved to "
+            f"{resolved_auto_workers} per trial "
+            f"(cpu_count={cpu_count}, parallel={max_parallel_trials}).",
+            flush=True,
+        )
     previous_global_best_score = _read_best_objective_score(
         config.global_best_config_path,
         config.objective_metric,

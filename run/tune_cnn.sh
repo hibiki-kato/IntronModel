@@ -578,7 +578,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   },
   "full_overrides": {
     "epochs": ${FULL_EPOCHS},
-    "compile_mode": "auto"
+    "compile_mode": "off"
   },
   "search_space": ${TARGET_SEARCH_SPACE_JSON}
 }

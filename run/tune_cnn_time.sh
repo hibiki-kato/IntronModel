@@ -461,7 +461,7 @@ while true; do
   },
 	  "full_overrides": {
 	    "epochs": ${FULL_EPOCHS},
-	    "compile_mode": "auto"
+	    "compile_mode": "off"
 	  },
 	  "search_space": ${target_search_space_json}
 }
