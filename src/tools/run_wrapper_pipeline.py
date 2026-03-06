@@ -625,6 +625,7 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
             ("off", "auto", "required"),
             "USE_TUNED_HPARAMS",
         )
+    _normalize_on_off_mode(env.get("MASK_MODE", "off"), "MASK_MODE")
 
     mps_max_batch_size = _as_int(
         _require_env(env, "MPS_MAX_BATCH_SIZE"), "MPS_MAX_BATCH_SIZE"
@@ -727,6 +728,113 @@ def _parse_species_list(raw_species: str) -> list[str]:
     return species_list
 
 
+def _resolve_species_path_template(raw_value: str, species: str) -> str:
+    """Resolve ``{species}``-style placeholders in one path template."""
+    return (
+        raw_value.replace("${SPECIES}", species)
+        .replace("{SPECIES}", species)
+        .replace("{species}", species)
+    )
+
+
+def _normalize_on_off_mode(value: str, key: str) -> str:
+    """Normalize ``on|off`` mode values with strict validation."""
+    normalized = value.strip().lower()
+    if normalized in {"", "off"}:
+        return "off"
+    if normalized in {"1", "on", "true"}:
+        return "on"
+    raise ValueError(f"{key} must be off|on.")
+
+
+def _ensure_tag_name_field(env: dict[str, str]) -> None:
+    """Ensure NAME_FIELDS contains ``tag``."""
+    raw = env.get("NAME_FIELDS", "").strip()
+    if raw in {"", "none"}:
+        env["NAME_FIELDS"] = "tag"
+        return
+    fields = [item.strip() for item in raw.split(",") if item.strip() != ""]
+    if "tag" not in fields:
+        fields.append("tag")
+    env["NAME_FIELDS"] = ",".join(fields)
+
+
+def _has_test_tsv_required_columns(path: Path) -> bool:
+    """Return whether one TSV header includes required inference columns."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            header_line = handle.readline().strip()
+    except OSError:
+        return False
+    if header_line == "":
+        return False
+    header = [item.strip() for item in header_line.split("\t")]
+    required = {"transcript_id", "site_type", "intron_index", "seq"}
+    return required.issubset(set(header))
+
+
+def _detect_mask_test_tsv(data_root: Path, species: str) -> Path | None:
+    """Detect one plausible masked transcript test TSV."""
+    raw_dir = data_root / species / "raw"
+    candidates = (
+        "transcripts_mask.tsv",
+        "transcripts_masked.tsv",
+        "transcripts_trimmed_npad.tsv",
+        "transcripts_with_intron_half.tsv",
+    )
+    for file_name in candidates:
+        candidate = raw_dir / file_name
+        if candidate.is_file() and _has_test_tsv_required_columns(candidate):
+            return candidate
+    return None
+
+
+def _apply_mask_mode_defaults(
+    *,
+    env: dict[str, str],
+    data_root: Path,
+    species: str,
+) -> None:
+    """Apply automatic defaults for ``MASK_MODE=on``."""
+    mode = _normalize_on_off_mode(env.get("MASK_MODE", "off"), "MASK_MODE")
+    if mode == "off":
+        return
+
+    donor_len = _as_int(_require_env(env, "DONOR_LEN"), "DONOR_LEN")
+    acceptor_len = _as_int(_require_env(env, "ACCEPTOR_LEN"), "ACCEPTOR_LEN")
+    mask_bp = max(donor_len, acceptor_len)
+
+    if env.get("TRAIN_POS_PATH", "").strip() == "":
+        env["TRAIN_POS_PATH"] = f"data/{{species}}/raw/{mask_bp}bp_trimmed_npad.err"
+    if env.get("TRAIN_NEG_PATH", "").strip() == "":
+        env["TRAIN_NEG_PATH"] = (
+            f"data/{{species}}/raw/{mask_bp}bp_trimmed_npad.neg.err"
+        )
+
+    if env.get("TAG", "").strip() == "":
+        env["TAG"] = "mask"
+    _ensure_tag_name_field(env)
+
+    if env.get("TEST_TSV_PATH", "").strip() != "":
+        return
+
+    explicit_mask_test_tsv = env.get("MASK_TEST_TSV_PATH", "").strip()
+    if explicit_mask_test_tsv != "":
+        env["TEST_TSV_PATH"] = explicit_mask_test_tsv
+        return
+
+    detected = _detect_mask_test_tsv(data_root, species)
+    if detected is not None:
+        env["TEST_TSV_PATH"] = str(detected)
+        print(f"[{species}] mask-mode test_tsv auto-detected: {detected}")
+    else:
+        print(
+            f"[{species}] mask-mode test_tsv not found; "
+            "fallback to raw/transcripts.tsv.",
+            file=sys.stderr,
+        )
+
+
 def _run_single_species(
     spec: WrapperSpec,
     *,
@@ -741,15 +849,18 @@ def _run_single_species(
         env,
         "MPS_MAX_BATCH_SIZE",
     )
-    for key in ("TRAIN_POS_PATH", "TRAIN_NEG_PATH"):
+    for key in (
+        "TRAIN_POS_PATH",
+        "TRAIN_NEG_PATH",
+        "TEST_TSV_PATH",
+        "CLASS_FILE_PATH",
+        "MASK_TEST_TSV_PATH",
+    ):
         raw = env.get(key, "")
         if raw == "":
             continue
-        env[key] = (
-            raw.replace("{species}", species)
-            .replace("{SPECIES}", species)
-            .replace("${SPECIES}", species)
-        )
+        env[key] = _resolve_species_path_template(raw, species)
+    _apply_mask_mode_defaults(env=env, data_root=data_root, species=species)
 
     tuned_config_paths: dict[TaskName, Path] = {}
     if spec.supports_tuned_hparams:
@@ -770,8 +881,16 @@ def _run_single_species(
         name_params=params,
     )
 
-    test_tsv = data_root / species / "raw" / "transcripts.tsv"
-    class_file = data_root / species / "raw" / "transcript_class.txt"
+    raw_test_tsv_path = env.get("TEST_TSV_PATH", "").strip()
+    if raw_test_tsv_path != "":
+        test_tsv = Path(raw_test_tsv_path)
+    else:
+        test_tsv = data_root / species / "raw" / "transcripts.tsv"
+    raw_class_file_path = env.get("CLASS_FILE_PATH", "").strip()
+    if raw_class_file_path != "":
+        class_file = Path(raw_class_file_path)
+    else:
+        class_file = data_root / species / "raw" / "transcript_class.txt"
     output_site_score_tsv = data_root / species / "site_score" / f"{output_stem}.tsv"
     output_trans_score_tsv = data_root / species / "trans_score" / f"{output_stem}.tsv"
     output_eval_score_txt = data_root / species / "eval_score" / f"{output_stem}.txt"

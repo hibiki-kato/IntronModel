@@ -227,6 +227,38 @@ intronmodel_resolve_python_bin() {
 }
 
 
+intronmodel_json_string_or_null() {
+	local py_bin="$1"
+	local raw_value="${2-}"
+
+	if [[ -z "${raw_value}" ]]; then
+		printf '%s\n' "null"
+		return 0
+	fi
+
+	"${py_bin}" - "${raw_value}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+
+print(json.dumps(sys.argv[1], ensure_ascii=False))
+PY
+}
+
+
+intronmodel_resolve_species_template() {
+	local raw_value="${1-}"
+	local species="$2"
+	local resolved="${raw_value}"
+
+	resolved="${resolved//\$\{SPECIES\}/${species}}"
+	resolved="${resolved//\{SPECIES\}/${species}}"
+	resolved="${resolved//\{species\}/${species}}"
+	printf '%s\n' "${resolved}"
+}
+
+
 intronmodel_resolve_max_model_params() {
 	local script_tag="$1"
 	local setting="$2"

@@ -133,7 +133,7 @@ intronmodel_auto_tmux() {
 		echo "[${script_name}] failed to create tmux session." >&2
 		return 1
 	fi
-	tmux set-option -t "${session_name}:0" remain-on-exit on >/dev/null 2>&1 \
+	tmux set-option -t "${session_name}:0" remain-on-exit off >/dev/null 2>&1 \
 		|| true
 
 	echo "[${script_name}] auto tmux session: ${session_name}"

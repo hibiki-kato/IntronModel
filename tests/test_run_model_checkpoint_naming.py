@@ -91,6 +91,21 @@ def test_checkpoint_stem_changes_when_model_hyperparameter_changes() -> None:
     assert stem_low != stem_high
 
 
+def test_checkpoint_stem_uses_tag_value_without_tag_prefix() -> None:
+    stem = _build_checkpoint_stem_from_params(
+        model_name="cnn",
+        donor_len=100,
+        acceptor_len=100,
+        inferred_train_len=None,
+        raw_params={"epochs": 20, "tag": "cnn_pad"},
+    )
+
+    assert stem.endswith("_pad")
+    assert "_ep20_" in stem
+    assert "tagcnn_pad" not in stem
+    assert "cnn_pad" not in stem
+
+
 def test_checkpoint_stem_falls_back_to_inferred_window_length() -> None:
     stem = _build_checkpoint_stem_from_params(
         model_name="cnn",

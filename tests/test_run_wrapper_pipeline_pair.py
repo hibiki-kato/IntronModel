@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from tools.run_wrapper_pipeline import WrapperSpec
 from tools.run_wrapper_pipeline import (
+    _apply_mask_mode_defaults,
     _build_run_args,
+    _resolve_species_path_template,
     _resolve_expected_checkpoint_paths_for_run,
     _resolve_tasks_for_target,
 )
@@ -83,3 +87,38 @@ def test_build_run_args_forwards_pair_fusion_mode() -> None:
 
     assert "--fusion_mode" in args
     assert "early" in args
+
+
+def test_resolve_species_path_template_replaces_all_tokens() -> None:
+    resolved = _resolve_species_path_template(
+        "data/{species}/raw/${SPECIES}/{SPECIES}.tsv",
+        "Dmel",
+    )
+    assert resolved == "data/Dmel/raw/Dmel/Dmel.tsv"
+
+
+def test_apply_mask_mode_defaults_sets_tag_and_paths(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "Dmel" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "transcripts_mask.tsv").write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    env: dict[str, str] = {
+        "MASK_MODE": "on",
+        "DONOR_LEN": "80",
+        "ACCEPTOR_LEN": "100",
+        "NAME_FIELDS": "none",
+        "TAG": "",
+        "TRAIN_POS_PATH": "",
+        "TRAIN_NEG_PATH": "",
+        "TEST_TSV_PATH": "",
+    }
+
+    _apply_mask_mode_defaults(env=env, data_root=tmp_path, species="Dmel")
+
+    assert env["TAG"] == "mask"
+    assert env["NAME_FIELDS"] == "tag"
+    assert env["TRAIN_POS_PATH"] == "data/{species}/raw/100bp_trimmed_npad.err"
+    assert env["TRAIN_NEG_PATH"] == "data/{species}/raw/100bp_trimmed_npad.neg.err"
+    assert env["TEST_TSV_PATH"] == str(raw_dir / "transcripts_mask.tsv")

@@ -25,6 +25,7 @@ from util.data_proc import (
     default_transcript_output_path,
     infer_default_train_paths,
     model_root,
+    normalize_tag_name_value,
     parse_name_fields,
     project_root,
     resolve_effective_window_lengths,
@@ -629,6 +630,11 @@ def _build_checkpoint_stem_from_params(
         if value is None:
             continue
         if key == "train_target" and str(value) == "both":
+            continue
+        if key == "tag":
+            normalized_tag = normalize_tag_name_value(model_name, value)
+            if normalized_tag != "":
+                pieces.append(normalized_tag)
             continue
         label = NAME_FIELD_LABELS.get(key, key)
         pieces.append(f"{label}{_format_name_value(value)}")

@@ -40,7 +40,7 @@ PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="8"
 MAX_MODEL_PARAMS="auto"
-MAX_MODEL_PARAMS_FALLBACK="30000000"
+MAX_MODEL_PARAMS_FALLBACK="auto"
 MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
 MAX_MODEL_PARAMS_RESERVE_MIB="2048"
 MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
@@ -48,6 +48,11 @@ MAX_MODEL_PARAMS_MODEL_FACTOR="1.00"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+# Optional output/data overrides for tagged or mask-data tuning runs.
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+MASK_MODE="off"
 UPDATE_DOUBLE_DESCENT_PLOT="1"
 
 SEARCH_ALGO="history_guided"
@@ -300,6 +305,30 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	echo "[temp_tune_cnn_6h.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
 	exit 1
 fi
+if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
+	echo "[temp_tune_cnn_6h.sh] MASK_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${MASK_MODE}" == "on" ]]; then
+	mask_bp="${DONOR_LEN}"
+	if (( ACCEPTOR_LEN > DONOR_LEN )); then
+		mask_bp="${ACCEPTOR_LEN}"
+	fi
+	if [[ -z "${TRAIN_POS_PATH}" ]]; then
+		TRAIN_POS_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.err"
+	fi
+	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
+		TRAIN_NEG_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.neg.err"
+	fi
+	if [[ -z "${TAG}" ]]; then
+		TAG="mask"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 
 PYTHON_BIN="$(resolve_python_bin)"
 RESOLVED_MAX_MODEL_PARAMS="$(
@@ -382,6 +411,17 @@ while true; do
 		objective_metric="${target}_pr_auc"
 		config_path="${output_dir}/hparam_search_config.json"
 		mkdir -p "${output_dir}"
+		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		TRAIN_POS_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${species}")"
+		)"
+		TRAIN_NEG_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${species}")"
+		)"
 		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
 		if [[ "${target}" == "acceptor" ]]; then
 			target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
@@ -450,6 +490,7 @@ while true; do
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
+    "tag": ${TAG_JSON},
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
     "allow_tf32": ${ALLOW_TF32},
@@ -461,8 +502,8 @@ while true; do
     "pin_memory": ${PIN_MEMORY},
     "min_batch_size": ${MIN_BATCH_SIZE},
     "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": null,
-    "train_neg_path": null
+    "train_pos_path": ${TRAIN_POS_PATH_JSON},
+    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},

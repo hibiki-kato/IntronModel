@@ -273,6 +273,28 @@ def _format_name_value(value: object) -> str:
     return text
 
 
+def normalize_tag_name_value(model_name: str, tag_value: object) -> str:
+    """Normalize a tag token for file/checkpoint naming.
+
+    Parameters
+    ----------
+    model_name : str
+        Model prefix already present in generated names.
+    tag_value : object
+        Raw tag value provided by the user.
+
+    Returns
+    -------
+    str
+        Sanitized tag token with a duplicated leading ``<model_name>_`` removed.
+    """
+    text = str(tag_value).strip()
+    prefix = f"{model_name}_"
+    if text.startswith(prefix):
+        text = text[len(prefix) :]
+    return _format_name_value(text)
+
+
 def _average_bp_label(
     donor_len: Optional[int],
     acceptor_len: Optional[int],
@@ -350,6 +372,11 @@ def build_output_stem(
 
         value = name_params.get(field)
         if value is None:
+            continue
+        if field == "tag":
+            normalized_tag = normalize_tag_name_value(model_name, value)
+            if normalized_tag != "":
+                pieces.append(normalized_tag)
             continue
         label = NAME_FIELD_LABELS.get(field, field)
         pieces.append(f"{label}{_format_name_value(value)}")

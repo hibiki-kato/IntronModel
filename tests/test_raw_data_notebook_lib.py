@@ -11,7 +11,13 @@ if str(ANALYSIS_SRC) not in sys.path:
     sys.path.insert(0, str(ANALYSIS_SRC))
 
 from raw.raw_data_notebook_lib import (  # noqa: E402
+    AnnotationCoverageRow,
+    EvaluationTranscriptIntronCountRow,
+    EvaluationTranscriptGroupIntronCountRow,
     SiteLabelCountRow,
+    build_annotation_coverage_rows,
+    build_evaluation_transcript_intron_count_rows,
+    build_evaluation_transcript_group_intron_count_rows,
     build_intron_count_comparison_rows,
     build_site_label_count_rows,
     build_noncanonical_ratio_rows,
@@ -86,6 +92,13 @@ def test_build_noncanonical_ratio_rows_filters_requested_sources() -> None:
         {
             "species": "A",
             "dataset": "training",
+            "subset": "neg",
+            "pairs_total": "75",
+            "pairs_non_gt_ag_fraction": "0.3",
+        },
+        {
+            "species": "A",
+            "dataset": "training",
             "subset": "all",
             "pairs_total": "999",
             "pairs_non_gt_ag_fraction": "0.9",
@@ -96,15 +109,229 @@ def test_build_noncanonical_ratio_rows_filters_requested_sources() -> None:
         rows,
         sources=(
             ("training", "pos", "train_pos"),
+            ("training", "neg", "train_neg"),
             ("transcript", "all", "final_score"),
         ),
     )
 
-    assert len(out) == 2
+    assert len(out) == 3
     assert out[0].species == "A"
     assert out[0].source_label == "final_score"
     assert out[0].noncanonical_fraction == 0.1
-    assert out[1].source_label == "train_pos"
+    assert out[1].source_label == "train_neg"
+    assert out[1].noncanonical_fraction == 0.3
+    assert out[2].source_label == "train_pos"
+
+
+def test_build_annotation_coverage_rows_counts_reference_query_and_inference(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "reference.fix.gff").write_text(
+        "\n".join(
+            [
+                "chr1\tref\tgene\t1\t100\t.\t+\t.\tID=gene-G1;gene=G1",
+                (
+                    "chr1\tref\texon\t1\t40\t.\t+\t.\tParent=tx1;"
+                    "transcript_id=tx1;gene=G1"
+                ),
+                "chr1\tref\tgene\t200\t400\t.\t+\t.\tID=gene-G2;gene=G2",
+                (
+                    "chr1\tref\texon\t200\t280\t.\t+\t.\tParent=tx2;"
+                    "transcript_id=tx2;gene=G2"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "query.fna.gtf").write_text(
+        "\n".join(
+            [
+                (
+                    'chr1\tquery\ttranscript\t1\t100\t.\t+\t.\t'
+                    'transcript_id "qtx1"; gene_id "QG1";'
+                ),
+                (
+                    'chr1\tquery\texon\t1\t40\t.\t+\t.\t'
+                    'transcript_id "qtx1"; gene_id "QG1";'
+                ),
+                (
+                    'chr1\tquery\ttranscript\t200\t300\t.\t+\t.\t'
+                    'transcript_id "qtx2"; gene_id "QG2";'
+                ),
+                (
+                    'chr1\tquery\texon\t200\t240\t.\t+\t.\t'
+                    'transcript_id "qtx2"; gene_id "QG2";'
+                ),
+                (
+                    'chr1\tquery\ttranscript\t400\t500\t.\t+\t.\t'
+                    'transcript_id "qtx3"; gene_id "QG2";'
+                ),
+                (
+                    'chr1\tquery\texon\t400\t450\t.\t+\t.\t'
+                    'transcript_id "qtx3"; gene_id "QG2";'
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tgene_id\tsite_type\tintron_index\tseq",
+                "qtx1\tQG1\tdonor\t1\tAAAA",
+                "qtx1\tQG1\tacceptor\t1\tCCCC",
+                "qtx3\tQG2\tdonor\t1\tGGGG",
+                "qtx3\tQG2\tacceptor\t1\tTTTT",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_annotation_coverage_rows(data_root)
+
+    assert rows == [
+        AnnotationCoverageRow(
+            species="SpX",
+            reference_gene_count=2,
+            query_gene_count=2,
+            query_transcript_count=3,
+            inference_gene_count=2,
+            inference_transcript_count=2,
+        )
+    ]
+
+
+def test_build_evaluation_transcript_intron_count_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tseq",
+                "tx1\t1\tdonor\tAAAA",
+                "tx1\t1\tacceptor\tCCCC",
+                "tx2\t1\tdonor\tGGGG",
+                "tx2\t1\tacceptor\tTTTT",
+                "tx2\t2\tdonor\tGGGG",
+                "tx2\t2\tacceptor\tTTTT",
+                "tx3\t3\tdonor\tACGT",
+                "tx3\t3\tacceptor\tTGCA",
+                "tx3\t7\tdonor\tACGT",
+                "tx3\t7\tacceptor\tTGCA",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_evaluation_transcript_intron_count_rows(data_root)
+
+    assert rows[0] == EvaluationTranscriptIntronCountRow(
+        species="SpX",
+        intron_count=1,
+        transcript_count=1,
+        transcript_fraction=rows[0].transcript_fraction,
+        cumulative_transcript_count=1,
+        cumulative_fraction=rows[0].cumulative_fraction,
+    )
+    assert rows[1] == EvaluationTranscriptIntronCountRow(
+        species="SpX",
+        intron_count=2,
+        transcript_count=2,
+        transcript_fraction=rows[1].transcript_fraction,
+        cumulative_transcript_count=3,
+        cumulative_fraction=rows[1].cumulative_fraction,
+    )
+    assert rows[0].transcript_fraction == pytest.approx(1.0 / 3.0)
+    assert rows[0].cumulative_fraction == pytest.approx(1.0 / 3.0)
+    assert rows[1].transcript_fraction == pytest.approx(2.0 / 3.0)
+    assert rows[1].cumulative_fraction == pytest.approx(1.0)
+
+
+def test_build_evaluation_transcript_group_intron_count_rows(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tseq",
+                "tx_true_1\t1\tdonor\tAAAA",
+                "tx_true_1\t1\tacceptor\tCCCC",
+                "tx_true_2\t1\tdonor\tGGGG",
+                "tx_true_2\t1\tacceptor\tTTTT",
+                "tx_true_2\t2\tdonor\tGGGG",
+                "tx_true_2\t2\tacceptor\tTTTT",
+                "tx_false_1\t3\tdonor\tACGT",
+                "tx_false_1\t3\tacceptor\tTGCA",
+                "tx_false_1\t7\tdonor\tACGT",
+                "tx_false_1\t7\tacceptor\tTGCA",
+                "tx_contained\t4\tdonor\tACGT",
+                "tx_contained\t4\tacceptor\tTGCA",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "transcript_class.txt").write_text(
+        "\n".join(
+            [
+                "tx_true_1 =",
+                "tx_true_2 =",
+                "tx_false_1 j",
+                "tx_contained c",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_evaluation_transcript_group_intron_count_rows(data_root)
+
+    assert rows == [
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="false",
+            intron_count=2,
+            transcript_count=1,
+            transcript_fraction_within_group=1.0,
+            cumulative_transcript_count=1,
+            cumulative_fraction_within_group=1.0,
+        ),
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="true",
+            intron_count=1,
+            transcript_count=1,
+            transcript_fraction_within_group=0.5,
+            cumulative_transcript_count=1,
+            cumulative_fraction_within_group=0.5,
+        ),
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="true",
+            intron_count=2,
+            transcript_count=1,
+            transcript_fraction_within_group=0.5,
+            cumulative_transcript_count=2,
+            cumulative_fraction_within_group=1.0,
+        ),
+    ]
 
 
 def test_collect_species_intron_length_profiles(tmp_path: Path) -> None:
@@ -283,7 +510,10 @@ def test_quality_duplicate_and_overlap_rows(tmp_path: Path) -> None:
     assert len(duplicate_rows) == 3
     assert len(overlap_sets) == 1
 
-    dup_map = {(row.species, row.source_label): row.duplicate_fraction for row in duplicate_rows}
+    dup_map = {
+        (row.species, row.source_label): row.duplicate_fraction
+        for row in duplicate_rows
+    }
     assert dup_map[("SpX", "Final")] == 0.0
     assert dup_map[("SpX", "Train (positive)")] > 0.0
 
@@ -330,7 +560,10 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
 
     rows = build_site_label_count_rows(data_root)
     result = {
-        (row.species, row.split, row.site_type): (row.positive_count, row.negative_count)
+        (row.species, row.split, row.site_type): (
+            row.positive_count,
+            row.negative_count,
+        )
         for row in rows
     }
 

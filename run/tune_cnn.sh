@@ -48,7 +48,7 @@ PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="8"
 MAX_MODEL_PARAMS="auto"
-MAX_MODEL_PARAMS_FALLBACK="30000000"
+MAX_MODEL_PARAMS_FALLBACK="auto"
 MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
 MAX_MODEL_PARAMS_RESERVE_MIB="2048"
 MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
@@ -61,6 +61,11 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+# Optional output/data overrides for tagged or mask-data tuning runs.
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+MASK_MODE="off"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
@@ -423,6 +428,31 @@ if [[ "${QUICK_TRIALS_MODE}" == "budget" ]]; then
 	fi
 fi
 
+if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
+	echo "[tune_cnn.sh] MASK_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${MASK_MODE}" == "on" ]]; then
+	mask_bp="${DONOR_LEN}"
+	if (( ACCEPTOR_LEN > DONOR_LEN )); then
+		mask_bp="${ACCEPTOR_LEN}"
+	fi
+	if [[ -z "${TRAIN_POS_PATH}" ]]; then
+		TRAIN_POS_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.err"
+	fi
+	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
+		TRAIN_NEG_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.neg.err"
+	fi
+	if [[ -z "${TAG}" ]]; then
+		TAG="mask"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
+
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 echo "[tune_cnn.sh] species=${SPECIES}"
 echo "[tune_cnn.sh] targets=${TARGET_LIST[*]}"
@@ -532,6 +562,17 @@ for TARGET in "${TARGET_LIST[@]}"; do
 			fi
 
 	CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
+	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+	TRAIN_POS_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
+	)"
+	TRAIN_NEG_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
+	)"
 	cat > "${CONFIG_PATH}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
@@ -567,6 +608,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
+    "tag": ${TAG_JSON},
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
     "allow_tf32": ${ALLOW_TF32},
@@ -578,8 +620,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "pin_memory": ${PIN_MEMORY},
     "min_batch_size": ${MIN_BATCH_SIZE},
     "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": null,
-    "train_neg_path": null
+    "train_pos_path": ${TRAIN_POS_PATH_JSON},
+    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},

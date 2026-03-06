@@ -13,6 +13,7 @@ from score.profile_score_vs_intron_count import (  # noqa: E402
     ScoreFileLoadResult,
     TranscriptScoreRecord,
     build_correlation_row,
+    build_evaluation_intron_count_distribution_rows,
     build_intron_bin_rows,
     collect_records_from_trans_score,
     load_transcript_intron_counts,
@@ -112,6 +113,28 @@ def test_collect_records_from_trans_score_supports_legacy_score_column(
     assert result.used_rows == 2
     assert result.score_column_used == "min_donor_times_acceptor"
     assert result.records[0].final_score == pytest.approx(0.25)
+
+
+def test_build_evaluation_intron_count_distribution_rows() -> None:
+    rows = build_evaluation_intron_count_distribution_rows(
+        species="SpX",
+        intron_count_by_transcript={
+            "tx1": 1,
+            "tx2": 1,
+            "tx3": 3,
+            "tx4": 5,
+        },
+    )
+
+    assert len(rows) == 3
+    assert rows[0]["species"] == "SpX"
+    assert rows[0]["intron_count"] == 1
+    assert rows[0]["transcript_count"] == 2
+    assert rows[0]["cumulative_transcript_count"] == 2
+    assert rows[0]["cumulative_fraction"] == pytest.approx(0.5)
+    assert rows[-1]["intron_count"] == 5
+    assert rows[-1]["cumulative_transcript_count"] == 4
+    assert rows[-1]["cumulative_fraction"] == pytest.approx(1.0)
 
 
 def test_build_correlation_row_and_bins_capture_negative_association() -> None:
