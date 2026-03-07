@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="360"
+TIME_BUDGET_MINUTES="60"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -519,6 +519,7 @@ while true; do
     "model": "cnn",
     "species": "${species}",
     "train_target": "${target}",
+    "seed": ${BASE_SEED},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},

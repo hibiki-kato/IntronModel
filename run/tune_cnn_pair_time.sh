@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="360"
+TIME_BUDGET_MINUTES="60"
 
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
@@ -23,7 +23,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
-SEED_LIST=""
+SEED_LIST="0, 1, 2, 3, 4"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="2"
@@ -498,6 +498,7 @@ while true; do
     "model": "cnn_pair",
     "species": "${species}",
     "train_target": "pair",
+    "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},

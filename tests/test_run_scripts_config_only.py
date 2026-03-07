@@ -188,7 +188,7 @@ def test_tune_reservoir_time_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_cnn_tuning_scripts_forward_val_frac() -> None:
+def test_tuning_scripts_forward_seed_and_val_frac() -> None:
     root = _project_root()
     script_names = (
         "tune_cnn.sh",
@@ -209,6 +209,12 @@ def test_cnn_tuning_scripts_forward_val_frac() -> None:
         content = (root / "run" / script_name).read_text(encoding="utf-8")
         assert 'VAL_FRAC="0.1"' in content
         assert '"val_frac": ${VAL_FRAC}' in content
+        assert '"seed": ${' in content
+
+
+def test_run_tcn_sh_includes_head_type_config() -> None:
+    content = (_project_root() / "run" / "run_tcn.sh").read_text(encoding="utf-8")
+    assert 'HEAD_TYPE="gap"' in content
 
 
 def test_run_scripts_are_shellcheck_parsable() -> None:

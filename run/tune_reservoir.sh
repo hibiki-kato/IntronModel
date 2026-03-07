@@ -612,6 +612,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "model": "reservoir",
     "species": "${SPECIES}",
     "train_target": "${TARGET}",
+    "seed": ${BASE_SEED},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},

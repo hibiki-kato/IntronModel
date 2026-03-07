@@ -490,6 +490,7 @@ while true; do
     "model": "${MODEL_NAME}",
     "species": "${species}",
     "train_target": "${target}",
+    "seed": ${BASE_SEED},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},

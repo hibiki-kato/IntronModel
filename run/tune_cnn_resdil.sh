@@ -602,6 +602,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "model": "cnn_resdil",
     "species": "${SPECIES}",
     "train_target": "${TARGET}",
+    "seed": ${BASE_SEED},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},

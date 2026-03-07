@@ -23,7 +23,7 @@ CLASS_FILE_PATH=""
 MASK_MODE="off"
 MASK_TEST_TSV_PATH=""
 
-EPOCHS="15"
+EPOCHS="20"
 MAX_EPOCHS="200"
 EARLY_STOP_PATIENCE="12"
 EARLY_STOP_MIN_DELTA="0.0"
@@ -34,6 +34,7 @@ CONV_CHANNELS="64,128,256"
 KERNEL_SIZE="7"
 TCN_BLOCK_REPEATS="2"
 TCN_CAUSAL="0"
+HEAD_TYPE="gap"
 DROPOUT="0.3"
 FC_HIDDEN="128"
 WEIGHT_DECAY="0.01"
@@ -138,6 +139,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+INTRONMODEL_AUTO_TMUX="off"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 intronmodel_start_timer "tcn.sh"

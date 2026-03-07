@@ -16,7 +16,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
-SEED_LIST=""
+SEED_LIST="1201,32,452,1,4,2545,23,99,2021,0"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
@@ -647,6 +647,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "model": "cnn",
     "species": "${SPECIES}",
     "train_target": "${TARGET}",
+    "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
