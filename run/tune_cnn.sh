@@ -17,6 +17,7 @@ ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
 SEED_LIST="1201,32,452,1,4,2545,23,99,2021,0"
+PROCESS_TITLE="email me if u wanna use (hibiki@umd) I'll stop right away"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
@@ -689,8 +690,11 @@ JSON
 
 		echo "[tune_cnn.sh] target=${TARGET} seed=${base_seed}"
 		echo "[tune_cnn.sh] output_dir=${OUTPUT_DIR}"
-		if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
-			--config "${CONFIG_PATH}"; then
+			if ! intronmodel_run_with_process_title \
+				"${PROCESS_TITLE}" \
+				"${PYTHON_BIN}" \
+				"${PROJECT_ROOT}/src/tools/hparam_search.py" \
+				--config "${CONFIG_PATH}"; then
 			target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 			target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
 			echo "[tune_cnn.sh] target=${TARGET} seed=${base_seed} "\

@@ -96,6 +96,7 @@ INTRON_SCORE_OP="*"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
+PROCESS_TITLE="email me if u wanna use (hibiki@umd) I'll stop right away"
 NAME_FIELDS=""
 TAG=""
 # MASK_MODE="on"
@@ -145,6 +146,11 @@ intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 intronmodel_start_timer "tcn.sh"
 trap 'intronmodel_print_timing' EXIT
 
-PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-	python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \
+(
+	export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+	intronmodel_run_with_process_title \
+		"${PROCESS_TITLE}" \
+		python3 \
+		"${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \
 		--script-name "tcn.sh"
+)

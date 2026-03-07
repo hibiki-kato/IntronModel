@@ -18,6 +18,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
+PROCESS_TITLE="email me if u wanna use (hibiki@umd) I'll stop right away"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
@@ -53,7 +54,7 @@ NAME_FIELDS="none"
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-MASK_MODE="off"
+MASK_MODE="on"
 UPDATE_DOUBLE_DESCENT_PLOT="1"
 
 SEARCH_ALGO="history_guided"
@@ -566,8 +567,11 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=%s\n' \
 		"${remaining_hms}" "${species}" "${target}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${config_path}"; then
+		if ! intronmodel_run_with_process_title \
+			"${PROCESS_TITLE}" \
+			"${PYTHON_BIN}" \
+			"${PROJECT_ROOT}/src/tools/hparam_search.py" \
+			--config "${config_path}"; then
 		echo "[temp_tune_cnn_6h.sh] cycle=${job_index} failed "\
 			"species=${species} target=${target}" >&2
 	fi

@@ -227,6 +227,25 @@ intronmodel_resolve_python_bin() {
 }
 
 
+intronmodel_run_with_process_title() {
+	local process_title="${1-}"
+	shift || true
+
+	if [[ $# -eq 0 ]]; then
+		echo "[common.sh] intronmodel_run_with_process_title requires a command." >&2
+		return 2
+	fi
+	if [[ -z "${process_title}" ]]; then
+		"$@"
+		return $?
+	fi
+
+	(
+		exec -a "${process_title}" "$@"
+	)
+}
+
+
 intronmodel_json_string_or_null() {
 	local py_bin="$1"
 	local raw_value="${2-}"

@@ -16,6 +16,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
+PROCESS_TITLE="email me if u wanna use (hibiki@umd) I'll stop right away"
 
 QUICK_TRIALS="8"
 QUICK_EPOCHS="3"
@@ -625,8 +626,11 @@ JSON
 
 	echo "[tune_tcn.sh] target=${TARGET}"
 	echo "[tune_tcn.sh] output_dir=${OUTPUT_DIR}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${CONFIG_PATH}"; then
+		if ! intronmodel_run_with_process_title \
+			"${PROCESS_TITLE}" \
+			"${PYTHON_BIN}" \
+			"${PROJECT_ROOT}/src/tools/hparam_search.py" \
+			--config "${CONFIG_PATH}"; then
 		target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 		target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
 		echo "[tune_tcn.sh] target=${TARGET} failed start=${TARGET_START_EPOCH} "\

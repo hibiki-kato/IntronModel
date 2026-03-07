@@ -24,6 +24,7 @@ ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
 SEED_LIST="0, 1, 2, 3, 4"
+PROCESS_TITLE="email me if u wanna use (hibiki@umd) I'll stop right away"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="2"
@@ -550,7 +551,10 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+	if ! intronmodel_run_with_process_title \
+		"${PROCESS_TITLE}" \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${config_path}"; then
 		echo "[tune_cnn_pair_time.sh] cycle=${job_index} failed "\
 			"species=${species} target=pair seed=${base_seed}" >&2
