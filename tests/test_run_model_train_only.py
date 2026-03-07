@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 
@@ -155,3 +156,18 @@ def test_run_pipeline_rejects_single_task_without_train_only(
 
     with pytest.raises(ValueError, match="requires --train_only"):
         run_model.run_pipeline(args)
+
+
+def test_run_model_applies_process_title_from_env_on_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[bool] = []
+
+    monkeypatch.setattr(
+        "util.process_title.apply_process_title_from_env",
+        lambda: called.append(True) or True,
+    )
+
+    importlib.reload(run_model)
+
+    assert called == [True]

@@ -32,6 +32,7 @@ from util.data_proc import (
     species_data_dirs,
 )
 from util.model_task_paths import checkpoint_tasks_for_model
+from util.process_title import apply_process_title_from_env
 from util.sequence_transform import SEQUENCE_TRANSFORM_CHOICES
 from util.validation_protocol import (
     build_validation_protocol,
@@ -59,6 +60,8 @@ except ModuleNotFoundError:  # pragma: no cover
         "weighted_bce_f1",
         "focal_f1",
     )
+
+_ = apply_process_title_from_env()
 
 
 CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
