@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="360"
 
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
@@ -64,6 +64,8 @@ GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
 MAX_POOL_SIZE="2"
+CONV_STRIDE="1"
+HEAD_TYPE="gap"
 
 CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
@@ -109,17 +111,13 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "donor_kernel_candidates": {
     "type": "categorical",
     "values": [
-      "3,5,7,9,11,13,15",
-      "5,7,9,11,13,15,17",
-      "7,9,11,13,15,17,19"
+      "3,5,7,9,11,13,15,17,19"
     ]
   },
   "acceptor_kernel_candidates": {
     "type": "categorical",
     "values": [
-      "3,5,7,9,11,13,15",
-      "5,7,9,11,13,15,17",
-      "7,9,11,13,15,17,19"
+      "3,5,7,9,11,13,15,17,19"
     ]
   },
   "fusion_mode": {
@@ -129,6 +127,14 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "max_pool_size": {
     "type": "categorical",
     "values": [1, 2, 3, 4]
+  },
+  "conv_stride": {
+    "type": "categorical",
+    "values": [1, 2]
+  },
+  "head_type": {
+    "type": "categorical",
+    "values": ["gap", "center"]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -485,6 +491,8 @@ while true; do
     "donor_kernel_candidates": "3,5,7,9,11,13,15",
     "acceptor_kernel_candidates": "3,5,7,9,11,13,15",
     "max_pool_size": ${MAX_POOL_SIZE},
+    "conv_stride": ${CONV_STRIDE},
+    "head_type": "${HEAD_TYPE}",
     "fusion_mode": "late",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",

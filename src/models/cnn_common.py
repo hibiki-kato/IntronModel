@@ -3,7 +3,7 @@
 This module provides reusable components for CNN-based models:
 - DNA one-hot encoding
 - channel-list parser
-- Conv1D -> GAP encoder
+- Conv1D encoder + readout
 - site classifier head
 - batched sequence scoring helper
 """
@@ -15,6 +15,8 @@ from typing import List, Optional, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+
+CNN_HEAD_TYPE_CHOICES: tuple[str, ...] = ("gap", "center")
 
 
 def one_hot_encode_dna(seq: str, window_len: int = 50) -> np.ndarray:
@@ -115,8 +117,96 @@ def parse_kernel_sizes(
     return parse_conv_channels(raw=raw, arg_name=arg_name)
 
 
+def normalize_cnn_head_type(raw: object, *, arg_name: str) -> str:
+    """Normalize one CNN readout type name.
+
+    Parameters
+    ----------
+    raw : object
+        Raw argument value.
+    arg_name : str
+        Argument name used in error messages.
+
+    Returns
+    -------
+    str
+        Normalized head type.
+
+    Raises
+    ------
+    ValueError
+        If the head type is unsupported.
+    """
+    head_type = str(raw).strip().lower()
+    if head_type in CNN_HEAD_TYPE_CHOICES:
+        return head_type
+    choices_text = ", ".join(CNN_HEAD_TYPE_CHOICES)
+    raise ValueError(f"{arg_name} must be one of: {choices_text}.")
+
+
+class CnnFeatureReadout(nn.Module):
+    """Readout over Conv1D features with position-sensitive options.
+
+    Parameters
+    ----------
+    output_channels : int
+        Channel width of the convolution stack output.
+    head_type : str, default="gap"
+        Readout mode. ``"gap"`` uses global average pooling and ``"center"``
+        reads the center position, averaging the two middle positions for
+        even-length feature maps.
+    """
+
+    def __init__(
+        self,
+        output_channels: int,
+        head_type: str = "gap",
+    ) -> None:
+        super().__init__()
+        if output_channels <= 0:
+            raise ValueError("output_channels must be positive.")
+        self.head_type = normalize_cnn_head_type(
+            head_type,
+            arg_name="head_type",
+        )
+        self.gap: Optional[nn.AdaptiveAvgPool1d]
+        if self.head_type == "gap":
+            self.gap = nn.AdaptiveAvgPool1d(1)
+        else:
+            self.gap = None
+        self.output_dim: int = output_channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Read one feature vector per sequence.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Feature map with shape ``(batch, channels, length)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded features with shape ``(batch, channels)``.
+        """
+        if x.ndim != 3:
+            raise ValueError("x must have shape (batch, channels, length).")
+        if x.shape[2] <= 0:
+            raise ValueError("x length dimension must be positive.")
+        if self.head_type == "gap":
+            if self.gap is None:
+                raise RuntimeError("GAP readout is not initialized.")
+            return self.gap(x).squeeze(-1)
+
+        center_right = x.shape[2] // 2
+        if x.shape[2] % 2 == 1:
+            return x[:, :, center_right]
+        center_left = center_right - 1
+        return 0.5 * (x[:, :, center_left] + x[:, :, center_right])
+
+
 class CnnGapEncoder(nn.Module):
-    """Conv1D encoder with adaptive global average pooling.
+    """Conv1D encoder with configurable readout.
 
     Parameters
     ----------
@@ -131,6 +221,11 @@ class CnnGapEncoder(nn.Module):
     max_pool_size : int, default=2
         Max-pooling width applied after each convolution block. Use ``1`` to
         skip pooling.
+    conv_stride : int, default=1
+        Shared stride used by all convolution layers.
+    head_type : str, default="gap"
+        Feature readout mode. ``"gap"`` applies global average pooling and
+        ``"center"`` uses the center position after the conv stack.
 
     Notes
     -----
@@ -144,6 +239,8 @@ class CnnGapEncoder(nn.Module):
         kernel_size: int | Sequence[int] = 7,
         dropout: float = 0.3,
         max_pool_size: int = 2,
+        conv_stride: int = 1,
+        head_type: str = "gap",
     ) -> None:
         super().__init__()
 
@@ -173,6 +270,8 @@ class CnnGapEncoder(nn.Module):
                 raise ValueError("kernel_size list values must be positive.")
         if max_pool_size <= 0:
             raise ValueError("max_pool_size must be positive.")
+        if conv_stride <= 0:
+            raise ValueError("conv_stride must be positive.")
 
         layers: list[nn.Module] = []
         prev_ch = in_channels
@@ -183,6 +282,7 @@ class CnnGapEncoder(nn.Module):
                         prev_ch,
                         ch,
                         layer_kernel_size,
+                        stride=conv_stride,
                         padding=layer_kernel_size // 2,
                     ),
                     nn.BatchNorm1d(ch),
@@ -195,11 +295,15 @@ class CnnGapEncoder(nn.Module):
             prev_ch = ch
 
         self.conv_layers = nn.Sequential(*layers)
-        self.gap = nn.AdaptiveAvgPool1d(1)
-        self.output_dim: int = int(channel_list[-1])
+        self.readout = CnnFeatureReadout(
+            output_channels=int(channel_list[-1]),
+            head_type=head_type,
+        )
+        self.gap = self.readout.gap
+        self.output_dim: int = self.readout.output_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode batched one-hot DNA into pooled features.
+        """Encode batched one-hot DNA into readout features.
 
         Parameters
         ----------
@@ -212,8 +316,7 @@ class CnnGapEncoder(nn.Module):
             Feature tensor with shape ``(batch, output_dim)``.
         """
         y = self.conv_layers(x)
-        y = self.gap(y)
-        return y.squeeze(-1)
+        return self.readout(y)
 
 
 class BasicSpliceCNN(nn.Module):
@@ -227,6 +330,8 @@ class BasicSpliceCNN(nn.Module):
         dropout: float = 0.3,
         fc_hidden: int = 128,
         max_pool_size: int = 2,
+        conv_stride: int = 1,
+        head_type: str = "gap",
     ) -> None:
         super().__init__()
         encoder = CnnGapEncoder(
@@ -235,9 +340,12 @@ class BasicSpliceCNN(nn.Module):
             kernel_size=kernel_size,
             dropout=dropout,
             max_pool_size=max_pool_size,
+            conv_stride=conv_stride,
+            head_type=head_type,
         )
         # Keep legacy attribute names for checkpoint compatibility.
         self.conv_layers = encoder.conv_layers
+        self.readout = encoder.readout
         self.gap = encoder.gap
         output_dim = encoder.output_dim
         self.fc = nn.Sequential(
@@ -261,8 +369,7 @@ class BasicSpliceCNN(nn.Module):
             Logit tensor with shape ``(batch,)``.
         """
         y = self.conv_layers(x)
-        y = self.gap(y)
-        features = y.squeeze(-1)
+        features = self.readout(y)
         return self.fc(features).squeeze(-1)
 
 

@@ -106,13 +106,17 @@ If only one value is given, it is broadcast to all stages.
 `max_pool_size=2` uses $\mathcal{P}=\mathrm{MaxPool}_2`. More generally,
 `max_pool_size=k` uses $\mathcal{P}=\mathrm{MaxPool}_k$, while
 `max_pool_size=1` skips the pooling step and keeps only dropout after each
-block.
+block. `conv_stride=s` applies the same Conv1D stride to every stage.
 
-Global pooling + head:
+Readout + head:
 
 $$
-z = \mathrm{GAP}(H^{(M)}) \in \mathbb{R}^{B \times C_M}
+z = \mathrm{Readout}(H^{(M)}) \in \mathbb{R}^{B \times C_M}
 $$
+
+`head_type=gap` uses global average pooling. `head_type=center` takes the
+center position after the conv stack (averaging the two middle positions when
+the feature length is even).
 
 $$
 \ell = W_2\,\mathrm{Dropout}(\mathrm{ReLU}(W_1z+b_1))+b_2
@@ -124,10 +128,10 @@ $$
 
 ### 3.1 CNN Pair (`src/models/cnn_pair.py`)
 
-Donor and acceptor are encoded independently up to GAP:
+Donor and acceptor are encoded independently up to the configured CNN readout:
 
 $$
-z_d = \mathrm{GAP}(f_d(X_d)),\quad z_a = \mathrm{GAP}(f_a(X_a))
+z_d = \mathrm{Readout}(f_d(X_d)),\quad z_a = \mathrm{Readout}(f_a(X_a))
 $$
 
 Then features are concatenated and scored by one shared MLP:
@@ -138,7 +142,9 @@ $$
 
 This produces one score per donor/acceptor intron pair.
 The pair model uses the same per-block pooling-width control
-(`max_pool_size>=1`) inside donor/acceptor encoders and fused CNN paths.
+(`max_pool_size>=1`), shared convolution stride (`conv_stride>=1`), and
+`head_type=gap|center` readout inside donor/acceptor encoders and fused CNN
+paths.
 
 ## 4. Residual Dilated CNN (`src/models/cnn_resdil.py`)
 
@@ -439,7 +445,7 @@ For all models, `--continue_train` is invalid with `--skip_train`.
 
 | Model | Input | Core latent shape | Logit output |
 | --- | --- | --- | --- |
-| `cnn` | $(B, 4, L)$ | $(B, C_M)$ after GAP | $(B,)$ |
+| `cnn` | $(B, 4, L)$ | $(B, C_M)$ after `gap` or `center` readout | $(B,)$ |
 | `cnn_resdil` | $(B, 4, L)$ | $(B, C_M)$ after GAP | $(B,)$ |
 | `tcn` | $(B, 4, L)$ | $(B, C_M)$ after GAP | $(B,)$ |
 | `bert` | `(ids, mask): (B, T)` | $(B, T, d_{model})$ | $(B,)$ |

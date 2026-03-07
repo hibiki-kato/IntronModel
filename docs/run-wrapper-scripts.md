@@ -81,10 +81,12 @@ CNN-family tuning search-space conventions:
 - The sampled architecture is materialized to run-time args
   (`conv_channels`, `kernel_sizes`, branch overrides) before each trial.
 - CNN and CNN-pair tuning can also search `max_pool_size` to compare no-pool
-  (`1`) vs. wider pooling windows.
+  (`1`) vs. wider pooling windows, `conv_stride` for learned downsampling, and
+  `head_type=gap|center` for readout style.
 - Shape-invalid CNN / CNN-pair samples (for example, pooling that collapses the
-  sequence length, or `cnn_pair` early/mid fusion with mismatched input
-  lengths) are discarded and resampled before a trial is launched.
+  sequence length after conv/pool downsampling, or `cnn_pair` early/mid fusion
+  with mismatched input lengths) are discarded and resampled before a trial is
+  launched.
 - Generated tuning config can set `max_model_params`; over-cap samples are
   resampled, and if all retries exceed the cap the lowest-complexity sample is
   used as fallback.
@@ -111,6 +113,8 @@ Validation rules in wrappers:
 - `MAX_POOL_SIZE>=1` is available in `run/run_cnn.sh`,
   `run/run_cnn_pair.sh`, `run/tune_cnn.sh`, `run/tune_cnn_time.sh`, and
   `run/tune_cnn_pair_time.sh`. `1` disables pooling.
+- `CONV_STRIDE>=1` and `HEAD_TYPE=gap|center` are available in the same CNN /
+  CNN-pair wrappers and tune scripts.
 
 ## 3. Continue Learning Behavior
 

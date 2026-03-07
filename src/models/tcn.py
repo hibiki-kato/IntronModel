@@ -33,6 +33,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
+from models.cnn_common import (
+    CNN_HEAD_TYPE_CHOICES,
+    CnnFeatureReadout,
+    normalize_cnn_head_type as _normalize_cnn_head_type,
+)
+
 from util.data_proc import (
     build_run_name,
     infer_default_train_paths,
@@ -160,6 +166,7 @@ class TaskTrainParams:
     kernel_size: int
     tcn_block_repeats: int
     tcn_causal: int
+    head_type: str
     dropout: float
     fc_hidden: int
     weight_decay: float
@@ -235,6 +242,10 @@ def _resolve_task_train_params(
             )
         ),
         tcn_causal=int(_override_or_default("tcn_causal", model_args.tcn_causal)),
+        head_type=_normalize_cnn_head_type(
+            _override_or_default("head_type", model_args.head_type),
+            arg_name=f"--{prefix}head_type",
+        ),
         dropout=float(_override_or_default("dropout", model_args.dropout)),
         fc_hidden=int(_override_or_default("fc_hidden", model_args.fc_hidden)),
         weight_decay=float(
@@ -396,6 +407,7 @@ class TCNSpliceCNN(nn.Module):
         fc_hidden: int = 128,
         block_repeats: int = 2,
         causal: bool = False,
+        head_type: str = "gap",
     ) -> None:
         super().__init__()
 
@@ -410,6 +422,10 @@ class TCNSpliceCNN(nn.Module):
             raise ValueError("kernel_size must be odd for symmetric padding.")
         if block_repeats <= 0:
             raise ValueError("block_repeats must be positive.")
+        resolved_head_type = _normalize_cnn_head_type(
+            head_type,
+            arg_name="head_type",
+        )
 
         self.stem = nn.Sequential(
             nn.Conv1d(
@@ -441,7 +457,11 @@ class TCNSpliceCNN(nn.Module):
                 dilation = min(dilation * 2, 16384)
         self.blocks = nn.ModuleList(blocks)
 
-        self.gap = nn.AdaptiveAvgPool1d(output_size=1)
+        self.readout = CnnFeatureReadout(
+            output_channels=prev_channels,
+            head_type=resolved_head_type,
+        )
+        self.gap = self.readout.gap
         self.fc = nn.Sequential(
             nn.Linear(prev_channels, fc_hidden),
             nn.ReLU(inplace=True),
@@ -453,7 +473,7 @@ class TCNSpliceCNN(nn.Module):
         x = self.stem(x)
         for block in self.blocks:
             x = block(x)
-        x = self.gap(x).squeeze(-1)
+        x = self.readout(x)
         logits = self.fc(x).squeeze(-1)
         return logits
 
@@ -572,6 +592,7 @@ def train_task_model(
     kernel_size: int = 7,
     tcn_block_repeats: int = 2,
     tcn_causal: Union[bool, int] = 0,
+    head_type: str = "gap",
     dropout: float = 0.3,
     fc_hidden: int = 128,
     weight_decay: float = 0.01,
@@ -638,6 +659,9 @@ def train_task_model(
         Number of times the channel schedule is repeated across dilated blocks.
     tcn_causal : bool | int, default=0
         Whether to use causal convolutions in temporal blocks.
+    head_type : str, default="gap"
+        TCN readout mode. ``"gap"`` uses global average pooling and
+        ``"center"`` reads the center position after the block stack.
     dropout : float, default=0.3
         Dropout rate.
     fc_hidden : int, default=128
@@ -713,6 +737,7 @@ def train_task_model(
         raise ValueError("--kernel_size must be positive.")
     if tcn_block_repeats <= 0:
         raise ValueError("--tcn_block_repeats must be positive.")
+    head_type = _normalize_cnn_head_type(head_type, arg_name="--head_type")
     if fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
     if dropout < 0.0 or dropout >= 1.0:
@@ -893,6 +918,7 @@ def train_task_model(
                 kernel_size=kernel_size,
                 block_repeats=tcn_block_repeats,
                 causal=tcn_causal_bool,
+                head_type=head_type,
                 dropout=dropout,
                 fc_hidden=fc_hidden,
             ).to(device)
@@ -1087,6 +1113,7 @@ def train_task_model(
                                 "kernel_size": kernel_size,
                                 "tcn_block_repeats": tcn_block_repeats,
                                 "tcn_causal": tcn_causal_bool,
+                                "head_type": head_type,
                                 "dropout": dropout,
                                 "fc_hidden": fc_hidden,
                             },
@@ -1190,6 +1217,7 @@ def train_task_model(
                 "kernel_size": kernel_size,
                 "tcn_block_repeats": tcn_block_repeats,
                 "tcn_causal": tcn_causal_bool,
+                "head_type": head_type,
                 "dropout": dropout,
                 "fc_hidden": fc_hidden,
                 "weight_decay": weight_decay,
@@ -1274,6 +1302,10 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
     kernel_size = int(model_config.get("kernel_size", 7))
     tcn_block_repeats = int(model_config.get("tcn_block_repeats", 2))
     tcn_causal = bool(model_config.get("tcn_causal", False))
+    head_type = _normalize_cnn_head_type(
+        model_config.get("head_type", "gap"),
+        arg_name="checkpoint head_type",
+    )
     dropout = float(model_config.get("dropout", 0.3))
     fc_hidden = int(model_config.get("fc_hidden", 128))
 
@@ -1286,6 +1318,7 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
         kernel_size=kernel_size,
         block_repeats=tcn_block_repeats,
         causal=tcn_causal,
+        head_type=head_type,
         dropout=dropout,
         fc_hidden=fc_hidden,
     ).to(device)
@@ -1450,6 +1483,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Use causal dilated convolutions when set to 1.",
     )
     parser.add_argument(
+        "--head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default="gap",
+        help="TCN readout mode: gap or center.",
+    )
+    parser.add_argument(
         "--dropout",
         type=float,
         default=0.3,
@@ -1558,6 +1597,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         choices=[0, 1],
         default=None,
         help="Acceptor-only override for --tcn_causal.",
+    )
+    parser.add_argument(
+        "--donor_head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default=None,
+        help="Donor-only override for --head_type.",
+    )
+    parser.add_argument(
+        "--acceptor_head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default=None,
+        help="Acceptor-only override for --head_type.",
     )
     parser.add_argument(
         "--donor_dropout",
@@ -1943,6 +1994,7 @@ def train(
             kernel_size=resolved.kernel_size,
             tcn_block_repeats=resolved.tcn_block_repeats,
             tcn_causal=resolved.tcn_causal,
+            head_type=resolved.head_type,
             dropout=resolved.dropout,
             fc_hidden=resolved.fc_hidden,
             weight_decay=resolved.weight_decay,
@@ -2004,6 +2056,7 @@ def train(
             "kernel_size": params.kernel_size,
             "tcn_block_repeats": params.tcn_block_repeats,
             "tcn_causal": params.tcn_causal,
+            "head_type": params.head_type,
             "dropout": params.dropout,
             "fc_hidden": params.fc_hidden,
             "weight_decay": params.weight_decay,
@@ -2046,6 +2099,10 @@ def train(
         "kernel_size": model_args.kernel_size,
         "tcn_block_repeats": model_args.tcn_block_repeats,
         "tcn_causal": model_args.tcn_causal,
+        "head_type": _normalize_cnn_head_type(
+            model_args.head_type,
+            arg_name="--head_type",
+        ),
         "dropout": model_args.dropout,
         "fc_hidden": model_args.fc_hidden,
         "weight_decay": model_args.weight_decay,

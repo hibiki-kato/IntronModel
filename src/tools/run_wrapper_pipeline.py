@@ -517,7 +517,18 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
 
     if builder in {"cnn", "cnn_resdil", "tcn"}:
         base["conv_channels"] = _require_env(env, "CONV_CHANNELS") or None
+        if builder in {"cnn", "cnn_resdil"}:
+            base["head_type"] = _require_env(env, "HEAD_TYPE")
         if builder == "cnn":
+            base["max_pool_size"] = _as_int(
+                _require_env(env, "MAX_POOL_SIZE"),
+                "MAX_POOL_SIZE",
+            )
+            base["conv_stride"] = _as_int(
+                _require_env(env, "CONV_STRIDE"),
+                "CONV_STRIDE",
+            )
+        elif builder == "cnn_resdil":
             base["max_pool_size"] = _as_int(
                 _require_env(env, "MAX_POOL_SIZE"),
                 "MAX_POOL_SIZE",
@@ -544,6 +555,7 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
             _require_env(env, "TCN_BLOCK_REPEATS"), "TCN_BLOCK_REPEATS"
         )
         base["tcn_causal"] = _as_int(_require_env(env, "TCN_CAUSAL"), "TCN_CAUSAL")
+        base["head_type"] = _require_env(env, "HEAD_TYPE")
 
     if builder in {"bert", "dnabert"}:
         base["dropout"] = _as_float(_require_env(env, "DROPOUT"), "DROPOUT")
@@ -1526,6 +1538,8 @@ SPECS: dict[str, WrapperSpec] = {
             "conv_channels": "CONV_CHANNELS",
             "kernel_sizes": "KERNEL_SIZES",
             "max_pool_size": "MAX_POOL_SIZE",
+            "conv_stride": "CONV_STRIDE",
+            "head_type": "HEAD_TYPE",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
             "dropout": "DROPOUT",
@@ -1559,6 +1573,8 @@ SPECS: dict[str, WrapperSpec] = {
             "CONV_CHANNELS",
             "KERNEL_SIZES",
             "MAX_POOL_SIZE",
+            "CONV_STRIDE",
+            "HEAD_TYPE",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -1594,6 +1610,8 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
+            "CONV_STRIDE",
+            "HEAD_TYPE",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -1624,6 +1642,8 @@ SPECS: dict[str, WrapperSpec] = {
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
             "max_pool_size": "MAX_POOL_SIZE",
+            "conv_stride": "CONV_STRIDE",
+            "head_type": "HEAD_TYPE",
             "fusion_mode": "FUSION_MODE",
             "dropout": "DROPOUT",
             "fc_hidden": "FC_HIDDEN",
@@ -1656,6 +1676,8 @@ SPECS: dict[str, WrapperSpec] = {
             "CONV_CHANNELS",
             "KERNEL_SIZES",
             "MAX_POOL_SIZE",
+            "CONV_STRIDE",
+            "HEAD_TYPE",
             "FUSION_MODE",
             "DROPOUT",
             "FC_HIDDEN",
@@ -1698,6 +1720,8 @@ SPECS: dict[str, WrapperSpec] = {
             "loss": "LOSS",
             "conv_channels": "CONV_CHANNELS",
             "kernel_sizes": "KERNEL_SIZES",
+            "max_pool_size": "MAX_POOL_SIZE",
+            "head_type": "HEAD_TYPE",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
             "dropout": "DROPOUT",
@@ -1728,6 +1752,8 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
+            "MAX_POOL_SIZE",
+            "HEAD_TYPE",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -1788,6 +1814,7 @@ SPECS: dict[str, WrapperSpec] = {
             "kernel_size": "KERNEL_SIZE",
             "tcn_block_repeats": "TCN_BLOCK_REPEATS",
             "tcn_causal": "TCN_CAUSAL",
+            "head_type": "HEAD_TYPE",
             "dropout": "DROPOUT",
             "fc_hidden": "FC_HIDDEN",
             "weight_decay": "WEIGHT_DECAY",
@@ -1818,6 +1845,7 @@ SPECS: dict[str, WrapperSpec] = {
             "KERNEL_SIZE",
             "TCN_BLOCK_REPEATS",
             "TCN_CAUSAL",
+            "HEAD_TYPE",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",

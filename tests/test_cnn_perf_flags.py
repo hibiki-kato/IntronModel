@@ -31,6 +31,10 @@ def test_add_train_args_includes_perf_flags() -> None:
             "off",
             "--max_pool_size",
             "1",
+            "--conv_stride",
+            "2",
+            "--head_type",
+            "center",
             "--num_workers",
             "2",
             "--prefetch_factor",
@@ -50,6 +54,8 @@ def test_add_train_args_includes_perf_flags() -> None:
     assert args.deterministic == 1
     assert args.compile_mode == "off"
     assert args.max_pool_size == 1
+    assert args.conv_stride == 2
+    assert args.head_type == "center"
     assert args.num_workers == "2"
     assert args.prefetch_factor == 3
     assert args.persistent_workers == 0
@@ -68,6 +74,20 @@ def test_basic_splice_cnn_supports_disabling_max_pool() -> None:
         layer for layer in model.conv_layers if isinstance(layer, torch.nn.MaxPool1d)
     ]
     assert max_pool_layers == []
+
+    batch = torch.randn(4, 4, 101)
+    logits = model(batch)
+    assert logits.shape == (4,)
+
+
+def test_basic_splice_cnn_supports_center_readout_with_stride() -> None:
+    model = cnn.BasicSpliceCNN(
+        conv_channels=[32, 64],
+        kernel_size=[7, 5],
+        max_pool_size=1,
+        conv_stride=2,
+        head_type="center",
+    )
 
     batch = torch.randn(4, 4, 101)
     logits = model(batch)
@@ -99,6 +119,10 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
             "0.25",
             "--donor_conv_channels",
             "128,256,512",
+            "--donor_conv_stride",
+            "2",
+            "--donor_head_type",
+            "center",
         ]
     )
 
@@ -147,11 +171,15 @@ def test_resolve_task_train_params_prefers_task_overrides() -> None:
     assert donor_params.loss_name == "weighted_bce"
     assert donor_params.f1_lambda == pytest.approx(0.25)
     assert donor_params.conv_channels == [128, 256, 512]
+    assert donor_params.conv_stride == 2
+    assert donor_params.head_type == "center"
     assert acceptor_params.batch_size == 512
     assert acceptor_params.lr == pytest.approx(0.0005)
     assert acceptor_params.loss_name == "focal"
     assert acceptor_params.f1_lambda == pytest.approx(0.1)
     assert acceptor_params.conv_channels == [64, 128, 256]
+    assert acceptor_params.conv_stride == 1
+    assert acceptor_params.head_type == "gap"
 
 
 def test_resolve_task_train_params_prefers_kernel_size_overrides() -> None:

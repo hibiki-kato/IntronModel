@@ -34,6 +34,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from models.cnn_common import (
     BasicSpliceCNN as _CommonBasicSpliceCNN,
+    CNN_HEAD_TYPE_CHOICES,
+    normalize_cnn_head_type as _normalize_cnn_head_type,
     one_hot_encode_dna as _one_hot_encode_dna,
     parse_conv_channels as _parse_conv_channels,
     parse_kernel_sizes as _parse_kernel_sizes,
@@ -136,6 +138,8 @@ class TaskTrainParams:
     conv_channels: Optional[Sequence[int]]
     kernel_sizes: Sequence[int]
     max_pool_size: int
+    conv_stride: int
+    head_type: str
     dropout: float
     fc_hidden: int
     weight_decay: float
@@ -223,6 +227,13 @@ def _resolve_task_train_params(
         conv_channels=resolved_conv_channels,
         kernel_sizes=list(resolved_kernel_sizes),
         max_pool_size=int(model_args.max_pool_size),
+        conv_stride=int(
+            _override_or_default("conv_stride", model_args.conv_stride)
+        ),
+        head_type=_normalize_cnn_head_type(
+            _override_or_default("head_type", model_args.head_type),
+            arg_name=f"--{prefix}head_type",
+        ),
         dropout=float(_override_or_default("dropout", model_args.dropout)),
         fc_hidden=int(_override_or_default("fc_hidden", model_args.fc_hidden)),
         weight_decay=float(
@@ -465,6 +476,8 @@ def train_task_model(
     conv_channels: Optional[Sequence[int]] = None,
     kernel_sizes: Optional[Sequence[int]] = None,
     max_pool_size: int = 2,
+    conv_stride: int = 1,
+    head_type: str = "gap",
     dropout: float = 0.3,
     fc_hidden: int = 128,
     weight_decay: float = 0.01,
@@ -533,6 +546,11 @@ def train_task_model(
     max_pool_size : int, default=2
         Max-pooling width after each convolution block. Use ``1`` to disable
         pooling.
+    conv_stride : int, default=1
+        Shared convolution stride used by all conv blocks.
+    head_type : str, default="gap"
+        CNN readout mode. ``"gap"`` uses global average pooling and
+        ``"center"`` reads the center position after the conv stack.
     dropout : float, default=0.3
         Dropout rate.
     fc_hidden : int, default=128
@@ -613,6 +631,9 @@ def train_task_model(
         raise ValueError("--kernel_sizes must not be empty.")
     if max_pool_size <= 0:
         raise ValueError("--max_pool_size must be positive.")
+    if conv_stride <= 0:
+        raise ValueError("--conv_stride must be positive.")
+    head_type = _normalize_cnn_head_type(head_type, arg_name="--head_type")
     if fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
     if dropout < 0.0 or dropout >= 1.0:
@@ -812,6 +833,8 @@ def train_task_model(
                 conv_channels=conv_channels,
                 kernel_size=resolved_kernel_sizes,
                 max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=head_type,
                 dropout=dropout,
                 fc_hidden=fc_hidden,
             ).to(device)
@@ -1003,6 +1026,8 @@ def train_task_model(
                                 "conv_channels": list(conv_channels),
                                 "kernel_sizes": list(resolved_kernel_sizes),
                                 "max_pool_size": int(max_pool_size),
+                                "conv_stride": int(conv_stride),
+                                "head_type": head_type,
                                 "dropout": dropout,
                                 "fc_hidden": fc_hidden,
                             },
@@ -1094,6 +1119,8 @@ def train_task_model(
                 "conv_channels": list(conv_channels),
                 "kernel_sizes": list(resolved_kernel_sizes),
                 "max_pool_size": int(max_pool_size),
+                "conv_stride": int(conv_stride),
+                "head_type": head_type,
                 "dropout": dropout,
                 "fc_hidden": fc_hidden,
                 "weight_decay": weight_decay,
@@ -1182,6 +1209,11 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
             max_pool_size = 2
     else:
         max_pool_size = int(max_pool_size_raw)
+    conv_stride = int(model_config.get("conv_stride", 1))
+    head_type = _normalize_cnn_head_type(
+        model_config.get("head_type", "gap"),
+        arg_name="checkpoint head_type",
+    )
     dropout = float(model_config.get("dropout", 0.3))
     fc_hidden = int(model_config.get("fc_hidden", 128))
     if kernel_sizes is None:
@@ -1200,6 +1232,8 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
         conv_channels=conv_channels,
         kernel_size=kernel_sizes,
         max_pool_size=max_pool_size,
+        conv_stride=conv_stride,
+        head_type=head_type,
         dropout=dropout,
         fc_hidden=fc_hidden,
     ).to(device)
@@ -1394,6 +1428,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Max-pooling width after each conv block. Use 1 to disable pooling.",
     )
     parser.add_argument(
+        "--conv_stride",
+        type=int,
+        default=1,
+        help="Shared convolution stride applied to every conv block.",
+    )
+    parser.add_argument(
+        "--head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default="gap",
+        help="CNN readout mode: gap or center.",
+    )
+    parser.add_argument(
         "--dropout",
         type=float,
         default=0.3,
@@ -1503,6 +1549,30 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Acceptor-only override for --dropout.",
+    )
+    parser.add_argument(
+        "--donor_conv_stride",
+        type=int,
+        default=None,
+        help="Donor-only override for --conv_stride.",
+    )
+    parser.add_argument(
+        "--acceptor_conv_stride",
+        type=int,
+        default=None,
+        help="Acceptor-only override for --conv_stride.",
+    )
+    parser.add_argument(
+        "--donor_head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default=None,
+        help="Donor-only override for --head_type.",
+    )
+    parser.add_argument(
+        "--acceptor_head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default=None,
+        help="Acceptor-only override for --head_type.",
     )
     parser.add_argument(
         "--donor_fc_hidden",
@@ -1933,6 +2003,8 @@ def train(
             conv_channels=resolved.conv_channels,
             kernel_sizes=resolved.kernel_sizes,
             max_pool_size=resolved.max_pool_size,
+            conv_stride=resolved.conv_stride,
+            head_type=resolved.head_type,
             dropout=resolved.dropout,
             fc_hidden=resolved.fc_hidden,
             weight_decay=resolved.weight_decay,
@@ -1994,6 +2066,8 @@ def train(
             ),
             "kernel_sizes": list(params.kernel_sizes),
             "max_pool_size": params.max_pool_size,
+            "conv_stride": params.conv_stride,
+            "head_type": params.head_type,
             "dropout": params.dropout,
             "fc_hidden": params.fc_hidden,
             "weight_decay": params.weight_decay,
@@ -2039,6 +2113,11 @@ def train(
             None if shared_kernel_sizes is None else list(shared_kernel_sizes)
         ),
         "max_pool_size": int(model_args.max_pool_size),
+        "conv_stride": int(model_args.conv_stride),
+        "head_type": _normalize_cnn_head_type(
+            model_args.head_type,
+            arg_name="--head_type",
+        ),
         "donor_kernel_sizes": (
             None if donor_kernel_sizes is None else list(donor_kernel_sizes)
         ),

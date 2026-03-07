@@ -30,7 +30,7 @@ import traceback
 from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 SRC_ROOT: Path = PROJECT_ROOT / "src"
@@ -2325,17 +2325,72 @@ def _resolve_max_pool_size(
     return 2
 
 
-def _apply_max_pool_schedule(length: int, depth: int, max_pool_size: int) -> int:
-    """Apply repeated max-pooling and return the resulting sequence length."""
+def _resolve_conv_stride(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> int:
+    """Resolve shared CNN convolution stride."""
+    raw = sampled_params.get("conv_stride")
+    if raw is None:
+        raw = base_args.get("conv_stride")
+    resolved = _to_positive_int(raw)
+    if resolved is not None:
+        return resolved
+    return 1
+
+
+def _resolve_kernel_argument(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+    kernel_key: str,
+    scalar_key: str,
+    depth: int,
+) -> Optional[list[int]]:
+    """Resolve one depth-aligned kernel-size list."""
+    kernel_raw = sampled_params.get(kernel_key)
+    if kernel_raw is None:
+        kernel_raw = base_args.get(kernel_key)
+    scalar_raw = sampled_params.get(scalar_key)
+    if scalar_raw is None:
+        scalar_raw = base_args.get(scalar_key)
+    return _resolve_kernel_sizes_for_depth(
+        kernel_raw=kernel_raw,
+        fallback_scalar_raw=scalar_raw,
+        depth=depth,
+    )
+
+
+def _conv_output_length(length: int, kernel_size: int, stride: int) -> int:
+    """Compute one Conv1d output length with same-style padding."""
+    if length <= 0 or kernel_size <= 0 or stride <= 0:
+        return 0
+    padding = kernel_size // 2
+    numerator = length + (2 * padding) - (kernel_size - 1) - 1
+    if numerator < 0:
+        return 0
+    return (numerator // stride) + 1
+
+
+def _apply_cnn_length_schedule(
+    length: int,
+    kernel_sizes: Sequence[int],
+    conv_stride: int,
+    max_pool_size: int,
+) -> int:
+    """Apply one CNN stack schedule and return the resulting length."""
     current = length
-    if depth <= 0:
+    if not kernel_sizes:
         return current
-    if max_pool_size <= 1:
-        return current
-    for _ in range(depth):
-        current = current // max_pool_size
+    for kernel_size in kernel_sizes:
+        current = _conv_output_length(current, kernel_size, conv_stride)
         if current <= 0:
             return 0
+        if max_pool_size > 1:
+            current = current // max_pool_size
+            if current <= 0:
+                return 0
     return current
 
 
@@ -2354,6 +2409,12 @@ def _is_valid_cnn_architecture(
         base_args=base_args,
     )
     if max_pool_size <= 0:
+        return False
+    conv_stride = _resolve_conv_stride(
+        sampled_params=sampled_params,
+        base_args=base_args,
+    )
+    if conv_stride <= 0:
         return False
 
     donor_len_raw = sampled_params.get("donor_len")
@@ -2380,12 +2441,37 @@ def _is_valid_cnn_architecture(
             lightweight = _to_bool(base_args.get("lightweight"))
             conv_channels = [64, 128] if lightweight else [64, 128, 256]
         depth = len(conv_channels)
+        kernel_sizes = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="kernel_sizes",
+            scalar_key="kernel_size",
+            depth=depth,
+        )
+        if kernel_sizes is None:
+            kernel_sizes = [7] * depth
 
         if train_target in {"both", "donor"} and donor_len is not None:
-            if _apply_max_pool_schedule(donor_len, depth, max_pool_size) <= 0:
+            if (
+                _apply_cnn_length_schedule(
+                    donor_len,
+                    kernel_sizes,
+                    conv_stride,
+                    max_pool_size,
+                )
+                <= 0
+            ):
                 return False
         if train_target in {"both", "acceptor"} and acceptor_len is not None:
-            if _apply_max_pool_schedule(acceptor_len, depth, max_pool_size) <= 0:
+            if (
+                _apply_cnn_length_schedule(
+                    acceptor_len,
+                    kernel_sizes,
+                    conv_stride,
+                    max_pool_size,
+                )
+                <= 0
+            ):
                 return False
         return True
 
@@ -2420,34 +2506,102 @@ def _is_valid_cnn_architecture(
 
     donor_depth = len(donor_conv_channels)
     acceptor_depth = len(acceptor_conv_channels)
+    donor_kernel_sizes = _resolve_kernel_argument(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        kernel_key="donor_kernel_sizes",
+        scalar_key="kernel_size",
+        depth=donor_depth,
+    )
+    if donor_kernel_sizes is None:
+        donor_kernel_sizes = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="kernel_sizes",
+            scalar_key="kernel_size",
+            depth=donor_depth,
+        )
+    acceptor_kernel_sizes = _resolve_kernel_argument(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        kernel_key="acceptor_kernel_sizes",
+        scalar_key="kernel_size",
+        depth=acceptor_depth,
+    )
+    if acceptor_kernel_sizes is None:
+        acceptor_kernel_sizes = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="kernel_sizes",
+            scalar_key="kernel_size",
+            depth=acceptor_depth,
+        )
+    if donor_kernel_sizes is None:
+        donor_kernel_sizes = [7] * donor_depth
+    if acceptor_kernel_sizes is None:
+        acceptor_kernel_sizes = [7] * acceptor_depth
 
     if fusion_mode in {"early", "mid"}:
         if donor_len is not None and acceptor_len is not None and donor_len != acceptor_len:
             return False
         if donor_conv_channels != acceptor_conv_channels:
             return False
+        if donor_kernel_sizes != acceptor_kernel_sizes:
+            return False
         shared_len = donor_len if donor_len is not None else acceptor_len
         if shared_len is None:
             return True
         if fusion_mode == "early":
-            return _apply_max_pool_schedule(shared_len, donor_depth, max_pool_size) > 0
+            return (
+                _apply_cnn_length_schedule(
+                    shared_len,
+                    donor_kernel_sizes,
+                    conv_stride,
+                    max_pool_size,
+                )
+                > 0
+            )
 
         split_index = max(1, donor_depth // 2)
-        prefix_length = _apply_max_pool_schedule(
+        prefix_length = _apply_cnn_length_schedule(
             shared_len,
-            split_index,
+            donor_kernel_sizes[:split_index],
+            conv_stride,
             max_pool_size,
         )
         if prefix_length <= 0:
             return False
-        tail_depth = donor_depth - split_index
-        return _apply_max_pool_schedule(prefix_length, tail_depth, max_pool_size) > 0
+        return (
+            _apply_cnn_length_schedule(
+                prefix_length,
+                donor_kernel_sizes[split_index:],
+                conv_stride,
+                max_pool_size,
+            )
+            > 0
+        )
 
     if donor_len is not None:
-        if _apply_max_pool_schedule(donor_len, donor_depth, max_pool_size) <= 0:
+        if (
+            _apply_cnn_length_schedule(
+                donor_len,
+                donor_kernel_sizes,
+                conv_stride,
+                max_pool_size,
+            )
+            <= 0
+        ):
             return False
     if acceptor_len is not None:
-        if _apply_max_pool_schedule(acceptor_len, acceptor_depth, max_pool_size) <= 0:
+        if (
+            _apply_cnn_length_schedule(
+                acceptor_len,
+                acceptor_kernel_sizes,
+                conv_stride,
+                max_pool_size,
+            )
+            <= 0
+        ):
             return False
     return True
 

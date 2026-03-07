@@ -67,6 +67,8 @@ TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="off"
 MAX_POOL_SIZE="2"
+CONV_STRIDE="1"
+HEAD_TYPE="gap"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
@@ -101,6 +103,14 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   "max_pool_size": {
     "type": "categorical",
     "values": [1, 2, 3, 4]
+  },
+  "conv_stride": {
+    "type": "categorical",
+    "values": [1, 2]
+  },
+  "head_type": {
+    "type": "categorical",
+    "values": ["gap", "center"]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -143,6 +153,14 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "max_pool_size": {
     "type": "categorical",
     "values": [1, 2, 3, 4]
+  },
+  "conv_stride": {
+    "type": "categorical",
+    "values": [1, 2]
+  },
+  "head_type": {
+    "type": "categorical",
+    "values": ["gap", "center"]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -622,6 +640,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "channel_candidates": "64,96,128,192,256,384,512",
     "kernel_candidates": "3,5,7,9,11,13,15",
     "max_pool_size": ${MAX_POOL_SIZE},
+    "conv_stride": ${CONV_STRIDE},
+    "head_type": "${HEAD_TYPE}",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

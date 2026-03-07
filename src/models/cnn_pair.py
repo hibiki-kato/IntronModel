@@ -1,8 +1,8 @@
 """Pair CNN model implementation for intron-level splice scoring.
 
 This module trains and infers one score per donor/acceptor pair. Donor and
-acceptor branches run independent CNN encoders up to GAP, then pooled features
-are mixed by one MLP head.
+acceptor branches run independent CNN encoders with configurable readout, then
+branch features are mixed by one MLP head.
 """
 
 from __future__ import annotations
@@ -21,7 +21,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from models.cnn_common import (
+    CNN_HEAD_TYPE_CHOICES,
+    CnnFeatureReadout,
     CnnGapEncoder,
+    normalize_cnn_head_type,
     one_hot_encode_dna,
     parse_conv_channels,
     parse_kernel_sizes,
@@ -133,6 +136,8 @@ class PairTrainParams:
     donor_kernel_sizes: Optional[Sequence[int]]
     acceptor_kernel_sizes: Optional[Sequence[int]]
     max_pool_size: int
+    conv_stride: int
+    head_type: str
     fusion_mode: str
     dropout: float
     fc_hidden: int
@@ -231,6 +236,8 @@ class PairSpliceCNN(nn.Module):
         donor_kernel_sizes: Optional[Sequence[int]] = None,
         acceptor_kernel_sizes: Optional[Sequence[int]] = None,
         max_pool_size: int = 2,
+        conv_stride: int = 1,
+        head_type: str = "gap",
         fusion_mode: str = "late",
         dropout: float = 0.3,
         fc_hidden: int = 128,
@@ -239,6 +246,10 @@ class PairSpliceCNN(nn.Module):
         self.fusion_mode = _normalize_fusion_mode(
             fusion_mode,
             arg_name="fusion_mode",
+        )
+        self.head_type = normalize_cnn_head_type(
+            head_type,
+            arg_name="head_type",
         )
 
         donor_kernel_spec: int | Sequence[int] = (
@@ -254,13 +265,15 @@ class PairSpliceCNN(nn.Module):
         self.mid_donor_prefix: Optional[nn.Sequential] = None
         self.mid_acceptor_prefix: Optional[nn.Sequential] = None
         self.mid_fused_tail: Optional[CnnGapEncoder] = None
-        self.mid_gap: Optional[nn.AdaptiveAvgPool1d] = None
+        self.mid_readout: Optional[CnnFeatureReadout] = None
         donor_probe = CnnGapEncoder(
             in_channels=4,
             conv_channels=donor_conv_channels,
             kernel_size=donor_kernel_spec,
             dropout=dropout,
             max_pool_size=max_pool_size,
+            conv_stride=conv_stride,
+            head_type=self.head_type,
         )
         acceptor_probe = CnnGapEncoder(
             in_channels=4,
@@ -268,6 +281,8 @@ class PairSpliceCNN(nn.Module):
             kernel_size=acceptor_kernel_spec,
             dropout=dropout,
             max_pool_size=max_pool_size,
+            conv_stride=conv_stride,
+            head_type=self.head_type,
         )
         donor_layout_channels, donor_layout_kernels = _extract_encoder_layout(
             donor_probe
@@ -299,6 +314,8 @@ class PairSpliceCNN(nn.Module):
                 kernel_size=donor_layout_kernels,
                 dropout=dropout,
                 max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=self.head_type,
             )
             pair_dim = self.fused_encoder.output_dim
         else:
@@ -323,6 +340,8 @@ class PairSpliceCNN(nn.Module):
                 kernel_size=prefix_kernels,
                 dropout=dropout,
                 max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=self.head_type,
             ).conv_layers
             self.mid_acceptor_prefix = CnnGapEncoder(
                 in_channels=4,
@@ -330,6 +349,8 @@ class PairSpliceCNN(nn.Module):
                 kernel_size=prefix_kernels,
                 dropout=dropout,
                 max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=self.head_type,
             ).conv_layers
             if suffix_channels:
                 self.mid_fused_tail = CnnGapEncoder(
@@ -338,11 +359,16 @@ class PairSpliceCNN(nn.Module):
                     kernel_size=suffix_kernels,
                     dropout=dropout,
                     max_pool_size=max_pool_size,
+                    conv_stride=conv_stride,
+                    head_type=self.head_type,
                 )
                 pair_dim = self.mid_fused_tail.output_dim
             else:
-                self.mid_gap = nn.AdaptiveAvgPool1d(1)
-                pair_dim = 2 * prefix_channels[-1]
+                self.mid_readout = CnnFeatureReadout(
+                    output_channels=2 * prefix_channels[-1],
+                    head_type=self.head_type,
+                )
+                pair_dim = self.mid_readout.output_dim
         self.fc = nn.Sequential(
             nn.Linear(pair_dim, fc_hidden),
             nn.ReLU(inplace=True),
@@ -392,9 +418,9 @@ class PairSpliceCNN(nn.Module):
             if self.mid_fused_tail is not None:
                 mixed = self.mid_fused_tail(fused_mid)
             else:
-                if self.mid_gap is None:
-                    raise RuntimeError("mid fusion GAP is not initialized.")
-                mixed = self.mid_gap(fused_mid).squeeze(-1)
+                if self.mid_readout is None:
+                    raise RuntimeError("mid fusion readout is not initialized.")
+                mixed = self.mid_readout(fused_mid)
         return self.fc(mixed).squeeze(-1)
 
 
@@ -557,6 +583,11 @@ def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParam
             else shared_kernel_sizes
         ),
         max_pool_size=int(model_args.max_pool_size),
+        conv_stride=int(model_args.conv_stride),
+        head_type=normalize_cnn_head_type(
+            getattr(model_args, "head_type", "gap"),
+            arg_name="--head_type",
+        ),
         fusion_mode=fusion_mode,
         dropout=float(model_args.dropout),
         fc_hidden=int(model_args.fc_hidden),
@@ -612,6 +643,8 @@ def train_pair_model(
         raise ValueError("--kernel_size must be positive.")
     if train_params.max_pool_size <= 0:
         raise ValueError("--max_pool_size must be positive.")
+    if train_params.conv_stride <= 0:
+        raise ValueError("--conv_stride must be positive.")
     if train_params.fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
     if train_params.dropout < 0.0 or train_params.dropout >= 1.0:
@@ -852,6 +885,8 @@ def train_pair_model(
                 donor_kernel_sizes=donor_kernel_sizes,
                 acceptor_kernel_sizes=acceptor_kernel_sizes,
                 max_pool_size=train_params.max_pool_size,
+                conv_stride=train_params.conv_stride,
+                head_type=train_params.head_type,
                 fusion_mode=train_params.fusion_mode,
                 dropout=train_params.dropout,
                 fc_hidden=train_params.fc_hidden,
@@ -1071,6 +1106,8 @@ def train_pair_model(
                                     else list(acceptor_kernel_sizes)
                                 ),
                                 "max_pool_size": train_params.max_pool_size,
+                                "conv_stride": train_params.conv_stride,
+                                "head_type": train_params.head_type,
                                 "fusion_mode": train_params.fusion_mode,
                                 "dropout": train_params.dropout,
                                 "fc_hidden": train_params.fc_hidden,
@@ -1173,6 +1210,8 @@ def train_pair_model(
                     else list(acceptor_kernel_sizes)
                 ),
                 "max_pool_size": train_params.max_pool_size,
+                "conv_stride": train_params.conv_stride,
+                "head_type": train_params.head_type,
                 "dropout": train_params.dropout,
                 "fc_hidden": train_params.fc_hidden,
                 "weight_decay": train_params.weight_decay,
@@ -1273,6 +1312,11 @@ def load_pair_model(
             max_pool_size = 2
     else:
         max_pool_size = int(max_pool_size_raw)
+    conv_stride = int(model_config.get("conv_stride", 1))
+    head_type = normalize_cnn_head_type(
+        model_config.get("head_type", "gap"),
+        arg_name="checkpoint head_type",
+    )
     fusion_mode = _normalize_fusion_mode(
         model_config.get("fusion_mode", "late"),
         arg_name="checkpoint fusion_mode",
@@ -1300,6 +1344,8 @@ def load_pair_model(
         donor_kernel_sizes=donor_kernel_sizes,
         acceptor_kernel_sizes=acceptor_kernel_sizes,
         max_pool_size=max_pool_size,
+        conv_stride=conv_stride,
+        head_type=head_type,
         fusion_mode=fusion_mode,
         dropout=dropout,
         fc_hidden=fc_hidden,
@@ -1456,6 +1502,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=2,
         help="Max-pooling width after each conv block. Use 1 to disable pooling.",
+    )
+    parser.add_argument(
+        "--conv_stride",
+        type=int,
+        default=1,
+        help="Shared convolution stride applied to every conv block.",
+    )
+    parser.add_argument(
+        "--head_type",
+        choices=list(CNN_HEAD_TYPE_CHOICES),
+        default="gap",
+        help="CNN readout mode: gap or center.",
     )
     parser.add_argument(
         "--fusion_mode",
@@ -1664,6 +1722,8 @@ def train(
         "kernel_size": train_params.kernel_size,
         "kernel_sizes": shared_kernel_sizes_summary,
         "max_pool_size": train_params.max_pool_size,
+        "conv_stride": train_params.conv_stride,
+        "head_type": train_params.head_type,
         "donor_kernel_sizes": (
             None
             if train_params.donor_kernel_sizes is None
@@ -1723,6 +1783,8 @@ def train(
                 "kernel_size": train_params.kernel_size,
                 "kernel_sizes": shared_kernel_sizes_summary,
                 "max_pool_size": train_params.max_pool_size,
+                "conv_stride": train_params.conv_stride,
+                "head_type": train_params.head_type,
                 "donor_kernel_sizes": (
                     None
                     if train_params.donor_kernel_sizes is None

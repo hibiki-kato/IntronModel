@@ -116,9 +116,13 @@ def test_add_train_args_accepts_fusion_mode() -> None:
 def test_add_train_args_accepts_max_pool_flag() -> None:
     parser = argparse.ArgumentParser()
     cnn_pair.add_train_args(parser)
-    args = parser.parse_args(["--max_pool_size", "1"])
+    args = parser.parse_args(
+        ["--max_pool_size", "1", "--conv_stride", "2", "--head_type", "center"]
+    )
 
     assert args.max_pool_size == 1
+    assert args.conv_stride == 2
+    assert args.head_type == "center"
 
 
 def test_resolve_pair_train_params_accepts_fusion_mode() -> None:
@@ -133,10 +137,14 @@ def test_resolve_pair_train_params_accepts_fusion_mode() -> None:
 def test_resolve_pair_train_params_accepts_max_pool_flag() -> None:
     parser = argparse.ArgumentParser()
     cnn_pair.add_train_args(parser)
-    args = parser.parse_args(["--max_pool_size", "1"])
+    args = parser.parse_args(
+        ["--max_pool_size", "1", "--conv_stride", "2", "--head_type", "center"]
+    )
 
     resolved = cnn_pair._resolve_pair_train_params(args)
     assert resolved.max_pool_size == 1
+    assert resolved.conv_stride == 2
+    assert resolved.head_type == "center"
 
 
 def test_resolve_pair_train_params_normalizes_early_channel_alias() -> None:
@@ -175,6 +183,22 @@ def test_pair_splice_cnn_supports_late_fusion_without_max_pool() -> None:
     ]
     assert max_pool_layers == []
 
+    donor_x = torch.rand(4, 4, 100)
+    acceptor_x = torch.rand(4, 4, 100)
+    logits = model(donor_x, acceptor_x)
+    assert logits.shape == (4,)
+
+
+def test_pair_splice_cnn_supports_center_readout_with_stride() -> None:
+    model = cnn_pair.PairSpliceCNN(
+        donor_conv_channels=[64, 128],
+        acceptor_conv_channels=[64, 128],
+        donor_kernel_sizes=[7, 5],
+        acceptor_kernel_sizes=[7, 5],
+        conv_stride=2,
+        head_type="center",
+        fusion_mode="early",
+    )
     donor_x = torch.rand(4, 4, 100)
     acceptor_x = torch.rand(4, 4, 100)
     logits = model(donor_x, acceptor_x)

@@ -98,18 +98,24 @@ def test_build_run_args_forwards_pair_max_pool_flag() -> None:
         supports_tuned_hparams=False,
         tuned_key_map={},
         stem_param_builder="cnn",
-        required_arg_keys=("MAX_POOL_SIZE",),
+        required_arg_keys=("MAX_POOL_SIZE", "CONV_STRIDE", "HEAD_TYPE"),
         per_task_override_keys=(),
     )
     env = {
         "MODEL": "cnn_pair",
         "MAX_POOL_SIZE": "1",
+        "CONV_STRIDE": "2",
+        "HEAD_TYPE": "center",
     }
 
     args = _build_run_args(spec, env)
 
     assert "--max_pool_size" in args
     assert args[args.index("--max_pool_size") + 1] == "1"
+    assert "--conv_stride" in args
+    assert args[args.index("--conv_stride") + 1] == "2"
+    assert "--head_type" in args
+    assert args[args.index("--head_type") + 1] == "center"
 
 
 def test_stem_params_include_pair_max_pool_flag() -> None:
@@ -134,12 +140,16 @@ def test_stem_params_include_pair_max_pool_flag() -> None:
             "CONV_CHANNELS": "64,128,256",
             "KERNEL_SIZES": "7,7,7",
             "MAX_POOL_SIZE": "1",
+            "CONV_STRIDE": "2",
+            "HEAD_TYPE": "center",
             "DROPOUT": "0.3",
             "FC_HIDDEN": "128",
         },
     )
 
     assert params["max_pool_size"] == 1
+    assert params["conv_stride"] == 2
+    assert params["head_type"] == "center"
 
 
 def test_resolve_species_path_template_replaces_all_tokens() -> None:
