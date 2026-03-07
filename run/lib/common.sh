@@ -113,6 +113,38 @@ intronmodel_format_elapsed() {
 }
 
 
+intronmodel_format_eta_epoch() {
+	local epoch_seconds="$1"
+
+	if date -d "@${epoch_seconds}" '+%m/%d %-H:%M' >/dev/null 2>&1; then
+		date -d "@${epoch_seconds}" '+%m/%d %-H:%M'
+		return 0
+	fi
+	if date -r "${epoch_seconds}" '+%m/%d %-H:%M' >/dev/null 2>&1; then
+		date -r "${epoch_seconds}" '+%m/%d %-H:%M'
+		return 0
+	fi
+
+	python3 - "${epoch_seconds}" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime
+import sys
+
+epoch_seconds = int(sys.argv[1])
+eta_dt = datetime.fromtimestamp(epoch_seconds)
+print(f"{eta_dt:%m/%d} {eta_dt.hour}:{eta_dt:%M}")
+PY
+}
+
+
+intronmodel_build_eta_process_title() {
+	local eta_label="$1"
+
+	printf 'ETA: %s\n' "${eta_label}"
+}
+
+
 intronmodel_start_timer() {
 	INTRONMODEL_SCRIPT_TAG="$1"
 	INTRONMODEL_SCRIPT_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

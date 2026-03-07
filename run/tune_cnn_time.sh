@@ -18,7 +18,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
-PROCESS_TITLE="use?email me Sorry"
+PROCESS_TITLE="ETA"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
@@ -203,6 +203,14 @@ format_elapsed() {
 	intronmodel_format_elapsed "$1"
 }
 
+format_eta() {
+	intronmodel_format_eta_epoch "$1"
+}
+
+build_eta_process_title() {
+	intronmodel_build_eta_process_title "$1"
+}
+
 resolve_species_case() {
 	intronmodel_resolve_species_case "$1" "$2" ""
 }
@@ -381,7 +389,11 @@ RESOLVED_MAX_MODEL_PARAMS="$(
 		"${PYTHON_BIN}"
 )"
 START_SECONDS="${SECONDS}"
+START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
+ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
+ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
+RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
@@ -565,10 +577,10 @@ JSON
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
 	printf '[temp_tune_cnn_6h.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-	printf 'ETA_remaining=%s species=%s target=%s\n' \
-		"${remaining_hms}" "${species}" "${target}"
+		printf 'ETA_remaining=%s species=%s target=%s\n' \
+			"${remaining_hms}" "${species}" "${target}"
 		if ! intronmodel_run_with_process_title \
-			"${PROCESS_TITLE}" \
+			"${RUNTIME_PROCESS_TITLE}" \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 			--config "${config_path}"; then

@@ -54,6 +54,24 @@ def test_common_json_string_or_null_quotes_resolved_species_path() -> None:
     assert run.stdout.strip() == '"data/Dmel/raw/Dmel.err"'
 
 
+def test_common_format_eta_epoch_uses_month_day_and_hour_minute() -> None:
+    run = _run_common_shell(
+        'TZ=UTC intronmodel_format_eta_epoch "1704072660"'
+    )
+
+    assert run.returncode == 0
+    assert run.stdout.strip() == "01/01 1:31"
+
+
+def test_common_build_eta_process_title_formats_eta_prefix() -> None:
+    run = _run_common_shell(
+        'intronmodel_build_eta_process_title "01/01 1:31"'
+    )
+
+    assert run.returncode == 0
+    assert run.stdout.strip() == "ETA: 01/01 1:31"
+
+
 def test_common_resolve_seed_list_defaults_to_base_seed() -> None:
     run = _run_common_shell(
         'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'

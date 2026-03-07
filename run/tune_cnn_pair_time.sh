@@ -24,7 +24,7 @@ ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
 SEED_LIST="0, 1, 2, 3, 4"
-PROCESS_TITLE="use? email me"
+PROCESS_TITLE="ETA"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="2"
@@ -166,6 +166,14 @@ source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
 	intronmodel_format_elapsed "$1"
+}
+
+format_eta() {
+	intronmodel_format_eta_epoch "$1"
+}
+
+build_eta_process_title() {
+	intronmodel_build_eta_process_title "$1"
 }
 
 resolve_species_case() {
@@ -368,7 +376,11 @@ RESOLVED_MAX_MODEL_PARAMS="$(
 		"${PYTHON_BIN}"
 )"
 START_SECONDS="${SECONDS}"
+START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
+ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
+ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
+RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
@@ -552,7 +564,7 @@ JSON
 	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
 	if ! intronmodel_run_with_process_title \
-		"${PROCESS_TITLE}" \
+		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \
 		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${config_path}"; then
