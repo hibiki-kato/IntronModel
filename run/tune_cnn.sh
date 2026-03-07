@@ -185,6 +185,7 @@ resolve_search_space_file() {
 	local project_root="$2"
 	local species="$3"
 	local target="$4"
+	local tuning_model_name="$5"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -195,13 +196,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/cnn/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -453,21 +454,26 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 	fi
 fi
 
+TUNING_MODEL_NAME="cnn"
+if [[ "${MASK_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="cnn_mask"
+fi
+
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 echo "[tune_cnn.sh] species=${SPECIES}"
 echo "[tune_cnn.sh] targets=${TARGET_LIST[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
-	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/cnn/${TARGET}/${RUN_TIMESTAMP}"
-	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/cnn/${TARGET}/best_config.json"
+	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
+	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
 			"tune_cnn.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"cnn" \
+			"${TUNING_MODEL_NAME}" \
 			"${SPECIES}" \
 			"${TARGET}" \
 			"${GLOBAL_BEST_CONFIG_PATH}" \
@@ -539,7 +545,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
 			"${SEARCH_SPACE_FILE}" \
 			"${PROJECT_ROOT}" \
 			"${SPECIES}" \
-			"${TARGET}"
+			"${TARGET}" \
+			"${TUNING_MODEL_NAME}"
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(

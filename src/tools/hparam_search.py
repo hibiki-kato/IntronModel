@@ -1030,8 +1030,10 @@ def _resolve_hparam_auto_num_workers(max_parallel_trials: int) -> int:
 
     The hparam sweep launches many trials concurrently, and each model trial may
     create multiple DataLoaders. A direct ``cpu_count // 2`` per trial often
-    oversubscribes CPU resources heavily. This resolver allocates a per-trial
-    worker budget and keeps a conservative cap for stability.
+    oversubscribes CPU resources heavily. This resolver keeps the existing
+    conservative default, then additionally caps it by ``cpu_count // parallel``
+    so per-trial workers never exceed the CPU budget implied by GPU-run
+    parallelism.
     """
     cpu_count = os.cpu_count() or 4
     parallel = max(1, int(max_parallel_trials))
@@ -1039,7 +1041,8 @@ def _resolve_hparam_auto_num_workers(max_parallel_trials: int) -> int:
     workers = max(1, per_trial_cpu_budget // 4)
     if cpu_count >= 64 and parallel >= 4:
         workers = max(workers, 4)
-    return min(8, workers)
+    current_default = min(8, workers)
+    return min(current_default, per_trial_cpu_budget)
 
 
 def _resolve_trial_num_workers(num_workers_value: ArgValue) -> Optional[int]:

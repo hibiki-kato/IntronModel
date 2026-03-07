@@ -165,6 +165,7 @@ resolve_python_bin() {
 resolve_search_space_file() {
 	local explicit_file="$1"
 	local species="$2"
+	local tuning_model_name="$3"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -175,16 +176,28 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/pair/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/cnn_pair/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
+	fi
+	if [[ "${tuning_model_name}" != "cnn_pair" ]]; then
+		local base_target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
+		if [[ -f "${base_target_file}" ]]; then
+			printf '%s\n' "${base_target_file}"
+			return 0
+		fi
+		local base_species_file="${DATA_ROOT}/${species}/tuning/cnn_pair/search_space.json"
+		if [[ -f "${base_species_file}" ]]; then
+			printf '%s\n' "${base_species_file}"
+			return 0
+		fi
 	fi
 
 	return 1
@@ -213,12 +226,13 @@ run_double_descent_plot() {
 	local python_bin="$1"
 	local project_root="$2"
 	local species_name="$3"
+	local model_name="$4"
 
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
 		--target "pair" \
-		--model "cnn_pair" || true
+		--model "${model_name}" || true
 }
 
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
@@ -312,6 +326,11 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 	fi
 fi
 
+TUNING_MODEL_NAME="cnn_pair"
+if [[ "${MASK_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="cnn_pair_mask"
+fi
+
 PYTHON_BIN="$(resolve_python_bin)"
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
@@ -360,15 +379,15 @@ while true; do
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/best_config.json"
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
 			"tune_cnn_pair_time.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"cnn_pair" \
+			"${TUNING_MODEL_NAME}" \
 			"${species}" \
 			"pair" \
 			"${global_best_path}" \
@@ -402,7 +421,8 @@ while true; do
 	if search_space_resolved="$(
 		resolve_search_space_file \
 			"${SEARCH_SPACE_FILE}" \
-			"${species}"
+			"${species}" \
+			"${TUNING_MODEL_NAME}"
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(
@@ -507,7 +527,8 @@ JSON
 		run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
-			"${species}"
+			"${species}" \
+			"${TUNING_MODEL_NAME}"
 	fi
 	cycle_duration_seconds=$((SECONDS - job_start_seconds))
 	TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))
@@ -536,7 +557,8 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 		run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
-			"${final_species}"
+			"${final_species}" \
+			"${TUNING_MODEL_NAME}"
 	done
 fi
 

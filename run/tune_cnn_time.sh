@@ -187,6 +187,7 @@ resolve_search_space_file() {
 	local project_root="$2"
 	local species="$3"
 	local target="$4"
+	local tuning_model_name="$5"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -197,13 +198,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/cnn/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -236,11 +237,13 @@ run_double_descent_plot() {
 	local project_root="$2"
 	local species_name="$3"
 	local target_name="$4"
+	local model_name="$5"
 
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
-		--target "${target_name}" || true
+		--target "${target_name}" \
+		--model "${model_name}" || true
 }
 
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
@@ -330,6 +333,11 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 	fi
 fi
 
+TUNING_MODEL_NAME="cnn"
+if [[ "${MASK_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="cnn_mask"
+fi
+
 PYTHON_BIN="$(resolve_python_bin)"
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
@@ -385,8 +393,8 @@ while true; do
 
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/cnn/${target}/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/cnn/${target}"\
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}"\
 "/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
@@ -394,7 +402,7 @@ while true; do
 			"temp_tune_cnn_6h.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"cnn" \
+			"${TUNING_MODEL_NAME}" \
 			"${species}" \
 			"${target}" \
 			"${global_best_path}" \
@@ -432,7 +440,8 @@ while true; do
 				"${SEARCH_SPACE_FILE}" \
 				"${PROJECT_ROOT}" \
 				"${species}" \
-				"${target}"
+				"${target}" \
+				"${TUNING_MODEL_NAME}"
 		)"; then
 			search_space_path="${search_space_resolved}"
 			if ! target_space_json="$(
@@ -534,7 +543,8 @@ JSON
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
-			"${target}"
+			"${target}" \
+			"${TUNING_MODEL_NAME}"
 	fi
 	cycle_duration_seconds=$((SECONDS - job_start_seconds))
 	TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))

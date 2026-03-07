@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.run_wrapper_pipeline import (
     SPECS,
     _apply_tuned_overrides,
+    _resolve_tuned_model_name,
     _resolve_tuned_checkpoint_path,
     _resolve_tuned_config_path,
 )
@@ -158,3 +159,51 @@ def test_apply_tuned_overrides_uses_dnabert_variant_model_name(
     assert env["ACCEPTOR_LR"] == "2.5e-05"
     assert env["ACCEPTOR_BATCH_SIZE"] == "12"
     assert env["ACCEPTOR_LOSS"] == "focal"
+
+
+def test_resolve_tuned_model_name_appends_mask_suffix_for_mask_mode() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["cnn.sh"],
+        model_name="cnn",
+        mask_mode="on",
+    )
+    assert resolved == "cnn_mask"
+
+
+def test_apply_tuned_overrides_reads_mask_tuning_dir_for_cnn(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    tuned_config = (
+        tmp_path / species / "tuning" / "cnn_mask" / "donor" / "best_config.json"
+    )
+    tuned_config.parent.mkdir(parents=True, exist_ok=True)
+    tuned_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "lr": 0.0007,
+                    "batch_size": 1024,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "cnn",
+        "SPECIES": species,
+        "MASK_MODE": "on",
+        "TRAIN_TARGET": "donor",
+        "USE_TUNED_HPARAMS": "required",
+        "DONOR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "DONOR_LR": "",
+        "DONOR_BATCH_SIZE": "",
+    }
+    resolved = _apply_tuned_overrides(SPECS["cnn.sh"], env, tmp_path)
+
+    assert resolved["donor"] == tuned_config.resolve()
+    assert env["DONOR_LR"] == "0.0007"
+    assert env["DONOR_BATCH_SIZE"] == "1024"

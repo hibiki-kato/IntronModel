@@ -262,6 +262,12 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
+    plot_eval = subprocess.run(
+        ["bash", "-n", str(root / "run" / "plot_eval.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert cnn.returncode == 0, cnn.stderr
     assert tune.returncode == 0, tune.stderr
     assert tune_pair_time.returncode == 0, tune_pair_time.stderr
@@ -278,3 +284,4 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert tune_resdil_time.returncode == 0, tune_resdil_time.stderr
     assert tune_tcn_time.returncode == 0, tune_tcn_time.stderr
     assert eval_pair.returncode == 0, eval_pair.stderr
+    assert plot_eval.returncode == 0, plot_eval.stderr

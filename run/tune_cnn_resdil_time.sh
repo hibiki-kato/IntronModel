@@ -51,6 +51,10 @@ MAX_MODEL_PARAMS_MODEL_FACTOR="0.90"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+MASK_MODE="off"
 UPDATE_DOUBLE_DESCENT_PLOT="1"
 
 SEARCH_ALGO="history_guided"
@@ -190,6 +194,7 @@ resolve_search_space_file() {
 	local project_root="$2"
 	local species="$3"
 	local target="$4"
+	local tuning_model_name="$5"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -200,13 +205,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/cnn_resdil/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/cnn_resdil/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -239,12 +244,13 @@ run_double_descent_plot() {
 	local project_root="$2"
 	local species_name="$3"
 	local target_name="$4"
+	local model_name="$5"
 
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
 		--target "${target_name}" \
-		--model "cnn_resdil" || true
+		--model "${model_name}" || true
 }
 
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
@@ -314,6 +320,35 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	echo "[tune_cnn_resdil_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
 	exit 1
 fi
+if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
+	echo "[tune_cnn_resdil_time.sh] MASK_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${MASK_MODE}" == "on" ]]; then
+	mask_bp="${DONOR_LEN}"
+	if (( ACCEPTOR_LEN > DONOR_LEN )); then
+		mask_bp="${ACCEPTOR_LEN}"
+	fi
+	if [[ -z "${TRAIN_POS_PATH}" ]]; then
+		TRAIN_POS_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.err"
+	fi
+	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
+		TRAIN_NEG_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.neg.err"
+	fi
+	if [[ -z "${TAG}" ]]; then
+		TAG="mask"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
+
+TUNING_MODEL_NAME="cnn_resdil"
+if [[ "${MASK_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="cnn_resdil_mask"
+fi
 
 PYTHON_BIN="$(resolve_python_bin)"
 RESOLVED_MAX_MODEL_PARAMS="$(
@@ -370,8 +405,8 @@ while true; do
 
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/cnn_resdil/${target}/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/cnn_resdil/${target}"\
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}"\
 "/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
@@ -379,7 +414,7 @@ while true; do
 			"tune_cnn_resdil_time.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"cnn_resdil" \
+			"${TUNING_MODEL_NAME}" \
 			"${species}" \
 			"${target}" \
 			"${global_best_path}" \
@@ -406,7 +441,8 @@ while true; do
 				"${SEARCH_SPACE_FILE}" \
 				"${PROJECT_ROOT}" \
 				"${species}" \
-				"${target}"
+				"${target}" \
+				"${TUNING_MODEL_NAME}"
 		)"; then
 			search_space_path="${search_space_resolved}"
 			if ! target_space_json="$(
@@ -429,6 +465,17 @@ while true; do
 			echo "[tune_cnn_resdil_time.sh] using embedded ${target} search space."
 		fi
 
+		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		TRAIN_POS_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${species}")"
+		)"
+		TRAIN_NEG_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${species}")"
+		)"
 		cat > "${config_path}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
@@ -463,6 +510,7 @@ while true; do
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
+    "tag": ${TAG_JSON},
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
     "allow_tf32": ${ALLOW_TF32},
@@ -474,8 +522,8 @@ while true; do
     "pin_memory": ${PIN_MEMORY},
     "min_batch_size": ${MIN_BATCH_SIZE},
     "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": null,
-    "train_neg_path": null
+    "train_pos_path": ${TRAIN_POS_PATH_JSON},
+    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},
@@ -506,7 +554,8 @@ JSON
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
-			"${target}"
+			"${target}" \
+			"${TUNING_MODEL_NAME}"
 	fi
 	cycle_duration_seconds=$((SECONDS - job_start_seconds))
 	TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))

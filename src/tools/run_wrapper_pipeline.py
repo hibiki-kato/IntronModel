@@ -293,18 +293,19 @@ def _apply_tuned_overrides(
         return resolved_configs
 
     species = env["SPECIES"]
-    tuned_model_name = spec.model_env_name
-    if spec.script_name == "dnabert.sh":
-        resolved_model_name = env.get("MODEL", "").strip()
-        if resolved_model_name != "":
-            tuned_model_name = resolved_model_name
+    model_name = env.get("MODEL", "").strip() or spec.model_env_name
+    tuned_model_name = _resolve_tuned_model_name(
+        spec=spec,
+        model_name=model_name,
+        mask_mode=env.get("MASK_MODE", "off"),
+    )
 
     if env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == "":
         env["SHARED_TUNED_CONFIG_PATH"] = str(
             data_root / species / "tuning" / tuned_model_name / "best_config.json"
         )
 
-    model_tasks = checkpoint_tasks_for_model(tuned_model_name)
+    model_tasks = checkpoint_tasks_for_model(model_name)
     train_target = env["TRAIN_TARGET"]
     is_single_task_model = len(model_tasks) == 1
     if is_single_task_model:
@@ -378,6 +379,23 @@ def _apply_tuned_overrides(
         )
         resolved_configs[task] = resolved.resolve()
     return resolved_configs
+
+
+def _resolve_tuned_model_name(
+    *,
+    spec: WrapperSpec,
+    model_name: str,
+    mask_mode: str,
+) -> str:
+    """Resolve tuning directory model name with mask-mode separation."""
+    if spec.script_name == "dnabert.sh":
+        return model_name
+
+    normalized_mode = _normalize_on_off_mode(mask_mode, "MASK_MODE")
+    mask_enabled_models = {"cnn", "cnn_pair", "cnn_resdil", "tcn"}
+    if normalized_mode == "on" and model_name in mask_enabled_models:
+        return f"{model_name}_mask"
+    return model_name
 
 
 def _resolve_expected_checkpoint_paths_for_run(
@@ -789,6 +807,78 @@ def _detect_mask_test_tsv(data_root: Path, species: str) -> Path | None:
     return None
 
 
+def _detect_fasta_for_test_data(raw_dir: Path) -> Path | None:
+    """Detect one FASTA path using make_test_data.sh-compatible priority."""
+    clean_candidates = sorted(raw_dir.glob("*.clean.fna"))
+    if clean_candidates:
+        return clean_candidates[0]
+    fna_candidates = sorted(raw_dir.glob("*.fna"))
+    if fna_candidates:
+        return fna_candidates[0]
+    return None
+
+
+def _detect_gtf_for_test_data(raw_dir: Path, fasta_path: Path) -> Path | None:
+    """Detect one GTF path using make_test_data.sh-compatible priority."""
+    direct = Path(f"{fasta_path}.gtf")
+    if direct.is_file():
+        return direct
+    fna_gtf_candidates = sorted(raw_dir.glob("*.fna.gtf"))
+    if fna_gtf_candidates:
+        return fna_gtf_candidates[0]
+    gtf_candidates = sorted(raw_dir.glob("*.gtf"))
+    if gtf_candidates:
+        return gtf_candidates[0]
+    return None
+
+
+def _build_mask_test_tsv(
+    *,
+    data_root: Path,
+    species: str,
+    donor_len: int,
+    acceptor_len: int,
+) -> Path | None:
+    """Build one clipped test TSV for mask-mode evaluation."""
+    raw_dir = data_root / species / "raw"
+    if not raw_dir.is_dir():
+        return None
+
+    fasta_path = _detect_fasta_for_test_data(raw_dir)
+    if fasta_path is None:
+        return None
+    gtf_path = _detect_gtf_for_test_data(raw_dir, fasta_path)
+    if gtf_path is None:
+        return None
+
+    output_path = raw_dir / "transcripts_with_intron_half.tsv"
+    cmd = [
+        sys.executable,
+        str(PROJECT_ROOT / "src" / "util" / "make_test_data_from_gtf.py"),
+        "--fasta",
+        str(fasta_path),
+        "--gtf",
+        str(gtf_path),
+        "--out_tsv",
+        str(output_path),
+        "--donor_len",
+        str(donor_len),
+        "--acceptor_len",
+        str(acceptor_len),
+        "--feature",
+        "exon",
+        "--limit",
+        "0",
+        "--clip-short-intron",
+    ]
+    proc = subprocess.run(cmd, check=False, env=os.environ.copy())
+    if proc.returncode != 0 or not output_path.is_file():
+        return None
+    if not _has_test_tsv_required_columns(output_path):
+        return None
+    return output_path
+
+
 def _apply_mask_mode_defaults(
     *,
     env: dict[str, str],
@@ -805,10 +895,12 @@ def _apply_mask_mode_defaults(
     mask_bp = max(donor_len, acceptor_len)
 
     if env.get("TRAIN_POS_PATH", "").strip() == "":
-        env["TRAIN_POS_PATH"] = f"data/{{species}}/raw/{mask_bp}bp_trimmed_npad.err"
+        env["TRAIN_POS_PATH"] = str(
+            data_root / species / "raw" / f"{mask_bp}bp_trimmed_npad.err"
+        )
     if env.get("TRAIN_NEG_PATH", "").strip() == "":
-        env["TRAIN_NEG_PATH"] = (
-            f"data/{{species}}/raw/{mask_bp}bp_trimmed_npad.neg.err"
+        env["TRAIN_NEG_PATH"] = str(
+            data_root / species / "raw" / f"{mask_bp}bp_trimmed_npad.neg.err"
         )
 
     if env.get("TAG", "").strip() == "":
@@ -827,12 +919,24 @@ def _apply_mask_mode_defaults(
     if detected is not None:
         env["TEST_TSV_PATH"] = str(detected)
         print(f"[{species}] mask-mode test_tsv auto-detected: {detected}")
-    else:
-        print(
-            f"[{species}] mask-mode test_tsv not found; "
-            "fallback to raw/transcripts.tsv.",
-            file=sys.stderr,
-        )
+        return
+
+    generated = _build_mask_test_tsv(
+        data_root=data_root,
+        species=species,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+    if generated is not None:
+        env["TEST_TSV_PATH"] = str(generated)
+        print(f"[{species}] mask-mode test_tsv auto-generated: {generated}")
+        return
+
+    print(
+        f"[{species}] mask-mode test_tsv not found/generated; "
+        "fallback to raw/transcripts.tsv.",
+        file=sys.stderr,
+    )
 
 
 def _run_single_species(

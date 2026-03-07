@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import tools.run_wrapper_pipeline as run_wrapper_pipeline
 from tools.run_wrapper_pipeline import WrapperSpec
 from tools.run_wrapper_pipeline import (
     _apply_mask_mode_defaults,
@@ -119,6 +120,43 @@ def test_apply_mask_mode_defaults_sets_tag_and_paths(tmp_path: Path) -> None:
 
     assert env["TAG"] == "mask"
     assert env["NAME_FIELDS"] == "tag"
-    assert env["TRAIN_POS_PATH"] == "data/{species}/raw/100bp_trimmed_npad.err"
-    assert env["TRAIN_NEG_PATH"] == "data/{species}/raw/100bp_trimmed_npad.neg.err"
+    assert env["TRAIN_POS_PATH"] == str(raw_dir / "100bp_trimmed_npad.err")
+    assert env["TRAIN_NEG_PATH"] == str(raw_dir / "100bp_trimmed_npad.neg.err")
     assert env["TEST_TSV_PATH"] == str(raw_dir / "transcripts_mask.tsv")
+
+
+def test_apply_mask_mode_defaults_builds_mask_test_tsv_when_missing(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    raw_dir = tmp_path / "Dmel" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    generated = raw_dir / "transcripts_with_intron_half.tsv"
+    generated.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MASK_MODE": "on",
+        "DONOR_LEN": "100",
+        "ACCEPTOR_LEN": "100",
+        "NAME_FIELDS": "none",
+        "TAG": "",
+        "TRAIN_POS_PATH": "",
+        "TRAIN_NEG_PATH": "",
+        "TEST_TSV_PATH": "",
+    }
+
+    def _fake_build_mask_test_tsv(**_: object) -> Path:
+        return generated
+
+    monkeypatch.setattr(
+        run_wrapper_pipeline,
+        "_build_mask_test_tsv",
+        _fake_build_mask_test_tsv,
+    )
+
+    _apply_mask_mode_defaults(env=env, data_root=tmp_path, species="Dmel")
+
+    assert env["TEST_TSV_PATH"] == str(generated)

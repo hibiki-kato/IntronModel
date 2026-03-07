@@ -18,7 +18,7 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
-MASK_MODE="off"
+MASK_MODE="on"
 MASK_TEST_TSV_PATH=""
 
 EPOCHS="10"
@@ -102,6 +102,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+INTRONMODEL_AUTO_TMUX="off"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 intronmodel_start_timer "cnn_pair.sh"

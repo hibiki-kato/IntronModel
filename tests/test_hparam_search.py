@@ -283,6 +283,18 @@ def test_resolve_trial_num_workers_auto_has_floor_on_large_multi_gpu_nodes(
     assert resolved == 4
 
 
+def test_resolve_trial_num_workers_auto_is_capped_by_cpu_per_parallel_trial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tools.hparam_search.os.cpu_count", lambda: 64)
+    previous_parallel = hparam_search._set_active_max_parallel_trials(32)
+    try:
+        resolved = hparam_search._resolve_trial_num_workers("auto")
+    finally:
+        _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
+    assert resolved == 2
+
+
 def test_run_trial_rewrites_auto_num_workers_to_effective_value(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

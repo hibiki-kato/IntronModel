@@ -54,6 +54,10 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+MASK_MODE="off"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
@@ -182,6 +186,7 @@ resolve_search_space_file() {
 	local project_root="$2"
 	local species="$3"
 	local target="$4"
+	local tuning_model_name="$5"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -192,13 +197,13 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/tcn/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/${target}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
 
-	local species_file="${DATA_ROOT}/${species}/tuning/tcn/search_space.json"
+	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
@@ -405,6 +410,35 @@ if [[ "${QUICK_TRIALS_MODE}" == "budget" ]]; then
 		exit 1
 	fi
 fi
+if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
+	echo "[tune_tcn.sh] MASK_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${MASK_MODE}" == "on" ]]; then
+	mask_bp="${DONOR_LEN}"
+	if (( ACCEPTOR_LEN > DONOR_LEN )); then
+		mask_bp="${ACCEPTOR_LEN}"
+	fi
+	if [[ -z "${TRAIN_POS_PATH}" ]]; then
+		TRAIN_POS_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.err"
+	fi
+	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
+		TRAIN_NEG_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.neg.err"
+	fi
+	if [[ -z "${TAG}" ]]; then
+		TAG="mask"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
+
+TUNING_MODEL_NAME="tcn"
+if [[ "${MASK_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="tcn_mask"
+fi
 
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 echo "[tune_tcn.sh] species=${SPECIES}"
@@ -412,15 +446,15 @@ echo "[tune_tcn.sh] targets=${TARGET_LIST[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
-	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/tcn/${TARGET}/${RUN_TIMESTAMP}"
-	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/tcn/${TARGET}/best_config.json"
+	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
+	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
 			"tune_tcn.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
-			"tcn" \
+			"${TUNING_MODEL_NAME}" \
 			"${SPECIES}" \
 			"${TARGET}" \
 			"${GLOBAL_BEST_CONFIG_PATH}" \
@@ -492,7 +526,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
 			"${SEARCH_SPACE_FILE}" \
 			"${PROJECT_ROOT}" \
 			"${SPECIES}" \
-			"${TARGET}"
+			"${TARGET}" \
+			"${TUNING_MODEL_NAME}"
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(
@@ -515,6 +550,17 @@ for TARGET in "${TARGET_LIST[@]}"; do
 			fi
 
 	CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
+	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+	TRAIN_POS_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
+	)"
+	TRAIN_NEG_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
+	)"
 	cat > "${CONFIG_PATH}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
@@ -547,6 +593,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
+    "tag": ${TAG_JSON},
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
     "allow_tf32": ${ALLOW_TF32},
@@ -558,8 +605,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "pin_memory": ${PIN_MEMORY},
     "min_batch_size": ${MIN_BATCH_SIZE},
     "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": null,
-    "train_neg_path": null
+    "train_pos_path": ${TRAIN_POS_PATH_JSON},
+    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},
