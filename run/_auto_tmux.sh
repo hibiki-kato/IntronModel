@@ -117,9 +117,7 @@ intronmodel_auto_tmux() {
 		"${cwd_q}" \
 		"${script_q}" \
 		"${arg_q}"
-	local session_default="intronmodel_${script_name%.*}"
-	session_default="${session_default//[^a-zA-Z0-9_]/_}"
-	local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-${session_default}}"
+	local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-0}"
 
 	_intronmodel_tmux_sync_env
 

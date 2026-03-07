@@ -27,7 +27,7 @@ EOT
 # USER DEFAULTS (optional edit)
 # --------------------------
 CONDA_ENV="intronmodel"
-SPECIES="Mmus"
+SPECIES="Mmus, Athal, Dmel"
 OUTPUT_PNG=""
 INTERACTIVE="1"
 X_MIN=""
