@@ -33,6 +33,9 @@ from util.checkpoint_io import (
 )
 from util.data_proc import build_output_stem, parse_name_fields
 from util.model_task_paths import checkpoint_tasks_for_model
+from util.process_title import apply_process_title_from_env
+
+_ = apply_process_title_from_env()
 
 
 @dataclass(frozen=True)

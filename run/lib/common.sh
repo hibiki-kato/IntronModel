@@ -241,7 +241,8 @@ intronmodel_run_with_process_title() {
 	fi
 
 	(
-		exec -a "${process_title}" "$@"
+		export INTRONMODEL_PROCESS_TITLE="${process_title}"
+		"$@"
 	)
 }
 

@@ -24,7 +24,7 @@ ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
 SEED_LIST="0, 1, 2, 3, 4"
-PROCESS_TITLE="email me if u wanna use (hibiki@umd) I'll stop right away"
+PROCESS_TITLE="use? email me"
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="2"

@@ -42,6 +42,9 @@ from util.validation_protocol import (
     build_validation_protocol,
 )
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
+from util.process_title import apply_process_title_from_env
+
+_ = apply_process_title_from_env()
 
 Scalar = int | float | str | bool
 ArgValue = Scalar | None

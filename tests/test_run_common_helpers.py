@@ -73,3 +73,18 @@ def test_common_resolve_seed_list_normalizes_and_deduplicates_entries() -> None:
 
     assert run.returncode == 0
     assert run.stdout.strip().splitlines() == ["2024", "1337", "3407"]
+
+
+def test_common_run_with_process_title_preserves_python_executable() -> None:
+    run = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        'intronmodel_run_with_process_title '
+        '"test process title" '
+        '"${PY_BIN}" - <<\'PY\'\n'
+        "import sys\n"
+        "print(sys.executable)\n"
+        "PY"
+    )
+
+    assert run.returncode == 0
+    assert run.stdout.strip() != ""
