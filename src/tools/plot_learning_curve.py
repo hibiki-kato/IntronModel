@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+SUPPORTED_TASK_NAMES: tuple[str, ...] = ("donor", "acceptor", "pair")
+
 
 class EpochRecord(TypedDict):
     """One epoch-level metrics record for a single task."""
@@ -16,6 +18,7 @@ class EpochRecord(TypedDict):
     train_loss: float | None
     pr_auc: float | None
     roc_auc: float | None
+    max_f1: float | None
     acc_at_0_5: float | None
     objective_metric: str
     objective_score: float | None
@@ -74,6 +77,7 @@ def _normalize_epoch_record(raw: object) -> EpochRecord | None:
         train_loss=_as_float(raw.get("train_loss")),
         pr_auc=_as_float(raw.get("pr_auc")),
         roc_auc=_as_float(raw.get("roc_auc")),
+        max_f1=_as_float(raw.get("max_f1")),
         acc_at_0_5=_as_float(raw.get("acc@0.5")),
         objective_metric=objective_metric_raw,
         objective_score=_as_float(raw.get("objective_score")),
@@ -107,6 +111,17 @@ def _load_task_curve(payload: dict[str, object], task_name: str) -> TaskCurve | 
     return TaskCurve(name=task_name, records=records)
 
 
+def _load_task_curves(payload: dict[str, object]) -> list[TaskCurve]:
+    """Load all supported task curves present in one metrics payload."""
+
+    task_curves: list[TaskCurve] = []
+    for task_name in SUPPORTED_TASK_NAMES:
+        curve = _load_task_curve(payload, task_name)
+        if curve is not None:
+            task_curves.append(curve)
+    return task_curves
+
+
 def _default_output_path(metrics_json: Path) -> Path:
     """Build default output PNG path for a metrics JSON path."""
 
@@ -119,20 +134,18 @@ def _default_output_path(metrics_json: Path) -> Path:
 
 
 def plot_curves(*, metrics_json: Path, output_png: Path, dpi: int) -> None:
-    """Render and save learning curves for donor/acceptor tasks."""
+    """Render and save learning curves for all supported training tasks."""
 
     payload_obj = json.loads(metrics_json.read_text(encoding="utf-8"))
     if not isinstance(payload_obj, dict):
         raise ValueError("Metrics JSON top-level value must be an object.")
 
-    task_curves: list[TaskCurve] = []
-    for task_name in ("donor", "acceptor"):
-        curve = _load_task_curve(payload_obj, task_name)
-        if curve is not None:
-            task_curves.append(curve)
-
+    task_curves = _load_task_curves(payload_obj)
     if not task_curves:
-        raise ValueError("No epoch_history found in donor/acceptor metrics.")
+        supported = ", ".join(SUPPORTED_TASK_NAMES)
+        raise ValueError(
+            f"No epoch_history found in supported task metrics: {supported}."
+        )
 
     try:
         import matplotlib
@@ -166,6 +179,7 @@ def plot_curves(*, metrics_json: Path, output_png: Path, dpi: int) -> None:
 
         pr_auc = [row["pr_auc"] for row in records]
         roc_auc = [row["roc_auc"] for row in records]
+        max_f1 = [row["max_f1"] for row in records]
         acc_at_0_5 = [row["acc_at_0_5"] for row in records]
         objective = [row["objective_score"] for row in records]
 
@@ -173,6 +187,8 @@ def plot_curves(*, metrics_json: Path, output_png: Path, dpi: int) -> None:
             ax_metric.plot(epochs, pr_auc, label="pr_auc", linewidth=1.5)
         if any(value is not None for value in roc_auc):
             ax_metric.plot(epochs, roc_auc, label="roc_auc", linewidth=1.5)
+        if any(value is not None for value in max_f1):
+            ax_metric.plot(epochs, max_f1, label="max_f1", linewidth=1.5)
         if any(value is not None for value in acc_at_0_5):
             ax_metric.plot(epochs, acc_at_0_5, label="acc@0.5", linewidth=1.5)
         if any(value is not None for value in objective):

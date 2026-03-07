@@ -27,6 +27,7 @@ NAME_FIELD_CHOICES: tuple[str, ...] = (
     "conv_channels",
     "kernel_sizes",
     "kernel_size",
+    "max_pool_size",
     "dropout",
     "fc_hidden",
     "weight_decay",
@@ -57,6 +58,7 @@ NAME_FIELD_LABELS: dict[str, str] = {
     "conv_channels": "ch",
     "kernel_sizes": "kss",
     "kernel_size": "ks",
+    "max_pool_size": "mps",
     "dropout": "do",
     "fc_hidden": "fch",
     "weight_decay": "wd",
@@ -661,6 +663,63 @@ def reshape_site_sequence(
     return None
 
 
+def _reshape_or_pad_test_site_sequence(
+    seq: str,
+    site_type: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+) -> Optional[str]:
+    """Reshape one inference-time site sequence to fixed length.
+
+    Test TSVs generated for mask-mode evaluation may clip intronic context for
+    short introns, which yields variable-length sequences. Inference models are
+    trained on fixed-width windows, so short donor windows must be padded on the
+    right and short acceptor windows must be padded on the left with ``N``.
+
+    Parameters
+    ----------
+    seq : str
+        Raw site sequence from the test TSV.
+    site_type : str
+        Site type label. Supported values are ``donor`` and ``acceptor``.
+    donor_len : int | None
+        Requested fixed donor window length.
+    acceptor_len : int | None
+        Requested fixed acceptor window length.
+
+    Returns
+    -------
+    str | None
+        Fixed-length sequence ready for inference, or ``None`` for unsupported
+        site types.
+    """
+    reshaped = reshape_site_sequence(
+        seq=seq,
+        site_type=site_type,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+    )
+    if reshaped is not None:
+        return reshaped
+
+    seq_upper = seq.upper()
+    if site_type == "donor":
+        if donor_len is None:
+            return seq_upper
+        if len(seq_upper) > donor_len:
+            return seq_upper[:donor_len]
+        return seq_upper + ("N" * (donor_len - len(seq_upper)))
+
+    if site_type == "acceptor":
+        if acceptor_len is None:
+            return seq_upper
+        if len(seq_upper) > acceptor_len:
+            return seq_upper[-acceptor_len:]
+        return ("N" * (acceptor_len - len(seq_upper))) + seq_upper
+
+    return None
+
+
 def _parse_optional_strand(
     tokens: Sequence[str],
     index: int,
@@ -1155,6 +1214,25 @@ def read_test_site_rows(
     donor_len: Optional[int],
     acceptor_len: Optional[int],
 ) -> Tuple[List[Dict[str, object]], int]:
+    """Read inference-time site rows from one transcript TSV.
+
+    Short mask-mode windows are padded with ``N`` to the requested fixed length
+    instead of being dropped.
+
+    Parameters
+    ----------
+    test_tsv : str
+        Test TSV path.
+    donor_len : int | None
+        Requested fixed donor window length.
+    acceptor_len : int | None
+        Requested fixed acceptor window length.
+
+    Returns
+    -------
+    tuple[list[dict[str, object]], int]
+        Parsed rows and the count of rows skipped due to invalid data.
+    """
     rows: List[Dict[str, object]] = []
     skipped_short = 0
 
@@ -1170,9 +1248,9 @@ def read_test_site_rows(
                 continue
 
             site_type = parts[idx["site_type"]]
-            reshaped = reshape_site_sequence(
-                parts[idx["seq"]],
-                site_type,
+            reshaped = _reshape_or_pad_test_site_sequence(
+                seq=parts[idx["seq"]],
+                site_type=site_type,
                 donor_len=donor_len,
                 acceptor_len=acceptor_len,
             )
@@ -1246,9 +1324,9 @@ def read_test_pair_rows(
             site_type = parts[idx["site_type"]]
             if site_type not in {"donor", "acceptor"}:
                 continue
-            reshaped = reshape_site_sequence(
-                parts[idx["seq"]],
-                site_type,
+            reshaped = _reshape_or_pad_test_site_sequence(
+                seq=parts[idx["seq"]],
+                site_type=site_type,
                 donor_len=donor_len,
                 acceptor_len=acceptor_len,
             )

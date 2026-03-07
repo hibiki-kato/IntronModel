@@ -95,7 +95,7 @@ Default `conv_channels=[64,128,256]` creates $M$ repeated blocks:
 
 $$
 H^{(m)} = \mathrm{Dropout}\left(
-\mathrm{MaxPool}_2(\mathrm{ReLU}(\mathrm{BN}(\mathrm{Conv1D}(H^{(m-1)}))))
+\mathcal{P}\left(\mathrm{ReLU}(\mathrm{BN}(\mathrm{Conv1D}(H^{(m-1)})))\right)
 \right)
 $$
 
@@ -103,6 +103,10 @@ with $H^{(0)} = X$.
 
 Kernel size is configured per stage by `kernel_sizes` (comma-separated list).
 If only one value is given, it is broadcast to all stages.
+`max_pool_size=2` uses $\mathcal{P}=\mathrm{MaxPool}_2`. More generally,
+`max_pool_size=k` uses $\mathcal{P}=\mathrm{MaxPool}_k$, while
+`max_pool_size=1` skips the pooling step and keeps only dropout after each
+block.
 
 Global pooling + head:
 
@@ -133,6 +137,8 @@ $$
 $$
 
 This produces one score per donor/acceptor intron pair.
+The pair model uses the same per-block pooling-width control
+(`max_pool_size>=1`) inside donor/acceptor encoders and fused CNN paths.
 
 ## 4. Residual Dilated CNN (`src/models/cnn_resdil.py`)
 

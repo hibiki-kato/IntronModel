@@ -132,6 +132,7 @@ class PairTrainParams:
     kernel_size: int
     donor_kernel_sizes: Optional[Sequence[int]]
     acceptor_kernel_sizes: Optional[Sequence[int]]
+    max_pool_size: int
     fusion_mode: str
     dropout: float
     fc_hidden: int
@@ -229,6 +230,7 @@ class PairSpliceCNN(nn.Module):
         kernel_size: int = 7,
         donor_kernel_sizes: Optional[Sequence[int]] = None,
         acceptor_kernel_sizes: Optional[Sequence[int]] = None,
+        max_pool_size: int = 2,
         fusion_mode: str = "late",
         dropout: float = 0.3,
         fc_hidden: int = 128,
@@ -258,12 +260,14 @@ class PairSpliceCNN(nn.Module):
             conv_channels=donor_conv_channels,
             kernel_size=donor_kernel_spec,
             dropout=dropout,
+            max_pool_size=max_pool_size,
         )
         acceptor_probe = CnnGapEncoder(
             in_channels=4,
             conv_channels=acceptor_conv_channels,
             kernel_size=acceptor_kernel_spec,
             dropout=dropout,
+            max_pool_size=max_pool_size,
         )
         donor_layout_channels, donor_layout_kernels = _extract_encoder_layout(
             donor_probe
@@ -294,6 +298,7 @@ class PairSpliceCNN(nn.Module):
                 conv_channels=donor_layout_channels,
                 kernel_size=donor_layout_kernels,
                 dropout=dropout,
+                max_pool_size=max_pool_size,
             )
             pair_dim = self.fused_encoder.output_dim
         else:
@@ -317,12 +322,14 @@ class PairSpliceCNN(nn.Module):
                 conv_channels=prefix_channels,
                 kernel_size=prefix_kernels,
                 dropout=dropout,
+                max_pool_size=max_pool_size,
             ).conv_layers
             self.mid_acceptor_prefix = CnnGapEncoder(
                 in_channels=4,
                 conv_channels=prefix_channels,
                 kernel_size=prefix_kernels,
                 dropout=dropout,
+                max_pool_size=max_pool_size,
             ).conv_layers
             if suffix_channels:
                 self.mid_fused_tail = CnnGapEncoder(
@@ -330,6 +337,7 @@ class PairSpliceCNN(nn.Module):
                     conv_channels=suffix_channels,
                     kernel_size=suffix_kernels,
                     dropout=dropout,
+                    max_pool_size=max_pool_size,
                 )
                 pair_dim = self.mid_fused_tail.output_dim
             else:
@@ -548,6 +556,7 @@ def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParam
             if acceptor_kernel_sizes is not None
             else shared_kernel_sizes
         ),
+        max_pool_size=int(model_args.max_pool_size),
         fusion_mode=fusion_mode,
         dropout=float(model_args.dropout),
         fc_hidden=int(model_args.fc_hidden),
@@ -601,6 +610,8 @@ def train_pair_model(
     """Train the pair CNN model."""
     if train_params.kernel_size <= 0:
         raise ValueError("--kernel_size must be positive.")
+    if train_params.max_pool_size <= 0:
+        raise ValueError("--max_pool_size must be positive.")
     if train_params.fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
     if train_params.dropout < 0.0 or train_params.dropout >= 1.0:
@@ -840,6 +851,7 @@ def train_pair_model(
                 kernel_size=train_params.kernel_size,
                 donor_kernel_sizes=donor_kernel_sizes,
                 acceptor_kernel_sizes=acceptor_kernel_sizes,
+                max_pool_size=train_params.max_pool_size,
                 fusion_mode=train_params.fusion_mode,
                 dropout=train_params.dropout,
                 fc_hidden=train_params.fc_hidden,
@@ -1058,6 +1070,7 @@ def train_pair_model(
                                     if acceptor_kernel_sizes is None
                                     else list(acceptor_kernel_sizes)
                                 ),
+                                "max_pool_size": train_params.max_pool_size,
                                 "fusion_mode": train_params.fusion_mode,
                                 "dropout": train_params.dropout,
                                 "fc_hidden": train_params.fc_hidden,
@@ -1159,6 +1172,7 @@ def train_pair_model(
                     if acceptor_kernel_sizes is None
                     else list(acceptor_kernel_sizes)
                 ),
+                "max_pool_size": train_params.max_pool_size,
                 "dropout": train_params.dropout,
                 "fc_hidden": train_params.fc_hidden,
                 "weight_decay": train_params.weight_decay,
@@ -1251,6 +1265,14 @@ def load_pair_model(
     shared_kernel_sizes = model_config.get("kernel_sizes")
     donor_kernel_sizes = model_config.get("donor_kernel_sizes")
     acceptor_kernel_sizes = model_config.get("acceptor_kernel_sizes")
+    max_pool_size_raw = model_config.get("max_pool_size")
+    if max_pool_size_raw is None:
+        if "use_max_pool" in model_config:
+            max_pool_size = 2 if bool(model_config["use_max_pool"]) else 1
+        else:
+            max_pool_size = 2
+    else:
+        max_pool_size = int(max_pool_size_raw)
     fusion_mode = _normalize_fusion_mode(
         model_config.get("fusion_mode", "late"),
         arg_name="checkpoint fusion_mode",
@@ -1277,6 +1299,7 @@ def load_pair_model(
         kernel_size=kernel_size,
         donor_kernel_sizes=donor_kernel_sizes,
         acceptor_kernel_sizes=acceptor_kernel_sizes,
+        max_pool_size=max_pool_size,
         fusion_mode=fusion_mode,
         dropout=dropout,
         fc_hidden=fc_hidden,
@@ -1427,6 +1450,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help="Acceptor-branch override for --kernel_sizes.",
+    )
+    parser.add_argument(
+        "--max_pool_size",
+        type=int,
+        default=2,
+        help="Max-pooling width after each conv block. Use 1 to disable pooling.",
     )
     parser.add_argument(
         "--fusion_mode",
@@ -1634,6 +1663,7 @@ def train(
         "fusion_mode": train_params.fusion_mode,
         "kernel_size": train_params.kernel_size,
         "kernel_sizes": shared_kernel_sizes_summary,
+        "max_pool_size": train_params.max_pool_size,
         "donor_kernel_sizes": (
             None
             if train_params.donor_kernel_sizes is None
@@ -1692,6 +1722,7 @@ def train(
                 "fusion_mode": train_params.fusion_mode,
                 "kernel_size": train_params.kernel_size,
                 "kernel_sizes": shared_kernel_sizes_summary,
+                "max_pool_size": train_params.max_pool_size,
                 "donor_kernel_sizes": (
                     None
                     if train_params.donor_kernel_sizes is None

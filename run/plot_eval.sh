@@ -34,6 +34,7 @@ X_MIN=""
 X_MAX=""
 Y_MIN=""
 Y_MAX=""
+INTRONMODEL_AUTO_TMUX="off"
 
 set_defaults_for_species() {
 	local sp="$1"

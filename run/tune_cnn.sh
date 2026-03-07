@@ -66,6 +66,7 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="off"
+MAX_POOL_SIZE="2"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
@@ -96,6 +97,10 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
     "values": [
       "3,5,7,9,11,13,15,17,19"
     ]
+  },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -134,6 +139,10 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
     "values": [
       "3,5,7,9,11,13,15,17,19"
     ]
+  },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -612,6 +621,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "conv_depth": 3,
     "channel_candidates": "64,96,128,192,256,384,512",
     "kernel_candidates": "3,5,7,9,11,13,15",
+    "max_pool_size": ${MAX_POOL_SIZE},
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

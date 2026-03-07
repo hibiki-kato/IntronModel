@@ -36,6 +36,7 @@ GPU_IDS="auto"
 # Keep the default to one concurrent trial for stable single-GPU throughput.
 # Increase manually when you intentionally run multi-GPU parallel tuning.
 MAX_PARALLEL_TRIALS="auto"
+TRIAL_PROCESS_MODE="persistent_all"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -304,6 +305,13 @@ if [[ "${FULL_COMPILE_MODE}" != "off" \
 	echo "[tune_dnabert_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
 	exit 1
 fi
+if [[ "${TRIAL_PROCESS_MODE}" != "subprocess" \
+	&& "${TRIAL_PROCESS_MODE}" != "persistent_quick" \
+	&& "${TRIAL_PROCESS_MODE}" != "persistent_all" ]]; then
+	echo "[tune_dnabert_time.sh] TRIAL_PROCESS_MODE must be "\
+		"subprocess|persistent_quick|persistent_all." >&2
+	exit 1
+fi
 if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; then
 	echo "[tune_dnabert_time.sh] SEARCH_ALGO must be random|history_guided." >&2
 	exit 1
@@ -467,6 +475,7 @@ while true; do
   "base_seed": ${BASE_SEED},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
+  "trial_process_mode": "${TRIAL_PROCESS_MODE}",
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},

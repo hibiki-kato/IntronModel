@@ -276,6 +276,7 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--conv_channels", type=str, default=None)
     parser.add_argument("--kernel_sizes", default=None)
     parser.add_argument("--kernel_size", type=int, default=7)
+    parser.add_argument("--max_pool_size", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--fc_hidden", type=int, default=128)
     parser.add_argument("--weight_decay", type=float, default=0.01)

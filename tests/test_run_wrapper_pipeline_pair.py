@@ -10,6 +10,7 @@ from tools.run_wrapper_pipeline import (
     _resolve_species_path_template,
     _resolve_expected_checkpoint_paths_for_run,
     _resolve_tasks_for_target,
+    _stem_params,
 )
 
 
@@ -88,6 +89,57 @@ def test_build_run_args_forwards_pair_fusion_mode() -> None:
 
     assert "--fusion_mode" in args
     assert "early" in args
+
+
+def test_build_run_args_forwards_pair_max_pool_flag() -> None:
+    spec = WrapperSpec(
+        script_name="unit.sh",
+        model_env_name="cnn_pair",
+        supports_tuned_hparams=False,
+        tuned_key_map={},
+        stem_param_builder="cnn",
+        required_arg_keys=("MAX_POOL_SIZE",),
+        per_task_override_keys=(),
+    )
+    env = {
+        "MODEL": "cnn_pair",
+        "MAX_POOL_SIZE": "1",
+    }
+
+    args = _build_run_args(spec, env)
+
+    assert "--max_pool_size" in args
+    assert args[args.index("--max_pool_size") + 1] == "1"
+
+
+def test_stem_params_include_pair_max_pool_flag() -> None:
+    params = _stem_params(
+        "cnn",
+        {
+            "DONOR_LEN": "100",
+            "ACCEPTOR_LEN": "100",
+            "EPOCHS": "10",
+            "BATCH_SIZE": "256",
+            "LR": "0.001",
+            "LOSS": "focal",
+            "WEIGHT_DECAY": "0.01",
+            "ETA_MIN_RATIO": "0.01",
+            "GRAD_CLIP": "5.0",
+            "VAL_FRAC": "0.1",
+            "INTRON_SCORE_OP": "*",
+            "TRANSCRIPT_SCORE_AGG": "min",
+            "SOFTMIN_TAU": "1.0",
+            "SEED": "1337",
+            "TRAIN_TARGET": "pair",
+            "CONV_CHANNELS": "64,128,256",
+            "KERNEL_SIZES": "7,7,7",
+            "MAX_POOL_SIZE": "1",
+            "DROPOUT": "0.3",
+            "FC_HIDDEN": "128",
+        },
+    )
+
+    assert params["max_pool_size"] == 1
 
 
 def test_resolve_species_path_template_replaces_all_tokens() -> None:

@@ -129,6 +129,85 @@ def test_load_config_rejects_invalid_trial_process_mode(tmp_path: Path) -> None:
         _ = hparam_search.load_config(config_path)
 
 
+def test_prewarm_persistent_trial_worker_calls_model_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1337,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=2,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "dnabert",
+            "species": "Dmel",
+            "batch_size": 16,
+            "pretrained_model_name": "dummy-model",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space={
+            "batch_size": {"type": "categorical", "values": [16]},
+        },
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeModule:
+        def add_train_args(self, parser: object) -> None:
+            del parser
+
+        def add_infer_args(self, parser: object) -> None:
+            del parser
+
+        def train(self, common_args: object, model_args: object) -> dict[str, object]:
+            del common_args, model_args
+            return {}
+
+        def infer_site(
+            self,
+            common_args: object,
+            model_args: object,
+        ) -> list[dict[str, object]]:
+            del common_args, model_args
+            return []
+
+        def prewarm_persistent_worker(
+            self,
+            base_args: dict[str, object],
+            assigned_gpu_id: str | None,
+        ) -> None:
+            captured["base_args"] = base_args
+            captured["assigned_gpu_id"] = assigned_gpu_id
+
+    import models.registry as registry
+
+    monkeypatch.setattr(
+        registry,
+        "load_model_module",
+        lambda model_name: _FakeModule(),
+    )
+
+    hparam_search._prewarm_persistent_trial_worker(
+        config=config,
+        assigned_gpu_id="1",
+    )
+
+    assert captured["assigned_gpu_id"] == "1"
+    assert cast(dict[str, object], captured["base_args"])["model"] == "dnabert"
+
+
 @pytest.mark.parametrize(
     ("mode", "phase", "expected"),
     [
@@ -2118,6 +2197,70 @@ def test_build_trial_params_materializes_independent_cnn_architecture(
         assert all(value in {3, 5, 7} for value in kernels)
 
 
+def test_build_trial_params_preserves_explicit_cnn_layer_layout(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "conv_channels": {
+                "type": "categorical",
+                "values": ["64,96,128"],
+            },
+            "kernel_sizes": {
+                "type": "categorical",
+                "values": ["11,7,5"],
+            },
+            "max_pool_size": {"type": "categorical", "values": [1]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=7,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 256,
+            "conv_depth": 4,
+            "channel_candidates": "64,128,256,512",
+            "kernel_candidates": "3,5,7,9",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )
+
+    assert params == [
+        {
+            "batch_size": 256,
+            "conv_channels": "64,96,128",
+            "kernel_sizes": "11,7,5",
+            "max_pool_size": 1,
+        }
+    ]
+
+
 @pytest.mark.parametrize("fusion_mode", ["early", "mid"])
 def test_build_trial_params_materializes_shared_pair_architecture_for_fusion_modes(
     tmp_path: Path,
@@ -2187,6 +2330,283 @@ def test_build_trial_params_materializes_shared_pair_architecture_for_fusion_mod
         assert "acceptor_channel_candidates" not in row
         assert "donor_kernel_candidates" not in row
         assert "acceptor_kernel_candidates" not in row
+
+
+def test_build_trial_params_preserves_explicit_pair_layer_layout(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "fusion_mode": {"type": "categorical", "values": ["late"]},
+            "donor_conv_channels": {
+                "type": "categorical",
+                "values": ["64,96,128"],
+            },
+            "acceptor_conv_channels": {
+                "type": "categorical",
+                "values": ["96,128,128"],
+            },
+            "donor_kernel_sizes": {
+                "type": "categorical",
+                "values": ["11,7,5"],
+            },
+            "acceptor_kernel_sizes": {
+                "type": "categorical",
+                "values": ["9,7,5"],
+            },
+            "max_pool_size": {"type": "categorical", "values": [1]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=7,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_pair",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_conv_depth": 5,
+            "acceptor_conv_depth": 4,
+            "donor_channel_candidates": "64,128,256,512",
+            "acceptor_channel_candidates": "64,128,256,512",
+            "donor_kernel_candidates": "3,5,7,9",
+            "acceptor_kernel_candidates": "3,5,7,9",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )
+
+    assert params == [
+        {
+            "batch_size": 256,
+            "fusion_mode": "late",
+            "donor_conv_channels": "64,96,128",
+            "acceptor_conv_channels": "96,128,128",
+            "donor_kernel_sizes": "11,7,5",
+            "acceptor_kernel_sizes": "9,7,5",
+            "max_pool_size": 1,
+        }
+    ]
+
+
+def test_build_trial_params_resamples_invalid_cnn_pool_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "conv_channels": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "kernel_sizes": {
+                "type": "categorical",
+                "values": ["7,7,7"],
+            },
+            "max_pool_size": {"type": "categorical", "values": [2, 4]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=11,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 8,
+            "acceptor_len": 8,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    sampled_rows = iter(
+        [
+            {
+                "batch_size": 256,
+                "conv_channels": "64,128,256",
+                "kernel_sizes": "7,7,7",
+                "max_pool_size": 4,
+            },
+            {
+                "batch_size": 256,
+                "conv_channels": "64,128,256",
+                "kernel_sizes": "7,7,7",
+                "max_pool_size": 2,
+            },
+        ]
+    )
+    call_count = {"value": 0}
+
+    def _fake_sample(
+        _search_space: dict[str, hparam_search.SearchDimension],
+        _rng: object,
+    ) -> dict[str, hparam_search.Scalar]:
+        call_count["value"] += 1
+        return next(sampled_rows)
+
+    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )
+
+    assert call_count["value"] == 2
+    assert params == [
+        {
+            "batch_size": 256,
+            "conv_channels": "64,128,256",
+            "kernel_sizes": "7,7,7",
+            "max_pool_size": 2,
+        }
+    ]
+
+
+def test_build_trial_params_resamples_invalid_pair_fusion_lengths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "fusion_mode": {"type": "categorical", "values": ["early", "late"]},
+            "donor_conv_channels": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "acceptor_conv_channels": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "donor_kernel_sizes": {
+                "type": "categorical",
+                "values": ["7,7,7"],
+            },
+            "acceptor_kernel_sizes": {
+                "type": "categorical",
+                "values": ["7,7,7"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=23,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_pair",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 100,
+            "acceptor_len": 80,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    sampled_rows = iter(
+        [
+            {
+                "batch_size": 256,
+                "fusion_mode": "early",
+                "donor_conv_channels": "64,128,256",
+                "acceptor_conv_channels": "64,128,256",
+                "donor_kernel_sizes": "7,7,7",
+                "acceptor_kernel_sizes": "7,7,7",
+            },
+            {
+                "batch_size": 256,
+                "fusion_mode": "late",
+                "donor_conv_channels": "64,128,256",
+                "acceptor_conv_channels": "64,128,256",
+                "donor_kernel_sizes": "7,7,7",
+                "acceptor_kernel_sizes": "7,7,7",
+            },
+        ]
+    )
+    call_count = {"value": 0}
+
+    def _fake_sample(
+        _search_space: dict[str, hparam_search.SearchDimension],
+        _rng: object,
+    ) -> dict[str, hparam_search.Scalar]:
+        call_count["value"] += 1
+        return next(sampled_rows)
+
+    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )
+
+    assert call_count["value"] == 2
+    assert params == [
+        {
+            "batch_size": 256,
+            "fusion_mode": "late",
+            "donor_conv_channels": "64,128,256",
+            "acceptor_conv_channels": "64,128,256",
+            "donor_kernel_sizes": "7,7,7",
+            "acceptor_kernel_sizes": "7,7,7",
+        }
+    ]
 
 
 def test_build_trial_params_respects_max_model_params(

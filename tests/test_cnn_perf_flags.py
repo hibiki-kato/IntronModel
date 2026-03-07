@@ -29,6 +29,8 @@ def test_add_train_args_includes_perf_flags() -> None:
             "1",
             "--compile_mode",
             "off",
+            "--max_pool_size",
+            "1",
             "--num_workers",
             "2",
             "--prefetch_factor",
@@ -47,11 +49,29 @@ def test_add_train_args_includes_perf_flags() -> None:
     assert args.cudnn_benchmark == 0
     assert args.deterministic == 1
     assert args.compile_mode == "off"
+    assert args.max_pool_size == 1
     assert args.num_workers == "2"
     assert args.prefetch_factor == 3
     assert args.persistent_workers == 0
     assert args.pin_memory == 0
     assert args.report_train_metrics == 0
+
+
+def test_basic_splice_cnn_supports_disabling_max_pool() -> None:
+    model = cnn.BasicSpliceCNN(
+        conv_channels=[32, 64],
+        kernel_size=[7, 5],
+        max_pool_size=1,
+    )
+
+    max_pool_layers = [
+        layer for layer in model.conv_layers if isinstance(layer, torch.nn.MaxPool1d)
+    ]
+    assert max_pool_layers == []
+
+    batch = torch.randn(4, 4, 101)
+    logits = model(batch)
+    assert logits.shape == (4,)
 
 
 def test_resolve_task_train_params_prefers_task_overrides() -> None:

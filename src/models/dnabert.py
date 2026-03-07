@@ -7,6 +7,7 @@ pipeline contract used by ``run_model.py``.
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import logging
@@ -113,6 +114,42 @@ DNA_BASE_SET: frozenset[str] = frozenset({"A", "C", "G", "T"})
 SPECIAL_TOKENS: frozenset[str] = frozenset(
     {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"}
 )
+
+
+@dataclass(frozen=True)
+class _TokenizerCacheKey:
+    """Stable cache key for one pretrained tokenizer resource."""
+
+    pretrained_model_name: str
+    pretrained_revision: Optional[str]
+    trust_remote_code: bool
+
+
+@dataclass(frozen=True)
+class _BackboneCacheKey:
+    """Stable cache key for one pretrained DNABERT backbone template."""
+
+    pretrained_model_name: str
+    pretrained_revision: Optional[str]
+    trust_remote_code: bool
+
+
+@dataclass(frozen=True)
+class _CachedBackboneTemplate:
+    """CPU-resident DNABERT backbone template reused within one process."""
+
+    backbone: nn.Module
+    hidden_size: int
+
+
+_TOKENIZER_CACHE: dict[_TokenizerCacheKey, object] = {}
+_BACKBONE_TEMPLATE_CACHE: dict[_BackboneCacheKey, _CachedBackboneTemplate] = {}
+
+
+def _clear_pretrained_resource_caches() -> None:
+    """Clear tokenizer and backbone template caches used in one process."""
+    _TOKENIZER_CACHE.clear()
+    _BACKBONE_TEMPLATE_CACHE.clear()
 
 
 def _require_transformers() -> None:
@@ -410,12 +447,28 @@ def _tokenize_sequences(
     return input_ids, attention_mask
 
 
-def _load_tokenizer(
+def _build_tokenizer_cache_key(
+    pretrained_model_name: str,
+    pretrained_revision: Optional[str],
+    trust_remote_code: bool,
+) -> _TokenizerCacheKey:
+    """Build a stable tokenizer cache key from pretrained arguments."""
+    resolved_pretrained_model_name = _resolve_pretrained_model_name(
+        pretrained_model_name
+    )
+    return _TokenizerCacheKey(
+        pretrained_model_name=resolved_pretrained_model_name,
+        pretrained_revision=pretrained_revision,
+        trust_remote_code=trust_remote_code,
+    )
+
+
+def _load_tokenizer_uncached(
     pretrained_model_name: str,
     pretrained_revision: Optional[str],
     trust_remote_code: bool,
 ) -> object:
-    """Load DNABERT tokenizer from Hugging Face."""
+    """Load DNABERT tokenizer without using the process-local cache."""
     _require_transformers()
     assert AutoTokenizer is not None
     tokenizer_kwargs = _without_none_kwargs(
@@ -431,6 +484,28 @@ def _load_tokenizer(
         resolved_pretrained_model_name,
         **tokenizer_kwargs,
     )
+
+
+def _load_tokenizer(
+    pretrained_model_name: str,
+    pretrained_revision: Optional[str],
+    trust_remote_code: bool,
+) -> object:
+    """Load and cache DNABERT tokenizer once per process."""
+    cache_key = _build_tokenizer_cache_key(
+        pretrained_model_name=pretrained_model_name,
+        pretrained_revision=pretrained_revision,
+        trust_remote_code=trust_remote_code,
+    )
+    cached_tokenizer = _TOKENIZER_CACHE.get(cache_key)
+    if cached_tokenizer is None:
+        cached_tokenizer = _load_tokenizer_uncached(
+            pretrained_model_name=cache_key.pretrained_model_name,
+            pretrained_revision=cache_key.pretrained_revision,
+            trust_remote_code=cache_key.trust_remote_code,
+        )
+        _TOKENIZER_CACHE[cache_key] = cached_tokenizer
+    return cached_tokenizer
 
 
 def _resolve_pretrained_model_name(pretrained_model_name: str) -> str:
@@ -662,14 +737,28 @@ def _disable_dnabert_triton_flash_attention(backbone: nn.Module) -> None:
             setattr(module_obj, attr_name, None)
 
 
-def _build_dnabert_model(
+def _build_backbone_cache_key(
     pretrained_model_name: str,
     pretrained_revision: Optional[str],
     trust_remote_code: bool,
-    dropout: float,
-    head_layer_norm: bool,
-) -> DnaBertBinaryClassifier:
-    """Build DNABERT classifier from a pretrained checkpoint."""
+) -> _BackboneCacheKey:
+    """Build a stable backbone cache key from pretrained arguments."""
+    resolved_pretrained_model_name = _resolve_pretrained_model_name(
+        pretrained_model_name
+    )
+    return _BackboneCacheKey(
+        pretrained_model_name=resolved_pretrained_model_name,
+        pretrained_revision=pretrained_revision,
+        trust_remote_code=trust_remote_code,
+    )
+
+
+def _load_backbone_template_uncached(
+    pretrained_model_name: str,
+    pretrained_revision: Optional[str],
+    trust_remote_code: bool,
+) -> _CachedBackboneTemplate:
+    """Load one pretrained DNABERT backbone template without cache reuse."""
     _require_transformers()
     assert AutoConfig is not None
     assert AutoModel is not None
@@ -722,11 +811,94 @@ def _build_dnabert_model(
     _disable_dnabert_triton_flash_attention(backbone)
     _materialize_dnabert_meta_buffers(backbone)
     hidden_size = _resolve_hidden_size(backbone)
+    backbone_cpu = backbone.to("cpu")
+    return _CachedBackboneTemplate(
+        backbone=backbone_cpu,
+        hidden_size=hidden_size,
+    )
+
+
+def _get_cached_backbone_template(
+    pretrained_model_name: str,
+    pretrained_revision: Optional[str],
+    trust_remote_code: bool,
+) -> _CachedBackboneTemplate:
+    """Return one cached DNABERT backbone template for this process."""
+    cache_key = _build_backbone_cache_key(
+        pretrained_model_name=pretrained_model_name,
+        pretrained_revision=pretrained_revision,
+        trust_remote_code=trust_remote_code,
+    )
+    cached_template = _BACKBONE_TEMPLATE_CACHE.get(cache_key)
+    if cached_template is None:
+        cached_template = _load_backbone_template_uncached(
+            pretrained_model_name=cache_key.pretrained_model_name,
+            pretrained_revision=cache_key.pretrained_revision,
+            trust_remote_code=cache_key.trust_remote_code,
+        )
+        _BACKBONE_TEMPLATE_CACHE[cache_key] = cached_template
+    return cached_template
+
+
+def _build_dnabert_model(
+    pretrained_model_name: str,
+    pretrained_revision: Optional[str],
+    trust_remote_code: bool,
+    dropout: float,
+    head_layer_norm: bool,
+) -> DnaBertBinaryClassifier:
+    """Build DNABERT classifier from a cached pretrained backbone template."""
+    cached_template = _get_cached_backbone_template(
+        pretrained_model_name=pretrained_model_name,
+        pretrained_revision=pretrained_revision,
+        trust_remote_code=trust_remote_code,
+    )
+    backbone = copy.deepcopy(cached_template.backbone)
     return DnaBertBinaryClassifier(
         backbone=backbone,
-        hidden_size=hidden_size,
+        hidden_size=cached_template.hidden_size,
         dropout=dropout,
         head_layer_norm=head_layer_norm,
+    )
+
+
+def prewarm_persistent_worker(
+    base_args: Mapping[str, object],
+    assigned_gpu_id: Optional[str] = None,
+) -> None:
+    """Preload reusable DNABERT resources inside one persistent worker.
+
+    Parameters
+    ----------
+    base_args : Mapping[str, object]
+        Base hyperparameter-search arguments for the worker.
+    assigned_gpu_id : str | None, default=None
+        GPU slot identifier associated with this worker, used for logging only.
+    """
+    raw_pretrained_model_name = base_args.get(
+        "pretrained_model_name",
+        DEFAULT_PRETRAINED_MODEL_NAME,
+    )
+    pretrained_model_name = str(raw_pretrained_model_name).strip()
+    if pretrained_model_name == "":
+        pretrained_model_name = DEFAULT_PRETRAINED_MODEL_NAME
+    raw_revision = base_args.get("pretrained_revision", "")
+    revision = _normalize_revision("" if raw_revision is None else str(raw_revision))
+    trust_remote_code = _bool_from_flag(base_args.get("trust_remote_code", 1))
+    _ = _load_tokenizer(
+        pretrained_model_name=pretrained_model_name,
+        pretrained_revision=revision,
+        trust_remote_code=trust_remote_code,
+    )
+    _ = _get_cached_backbone_template(
+        pretrained_model_name=pretrained_model_name,
+        pretrained_revision=revision,
+        trust_remote_code=trust_remote_code,
+    )
+    gpu_label = "cpu" if assigned_gpu_id is None else assigned_gpu_id
+    print(
+        f"[dnabert] prewarmed persistent worker cache "
+        f"(gpu={gpu_label}, model={pretrained_model_name})"
     )
 
 

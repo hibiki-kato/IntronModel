@@ -135,6 +135,7 @@ class TaskTrainParams:
     loss_name: str
     conv_channels: Optional[Sequence[int]]
     kernel_sizes: Sequence[int]
+    max_pool_size: int
     dropout: float
     fc_hidden: int
     weight_decay: float
@@ -221,6 +222,7 @@ def _resolve_task_train_params(
         loss_name=str(_override_or_default("loss", model_args.loss)),
         conv_channels=resolved_conv_channels,
         kernel_sizes=list(resolved_kernel_sizes),
+        max_pool_size=int(model_args.max_pool_size),
         dropout=float(_override_or_default("dropout", model_args.dropout)),
         fc_hidden=int(_override_or_default("fc_hidden", model_args.fc_hidden)),
         weight_decay=float(
@@ -462,6 +464,7 @@ def train_task_model(
     lightweight: bool = False,
     conv_channels: Optional[Sequence[int]] = None,
     kernel_sizes: Optional[Sequence[int]] = None,
+    max_pool_size: int = 2,
     dropout: float = 0.3,
     fc_hidden: int = 128,
     weight_decay: float = 0.01,
@@ -527,6 +530,9 @@ def train_task_model(
         Convolution channels.
     kernel_sizes : Sequence[int] | None, default=None
         Convolution kernel sizes. A single size is broadcast to all layers.
+    max_pool_size : int, default=2
+        Max-pooling width after each convolution block. Use ``1`` to disable
+        pooling.
     dropout : float, default=0.3
         Dropout rate.
     fc_hidden : int, default=128
@@ -605,6 +611,8 @@ def train_task_model(
     """
     if kernel_sizes is not None and len(kernel_sizes) == 0:
         raise ValueError("--kernel_sizes must not be empty.")
+    if max_pool_size <= 0:
+        raise ValueError("--max_pool_size must be positive.")
     if fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
     if dropout < 0.0 or dropout >= 1.0:
@@ -803,6 +811,7 @@ def train_task_model(
                 in_channels=4,
                 conv_channels=conv_channels,
                 kernel_size=resolved_kernel_sizes,
+                max_pool_size=max_pool_size,
                 dropout=dropout,
                 fc_hidden=fc_hidden,
             ).to(device)
@@ -993,6 +1002,7 @@ def train_task_model(
                             "model_config": {
                                 "conv_channels": list(conv_channels),
                                 "kernel_sizes": list(resolved_kernel_sizes),
+                                "max_pool_size": int(max_pool_size),
                                 "dropout": dropout,
                                 "fc_hidden": fc_hidden,
                             },
@@ -1083,6 +1093,7 @@ def train_task_model(
                 "f1_lambda": loss_meta["f1_lambda"],
                 "conv_channels": list(conv_channels),
                 "kernel_sizes": list(resolved_kernel_sizes),
+                "max_pool_size": int(max_pool_size),
                 "dropout": dropout,
                 "fc_hidden": fc_hidden,
                 "weight_decay": weight_decay,
@@ -1163,6 +1174,14 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
     model_config = ckpt.get("model_config", {})
     conv_channels = model_config.get("conv_channels")
     kernel_sizes = model_config.get("kernel_sizes")
+    max_pool_size_raw = model_config.get("max_pool_size")
+    if max_pool_size_raw is None:
+        if "use_max_pool" in model_config:
+            max_pool_size = 2 if bool(model_config["use_max_pool"]) else 1
+        else:
+            max_pool_size = 2
+    else:
+        max_pool_size = int(max_pool_size_raw)
     dropout = float(model_config.get("dropout", 0.3))
     fc_hidden = int(model_config.get("fc_hidden", 128))
     if kernel_sizes is None:
@@ -1180,6 +1199,7 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
         in_channels=4,
         conv_channels=conv_channels,
         kernel_size=kernel_sizes,
+        max_pool_size=max_pool_size,
         dropout=dropout,
         fc_hidden=fc_hidden,
     ).to(device)
@@ -1366,6 +1386,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=7,
         help="Legacy scalar kernel size fallback when --kernel_sizes is unset.",
+    )
+    parser.add_argument(
+        "--max_pool_size",
+        type=int,
+        default=2,
+        help="Max-pooling width after each conv block. Use 1 to disable pooling.",
     )
     parser.add_argument(
         "--dropout",
@@ -1906,6 +1932,7 @@ def train(
             lightweight=model_args.lightweight,
             conv_channels=resolved.conv_channels,
             kernel_sizes=resolved.kernel_sizes,
+            max_pool_size=resolved.max_pool_size,
             dropout=resolved.dropout,
             fc_hidden=resolved.fc_hidden,
             weight_decay=resolved.weight_decay,
@@ -1966,6 +1993,7 @@ def train(
                 None if params.conv_channels is None else list(params.conv_channels)
             ),
             "kernel_sizes": list(params.kernel_sizes),
+            "max_pool_size": params.max_pool_size,
             "dropout": params.dropout,
             "fc_hidden": params.fc_hidden,
             "weight_decay": params.weight_decay,
@@ -2010,6 +2038,7 @@ def train(
         "kernel_sizes": (
             None if shared_kernel_sizes is None else list(shared_kernel_sizes)
         ),
+        "max_pool_size": int(model_args.max_pool_size),
         "donor_kernel_sizes": (
             None if donor_kernel_sizes is None else list(donor_kernel_sizes)
         ),

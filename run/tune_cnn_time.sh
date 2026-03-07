@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="360"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -60,6 +60,7 @@ HISTORY_TOP_N="512"
 GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
+MAX_POOL_SIZE="2"
 
 CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
@@ -107,6 +108,10 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
       "3,5,7,9,11,13,15,17,19"
     ]
   },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
+  },
   "fc_hidden": {
     "type": "categorical",
     "values": [64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096]
@@ -144,6 +149,10 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
     "values": [
       "3,5,7,9,11,13,15,17,19"
     ]
+  },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -496,6 +505,7 @@ while true; do
     "conv_depth": 3,
     "channel_candidates": "64,96,128,192,256,384,512",
     "kernel_candidates": "3,5,7,9,11,13,15",
+    "max_pool_size": ${MAX_POOL_SIZE},
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

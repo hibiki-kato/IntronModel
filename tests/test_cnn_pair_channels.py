@@ -113,6 +113,14 @@ def test_add_train_args_accepts_fusion_mode() -> None:
     assert args.fusion_mode == "early"
 
 
+def test_add_train_args_accepts_max_pool_flag() -> None:
+    parser = argparse.ArgumentParser()
+    cnn_pair.add_train_args(parser)
+    args = parser.parse_args(["--max_pool_size", "1"])
+
+    assert args.max_pool_size == 1
+
+
 def test_resolve_pair_train_params_accepts_fusion_mode() -> None:
     parser = argparse.ArgumentParser()
     cnn_pair.add_train_args(parser)
@@ -120,6 +128,15 @@ def test_resolve_pair_train_params_accepts_fusion_mode() -> None:
 
     resolved = cnn_pair._resolve_pair_train_params(args)
     assert resolved.fusion_mode == "early"
+
+
+def test_resolve_pair_train_params_accepts_max_pool_flag() -> None:
+    parser = argparse.ArgumentParser()
+    cnn_pair.add_train_args(parser)
+    args = parser.parse_args(["--max_pool_size", "1"])
+
+    resolved = cnn_pair._resolve_pair_train_params(args)
+    assert resolved.max_pool_size == 1
 
 
 def test_resolve_pair_train_params_normalizes_early_channel_alias() -> None:
@@ -139,6 +156,25 @@ def test_pair_splice_cnn_supports_early_fusion() -> None:
         acceptor_kernel_sizes=[7, 5],
         fusion_mode="early",
     )
+    donor_x = torch.rand(4, 4, 100)
+    acceptor_x = torch.rand(4, 4, 100)
+    logits = model(donor_x, acceptor_x)
+    assert logits.shape == (4,)
+
+
+def test_pair_splice_cnn_supports_late_fusion_without_max_pool() -> None:
+    model = cnn_pair.PairSpliceCNN(
+        donor_conv_channels=[64, 128],
+        acceptor_conv_channels=[64, 128],
+        donor_kernel_sizes=[7, 5],
+        acceptor_kernel_sizes=[7, 5],
+        max_pool_size=1,
+    )
+    max_pool_layers = [
+        layer for layer in model.modules() if isinstance(layer, torch.nn.MaxPool1d)
+    ]
+    assert max_pool_layers == []
+
     donor_x = torch.rand(4, 4, 100)
     acceptor_x = torch.rand(4, 4, 100)
     logits = model(donor_x, acceptor_x)

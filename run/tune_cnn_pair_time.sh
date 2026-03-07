@@ -63,6 +63,7 @@ HISTORY_TOP_N="512"
 GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
+MAX_POOL_SIZE="2"
 
 CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
@@ -124,6 +125,10 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "fusion_mode": {
     "type": "categorical",
     "values": ["late", "mid", "early"]
+  },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -479,6 +484,7 @@ while true; do
     "acceptor_channel_candidates": "64,96,128,192,256,384,512",
     "donor_kernel_candidates": "3,5,7,9,11,13,15",
     "acceptor_kernel_candidates": "3,5,7,9,11,13,15",
+    "max_pool_size": ${MAX_POOL_SIZE},
     "fusion_mode": "late",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",

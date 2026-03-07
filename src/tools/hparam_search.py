@@ -2303,6 +2303,155 @@ def _stringify_int_list(values: list[int]) -> str:
     return ",".join(str(value) for value in values)
 
 
+def _resolve_max_pool_size(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> int:
+    """Resolve CNN max-pooling width with backward-compatible fallback."""
+    raw = sampled_params.get("max_pool_size")
+    if raw is None:
+        raw = base_args.get("max_pool_size")
+    if raw is not None:
+        resolved = _to_positive_int(raw)
+        if resolved is not None:
+            return resolved
+
+    legacy_raw = sampled_params.get("use_max_pool")
+    if legacy_raw is None:
+        legacy_raw = base_args.get("use_max_pool")
+    if legacy_raw is not None:
+        return 2 if _to_bool(legacy_raw) else 1
+    return 2
+
+
+def _apply_max_pool_schedule(length: int, depth: int, max_pool_size: int) -> int:
+    """Apply repeated max-pooling and return the resulting sequence length."""
+    current = length
+    if depth <= 0:
+        return current
+    if max_pool_size <= 1:
+        return current
+    for _ in range(depth):
+        current = current // max_pool_size
+        if current <= 0:
+            return 0
+    return current
+
+
+def _is_valid_cnn_architecture(
+    *,
+    model_name: str,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> bool:
+    """Return whether sampled CNN-family architecture is shape-valid."""
+    if model_name not in {"cnn", "cnn_pair"}:
+        return True
+
+    max_pool_size = _resolve_max_pool_size(
+        sampled_params=sampled_params,
+        base_args=base_args,
+    )
+    if max_pool_size <= 0:
+        return False
+
+    donor_len_raw = sampled_params.get("donor_len")
+    if donor_len_raw is None:
+        donor_len_raw = base_args.get("donor_len")
+    acceptor_len_raw = sampled_params.get("acceptor_len")
+    if acceptor_len_raw is None:
+        acceptor_len_raw = base_args.get("acceptor_len")
+
+    donor_len = _to_positive_int(donor_len_raw)
+    acceptor_len = _to_positive_int(acceptor_len_raw)
+
+    if model_name == "cnn":
+        train_target_raw = sampled_params.get("train_target")
+        if train_target_raw is None:
+            train_target_raw = base_args.get("train_target", "both")
+        train_target = str(train_target_raw).strip().lower()
+
+        conv_channels_raw = sampled_params.get("conv_channels")
+        if conv_channels_raw is None:
+            conv_channels_raw = base_args.get("conv_channels")
+        conv_channels = _parse_conv_channels(conv_channels_raw)
+        if conv_channels is None:
+            lightweight = _to_bool(base_args.get("lightweight"))
+            conv_channels = [64, 128] if lightweight else [64, 128, 256]
+        depth = len(conv_channels)
+
+        if train_target in {"both", "donor"} and donor_len is not None:
+            if _apply_max_pool_schedule(donor_len, depth, max_pool_size) <= 0:
+                return False
+        if train_target in {"both", "acceptor"} and acceptor_len is not None:
+            if _apply_max_pool_schedule(acceptor_len, depth, max_pool_size) <= 0:
+                return False
+        return True
+
+    fusion_mode_raw = sampled_params.get("fusion_mode")
+    if fusion_mode_raw is None:
+        fusion_mode_raw = base_args.get("fusion_mode", "late")
+    fusion_mode = _normalize_cnn_pair_fusion_mode(fusion_mode_raw)
+
+    donor_conv_channels_raw = sampled_params.get("donor_conv_channels")
+    if donor_conv_channels_raw is None:
+        donor_conv_channels_raw = base_args.get("donor_conv_channels")
+    acceptor_conv_channels_raw = sampled_params.get("acceptor_conv_channels")
+    if acceptor_conv_channels_raw is None:
+        acceptor_conv_channels_raw = base_args.get("acceptor_conv_channels")
+    shared_conv_channels_raw = sampled_params.get("conv_channels")
+    if shared_conv_channels_raw is None:
+        shared_conv_channels_raw = base_args.get("conv_channels")
+
+    shared_conv_channels = _parse_conv_channels(shared_conv_channels_raw)
+    donor_conv_channels = _parse_conv_channels(donor_conv_channels_raw)
+    if donor_conv_channels is None:
+        donor_conv_channels = shared_conv_channels
+    acceptor_conv_channels = _parse_conv_channels(acceptor_conv_channels_raw)
+    if acceptor_conv_channels is None:
+        acceptor_conv_channels = shared_conv_channels
+    if donor_conv_channels is None:
+        lightweight = _to_bool(base_args.get("lightweight"))
+        donor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+    if acceptor_conv_channels is None:
+        lightweight = _to_bool(base_args.get("lightweight"))
+        acceptor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+    donor_depth = len(donor_conv_channels)
+    acceptor_depth = len(acceptor_conv_channels)
+
+    if fusion_mode in {"early", "mid"}:
+        if donor_len is not None and acceptor_len is not None and donor_len != acceptor_len:
+            return False
+        if donor_conv_channels != acceptor_conv_channels:
+            return False
+        shared_len = donor_len if donor_len is not None else acceptor_len
+        if shared_len is None:
+            return True
+        if fusion_mode == "early":
+            return _apply_max_pool_schedule(shared_len, donor_depth, max_pool_size) > 0
+
+        split_index = max(1, donor_depth // 2)
+        prefix_length = _apply_max_pool_schedule(
+            shared_len,
+            split_index,
+            max_pool_size,
+        )
+        if prefix_length <= 0:
+            return False
+        tail_depth = donor_depth - split_index
+        return _apply_max_pool_schedule(prefix_length, tail_depth, max_pool_size) > 0
+
+    if donor_len is not None:
+        if _apply_max_pool_schedule(donor_len, donor_depth, max_pool_size) <= 0:
+            return False
+    if acceptor_len is not None:
+        if _apply_max_pool_schedule(acceptor_len, acceptor_depth, max_pool_size) <= 0:
+            return False
+    return True
+
+
 def _materialize_cnn_architecture_params(
     *,
     model_name: str,
@@ -2324,6 +2473,16 @@ def _materialize_cnn_architecture_params(
         shared_channel_key: Optional[str] = None,
         shared_kernel_key: Optional[str] = None,
     ) -> None:
+        explicit_conv_raw = out.get(conv_out_key)
+        if explicit_conv_raw is None:
+            explicit_conv_raw = base_args.get(conv_out_key)
+        explicit_conv = _parse_conv_channels(explicit_conv_raw)
+
+        explicit_kernel_raw = out.get(kernel_out_key)
+        if explicit_kernel_raw is None:
+            explicit_kernel_raw = base_args.get(kernel_out_key)
+        explicit_kernel = _parse_conv_channels(explicit_kernel_raw)
+
         depth_raw = out.get(depth_key)
         if depth_raw is None:
             depth_raw = base_args.get(depth_key)
@@ -2332,6 +2491,10 @@ def _materialize_cnn_architecture_params(
             if depth_raw is None:
                 depth_raw = base_args.get(shared_depth_key)
         depth = _to_positive_int(depth_raw)
+        if explicit_conv is not None:
+            depth = len(explicit_conv)
+        elif explicit_kernel is not None:
+            depth = len(explicit_kernel)
         if depth is None:
             depth = _default_conv_depth(
                 sampled_params=out,
@@ -2370,20 +2533,22 @@ def _materialize_cnn_architecture_params(
         if not kernel_candidates:
             raise ValueError("kernel_candidates must include at least one odd value.")
 
-        out[conv_out_key] = _stringify_int_list(
-            _sample_list_by_depth(
-                candidates=channel_candidates,
-                depth=depth,
-                rng=rng,
+        if explicit_conv is None:
+            out[conv_out_key] = _stringify_int_list(
+                _sample_list_by_depth(
+                    candidates=channel_candidates,
+                    depth=depth,
+                    rng=rng,
+                )
             )
-        )
-        out[kernel_out_key] = _stringify_int_list(
-            _sample_list_by_depth(
-                candidates=kernel_candidates,
-                depth=depth,
-                rng=rng,
+        if explicit_kernel is None:
+            out[kernel_out_key] = _stringify_int_list(
+                _sample_list_by_depth(
+                    candidates=kernel_candidates,
+                    depth=depth,
+                    rng=rng,
+                )
             )
-        )
 
     if model_name in {"cnn", "cnn_resdil"}:
         has_arch_keys = any(
@@ -3223,6 +3388,24 @@ def _build_worker_failure_result(
     )
 
 
+def _prewarm_persistent_trial_worker(
+    *,
+    config: SearchConfig,
+    assigned_gpu_id: Optional[str],
+) -> None:
+    """Prewarm one persistent worker if the selected model exposes a hook."""
+    from models.registry import load_model_module
+
+    model_name_obj = config.base_args.get("model")
+    if not isinstance(model_name_obj, str) or not model_name_obj.strip():
+        return
+    model_module = load_model_module(model_name_obj)
+    prewarm_fn = getattr(model_module, "prewarm_persistent_worker", None)
+    if not callable(prewarm_fn):
+        return
+    prewarm_fn(dict(config.base_args), assigned_gpu_id)
+
+
 def _persistent_trial_worker_main(
     *,
     slot_index: int,
@@ -3239,6 +3422,10 @@ def _persistent_trial_worker_main(
     previous_stream_mode = _set_active_trial_stream_mode(stream_mode)
     previous_parallel = _set_active_max_parallel_trials(max_parallel_trials)
     try:
+        _prewarm_persistent_trial_worker(
+            config=config,
+            assigned_gpu_id=assigned_gpu_id,
+        )
         while True:
             task = task_queue.get()
             if task is None:
@@ -3459,6 +3646,7 @@ def build_trial_params(
         params: dict[str, Scalar]
         best_under_cap_params: Optional[dict[str, Scalar]] = None
         best_under_cap_complexity: Optional[int] = None
+        last_invalid_reason = "Failed to sample a valid architecture."
         for _attempt in range(max_resample_attempts):
             if (
                 phase == "quick"
@@ -3480,6 +3668,16 @@ def build_trial_params(
                 base_args=config.base_args,
                 rng=rng,
             )
+            if not _is_valid_cnn_architecture(
+                model_name=model_name,
+                sampled_params=params,
+                base_args=config.base_args,
+            ):
+                last_invalid_reason = (
+                    "Failed to sample a valid architecture after "
+                    f"{max_resample_attempts} attempts."
+                )
+                continue
             if config.max_model_params is None:
                 break
             complexity = estimate_model_param_complexity(
@@ -3498,6 +3696,8 @@ def build_trial_params(
         else:
             if best_under_cap_params is not None:
                 params = best_under_cap_params
+            else:
+                raise ValueError(last_invalid_reason)
         sampled.append(params)
     return sampled
 

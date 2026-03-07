@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import resource
 
 import tools.run_wrapper_pipeline as run_wrapper_pipeline
 from tools.run_wrapper_pipeline import WrapperSpec
+from tools.run_wrapper_pipeline import _apply_species_parallel_env_overrides
+from tools.run_wrapper_pipeline import _resolve_parallel_auto_num_workers
 from tools.run_wrapper_pipeline import _resolve_species_gpu_slots
 from tools.run_wrapper_pipeline import _run_species_batch
 
@@ -37,7 +40,7 @@ def test_run_species_batch_parallel_assigns_gpu_per_species(
 ) -> None:
     """Assign one visible GPU to each species subprocess."""
 
-    assignments: list[tuple[str, str | None]] = []
+    assignments: list[tuple[str, str | None, str | None]] = []
 
     def _fake_run_single_species(
         spec: WrapperSpec,
@@ -48,8 +51,14 @@ def test_run_species_batch_parallel_assigns_gpu_per_species(
         species: str,
         process_env: dict[str, str],
     ) -> int:
-        del spec, project_root, data_root, env
-        assignments.append((species, process_env.get("CUDA_VISIBLE_DEVICES")))
+        del spec, project_root, data_root
+        assignments.append(
+            (
+                species,
+                process_env.get("CUDA_VISIBLE_DEVICES"),
+                env.get("NUM_WORKERS"),
+            )
+        )
         return 0
 
     monkeypatch.setattr(
@@ -62,20 +71,79 @@ def test_run_species_batch_parallel_assigns_gpu_per_species(
         "_resolve_species_gpu_slots",
         lambda _device: ["0", "1"],
     )
+    monkeypatch.setattr(
+        run_wrapper_pipeline,
+        "_resolve_parallel_auto_num_workers",
+        lambda parallel_species: parallel_species + 1,
+    )
 
     result = _run_species_batch(
         _build_spec(),
         project_root=tmp_path,
         data_root=tmp_path,
-        base_env={"DEVICE": "auto"},
+        base_env={"DEVICE": "auto", "NUM_WORKERS": "auto"},
         base_process_env={},
         species_list=["Athal", "Dmel", "Mmus"],
     )
 
     assert result == 0
     assert len(assignments) == 3
-    assert {species for species, _gpu in assignments} == {"Athal", "Dmel", "Mmus"}
-    assert {gpu for _species, gpu in assignments} == {"0", "1"}
+    assert {
+        species for species, _gpu, _num_workers in assignments
+    } == {"Athal", "Dmel", "Mmus"}
+    assert {gpu for _species, gpu, _num_workers in assignments} == {"0", "1"}
+    assert {
+        num_workers for _species, _gpu, num_workers in assignments
+    } == {"3"}
+
+
+def test_apply_species_parallel_env_overrides_resolves_auto_num_workers(
+    monkeypatch: object,
+) -> None:
+    """Lower auto worker count for parallel species runs."""
+
+    monkeypatch.setattr(
+        run_wrapper_pipeline,
+        "_resolve_parallel_auto_num_workers",
+        lambda parallel_species: 3 + parallel_species,
+    )
+
+    resolved = _apply_species_parallel_env_overrides(
+        env={"NUM_WORKERS": "auto", "DEVICE": "auto"},
+        parallel_species=2,
+        script_name="unit.sh",
+    )
+
+    assert resolved["NUM_WORKERS"] == "5"
+
+
+def test_apply_species_parallel_env_overrides_keeps_explicit_num_workers() -> None:
+    """Leave explicit worker settings unchanged."""
+
+    resolved = _apply_species_parallel_env_overrides(
+        env={"NUM_WORKERS": "6", "DEVICE": "auto"},
+        parallel_species=3,
+        script_name="unit.sh",
+    )
+
+    assert resolved["NUM_WORKERS"] == "6"
+
+
+def test_resolve_parallel_auto_num_workers_uses_cpu_and_gpu_process_count(
+    monkeypatch: object,
+) -> None:
+    """Scale workers from CPU count and concurrent GPU process count."""
+
+    monkeypatch.setattr(run_wrapper_pipeline.os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(
+        run_wrapper_pipeline.resource,
+        "getrlimit",
+        lambda _kind: (4096, resource.RLIM_INFINITY),
+    )
+
+    resolved = _resolve_parallel_auto_num_workers(4)
+
+    assert resolved == 2
 
 
 def test_run_species_batch_uses_serial_fallback_for_single_gpu(

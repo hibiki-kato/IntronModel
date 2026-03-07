@@ -10,6 +10,7 @@ from util.data_proc import (
     read_examples_single_task,
     read_examples_single_task_with_metadata,
     read_test_pair_rows,
+    read_test_site_rows,
 )
 
 
@@ -334,7 +335,54 @@ def test_read_test_pair_rows_pairs_and_skips_rows(tmp_path: Path) -> None:
             "donor_seq": "AAAA",
             "acceptor_seq": "TTTT",
             "intron_half_length": 5,
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 1,
+            "donor_seq": "AANN",
+            "acceptor_seq": "TTTT",
+            "intron_half_length": 3,
         }
     ]
-    assert skipped_short == 1
-    assert skipped_unpaired == 2
+    assert skipped_short == 0
+    assert skipped_unpaired == 1
+
+
+def test_read_test_site_rows_pads_short_mask_windows(tmp_path: Path) -> None:
+    """Pad short clipped mask windows instead of skipping them."""
+    tsv_path = tmp_path / "transcripts.tsv"
+    _write_text(
+        tsv_path,
+        "\n".join(
+            [
+                "transcript_id\tsite_type\tintron_index\tseq",
+                "tx1\tdonor\t1\tAA",
+                "tx1\tacceptor\t1\tTT",
+                "",
+            ]
+        ),
+    )
+
+    rows, skipped_short = read_test_site_rows(
+        test_tsv=str(tsv_path),
+        donor_len=4,
+        acceptor_len=4,
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "site_type": "donor",
+            "intron_index": 1,
+            "seq": "AANN",
+            "intron_half_length": None,
+        },
+        {
+            "transcript_id": "tx1",
+            "site_type": "acceptor",
+            "intron_index": 1,
+            "seq": "NNTT",
+            "intron_half_length": None,
+        },
+    ]
+    assert skipped_short == 0

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -516,6 +517,11 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
 
     if builder in {"cnn", "cnn_resdil", "tcn"}:
         base["conv_channels"] = _require_env(env, "CONV_CHANNELS") or None
+        if builder == "cnn":
+            base["max_pool_size"] = _as_int(
+                _require_env(env, "MAX_POOL_SIZE"),
+                "MAX_POOL_SIZE",
+            )
         if builder in {"cnn", "cnn_resdil"}:
             kernel_sizes_raw = _require_env(env, "KERNEL_SIZES").strip()
             if kernel_sizes_raw != "":
@@ -1192,6 +1198,96 @@ def _build_species_process_env(
     return process_env
 
 
+def _resolve_parallel_auto_num_workers(concurrent_gpu_processes: int) -> int:
+    """Resolve auto DataLoader workers from CPU cores and GPU process count.
+
+    Parameters
+    ----------
+    concurrent_gpu_processes : int
+        Number of species subprocesses expected to run concurrently across GPUs.
+
+    Returns
+    -------
+    int
+        Conservative per-process ``num_workers`` override.
+
+    Raises
+    ------
+    ValueError
+        If ``concurrent_gpu_processes`` is not positive.
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    if concurrent_gpu_processes <= 0:
+        raise ValueError("concurrent_gpu_processes must be positive.")
+
+    cpu_count = os.cpu_count() or 4
+    per_process_cpu_budget = max(1, cpu_count // concurrent_gpu_processes)
+
+    # One training process typically owns multiple DataLoaders at once
+    # (train/val/train-eval). Keep worker allocation well below the raw
+    # per-process CPU budget so aggregate workers scale with GPU process count
+    # without oversubscribing CPU or file descriptors.
+    cpu_cap = max(1, min(4, per_process_cpu_budget // 8))
+
+    soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft_limit <= 0 or soft_limit == resource.RLIM_INFINITY:
+        return cpu_cap
+
+    # Each worker can consume multiple pipes/queues across train/val/eval
+    # DataLoaders. Keep a wide safety margin to avoid exhausting the per-process
+    # soft descriptor limit when several species run concurrently.
+    reserve_fds = 128
+    approx_fds_per_worker = 32
+    usable_fds = max(0, soft_limit - reserve_fds)
+    fd_cap = max(1, usable_fds // approx_fds_per_worker)
+    return max(1, min(cpu_cap, fd_cap))
+
+
+def _apply_species_parallel_env_overrides(
+    *,
+    env: Mapping[str, str],
+    parallel_species: int,
+    script_name: str,
+) -> dict[str, str]:
+    """Apply wrapper-runtime overrides for species-parallel execution.
+
+    Parameters
+    ----------
+    env : Mapping[str, str]
+        Base wrapper environment.
+    parallel_species : int
+        Number of concurrently scheduled species subprocesses.
+    script_name : str
+        Wrapper script label used for log messages.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment copy with safe parallel-run overrides applied.
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    resolved_env = dict(env)
+    raw_num_workers = resolved_env.get("NUM_WORKERS", "").strip().lower()
+    if raw_num_workers == "auto" and parallel_species > 1:
+        cpu_count = os.cpu_count() or 4
+        resolved_num_workers = _resolve_parallel_auto_num_workers(parallel_species)
+        resolved_env["NUM_WORKERS"] = str(resolved_num_workers)
+        print(
+            f"[{script_name}] species-parallel auto NUM_WORKERS override: "
+            f"auto -> {resolved_num_workers} "
+            f"(parallel_species={parallel_species}, cpu_count={cpu_count})"
+        )
+    return resolved_env
+
+
 def _run_species_serial(
     spec: WrapperSpec,
     *,
@@ -1273,6 +1369,12 @@ def _run_species_parallel(
     slots = gpu_ids[: min(len(species_list), len(gpu_ids))]
     if not slots:
         raise RuntimeError("Parallel species execution requires at least one GPU.")
+    parallel_species = len(slots)
+    parallel_base_env = _apply_species_parallel_env_overrides(
+        env=base_env,
+        parallel_species=parallel_species,
+        script_name=spec.script_name,
+    )
 
     print(
         f"[{spec.script_name}] species-parallel run across GPUs: "
@@ -1299,7 +1401,7 @@ def _run_species_parallel(
                     spec,
                     project_root=project_root,
                     data_root=data_root,
-                    env=dict(base_env),
+                    env=dict(parallel_base_env),
                     species=species,
                     process_env=_build_species_process_env(
                         base_process_env=base_process_env,
@@ -1423,6 +1525,7 @@ SPECS: dict[str, WrapperSpec] = {
             "loss": "LOSS",
             "conv_channels": "CONV_CHANNELS",
             "kernel_sizes": "KERNEL_SIZES",
+            "max_pool_size": "MAX_POOL_SIZE",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
             "dropout": "DROPOUT",
@@ -1455,6 +1558,7 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
+            "MAX_POOL_SIZE",
             "DROPOUT",
             "FC_HIDDEN",
             "WEIGHT_DECAY",
@@ -1519,6 +1623,7 @@ SPECS: dict[str, WrapperSpec] = {
             "kernel_sizes": "KERNEL_SIZES",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
+            "max_pool_size": "MAX_POOL_SIZE",
             "fusion_mode": "FUSION_MODE",
             "dropout": "DROPOUT",
             "fc_hidden": "FC_HIDDEN",
@@ -1550,6 +1655,7 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
+            "MAX_POOL_SIZE",
             "FUSION_MODE",
             "DROPOUT",
             "FC_HIDDEN",
