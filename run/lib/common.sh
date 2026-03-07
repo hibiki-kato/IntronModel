@@ -259,6 +259,63 @@ intronmodel_resolve_species_template() {
 }
 
 
+intronmodel_resolve_seed_list() {
+	local script_tag="$1"
+	local base_seed="$2"
+	local raw_seed_list="${3-}"
+	local py_bin="${4:-python3}"
+
+	"${py_bin}" - \
+		"${script_tag}" \
+		"${base_seed}" \
+		"${raw_seed_list}" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+
+
+def _fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _parse_seed(text: str, *, name: str) -> int:
+    stripped = text.strip()
+    if not re.fullmatch(r"\d+", stripped):
+        _fail(f"[{script_tag}] {name} must be a non-negative integer.")
+    return int(stripped)
+
+
+script_tag = sys.argv[1]
+base_seed = _parse_seed(sys.argv[2], name="BASE_SEED")
+raw_seed_list = sys.argv[3]
+
+if raw_seed_list.strip() == "":
+    print(base_seed)
+    raise SystemExit(0)
+
+resolved: list[int] = []
+seen: set[int] = set()
+for token in raw_seed_list.replace("\n", ",").split(","):
+    item = token.strip()
+    if item == "":
+        continue
+    seed = _parse_seed(item, name="SEED_LIST entry")
+    if seed in seen:
+        continue
+    seen.add(seed)
+    resolved.append(seed)
+
+if not resolved:
+    _fail(f"[{script_tag}] SEED_LIST resolved to an empty set.")
+
+for seed in resolved:
+    print(seed)
+PY
+}
+
+
 intronmodel_resolve_max_model_params() {
 	local script_tag="$1"
 	local setting="$2"

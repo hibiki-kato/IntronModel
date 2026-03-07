@@ -14,7 +14,9 @@ fi
 SPECIES="Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+VAL_FRAC="0.1"
 BASE_SEED="1337"
+SEED_LIST=""
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
@@ -207,6 +209,14 @@ resolve_python_bin() {
 	intronmodel_resolve_python_bin "tune_cnn.sh"
 }
 
+resolve_seed_list() {
+	intronmodel_resolve_seed_list \
+		"tune_cnn.sh" \
+		"${BASE_SEED}" \
+		"${SEED_LIST}" \
+		"${PYTHON_BIN}"
+}
+
 resolve_search_space_file() {
 	local explicit_file="$1"
 	local project_root="$2"
@@ -380,6 +390,7 @@ PY
 SPECIES="$(resolve_species_case "${SPECIES}" "${DATA_ROOT}")"
 mapfile -t TARGET_LIST < <(resolve_tune_targets "${TUNE_TARGETS}")
 PYTHON_BIN="$(resolve_python_bin)"
+mapfile -t SEED_VALUES < <(resolve_seed_list)
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
 		"tune_cnn.sh" \
@@ -489,10 +500,10 @@ fi
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 echo "[tune_cnn.sh] species=${SPECIES}"
 echo "[tune_cnn.sh] targets=${TARGET_LIST[*]}"
+echo "[tune_cnn.sh] seeds=${SEED_VALUES[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
-	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
@@ -514,14 +525,11 @@ for TARGET in "${TARGET_LIST[@]}"; do
 	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
-	mkdir -p "${OUTPUT_DIR}"
-	TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	TARGET_START_SECONDS="${SECONDS}"
 	QUICK_TRIALS_TARGET="${QUICK_TRIALS}"
-		TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
-		if [[ "${TARGET}" == "acceptor" ]]; then
-			TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
-		fi
+	TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
+	if [[ "${TARGET}" == "acceptor" ]]; then
+		TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
+	fi
 
 	if [[ "${QUICK_TRIALS_MODE}" == "budget" ]]; then
 		TARGET_BUDGET_MINUTES="${TARGET_TIME_BUDGET_MINUTES}"
@@ -587,27 +595,32 @@ for TARGET in "${TARGET_LIST[@]}"; do
 		fi
 		TARGET_SEARCH_SPACE_JSON="${target_space_json}"
 		echo "[tune_cnn.sh] target=${TARGET} search_space_file=${search_space_path}"
-		else
-			search_space_status=$?
-			if [[ "${search_space_status}" -eq 2 ]]; then
-				exit 1
-			fi
-				echo "[tune_cnn.sh] target=${TARGET} search_space_file=<embedded_${TARGET}>"
-			fi
+	else
+		search_space_status=$?
+		if [[ "${search_space_status}" -eq 2 ]]; then
+			exit 1
+		fi
+		echo "[tune_cnn.sh] target=${TARGET} search_space_file=<embedded_${TARGET}>"
+	fi
 
-	CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
-	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
-	TRAIN_POS_PATH_JSON="$(
-		intronmodel_json_string_or_null \
-			"${PYTHON_BIN}" \
-			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
-	)"
-	TRAIN_NEG_PATH_JSON="$(
-		intronmodel_json_string_or_null \
-			"${PYTHON_BIN}" \
-			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
-	)"
-	cat > "${CONFIG_PATH}" <<JSON
+	for base_seed in "${SEED_VALUES[@]}"; do
+		OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}_seed${base_seed}"
+		mkdir -p "${OUTPUT_DIR}"
+		TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		TARGET_START_SECONDS="${SECONDS}"
+		CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
+		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		TRAIN_POS_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
+		)"
+		TRAIN_NEG_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
+		)"
+		cat > "${CONFIG_PATH}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
   "species": "${SPECIES}",
@@ -616,7 +629,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
   "full_epochs": ${FULL_EPOCHS},
-  "base_seed": ${BASE_SEED},
+  "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
@@ -636,6 +649,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "train_target": "${TARGET}",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "val_frac": ${VAL_FRAC},
     "conv_depth": 3,
     "channel_candidates": "64,96,128,192,256,384,512",
     "kernel_candidates": "3,5,7,9,11,13,15",
@@ -672,20 +686,22 @@ for TARGET in "${TARGET_LIST[@]}"; do
 }
 JSON
 
-	echo "[tune_cnn.sh] target=${TARGET}"
-	echo "[tune_cnn.sh] output_dir=${OUTPUT_DIR}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${CONFIG_PATH}"; then
+		echo "[tune_cnn.sh] target=${TARGET} seed=${base_seed}"
+		echo "[tune_cnn.sh] output_dir=${OUTPUT_DIR}"
+		if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+			--config "${CONFIG_PATH}"; then
+			target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
+			target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
+			echo "[tune_cnn.sh] target=${TARGET} seed=${base_seed} "\
+				"failed start=${TARGET_START_EPOCH} "\
+				"elapsed=${target_elapsed_hms} (${target_elapsed_seconds}s)" >&2
+			exit 1
+			fi
+		target_end_epoch="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 		target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
-		echo "[tune_cnn.sh] target=${TARGET} failed start=${TARGET_START_EPOCH} "\
-			"elapsed=${target_elapsed_hms} (${target_elapsed_seconds}s)" >&2
-		exit 1
-	fi
-	target_end_epoch="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
-	target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
-	echo "[tune_cnn.sh] target=${TARGET} done start=${TARGET_START_EPOCH} "\
-		"end=${target_end_epoch} elapsed=${target_elapsed_hms} "\
-		"(${target_elapsed_seconds}s)"
+		echo "[tune_cnn.sh] target=${TARGET} seed=${base_seed} "\
+			"done start=${TARGET_START_EPOCH} end=${target_end_epoch} "\
+			"elapsed=${target_elapsed_hms} (${target_elapsed_seconds}s)"
+	done
 done

@@ -12,13 +12,12 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 set -a
-MODEL="cnn_pair"
 SPECIES="Athal, Dmel, Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
-MASK_MODE="on"
+MASK_MODE="off"
 MASK_TEST_TSV_PATH=""
 
 EPOCHS="10"
@@ -47,7 +46,6 @@ F1_LAMBDA="0.1"
 ASYM_GAMMA_POS="0.0"
 ASYM_GAMMA_NEG="4.0"
 ASYM_ALPHA_POS=""
-TRAIN_TARGET="pair"
 SEQUENCE_TRANSFORM="none"
 USE_TUNED_HPARAMS="auto"
 PAIR_TUNED_CONFIG_PATH=""
@@ -58,14 +56,13 @@ ACCEPTOR_CONV_CHANNELS=""
 DONOR_KERNEL_SIZES=""
 ACCEPTOR_KERNEL_SIZES=""
 
-INTRON_SCORE_OP="*"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
 NAME_FIELDS=""
 TAG=""
 VISUALIZE="true"
-SKIP_TRAINING="1"
+SKIP_TRAINING="0"
 CONTINUE_TRAINING="0"
 TRAIN_ONLY="0"
 TRAIN_POS_PATH=""
@@ -74,7 +71,6 @@ PRECOMPUTED_SITE_SCORE_TSV=""
 CHECKPOINT_TOP_K="3"
 CHECKPOINT_PRUNE_DRY_RUN="0"
 
-PERF_MODE="max_throughput"
 DEVICE="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
@@ -103,7 +99,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
-INTRONMODEL_AUTO_TMUX="off"
+# INTRONMODEL_AUTO_TMUX="off"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 intronmodel_start_timer "cnn_pair.sh"

@@ -71,6 +71,29 @@ SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "pair_max_f1",
 )
 SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
+_CONTEXT_ARG_IGNORE_KEYS: set[str] = {
+    "allow_tf32",
+    "amp_dtype",
+    "checkpoint_prune_dry_run",
+    "checkpoint_top_k",
+    "compile_mode",
+    "cudnn_benchmark",
+    "deterministic",
+    "device",
+    "epochs",
+    "max_oom_retries",
+    "metrics_json",
+    "min_batch_size",
+    "name_fields",
+    "num_workers",
+    "persistent_workers",
+    "pin_memory",
+    "prefetch_factor",
+    "tag",
+    "train_only",
+    "use_amp",
+    "visualize",
+}
 
 
 @dataclass(frozen=True)
@@ -503,14 +526,55 @@ def _build_hparam_context(
     objective_metric: str,
     full_epochs: int,
     validation_protocol: dict[str, object],
+    fixed_run_args: Optional[dict[str, object]] = None,
 ) -> dict[str, object]:
     """Build comparison context used for global-best compatibility checks."""
-    return {
+    context: dict[str, object] = {
         "version": 1,
         "objective_metric": objective_metric,
         "full_epochs": full_epochs,
         "validation_protocol": _normalize_context_object(validation_protocol),
     }
+    if fixed_run_args:
+        context["fixed_run_args"] = _normalize_context_object(fixed_run_args)
+    return context
+
+
+def _build_fixed_run_args_context(
+    *,
+    base_args: dict[str, ArgValue],
+    full_overrides: dict[str, ArgValue],
+    search_space: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    """Build context for non-search fixed arguments that affect comparability."""
+    merged_args: dict[str, ArgValue] = dict(base_args)
+    for key, value in full_overrides.items():
+        merged_args[key] = value
+
+    search_keys = set(search_space)
+    fixed_args: dict[str, object] = {}
+    for key, value in merged_args.items():
+        if key in search_keys or key in _CONTEXT_ARG_IGNORE_KEYS:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, Path):
+            text = str(value)
+            if text != "":
+                fixed_args[key] = text
+            continue
+        if isinstance(value, str):
+            if value != "":
+                fixed_args[key] = value
+            continue
+        if isinstance(value, (bool, int, float)):
+            fixed_args[key] = value
+            continue
+        fixed_args[key] = str(value)
+    normalized = _normalize_context_object(fixed_args)
+    if not isinstance(normalized, dict):
+        raise ValueError("fixed_run_args must normalize to an object.")
+    return normalized
 
 
 def _extract_hparam_context(raw: dict[str, object]) -> Optional[dict[str, object]]:
@@ -4063,10 +4127,16 @@ def run_search(config: SearchConfig) -> int:
     full_epochs_value = _to_positive_int(full_overrides.get("epochs"))
     if full_epochs_value is None:
         full_epochs_value = config.full_epochs
+    fixed_run_args = _build_fixed_run_args_context(
+        base_args=dict(config.base_args),
+        full_overrides=full_overrides,
+        search_space=config.search_space,
+    )
     current_hparam_context = _build_hparam_context(
         objective_metric=config.objective_metric,
         full_epochs=full_epochs_value,
         validation_protocol=baseline_validation_protocol,
+        fixed_run_args=fixed_run_args,
     )
     gpu_ids = detect_gpu_ids(config.gpu_ids_setting)
     max_parallel_trials = resolve_max_parallel(

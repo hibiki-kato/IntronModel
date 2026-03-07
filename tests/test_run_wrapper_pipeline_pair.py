@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import tools.run_wrapper_pipeline as run_wrapper_pipeline
-from tools.run_wrapper_pipeline import WrapperSpec
+from tools.run_wrapper_pipeline import SPECS, WrapperSpec
 from tools.run_wrapper_pipeline import (
+    _apply_wrapper_defaults,
     _apply_mask_mode_defaults,
     _build_run_args,
     _resolve_species_path_template,
@@ -120,7 +121,7 @@ def test_build_run_args_forwards_pair_max_pool_flag() -> None:
 
 def test_stem_params_include_pair_max_pool_flag() -> None:
     params = _stem_params(
-        "cnn",
+        "cnn_pair",
         {
             "DONOR_LEN": "100",
             "ACCEPTOR_LEN": "100",
@@ -132,7 +133,6 @@ def test_stem_params_include_pair_max_pool_flag() -> None:
             "ETA_MIN_RATIO": "0.01",
             "GRAD_CLIP": "5.0",
             "VAL_FRAC": "0.1",
-            "INTRON_SCORE_OP": "*",
             "TRANSCRIPT_SCORE_AGG": "min",
             "SOFTMIN_TAU": "1.0",
             "SEED": "1337",
@@ -150,6 +150,32 @@ def test_stem_params_include_pair_max_pool_flag() -> None:
     assert params["max_pool_size"] == 1
     assert params["conv_stride"] == 2
     assert params["head_type"] == "center"
+
+
+def test_apply_wrapper_defaults_fills_single_task_pair_values() -> None:
+    spec = WrapperSpec(
+        script_name="unit.sh",
+        model_env_name="cnn_pair",
+        supports_tuned_hparams=False,
+        tuned_key_map={},
+        stem_param_builder="cnn_pair",
+        required_arg_keys=(),
+        per_task_override_keys=(),
+    )
+    env: dict[str, str] = {}
+
+    _apply_wrapper_defaults(spec, env)
+
+    assert env["MODEL"] == "cnn_pair"
+    assert env["TRAIN_TARGET"] == "pair"
+
+
+def test_cnn_pair_spec_does_not_require_redundant_pair_envs() -> None:
+    spec = SPECS["cnn_pair.sh"]
+
+    assert spec.stem_param_builder == "cnn_pair"
+    assert "TRAIN_TARGET" not in spec.required_arg_keys
+    assert "INTRON_SCORE_OP" not in spec.required_arg_keys
 
 
 def test_resolve_species_path_template_replaces_all_tokens() -> None:

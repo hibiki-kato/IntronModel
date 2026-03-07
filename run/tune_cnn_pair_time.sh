@@ -21,7 +21,9 @@ TRAIN_NEG_PATH=""
 MASK_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+VAL_FRAC="0.1"
 BASE_SEED="1337"
+SEED_LIST=""
 
 QUICK_TRIALS="32"
 QUICK_EPOCHS="2"
@@ -171,6 +173,14 @@ resolve_species_case() {
 
 resolve_python_bin() {
 	intronmodel_resolve_python_bin "tune_cnn_pair_time.sh"
+}
+
+resolve_seed_list() {
+	intronmodel_resolve_seed_list \
+		"tune_cnn_pair_time.sh" \
+		"${BASE_SEED}" \
+		"${SEED_LIST}" \
+		"${PYTHON_BIN}"
 }
 
 resolve_search_space_file() {
@@ -343,6 +353,7 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 fi
 
 PYTHON_BIN="$(resolve_python_bin)"
+mapfile -t SEED_VALUES < <(resolve_seed_list)
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
 		"tune_cnn_pair_time.sh" \
@@ -366,6 +377,7 @@ echo "[tune_cnn_pair_time.sh] quick+full cycles: "\
 	"quick_trials=${QUICK_TRIALS} quick_epochs=${QUICK_EPOCHS} "\
 	"top_k=${TOP_K} full_epochs=${FULL_EPOCHS}"
 echo "[tune_cnn_pair_time.sh] schedule=${JOB_ORDER[*]}"
+echo "[tune_cnn_pair_time.sh] seeds=${SEED_VALUES[*]}"
 
 job_index=0
 while true; do
@@ -386,10 +398,14 @@ while true; do
 	fi
 	remaining_hms="$(format_elapsed "${remaining_seconds}")"
 
-	raw_species="${JOB_ORDER[$((job_index % ${#JOB_ORDER[@]}))]}"
+	schedule_index=$((job_index % (${#JOB_ORDER[@]} * ${#SEED_VALUES[@]})))
+	species_index=$((schedule_index % ${#JOB_ORDER[@]}))
+	seed_index=$((schedule_index / ${#JOB_ORDER[@]}))
+	raw_species="${JOB_ORDER[${species_index}]}"
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
+	base_seed="${SEED_VALUES[${seed_index}]}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
-	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
+	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
 	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
@@ -465,7 +481,7 @@ while true; do
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
   "full_epochs": ${FULL_EPOCHS},
-  "base_seed": ${BASE_SEED},
+  "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "objective_metric": "${objective_metric}",
@@ -484,6 +500,7 @@ while true; do
     "train_target": "pair",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "val_frac": ${VAL_FRAC},
     "donor_conv_depth": 3,
     "acceptor_conv_depth": 3,
     "donor_channel_candidates": "64,96,128,192,256,384,512",
@@ -530,12 +547,12 @@ JSON
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
 	printf '[tune_cnn_pair_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-	printf 'ETA_remaining=%s species=%s target=pair\n' \
-		"${remaining_hms}" "${species}"
+	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
+		"${remaining_hms}" "${species}" "${base_seed}"
 	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${config_path}"; then
 		echo "[tune_cnn_pair_time.sh] cycle=${job_index} failed "\
-			"species=${species} target=pair" >&2
+			"species=${species} target=pair seed=${base_seed}" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 		run_double_descent_plot \

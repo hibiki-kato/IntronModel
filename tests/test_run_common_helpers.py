@@ -52,3 +52,24 @@ def test_common_json_string_or_null_quotes_resolved_species_path() -> None:
 
     assert run.returncode == 0
     assert run.stdout.strip() == '"data/Dmel/raw/Dmel.err"'
+
+
+def test_common_resolve_seed_list_defaults_to_base_seed() -> None:
+    run = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        'intronmodel_resolve_seed_list "test_common.sh" "1337" "" "${PY_BIN}"'
+    )
+
+    assert run.returncode == 0
+    assert run.stdout.strip().splitlines() == ["1337"]
+
+
+def test_common_resolve_seed_list_normalizes_and_deduplicates_entries() -> None:
+    run = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        'intronmodel_resolve_seed_list '
+        '"test_common.sh" "1337" " 2024,1337,2024, 3407 " "${PY_BIN}"'
+    )
+
+    assert run.returncode == 0
+    assert run.stdout.strip().splitlines() == ["2024", "1337", "3407"]

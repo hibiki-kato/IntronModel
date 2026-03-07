@@ -16,6 +16,7 @@ TIME_BUDGET_MINUTES="780"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+VAL_FRAC="0.1"
 BASE_SEED="1337"
 
 QUICK_TRIALS="8"
@@ -508,6 +509,7 @@ while true; do
     "train_target": "${target}",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "val_frac": ${VAL_FRAC},
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

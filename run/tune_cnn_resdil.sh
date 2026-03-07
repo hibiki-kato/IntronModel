@@ -14,6 +14,7 @@ fi
 SPECIES="Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+VAL_FRAC="0.1"
 BASE_SEED="1337"
 
 QUICK_TRIALS="8"
@@ -603,6 +604,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "train_target": "${TARGET}",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "val_frac": ${VAL_FRAC},
     "conv_depth": 3,
     "channel_candidates": "64,96,128,192,256,384,512",
     "kernel_candidates": "3,5,7,9,11,13,15",

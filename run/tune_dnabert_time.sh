@@ -17,6 +17,7 @@ TIME_BUDGET_MINUTES="780"
 SPECIES="Dmel Mmus Athal"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+VAL_FRAC="0.1"
 BASE_SEED="1337"
 DNABERT_VARIANT="6"
 PRETRAINED_MODEL_NAME=""
@@ -491,6 +492,7 @@ while true; do
     "train_target": "${target}",
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "val_frac": ${VAL_FRAC},
     "pretrained_model_name": "${PRETRAINED_MODEL_NAME_RESOLVED}",
     "pretrained_revision": "${PRETRAINED_REVISION}",
     "trust_remote_code": ${TRUST_REMOTE_CODE},

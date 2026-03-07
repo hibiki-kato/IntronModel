@@ -282,6 +282,20 @@ def _resolve_tasks_for_target(
     return (train_target,)
 
 
+def _apply_wrapper_defaults(spec: WrapperSpec, env: dict[str, str]) -> None:
+    """Populate wrapper-owned defaults before validation."""
+
+    if env.get("MODEL", "").strip() == "":
+        env["MODEL"] = spec.model_env_name
+
+    if env.get("TRAIN_TARGET", "").strip() != "":
+        return
+
+    model_tasks = checkpoint_tasks_for_model(env["MODEL"])
+    if len(model_tasks) == 1:
+        env["TRAIN_TARGET"] = model_tasks[0]
+
+
 def _apply_tuned_overrides(
     spec: WrapperSpec,
     env: dict[str, str],
@@ -505,21 +519,22 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         ),
         "grad_clip": _as_float(_require_env(env, "GRAD_CLIP"), "GRAD_CLIP"),
         "val_frac": _as_float(_require_env(env, "VAL_FRAC"), "VAL_FRAC"),
-        "intron_score_op": _require_env(env, "INTRON_SCORE_OP"),
         "transcript_score_agg": _require_env(env, "TRANSCRIPT_SCORE_AGG"),
         "softmin_tau": _as_float(_require_env(env, "SOFTMIN_TAU"), "SOFTMIN_TAU"),
         "seed": _as_int(_require_env(env, "SEED"), "SEED"),
         "train_target": _require_env(env, "TRAIN_TARGET"),
     }
+    if builder != "cnn_pair":
+        base["intron_score_op"] = _require_env(env, "INTRON_SCORE_OP")
     tag_value = env.get("TAG", "").strip()
     if tag_value != "":
         base["tag"] = tag_value
 
-    if builder in {"cnn", "cnn_resdil", "tcn"}:
+    if builder in {"cnn", "cnn_pair", "cnn_resdil", "tcn"}:
         base["conv_channels"] = _require_env(env, "CONV_CHANNELS") or None
-        if builder in {"cnn", "cnn_resdil"}:
+        if builder in {"cnn", "cnn_pair", "cnn_resdil"}:
             base["head_type"] = _require_env(env, "HEAD_TYPE")
-        if builder == "cnn":
+        if builder in {"cnn", "cnn_pair"}:
             base["max_pool_size"] = _as_int(
                 _require_env(env, "MAX_POOL_SIZE"),
                 "MAX_POOL_SIZE",
@@ -533,7 +548,7 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
                 _require_env(env, "MAX_POOL_SIZE"),
                 "MAX_POOL_SIZE",
             )
-        if builder in {"cnn", "cnn_resdil"}:
+        if builder in {"cnn", "cnn_pair", "cnn_resdil"}:
             kernel_sizes_raw = _require_env(env, "KERNEL_SIZES").strip()
             if kernel_sizes_raw != "":
                 base["kernel_sizes"] = kernel_sizes_raw
@@ -1500,6 +1515,7 @@ def _run(spec: WrapperSpec) -> int:
         _validate_dnabert_specific(env)
         _resolve_dnabert_model(env, model_root)
 
+    _apply_wrapper_defaults(spec, env)
     _validate_common(spec, env)
     raw_species_value = _require_env(env, "SPECIES")
     raw_species_list = _parse_species_list(raw_species_value)
@@ -1659,7 +1675,7 @@ SPECS: dict[str, WrapperSpec] = {
             "asym_gamma_neg": "ASYM_GAMMA_NEG",
             "asym_alpha_pos": "ASYM_ALPHA_POS",
         },
-        stem_param_builder="cnn",
+        stem_param_builder="cnn_pair",
         required_arg_keys=(
             "SPECIES",
             "DONOR_LEN",
@@ -1668,7 +1684,6 @@ SPECS: dict[str, WrapperSpec] = {
             "MAX_EPOCHS",
             "EARLY_STOP_PATIENCE",
             "EARLY_STOP_MIN_DELTA",
-            "TRAIN_TARGET",
             "SEQUENCE_TRANSFORM",
             "BATCH_SIZE",
             "LR",
@@ -1689,7 +1704,6 @@ SPECS: dict[str, WrapperSpec] = {
             "FOCAL_GAMMA",
             "F1_LAMBDA",
             "NAME_FIELDS",
-            "INTRON_SCORE_OP",
             "TRANSCRIPT_SCORE_AGG",
             "SOFTMIN_TAU",
             "SEED",
