@@ -164,6 +164,30 @@ def test_tune_bert_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_tune_bert_time_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "tune_bert_time.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_tune_reservoir_time_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "tune_reservoir_time.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_run_scripts_are_shellcheck_parsable() -> None:
     root = _project_root()
     cnn = subprocess.run(
@@ -256,6 +280,18 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
+    tune_bert_time = subprocess.run(
+        ["bash", "-n", str(root / "run" / "tune_bert_time.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tune_reservoir_time = subprocess.run(
+        ["bash", "-n", str(root / "run" / "tune_reservoir_time.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     eval_pair = subprocess.run(
         ["bash", "-n", str(root / "run" / "eval_trans_score_pair.sh")],
         capture_output=True,
@@ -283,5 +319,7 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert tune_bert.returncode == 0, tune_bert.stderr
     assert tune_resdil_time.returncode == 0, tune_resdil_time.stderr
     assert tune_tcn_time.returncode == 0, tune_tcn_time.stderr
+    assert tune_bert_time.returncode == 0, tune_bert_time.stderr
+    assert tune_reservoir_time.returncode == 0, tune_reservoir_time.stderr
     assert eval_pair.returncode == 0, eval_pair.stderr
     assert plot_eval.returncode == 0, plot_eval.stderr
