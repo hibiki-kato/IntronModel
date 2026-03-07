@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import json
 import math
 import os
@@ -838,6 +839,7 @@ def _build_mask_test_tsv(
     species: str,
     donor_len: int,
     acceptor_len: int,
+    process_env: Mapping[str, str],
 ) -> Path | None:
     """Build one clipped test TSV for mask-mode evaluation."""
     raw_dir = data_root / species / "raw"
@@ -871,7 +873,7 @@ def _build_mask_test_tsv(
         "0",
         "--clip-short-intron",
     ]
-    proc = subprocess.run(cmd, check=False, env=os.environ.copy())
+    proc = subprocess.run(cmd, check=False, env=dict(process_env))
     if proc.returncode != 0 or not output_path.is_file():
         return None
     if not _has_test_tsv_required_columns(output_path):
@@ -884,6 +886,7 @@ def _apply_mask_mode_defaults(
     env: dict[str, str],
     data_root: Path,
     species: str,
+    process_env: Mapping[str, str],
 ) -> None:
     """Apply automatic defaults for ``MASK_MODE=on``."""
     mode = _normalize_on_off_mode(env.get("MASK_MODE", "off"), "MASK_MODE")
@@ -926,6 +929,7 @@ def _apply_mask_mode_defaults(
         species=species,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        process_env=process_env,
     )
     if generated is not None:
         env["TEST_TSV_PATH"] = str(generated)
@@ -946,10 +950,11 @@ def _run_single_species(
     data_root: Path,
     env: dict[str, str],
     species: str,
+    process_env: dict[str, str],
 ) -> int:
     """Execute one wrapper pipeline run for one normalized species."""
     env["SPECIES"] = species
-    os.environ["INTRONMODEL_MPS_MAX_BATCH_SIZE"] = _require_env(
+    process_env["INTRONMODEL_MPS_MAX_BATCH_SIZE"] = _require_env(
         env,
         "MPS_MAX_BATCH_SIZE",
     )
@@ -964,7 +969,12 @@ def _run_single_species(
         if raw == "":
             continue
         env[key] = _resolve_species_path_template(raw, species)
-    _apply_mask_mode_defaults(env=env, data_root=data_root, species=species)
+    _apply_mask_mode_defaults(
+        env=env,
+        data_root=data_root,
+        species=species,
+        process_env=process_env,
+    )
 
     tuned_config_paths: dict[TaskName, Path] = {}
     if spec.supports_tuned_hparams:
@@ -1057,7 +1067,7 @@ def _run_single_species(
     process = subprocess.run(
         [sys.executable, str(project_root / "src" / "run_model.py"), *run_args],
         check=False,
-        env=os.environ.copy(),
+        env=dict(process_env),
     )
     if process.returncode != 0:
         return process.returncode
@@ -1077,7 +1087,7 @@ def _run_single_species(
                     str(learning_curve_png),
                 ],
                 check=False,
-                env=os.environ.copy(),
+                env=dict(process_env),
             )
             if curve_proc.returncode != 0:
                 print(
@@ -1099,6 +1109,265 @@ def _run_single_species(
     print(f"[{spec.script_name}] transcript_score={output_trans_score_tsv}")
     print(f"[{spec.script_name}] eval_score={output_eval_score_txt}")
     return 0
+
+
+def _detect_visible_gpu_ids() -> list[str]:
+    """Detect visible GPU ids from the environment or ``nvidia-smi``.
+
+    Returns
+    -------
+    list[str]
+        Ordered GPU identifiers visible to the current process. Returns an
+        empty list when no CUDA GPUs are detectable.
+
+    Complexity
+    ----------
+    O(g) time and O(g) memory, where ``g`` is the detected GPU count.
+    """
+
+    env_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if env_visible != "":
+        return [part.strip() for part in env_visible.split(",") if part.strip()]
+
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index",
+        "--format=csv,noheader",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _resolve_species_gpu_slots(device: str) -> list[str]:
+    """Resolve GPU slots usable for species-level parallel wrapper runs.
+
+    Parameters
+    ----------
+    device : str
+        Wrapper ``DEVICE`` setting.
+
+    Returns
+    -------
+    list[str]
+        Ordered GPU ids to assign per species subprocess.
+
+    Raises
+    ------
+    ValueError
+        If the device setting is unsupported.
+
+    Complexity
+    ----------
+    O(g) time and O(g) memory, where ``g`` is the detected GPU count.
+    """
+
+    normalized = device.strip().lower()
+    if normalized not in {"auto", "cuda", "cpu", "mps"}:
+        raise ValueError("DEVICE must be auto|cuda|cpu|mps.")
+    if normalized in {"cpu", "mps"}:
+        return []
+    return _detect_visible_gpu_ids()
+
+
+def _build_species_process_env(
+    *,
+    base_process_env: Mapping[str, str],
+    assigned_gpu_id: str | None,
+) -> dict[str, str]:
+    """Build one subprocess environment for a species run."""
+
+    process_env = dict(base_process_env)
+    if assigned_gpu_id is not None:
+        process_env["CUDA_VISIBLE_DEVICES"] = assigned_gpu_id
+    return process_env
+
+
+def _run_species_serial(
+    spec: WrapperSpec,
+    *,
+    project_root: Path,
+    data_root: Path,
+    base_env: Mapping[str, str],
+    base_process_env: Mapping[str, str],
+    species_list: list[str],
+) -> int:
+    """Run species sequentially with one shared process environment template."""
+
+    for index, species in enumerate(species_list, start=1):
+        if len(species_list) > 1:
+            print(
+                f"[{spec.script_name}] species batch progress: "
+                f"{index}/{len(species_list)} ({species})"
+            )
+        code = _run_single_species(
+            spec,
+            project_root=project_root,
+            data_root=data_root,
+            env=dict(base_env),
+            species=species,
+            process_env=_build_species_process_env(
+                base_process_env=base_process_env,
+                assigned_gpu_id=None,
+            ),
+        )
+        if code != 0:
+            return code
+    return 0
+
+
+def _run_species_parallel(
+    spec: WrapperSpec,
+    *,
+    project_root: Path,
+    data_root: Path,
+    base_env: Mapping[str, str],
+    base_process_env: Mapping[str, str],
+    species_list: list[str],
+    gpu_ids: list[str],
+) -> int:
+    """Run species in parallel, assigning one GPU slot per subprocess.
+
+    Parameters
+    ----------
+    spec : WrapperSpec
+        Wrapper specification for the active shell script.
+    project_root : Path
+        Repository root path.
+    data_root : Path
+        Data root path.
+    base_env : Mapping[str, str]
+        Shared wrapper config environment copied per species.
+    base_process_env : Mapping[str, str]
+        Shared subprocess environment copied per species.
+    species_list : list[str]
+        Ordered normalized species names to run.
+    gpu_ids : list[str]
+        Ordered GPU identifiers available for assignment.
+
+    Returns
+    -------
+    int
+        Zero on success, otherwise the first non-zero subprocess return code.
+
+    Raises
+    ------
+    RuntimeError
+        If no GPU slots are available despite entering parallel mode.
+
+    Complexity
+    ----------
+    O(n) scheduler overhead and O(k) concurrent memory, where ``n`` is the
+    number of species and ``k`` is ``min(n, len(gpu_ids))``.
+    """
+
+    slots = gpu_ids[: min(len(species_list), len(gpu_ids))]
+    if not slots:
+        raise RuntimeError("Parallel species execution requires at least one GPU.")
+
+    print(
+        f"[{spec.script_name}] species-parallel run across GPUs: "
+        f"{','.join(slots)}"
+    )
+    pending_species = list(species_list)
+    available_gpu_ids = list(slots)
+    stop_submitting = False
+    first_error_code = 0
+    first_exception: BaseException | None = None
+    running: dict[Future[int], tuple[str, str]] = {}
+
+    with ThreadPoolExecutor(max_workers=len(slots)) as executor:
+        while pending_species or running:
+            while pending_species and available_gpu_ids and not stop_submitting:
+                species = pending_species.pop(0)
+                assigned_gpu_id = available_gpu_ids.pop(0)
+                print(
+                    f"[{spec.script_name}] species dispatch: "
+                    f"{species} -> gpu={assigned_gpu_id}"
+                )
+                future = executor.submit(
+                    _run_single_species,
+                    spec,
+                    project_root=project_root,
+                    data_root=data_root,
+                    env=dict(base_env),
+                    species=species,
+                    process_env=_build_species_process_env(
+                        base_process_env=base_process_env,
+                        assigned_gpu_id=assigned_gpu_id,
+                    ),
+                )
+                running[future] = (species, assigned_gpu_id)
+
+            if not running:
+                break
+
+            completed, _ = wait(
+                running.keys(),
+                return_when=FIRST_COMPLETED,
+            )
+            for future in completed:
+                species, assigned_gpu_id = running.pop(future)
+                available_gpu_ids.append(assigned_gpu_id)
+                try:
+                    code = future.result()
+                except BaseException as exc:  # pragma: no cover
+                    if first_exception is None:
+                        first_exception = exc
+                    stop_submitting = True
+                    continue
+                print(
+                    f"[{spec.script_name}] species complete: "
+                    f"{species} gpu={assigned_gpu_id} exit={code}"
+                )
+                if code != 0 and first_error_code == 0:
+                    first_error_code = code
+                    stop_submitting = True
+
+    if first_exception is not None:
+        raise first_exception
+    return first_error_code
+
+
+def _run_species_batch(
+    spec: WrapperSpec,
+    *,
+    project_root: Path,
+    data_root: Path,
+    base_env: Mapping[str, str],
+    base_process_env: Mapping[str, str],
+    species_list: list[str],
+) -> int:
+    """Run one normalized species list using serial or GPU-parallel scheduling."""
+
+    gpu_ids = _resolve_species_gpu_slots(_require_env(base_env, "DEVICE"))
+    if len(species_list) <= 1 or len(gpu_ids) <= 1:
+        return _run_species_serial(
+            spec,
+            project_root=project_root,
+            data_root=data_root,
+            base_env=base_env,
+            base_process_env=base_process_env,
+            species_list=species_list,
+        )
+    return _run_species_parallel(
+        spec,
+        project_root=project_root,
+        data_root=data_root,
+        base_env=base_env,
+        base_process_env=base_process_env,
+        species_list=species_list,
+        gpu_ids=gpu_ids,
+    )
 
 
 def _run(spec: WrapperSpec) -> int:
@@ -1133,24 +1402,14 @@ def _run(spec: WrapperSpec) -> int:
         joined = ",".join(normalized_species)
         print(f"[{spec.script_name}] multi-species run: {joined}")
 
-    base_env = dict(env)
-    for index, species in enumerate(normalized_species, start=1):
-        if len(normalized_species) > 1:
-            print(
-                f"[{spec.script_name}] species batch progress: "
-                f"{index}/{len(normalized_species)} ({species})"
-            )
-        species_env = dict(base_env)
-        code = _run_single_species(
-            spec,
-            project_root=project_root,
-            data_root=data_root,
-            env=species_env,
-            species=species,
-        )
-        if code != 0:
-            return code
-    return 0
+    return _run_species_batch(
+        spec,
+        project_root=project_root,
+        data_root=data_root,
+        base_env=dict(env),
+        base_process_env=dict(os.environ),
+        species_list=normalized_species,
+    )
 
 
 SPECS: dict[str, WrapperSpec] = {

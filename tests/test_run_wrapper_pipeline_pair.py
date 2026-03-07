@@ -116,7 +116,12 @@ def test_apply_mask_mode_defaults_sets_tag_and_paths(tmp_path: Path) -> None:
         "TEST_TSV_PATH": "",
     }
 
-    _apply_mask_mode_defaults(env=env, data_root=tmp_path, species="Dmel")
+    _apply_mask_mode_defaults(
+        env=env,
+        data_root=tmp_path,
+        species="Dmel",
+        process_env={},
+    )
 
     assert env["TAG"] == "mask"
     assert env["NAME_FIELDS"] == "tag"
@@ -157,6 +162,11 @@ def test_apply_mask_mode_defaults_builds_mask_test_tsv_when_missing(
         _fake_build_mask_test_tsv,
     )
 
-    _apply_mask_mode_defaults(env=env, data_root=tmp_path, species="Dmel")
+    _apply_mask_mode_defaults(
+        env=env,
+        data_root=tmp_path,
+        species="Dmel",
+        process_env={},
+    )
 
     assert env["TEST_TSV_PATH"] == str(generated)
