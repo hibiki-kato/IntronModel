@@ -13,7 +13,7 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 MODEL="bert"
-SPECIES="Mmus"
+SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
