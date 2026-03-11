@@ -507,6 +507,36 @@ def _ensure_tuned_checkpoint_aliases(
 def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
     """Build output-stem parameter dictionary with wrapper-compatible casting."""
 
+    if builder == "markov_xgboost":
+        params: dict[str, object] = {
+            "donor_len": _as_int(_require_env(env, "DONOR_LEN"), "DONOR_LEN"),
+            "acceptor_len": _as_int(
+                _require_env(env, "ACCEPTOR_LEN"),
+                "ACCEPTOR_LEN",
+            ),
+            "markov_order": _as_int(
+                _require_env(env, "MARKOV_ORDER"),
+                "MARKOV_ORDER",
+            ),
+            "markov_alpha": _as_float(
+                _require_env(env, "MARKOV_ALPHA"),
+                "MARKOV_ALPHA",
+            ),
+            "markov_feature_mode": _require_env(env, "MARKOV_FEATURE_MODE"),
+            "val_frac": _as_float(_require_env(env, "VAL_FRAC"), "VAL_FRAC"),
+            "transcript_score_agg": _require_env(env, "TRANSCRIPT_SCORE_AGG"),
+            "softmin_tau": _as_float(
+                _require_env(env, "SOFTMIN_TAU"),
+                "SOFTMIN_TAU",
+            ),
+            "seed": _as_int(_require_env(env, "SEED"), "SEED"),
+            "train_target": _require_env(env, "TRAIN_TARGET"),
+        }
+        tag_value = env.get("TAG", "").strip()
+        if tag_value != "":
+            params["tag"] = tag_value
+        return params
+
     base: dict[str, object] = {
         "donor_len": _as_int(_require_env(env, "DONOR_LEN"), "DONOR_LEN"),
         "acceptor_len": _as_int(_require_env(env, "ACCEPTOR_LEN"), "ACCEPTOR_LEN"),
@@ -599,6 +629,7 @@ def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
         "ASYM_GAMMA_POS",
         "ASYM_GAMMA_NEG",
         "KERNEL_SIZES",
+        "MARKOV_CACHE_DIR",
         "N_DIM",
         "TAG",
     )
@@ -2220,6 +2251,41 @@ SPECS: dict[str, WrapperSpec] = {
             "ASYM_GAMMA_NEG",
             "ASYM_ALPHA_POS",
         ),
+    ),
+    "markov_xgboost.sh": WrapperSpec(
+        script_name="markov_xgboost.sh",
+        model_env_name="markov_xgboost",
+        supports_tuned_hparams=False,
+        tuned_key_map={},
+        stem_param_builder="markov_xgboost",
+        required_arg_keys=(
+            "SPECIES",
+            "DONOR_LEN",
+            "ACCEPTOR_LEN",
+            "SEQUENCE_TRANSFORM",
+            "MARKOV_ORDER",
+            "MARKOV_ALPHA",
+            "MARKOV_FEATURE_MODE",
+            "MARKOV_CACHE_MODE",
+            "VAL_FRAC",
+            "XGB_N_ESTIMATORS",
+            "XGB_MAX_DEPTH",
+            "XGB_LEARNING_RATE",
+            "XGB_SUBSAMPLE",
+            "XGB_COLSAMPLE_BYTREE",
+            "XGB_MIN_CHILD_WEIGHT",
+            "XGB_REG_LAMBDA",
+            "XGB_REG_ALPHA",
+            "XGB_TREE_METHOD",
+            "XGB_N_JOBS",
+            "NAME_FIELDS",
+            "TRANSCRIPT_SCORE_AGG",
+            "SOFTMIN_TAU",
+            "SEED",
+            "DEVICE",
+            "VISUALIZE",
+        ),
+        per_task_override_keys=(),
     ),
 }
 

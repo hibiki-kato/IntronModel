@@ -158,6 +158,8 @@ class SearchConfig:
     surrogate_min_observations: int = 8
     trial_stream_mode: str = "auto"
     trial_process_mode: str = "subprocess"
+    skip_full_phase: bool = False
+    enable_visualization: bool = True
 
 
 @dataclass(frozen=True)
@@ -430,6 +432,8 @@ def load_config(path: Path) -> SearchConfig:
         raise ValueError("quick_overrides must be an object.")
     if not isinstance(full_overrides, dict):
         raise ValueError("full_overrides must be an object.")
+    skip_full_phase = _to_bool(raw.get("skip_full_phase", False))
+    enable_visualization = _to_bool(raw.get("enable_visualization", True))
 
     normalized_base_args: dict[str, ArgValue] = {
         str(key): value for key, value in base_args.items()
@@ -463,6 +467,8 @@ def load_config(path: Path) -> SearchConfig:
         guided_mutation_rate=guided_mutation_rate,
         trial_stream_mode=trial_stream_mode,
         trial_process_mode=trial_process_mode,
+        skip_full_phase=skip_full_phase,
+        enable_visualization=enable_visualization,
     )
 
 
@@ -4320,93 +4326,101 @@ def run_search(config: SearchConfig) -> int:
     write_trials_tsv(config.output_dir / "quick_trials.tsv", quick_rows)
     ranked_quick = rank_successful_trials(quick_rows)
 
-    selected_for_full = ranked_quick[: config.top_k]
-    full_compile_mode = str(full_overrides.get("compile_mode", "auto")).strip().lower()
-    if full_compile_mode == "auto" and gpu_ids:
-        cuda_header_path = _find_cuda_header()
-        if cuda_header_path is None:
-            full_overrides["compile_mode"] = "off"
-            print(
-                "[hparam_search] Full phase compile_mode auto -> off: "
-                "cuda.h not found. Install CUDA toolkit headers (or set "
-                "CUDA_HOME/CUDA_PATH) to enable torch.compile.",
-                flush=True,
-            )
-    filtered_for_full: list[TrialResult] = []
-    skipped_same_best_epoch = 0
-    skipped_seed_context_match = 0
-    seed_best_key: Optional[str] = None
-    if seed_best_params is not None:
-        seed_best_key = json.dumps(
-            seed_best_params,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    for row in selected_for_full:
-        row_key = json.dumps(
-            row.sampled_params,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        if (
-            seed_best_key is not None
-            and row_key == seed_best_key
-            and not seed_best_context_mismatch
-        ):
-            skipped_seed_context_match += 1
-            continue
-        quick_best_epoch = _read_objective_best_epoch_from_metrics(
-            metrics_json_path=row.metrics_json,
-            objective_metric=config.objective_metric,
-        )
-        if (
-            full_epochs_value is not None
-            and quick_best_epoch is not None
-            and quick_best_epoch == full_epochs_value
-        ):
-            skipped_same_best_epoch += 1
-            continue
-        filtered_for_full.append(row)
-    full_params = [dict(row.sampled_params) for row in filtered_for_full]
-    injected_seed_full_recheck = False
-    if seed_best_params is not None and seed_best_context_mismatch:
-        existing_param_keys = {
-            json.dumps(params, sort_keys=True, separators=(",", ":"))
-            for params in full_params
-        }
-        if seed_best_key not in existing_param_keys:
-            full_params.append(dict(seed_best_params))
-            injected_seed_full_recheck = True
-    full_count = len(full_params)
-    full_execution_mode = _resolve_workload_execution_mode(
-        phase_execution_mode=full_mode_policy,
-        trial_count=full_count,
-        max_parallel_trials=max_parallel_trials,
-    )
-    print(
-        f"[hparam_search] Full phase: top_k={config.top_k}, "
-        f"selected={full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
-        f"skipped_seed_context_match={skipped_seed_context_match}, "
-        f"injected_seed_full_recheck={injected_seed_full_recheck}, "
-        f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}, "
-        f"execution_mode={full_execution_mode}.",
-        flush=True,
-    )
     full_rows: list[TrialResult]
-    if full_count > 0:
-        full_rows = run_phase(
-            phase="full",
-            config=config,
-            trial_count=full_count,
-            trial_params=full_params,
-            overrides=full_overrides,
-            gpu_ids=gpu_ids,
-            max_parallel_trials=max_parallel_trials,
-            out_dir=config.output_dir,
-            execution_mode=full_execution_mode,
+    if config.skip_full_phase:
+        full_rows = []
+        print(
+            "[hparam_search] Full phase skipped by config "
+            "(skip_full_phase=true).",
+            flush=True,
         )
     else:
-        full_rows = []
+        selected_for_full = ranked_quick[: config.top_k]
+        full_compile_mode = str(full_overrides.get("compile_mode", "auto")).strip().lower()
+        if full_compile_mode == "auto" and gpu_ids:
+            cuda_header_path = _find_cuda_header()
+            if cuda_header_path is None:
+                full_overrides["compile_mode"] = "off"
+                print(
+                    "[hparam_search] Full phase compile_mode auto -> off: "
+                    "cuda.h not found. Install CUDA toolkit headers (or set "
+                    "CUDA_HOME/CUDA_PATH) to enable torch.compile.",
+                    flush=True,
+                )
+        filtered_for_full: list[TrialResult] = []
+        skipped_same_best_epoch = 0
+        skipped_seed_context_match = 0
+        seed_best_key: Optional[str] = None
+        if seed_best_params is not None:
+            seed_best_key = json.dumps(
+                seed_best_params,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        for row in selected_for_full:
+            row_key = json.dumps(
+                row.sampled_params,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if (
+                seed_best_key is not None
+                and row_key == seed_best_key
+                and not seed_best_context_mismatch
+            ):
+                skipped_seed_context_match += 1
+                continue
+            quick_best_epoch = _read_objective_best_epoch_from_metrics(
+                metrics_json_path=row.metrics_json,
+                objective_metric=config.objective_metric,
+            )
+            if (
+                full_epochs_value is not None
+                and quick_best_epoch is not None
+                and quick_best_epoch == full_epochs_value
+            ):
+                skipped_same_best_epoch += 1
+                continue
+            filtered_for_full.append(row)
+        full_params = [dict(row.sampled_params) for row in filtered_for_full]
+        injected_seed_full_recheck = False
+        if seed_best_params is not None and seed_best_context_mismatch:
+            existing_param_keys = {
+                json.dumps(params, sort_keys=True, separators=(",", ":"))
+                for params in full_params
+            }
+            if seed_best_key not in existing_param_keys:
+                full_params.append(dict(seed_best_params))
+                injected_seed_full_recheck = True
+        full_count = len(full_params)
+        full_execution_mode = _resolve_workload_execution_mode(
+            phase_execution_mode=full_mode_policy,
+            trial_count=full_count,
+            max_parallel_trials=max_parallel_trials,
+        )
+        print(
+            f"[hparam_search] Full phase: top_k={config.top_k}, "
+            f"selected={full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
+            f"skipped_seed_context_match={skipped_seed_context_match}, "
+            f"injected_seed_full_recheck={injected_seed_full_recheck}, "
+            f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}, "
+            f"execution_mode={full_execution_mode}.",
+            flush=True,
+        )
+        if full_count > 0:
+            full_rows = run_phase(
+                phase="full",
+                config=config,
+                trial_count=full_count,
+                trial_params=full_params,
+                overrides=full_overrides,
+                gpu_ids=gpu_ids,
+                max_parallel_trials=max_parallel_trials,
+                out_dir=config.output_dir,
+                execution_mode=full_execution_mode,
+            )
+        else:
+            full_rows = []
     write_trials_tsv(config.output_dir / "full_trials.tsv", full_rows)
 
     ranked_full = rank_successful_trials(full_rows)
@@ -4451,20 +4465,27 @@ def run_search(config: SearchConfig) -> int:
         fallback_validation_protocol=baseline_validation_protocol,
         hparam_context=current_hparam_context,
     )
-    viz_path = config.output_dir / f"{config.species}_snpr.png"
-    viz_error = write_visualization(
-        viz_path,
-        model_name=str(config.base_args.get("model", "cnn")),
-        species=config.species,
-        objective_metric=config.objective_metric,
-        quick_rows=quick_rows,
-        full_rows=full_rows,
-        base_args=config.base_args,
-    )
-    if viz_error is None:
-        print(f"[hparam_search] Wrote tuning visualization: {viz_path}", flush=True)
+    if config.enable_visualization:
+        viz_path = config.output_dir / f"{config.species}_snpr.png"
+        viz_error = write_visualization(
+            viz_path,
+            model_name=str(config.base_args.get("model", "cnn")),
+            species=config.species,
+            objective_metric=config.objective_metric,
+            quick_rows=quick_rows,
+            full_rows=full_rows,
+            base_args=config.base_args,
+        )
+        if viz_error is None:
+            print(f"[hparam_search] Wrote tuning visualization: {viz_path}", flush=True)
+        else:
+            print(f"[hparam_search] Visualization skipped: {viz_error}", flush=True)
     else:
-        print(f"[hparam_search] Visualization skipped: {viz_error}", flush=True)
+        print(
+            "[hparam_search] Visualization disabled by config "
+            "(enable_visualization=false).",
+            flush=True,
+        )
     write_summary_markdown(
         config.output_dir / "run_summary.md",
         config=config,

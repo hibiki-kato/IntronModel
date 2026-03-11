@@ -14,8 +14,11 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     AnnotationCoverageRow,
     EvaluationTranscriptIntronCountRow,
     EvaluationTranscriptGroupIntronCountRow,
+    FalseTranscriptIntronLabelRow,
     SiteLabelCountRow,
+    TrainTestSiteLabelConsistencyRow,
     build_annotation_coverage_rows,
+    build_false_transcript_intron_label_rows,
     build_evaluation_transcript_intron_count_rows,
     build_evaluation_transcript_group_intron_count_rows,
     build_intron_count_comparison_rows,
@@ -23,13 +26,17 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     build_noncanonical_ratio_rows,
     build_sequence_quality_rows,
     build_species_overlap_sets,
+    build_train_test_site_label_consistency_rows,
     build_duplicate_rate_rows,
     collect_species_intron_length_profiles,
     parse_final_score_intron_lengths,
     parse_negative_pair_count,
     parse_training_pair_records,
     parse_training_intron_lengths,
+    plot_false_transcript_false_intron_scatter,
     plot_site_label_count_comparison,
+    plot_evaluation_transcript_group_ratio_by_intron_count,
+    plot_test_transcript_true_false_ratio_pie,
 )
 
 
@@ -334,6 +341,174 @@ def test_build_evaluation_transcript_group_intron_count_rows(
     ]
 
 
+def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "transcript_class.txt").write_text(
+        "\n".join(
+            [
+                "tx_false_a j",
+                "tx_false_b u",
+                "tx_true =",
+                "tx_contained c",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tlabel",
+                "tx_false_a\t1\t0",
+                "tx_false_a\t2\t1",
+                "tx_false_a\t2\t1",
+                "tx_false_b\t3\t0",
+                "tx_false_b\t8\t0",
+                "tx_true\t1\t0",
+                "tx_contained\t1\t0",
+                "tx_missing\t1\t0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_false_transcript_intron_label_rows(data_root)
+
+    assert rows == [
+        FalseTranscriptIntronLabelRow(
+            species="SpX",
+            transcript_id="tx_false_a",
+            total_intron_count=2,
+            false_intron_count=1,
+            false_intron_fraction=0.5,
+        ),
+        FalseTranscriptIntronLabelRow(
+            species="SpX",
+            transcript_id="tx_false_b",
+            total_intron_count=2,
+            false_intron_count=2,
+            false_intron_fraction=1.0,
+        ),
+    ]
+
+
+def test_plot_false_transcript_false_intron_scatter(tmp_path: Path) -> None:
+    output_path = tmp_path / "false_transcript_false_intron_scatter.png"
+    rows = [
+        FalseTranscriptIntronLabelRow(
+            species="SpX",
+            transcript_id="tx_false_a",
+            total_intron_count=2,
+            false_intron_count=1,
+            false_intron_fraction=0.5,
+        ),
+        FalseTranscriptIntronLabelRow(
+            species="SpX",
+            transcript_id="tx_false_b",
+            total_intron_count=3,
+            false_intron_count=2,
+            false_intron_fraction=2.0 / 3.0,
+        ),
+    ]
+
+    plot_false_transcript_false_intron_scatter(
+        rows,
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
+
+
+def test_plot_false_transcript_false_intron_scatter_validation() -> None:
+    with pytest.raises(
+        ValueError,
+        match="No false-transcript intron-label rows were provided.",
+    ):
+        plot_false_transcript_false_intron_scatter([])
+
+
+def test_plot_evaluation_transcript_group_ratio_by_intron_count(tmp_path: Path) -> None:
+    output_path = tmp_path / "ratio_by_intron_count.png"
+    rows = [
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="true",
+            intron_count=1,
+            transcript_count=2,
+            transcript_fraction_within_group=2.0 / 3.0,
+            cumulative_transcript_count=2,
+            cumulative_fraction_within_group=2.0 / 3.0,
+        ),
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="false",
+            intron_count=1,
+            transcript_count=1,
+            transcript_fraction_within_group=0.25,
+            cumulative_transcript_count=1,
+            cumulative_fraction_within_group=0.25,
+        ),
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="true",
+            intron_count=2,
+            transcript_count=1,
+            transcript_fraction_within_group=1.0 / 3.0,
+            cumulative_transcript_count=3,
+            cumulative_fraction_within_group=1.0,
+        ),
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="false",
+            intron_count=2,
+            transcript_count=3,
+            transcript_fraction_within_group=0.75,
+            cumulative_transcript_count=4,
+            cumulative_fraction_within_group=1.0,
+        ),
+    ]
+
+    plot_evaluation_transcript_group_ratio_by_intron_count(
+        rows,
+        max_intron_count=2,
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
+
+
+def test_plot_evaluation_transcript_group_ratio_by_intron_count_validation() -> None:
+    with pytest.raises(
+        ValueError,
+        match="No evaluation transcript group intron-count rows were provided.",
+    ):
+        plot_evaluation_transcript_group_ratio_by_intron_count([])
+
+    one_row = [
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="true",
+            intron_count=1,
+            transcript_count=1,
+            transcript_fraction_within_group=1.0,
+            cumulative_transcript_count=1,
+            cumulative_fraction_within_group=1.0,
+        )
+    ]
+    with pytest.raises(ValueError, match="max_intron_count must be positive."):
+        plot_evaluation_transcript_group_ratio_by_intron_count(
+            one_row,
+            max_intron_count=0,
+        )
+
+
 def test_collect_species_intron_length_profiles(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
@@ -429,7 +604,7 @@ def test_build_intron_count_comparison_rows(tmp_path: Path) -> None:
 
     assert len(rows) == 3
     counts = {(row.species, row.source_label): row.intron_count for row in rows}
-    assert counts[("SpX", "Final")] == 2
+    assert counts[("SpX", "Test")] == 2
     assert counts[("SpX", "Train (positive)")] == 2
     assert counts[("SpX", "Train (negative_pair)")] == 2
 
@@ -514,8 +689,48 @@ def test_quality_duplicate_and_overlap_rows(tmp_path: Path) -> None:
         (row.species, row.source_label): row.duplicate_fraction
         for row in duplicate_rows
     }
-    assert dup_map[("SpX", "Final")] == 0.0
+    assert dup_map[("SpX", "Test")] == 0.0
     assert dup_map[("SpX", "Train (positive)")] > 0.0
+
+
+def test_plot_test_transcript_true_false_ratio_pie(tmp_path: Path) -> None:
+    output_path = tmp_path / "test_transcript_true_false_ratio_pie.png"
+    rows = [
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="true",
+            intron_count=1,
+            transcript_count=4,
+            transcript_fraction_within_group=1.0,
+            cumulative_transcript_count=4,
+            cumulative_fraction_within_group=1.0,
+        ),
+        EvaluationTranscriptGroupIntronCountRow(
+            species="SpX",
+            transcript_group="false",
+            intron_count=2,
+            transcript_count=6,
+            transcript_fraction_within_group=1.0,
+            cumulative_transcript_count=6,
+            cumulative_fraction_within_group=1.0,
+        ),
+    ]
+
+    plot_test_transcript_true_false_ratio_pie(
+        rows,
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
+
+
+def test_plot_test_transcript_true_false_ratio_pie_validation() -> None:
+    with pytest.raises(
+        ValueError,
+        match="No evaluation transcript group intron-count rows were provided.",
+    ):
+        plot_test_transcript_true_false_ratio_pie([])
 
 
 def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> None:
@@ -571,6 +786,112 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
     assert result[("SpX", "train", "acceptor")] == (1, 2)
     assert result[("SpX", "test", "donor")] == (2, 1)
     assert result[("SpX", "test", "acceptor")] == (2, 1)
+
+
+def test_build_train_test_site_label_consistency_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "100bp.err").write_text(
+        "\n".join(
+            [
+                "DEBUG donor AAAA acceptor CCCC + TX1 10",
+                "DEBUG donor PPPP +",
+                "DEBUG acceptor QQQQ +",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.neg.err").write_text(
+        "\n".join(
+            [
+                "DEBUG pair AAAA CCCC + 10",
+                "DEBUG donor TTTT +",
+                "DEBUG acceptor GGGG -",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "species\ttranscript_id\tintron_index\tdonor_label\t"
+                    "acceptor_label\tdonor_seq_100bp\tacceptor_seq_100bp"
+                ),
+                "SpX\ttx1\t1\t1\t1\tAAAA\tCCCC",
+                "SpX\ttx2\t2\t0\t0\tTTTT\tGGGG",
+                "SpX\ttx3\t3\t1\t1\tPPPP\tQQQQ",
+                "SpX\ttx4\t4\t1\t0\tXXXX\tYYYY",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_train_test_site_label_consistency_rows(data_root)
+    assert len(rows) == 2
+    by_site = {row.site_type: row for row in rows}
+
+    for site_type in ("donor", "acceptor"):
+        row = by_site[site_type]
+        assert row.species == "SpX"
+        assert row.overlap_total == 3
+        assert row.comparable_overlap == 2
+        assert row.train_pos_test_pos == 1
+        assert row.train_pos_test_neg == 0
+        assert row.train_neg_test_pos == 0
+        assert row.train_neg_test_neg == 1
+        assert row.ambiguous_overlap == 1
+        assert row.consistency_fraction == 1.0
+
+
+def test_build_train_test_site_label_consistency_rows_with_bp(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    raw_dir.mkdir(parents=True)
+
+    (raw_dir / "100bp.err").write_text(
+        "DEBUG donor AAXX acceptor XXAA + TX1 10\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.neg.err").write_text(
+        "DEBUG pair CCCC GGGG + 10\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "species\ttranscript_id\tintron_index\tdonor_label\t"
+                    "acceptor_label\tdonor_seq_100bp\tacceptor_seq_100bp"
+                ),
+                "SpX\ttx1\t1\t1\t1\tAAZZ\tZZAA",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    full_rows = build_train_test_site_label_consistency_rows(data_root)
+    full_by_site = {row.site_type: row for row in full_rows}
+    assert full_by_site["donor"].overlap_total == 0
+    assert full_by_site["acceptor"].overlap_total == 0
+
+    bp_rows = build_train_test_site_label_consistency_rows(data_root, bp=2)
+    bp_by_site = {row.site_type: row for row in bp_rows}
+    assert bp_by_site["donor"].overlap_total == 1
+    assert bp_by_site["donor"].train_pos_test_pos == 1
+    assert bp_by_site["acceptor"].overlap_total == 1
+    assert bp_by_site["acceptor"].train_pos_test_pos == 1
+
+    with pytest.raises(ValueError, match="bp must be positive when provided."):
+        build_train_test_site_label_consistency_rows(data_root, bp=0)
 
 
 def test_build_site_label_count_rows_handles_large_tsv_fields(

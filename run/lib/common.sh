@@ -141,7 +141,7 @@ PY
 intronmodel_build_eta_process_title() {
 	local eta_label="$1"
 
-	printf 'ETA: %s\n' "${eta_label}"
+	printf 'ETA:%s\n' "${eta_label}"
 }
 
 
@@ -341,29 +341,16 @@ def _parse_seed(text: str, *, name: str) -> int:
 
 script_tag = sys.argv[1]
 base_seed = _parse_seed(sys.argv[2], name="BASE_SEED")
-raw_seed_list = sys.argv[3]
+raw_seed_list = sys.argv[3].strip()
 
-if raw_seed_list.strip() == "":
-    print(base_seed)
-    raise SystemExit(0)
+if raw_seed_list:
+    print(
+        f"[{script_tag}] SEED_LIST is ignored. "
+        "Using BASE_SEED only for a single tuning run.",
+        file=sys.stderr,
+    )
 
-resolved: list[int] = []
-seen: set[int] = set()
-for token in raw_seed_list.replace("\n", ",").split(","):
-    item = token.strip()
-    if item == "":
-        continue
-    seed = _parse_seed(item, name="SEED_LIST entry")
-    if seed in seen:
-        continue
-    seen.add(seed)
-    resolved.append(seed)
-
-if not resolved:
-    _fail(f"[{script_tag}] SEED_LIST resolved to an empty set.")
-
-for seed in resolved:
-    print(seed)
+print(base_seed)
 PY
 }
 

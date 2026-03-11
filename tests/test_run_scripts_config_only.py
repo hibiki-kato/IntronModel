@@ -116,6 +116,18 @@ def test_reservoir_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_markov_xgboost_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_markov_xgboost.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_tune_cnn_resdil_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "tune_cnn_resdil.sh"
     run = subprocess.run(
@@ -176,6 +188,18 @@ def test_tune_bert_time_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_tune_markov_xgboost_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "tune_markov_xgboost.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_tune_reservoir_time_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "tune_reservoir_time.sh"
     run = subprocess.run(
@@ -204,6 +228,7 @@ def test_tuning_scripts_forward_seed_and_val_frac() -> None:
         "tune_tcn_time.sh",
         "tune_reservoir.sh",
         "tune_reservoir_time.sh",
+        "tune_markov_xgboost.sh",
     )
     for script_name in script_names:
         content = (root / "run" / script_name).read_text(encoding="utf-8")
@@ -281,6 +306,12 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     )
     reservoir = subprocess.run(
         ["bash", "-n", str(root / "run" / "reservoir.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    markov_xgb = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_markov_xgboost.sh")],
         capture_output=True,
         text=True,
         check=False,
@@ -386,6 +417,7 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr
     assert reservoir.returncode == 0, reservoir.stderr
+    assert markov_xgb.returncode == 0, markov_xgb.stderr
     assert tune_resdil.returncode == 0, tune_resdil.stderr
     assert tune_tcn.returncode == 0, tune_tcn.stderr
     assert tune_reservoir.returncode == 0, tune_reservoir.stderr

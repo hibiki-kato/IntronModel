@@ -129,6 +129,21 @@ def test_load_config_rejects_invalid_trial_process_mode(tmp_path: Path) -> None:
         _ = hparam_search.load_config(config_path)
 
 
+def test_load_config_parses_skip_full_and_visualization_flags(
+    tmp_path: Path,
+) -> None:
+    config = _base_config_dict(tmp_path)
+    config["skip_full_phase"] = 1
+    config["enable_visualization"] = "off"
+    config_path = tmp_path / "flags.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.skip_full_phase is True
+    assert loaded.enable_visualization is False
+
+
 def test_prewarm_persistent_trial_worker_calls_model_hook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1544,6 +1559,115 @@ def test_run_search_uses_trial_process_mode_per_phase(
 
     assert exit_code == 0
     assert captured_modes == {"quick": "persistent", "full": "subprocess"}
+
+
+def test_run_search_skips_full_phase_and_visualization_when_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        _base_config_dict(tmp_path)["search_space"]
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=3,
+        quick_epochs=1,
+        top_k=2,
+        full_epochs=1,
+        base_seed=1337,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=2,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={"compile_mode": "off"},
+        full_overrides={"compile_mode": "off"},
+        search_space=search_space,
+        skip_full_phase=True,
+        enable_visualization=False,
+    )
+
+    phase_calls: list[str] = []
+    visualization_called = False
+
+    def _fake_detect_gpu_ids(setting: object) -> list[str]:
+        del setting
+        return []
+
+    def _fake_run_phase(
+        *,
+        phase: str,
+        config: hparam_search.SearchConfig,
+        trial_count: int,
+        trial_params: list[dict[str, hparam_search.Scalar]],
+        overrides: dict[str, hparam_search.ArgValue],
+        gpu_ids: list[str],
+        max_parallel_trials: int,
+        out_dir: Path,
+        execution_mode: str,
+    ) -> list[hparam_search.TrialResult]:
+        del config, overrides, gpu_ids, max_parallel_trials, out_dir, execution_mode
+        phase_calls.append(phase)
+        rows: list[hparam_search.TrialResult] = []
+        for trial_id in range(trial_count):
+            score = 0.7 + (0.01 * trial_id)
+            rows.append(
+                hparam_search.TrialResult(
+                    phase=phase,
+                    trial_id=trial_id,
+                    status="success",
+                    gpu_id=None,
+                    sampled_params=dict(trial_params[trial_id]),
+                    effective_batch_size=512,
+                    oom_retries=0,
+                    donor_pr_auc=score,
+                    acceptor_pr_auc=score,
+                    mean_pr_auc=score,
+                    objective_metric="mean_pr_auc",
+                    objective_score=score,
+                    error_message=None,
+                    return_code=0,
+                    duration_sec=0.1,
+                    metrics_json=f"{phase}_{trial_id}.json",
+                    log_file=f"{phase}_{trial_id}.log",
+                )
+            )
+        return rows
+
+    def _fake_write_visualization(
+        path: Path,
+        *,
+        model_name: str,
+        species: str,
+        objective_metric: str,
+        quick_rows: list[hparam_search.TrialResult],
+        full_rows: list[hparam_search.TrialResult],
+        base_args: dict[str, hparam_search.ArgValue],
+    ) -> Optional[str]:
+        nonlocal visualization_called
+        del path, model_name, species, objective_metric, quick_rows, full_rows, base_args
+        visualization_called = True
+        return None
+
+    monkeypatch.setattr(hparam_search, "detect_gpu_ids", _fake_detect_gpu_ids)
+    monkeypatch.setattr(hparam_search, "run_phase", _fake_run_phase)
+    monkeypatch.setattr(
+        hparam_search,
+        "write_visualization",
+        _fake_write_visualization,
+    )
+
+    exit_code = hparam_search.run_search(config)
+
+    assert exit_code == 0
+    assert phase_calls == ["quick"]
+    assert visualization_called is False
 
 
 def test_run_search_downgrades_persistent_when_trials_fit_one_wave(

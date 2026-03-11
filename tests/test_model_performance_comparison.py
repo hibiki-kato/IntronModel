@@ -21,6 +21,7 @@ from score.model_performance_comparison import (  # noqa: E402
 
 def test_infer_model_family_for_prefixed_names() -> None:
     assert infer_model_family("cnn_pair") == "cnn_pair"
+    assert infer_model_family("markov_xgboost_dlen100") == "markov_xgboost"
     assert infer_model_family("cnn_resdil") == "cnn_resdil"
     assert infer_model_family("cnn_iopx_taggsoftmin") == "cnn"
     assert infer_model_family("dnabert6") == "dnabert6"

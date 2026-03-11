@@ -19,6 +19,7 @@ Options:
 Species default ranges:
   Athal: x=[10.0, 52.0], y=[48.0, 75.0]
   Dmel : x=[40.0, 52.0], y=[40.0, 55.0]
+  Hsap : x=[10.0, 18.0], y=[40.0, 46.0]
   Mmus : x=[10.0, 18.0], y=[40.0, 46.0]
 EOT
 }
@@ -27,7 +28,7 @@ EOT
 # USER DEFAULTS (optional edit)
 # --------------------------
 CONDA_ENV="intronmodel"
-SPECIES="Mmus, Athal, Dmel"
+SPECIES="Mmus, Athal, Dmel, Hsap"
 OUTPUT_PNG=""
 INTERACTIVE="1"
 X_MIN=""
@@ -57,10 +58,16 @@ set_defaults_for_species() {
 		DEFAULT_Y_MIN="40.0"
 		DEFAULT_Y_MAX="46.0"
 		;;
+	Hsap)
+		DEFAULT_X_MIN="10.0"
+		DEFAULT_X_MAX="18.0"
+		DEFAULT_Y_MIN="40.0"
+		DEFAULT_Y_MAX="46.0"
+		;;
 	*)
 		if [[ -z "${X_MIN}" || -z "${X_MAX}" || -z "${Y_MIN}" || -z "${Y_MAX}" ]]; then
 			echo "[plot_eval.sh] Unknown species '${sp}'." >&2
-			echo "[plot_eval.sh] Use one of: Athal, Dmel, Mmus; or provide all of" >&2
+			echo "[plot_eval.sh] Use one of: Athal, Dmel, Hsap, Mmus; or provide all of" >&2
 			echo "[plot_eval.sh] --x-min --x-max --y-min --y-max explicitly." >&2
 			return 1
 		fi

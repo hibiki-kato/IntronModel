@@ -13,7 +13,7 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 MODEL="cnn"
-SPECIES="Athal, Dmel, Mmus"
+SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRAIN_POS_PATH="data/{species}/raw/100bp.err"

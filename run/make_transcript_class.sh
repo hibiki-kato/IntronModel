@@ -3,26 +3,23 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOT'
-Usage: bash run/make_labeled_intron_eval_data.sh [options]
+Usage: bash run/make_transcript_class.sh [options]
 
 Options:
   --species <csv>              Species list (default: Dmel,Mmus,Athal,Hsap)
   --data-root <path>           Data root (default: <repo>/data)
-  --fasta <path>               Override FASTA path
-  --query-gtf <path>           Override query GTF path
+  --gtf <path>                 Override query GTF path
   --reference-annotation <path>
                                Override reference annotation path
-  --out-name <filename>        Output TSV name under data/<species>/raw
-                               (default: intron_eval_flank10.tsv)
-  --donor-len <int>            Donor window length (default: 100)
-  --acceptor-len <int>         Acceptor window length (default: 100)
-  --flank-bp <int>             Flank bp for intron sequence (default: 10)
-  --limit <int>                Max rows per species (default: 0; no limit)
+  --out-name <filename>        Output filename under data/<species>/raw
+                               (default: transcript_class.txt)
+  --keep-temp                  Keep gffcompare temporary files
   -h, --help                   Show this help
 
 Notes:
   - Query GTF priority: <fasta>.gtf, then *.fna.gtf, then *.gtf.
   - Reference annotation priority: *.fix.gff, *.gff.fix, *.gff, *.gff3.
+  - Requires gffcompare to be available on PATH.
 EOT
 }
 
@@ -32,14 +29,10 @@ EOT
 CONDA_ENV="intronmodel"
 SPECIES="Dmel,Mmus,Athal,Hsap"
 DATA_ROOT=""
-FASTA_PATH=""
 QUERY_GTF_PATH=""
 REFERENCE_ANNOTATION_PATH=""
-OUT_NAME="intron_eval_flank10.tsv"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-FLANK_BP="10"
-LIMIT="0"
+OUT_NAME="transcript_class.txt"
+KEEP_TEMP="0"
 
 # --------------------------
 # Runtime implementation
@@ -64,11 +57,7 @@ while [[ $# -gt 0 ]]; do
 		DATA_ROOT="$2"
 		shift 2
 		;;
-	--fasta)
-		FASTA_PATH="$2"
-		shift 2
-		;;
-	--query-gtf)
+	--gtf)
 		QUERY_GTF_PATH="$2"
 		shift 2
 		;;
@@ -80,29 +69,17 @@ while [[ $# -gt 0 ]]; do
 		OUT_NAME="$2"
 		shift 2
 		;;
-	--donor-len)
-		DONOR_LEN="$2"
-		shift 2
-		;;
-	--acceptor-len)
-		ACCEPTOR_LEN="$2"
-		shift 2
-		;;
-	--flank-bp)
-		FLANK_BP="$2"
-		shift 2
-		;;
-	--limit)
-		LIMIT="$2"
-		shift 2
+	--keep-temp)
+		KEEP_TEMP="1"
+		shift
 		;;
 	-h | --help)
 		usage
 		exit 0
 		;;
 	*)
-		echo "Unknown argument: $1" >&2
-		usage
+		echo "Unknown option: $1" >&2
+		usage >&2
 		exit 1
 		;;
 	esac
@@ -112,31 +89,15 @@ if [[ -z "${DATA_ROOT}" ]]; then
 	DATA_ROOT="${PROJECT_ROOT}/data"
 fi
 
-resolve_fasta() {
-	local raw_dir="$1"
-	local candidates_clean=()
-	local candidates_fna=()
-
-	shopt -s nullglob
-	candidates_clean=("${raw_dir}"/*.clean.fna)
-	candidates_fna=("${raw_dir}"/*.fna)
-	shopt -u nullglob
-
-	if [[ ${#candidates_clean[@]} -gt 0 ]]; then
-		echo "${candidates_clean[0]}"
-		return 0
-	fi
-	if [[ ${#candidates_fna[@]} -gt 0 ]]; then
-		echo "${candidates_fna[0]}"
-		return 0
-	fi
-	return 1
-}
+if ! command -v gffcompare &>/dev/null; then
+	echo "[make_transcript_class.sh] gffcompare not found on PATH." >&2
+	exit 2
+fi
 
 resolve_query_gtf() {
 	local raw_dir="$1"
-	local fasta_path="$2"
-	local direct_gtf="${fasta_path}.gtf"
+	local fasta="$2"
+	local direct_gtf="${fasta}.gtf"
 	local candidates_fna_gtf=()
 	local candidates_gtf=()
 
@@ -156,6 +117,27 @@ resolve_query_gtf() {
 	fi
 	if [[ ${#candidates_gtf[@]} -gt 0 ]]; then
 		echo "${candidates_gtf[0]}"
+		return 0
+	fi
+	return 1
+}
+
+resolve_fasta() {
+	local raw_dir="$1"
+	local clean_fna=()
+	local fna=()
+
+	shopt -s nullglob
+	clean_fna=("${raw_dir}"/*.clean.fna)
+	fna=("${raw_dir}"/*.fna)
+	shopt -u nullglob
+
+	if [[ ${#clean_fna[@]} -gt 0 ]]; then
+		echo "${clean_fna[0]}"
+		return 0
+	fi
+	if [[ ${#fna[@]} -gt 0 ]]; then
+		echo "${fna[0]}"
 		return 0
 	fi
 	return 1
@@ -200,7 +182,7 @@ resolve_reference_annotation() {
 	return 1
 }
 
-python_bin="$(intronmodel_resolve_python_bin "make_labeled_intron_eval_data")"
+python_bin="$(intronmodel_resolve_python_bin "make_transcript_class")"
 
 IFS=',' read -r -a species_tokens <<< "${SPECIES}"
 for raw_species in "${species_tokens[@]}"; do
@@ -210,32 +192,24 @@ for raw_species in "${species_tokens[@]}"; do
 	fi
 
 	species="$(intronmodel_resolve_species_case \
-		"${token}" "${DATA_ROOT}" "make_labeled_intron_eval_data")"
+		"${token}" "${DATA_ROOT}" "make_transcript_class")"
 	raw_dir="${DATA_ROOT}/${species}/raw"
 	if [[ ! -d "${raw_dir}" ]]; then
 		echo "Raw directory not found: ${raw_dir}" >&2
-		exit 2
+		exit 3
 	fi
 
-	fasta="${FASTA_PATH}"
 	query_gtf="${QUERY_GTF_PATH}"
 	ref_annotation="${REFERENCE_ANNOTATION_PATH}"
-	out_tsv="${raw_dir}/${OUT_NAME}"
 
-	if [[ -z "${fasta}" ]]; then
-		fasta="$(resolve_fasta "${raw_dir}" || true)"
-	fi
 	if [[ -z "${query_gtf}" ]]; then
+		fasta="$(resolve_fasta "${raw_dir}" || true)"
 		query_gtf="$(resolve_query_gtf "${raw_dir}" "${fasta}" || true)"
 	fi
 	if [[ -z "${ref_annotation}" ]]; then
 		ref_annotation="$(resolve_reference_annotation "${raw_dir}" || true)"
 	fi
 
-	if [[ -z "${fasta}" || ! -f "${fasta}" ]]; then
-		echo "FASTA not found for species=${species}" >&2
-		exit 3
-	fi
 	if [[ -z "${query_gtf}" || ! -f "${query_gtf}" ]]; then
 		echo "Query GTF not found for species=${species}" >&2
 		exit 4
@@ -245,20 +219,33 @@ for raw_species in "${species_tokens[@]}"; do
 		exit 5
 	fi
 
-	echo "[make_labeled_intron_eval_data] species=${species}"
-	echo "[make_labeled_intron_eval_data] fasta=${fasta}"
-	echo "[make_labeled_intron_eval_data] query_gtf=${query_gtf}"
-	echo "[make_labeled_intron_eval_data] reference_annotation=${ref_annotation}"
-	echo "[make_labeled_intron_eval_data] out_tsv=${out_tsv}"
+	out_path="${raw_dir}/${OUT_NAME}"
+	tmp_prefix="${raw_dir}/gffcompare_tmp_$$"
+	tracking_path="${tmp_prefix}.tracking"
 
-	"${python_bin}" "${PROJECT_ROOT}/src/util/make_labeled_intron_eval_data.py" \
-		--species "${species}" \
-		--fasta "${fasta}" \
-		--query-gtf "${query_gtf}" \
-		--reference-annotation "${ref_annotation}" \
-		--out-tsv "${out_tsv}" \
-		--donor-len "${DONOR_LEN}" \
-		--acceptor-len "${ACCEPTOR_LEN}" \
-		--flank-bp "${FLANK_BP}" \
-		--limit "${LIMIT}"
+	echo "[make_transcript_class.sh] species=${species}"
+	echo "[make_transcript_class.sh] query_gtf=${query_gtf}"
+	echo "[make_transcript_class.sh] reference_annotation=${ref_annotation}"
+	echo "[make_transcript_class.sh] out=${out_path}"
+	echo "[make_transcript_class.sh] running gffcompare..."
+
+	gffcompare \
+		-r "${ref_annotation}" \
+		"${query_gtf}" \
+		-o "${tmp_prefix}"
+
+	if [[ ! -f "${tracking_path}" ]]; then
+		echo "gffcompare tracking not found: ${tracking_path}" >&2
+		exit 6
+	fi
+
+	"${python_bin}" \
+		"${PROJECT_ROOT}/src/util/make_transcript_class_from_tmap.py" \
+		--tracking "${tracking_path}" \
+		--out "${out_path}"
+
+	if [[ "${KEEP_TEMP}" == "0" ]]; then
+		rm -f "${tmp_prefix}".* "${tmp_prefix}"
+		echo "[make_transcript_class.sh] cleaned up gffcompare temp files"
+	fi
 done

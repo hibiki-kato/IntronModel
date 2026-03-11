@@ -11,12 +11,13 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-SPECIES="Dmel"
+SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
-SEED_LIST="1201,32,452,1,4,2545,23,99,2021,0"
+# Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
+SEED_LIST=""
 PROCESS_TITLE="use? email me"
 
 QUICK_TRIALS="32"

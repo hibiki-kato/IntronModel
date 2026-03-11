@@ -13,7 +13,7 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 DNABERT_VARIANT="6"
-SPECIES="Mmus, Dmel, Athal"
+SPECIES="Mmus, Dmel, Athal, Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 

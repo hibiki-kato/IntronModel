@@ -178,6 +178,43 @@ def test_cnn_pair_spec_does_not_require_redundant_pair_envs() -> None:
     assert "INTRON_SCORE_OP" not in spec.required_arg_keys
 
 
+def test_markov_xgboost_spec_single_task_pair() -> None:
+    spec = SPECS["markov_xgboost.sh"]
+
+    assert spec.model_env_name == "markov_xgboost"
+    assert spec.stem_param_builder == "markov_xgboost"
+    assert "TRAIN_TARGET" not in spec.required_arg_keys
+    assert "MARKOV_ORDER" in spec.required_arg_keys
+    assert "MARKOV_FEATURE_MODE" in spec.required_arg_keys
+    assert "MARKOV_CACHE_MODE" in spec.required_arg_keys
+    assert "XGB_N_ESTIMATORS" in spec.required_arg_keys
+
+
+def test_stem_params_for_markov_xgboost_builder() -> None:
+    params = _stem_params(
+        "markov_xgboost",
+        {
+            "DONOR_LEN": "100",
+            "ACCEPTOR_LEN": "100",
+            "MARKOV_ORDER": "2",
+            "MARKOV_ALPHA": "0.5",
+            "MARKOV_FEATURE_MODE": "per_base",
+            "VAL_FRAC": "0.1",
+            "TRANSCRIPT_SCORE_AGG": "min",
+            "SOFTMIN_TAU": "1.0",
+            "SEED": "1337",
+            "TRAIN_TARGET": "pair",
+            "TAG": "mxgb",
+        },
+    )
+
+    assert params["markov_order"] == 2
+    assert params["markov_alpha"] == 0.5
+    assert params["markov_feature_mode"] == "per_base"
+    assert params["train_target"] == "pair"
+    assert params["tag"] == "mxgb"
+
+
 def test_resolve_species_path_template_replaces_all_tokens() -> None:
     resolved = _resolve_species_path_template(
         "data/{species}/raw/${SPECIES}/{SPECIES}.tsv",

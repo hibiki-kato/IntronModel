@@ -13,7 +13,7 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 MODEL="tcn"
-SPECIES="Athal, Dmel, Mmus"
+SPECIES="Athal, Dmel, Mmus, Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRAIN_POS_PATH=""

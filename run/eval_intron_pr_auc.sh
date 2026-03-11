@@ -29,7 +29,7 @@ EOT
 # USER DEFAULTS (optional edit)
 # --------------------------
 CONDA_ENV="intronmodel"
-SPECIES="Dmel,Mmus,Athal"
+SPECIES="Dmel,Mmus,Athal,Hsap"
 DATA_ROOT=""
 LABELED_TSV=""
 LABELED_NAME="intron_eval_flank10.tsv"

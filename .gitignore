@@ -51,6 +51,7 @@ sync.sh
 # Analysis cache artifacts
 analysis/outputs/cache/*
 !analysis/outputs/cache/.gitkeep
+analysis
 
 # rsync
 .rsyncignore

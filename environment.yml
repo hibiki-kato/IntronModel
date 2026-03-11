@@ -17,6 +17,7 @@ dependencies:
   - setproctitle
   - tqdm
   - pyyaml
+  - xgboost
   - pip:
       - pytest>=8.0
       - sphinx>=8.0

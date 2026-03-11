@@ -6,7 +6,7 @@ usage() {
 Usage: bash run/make_mixed_pair_neg_data.sh [options]
 
 Options:
-  --species <csv>                 Species list (default: Dmel,Mmus,Athal)
+  --species <csv>                 Species list (default: Dmel,Mmus,Athal,Hsap)
   --data-root <path>              Data root (default: <repo>/data)
   --pos-input-name <name>         Positive source name (default: 100bp.err)
   --neg-input-name <name>         Negative source name (default: 100bp.neg.err)
@@ -32,7 +32,7 @@ EOT
 # USER DEFAULTS (optional edit)
 # --------------------------
 CONDA_ENV="intronmodel"
-SPECIES="Dmel,Mmus,Athal"
+SPECIES="Dmel,Mmus,Athal,Hsap"
 DATA_ROOT=""
 POS_INPUT_NAME="100bp.err"
 NEG_INPUT_NAME="100bp.neg.err"

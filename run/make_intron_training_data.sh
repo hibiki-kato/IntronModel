@@ -30,7 +30,7 @@ EOT
 # USER DEFAULTS (optional edit)
 # --------------------------
 CONDA_ENV="intronmodel"
-SPECIES="Dmel,Mmus,Athal"
+SPECIES="Dmel,Mmus,Athal,Hsap"
 DATA_ROOT=""
 FLANK_BP="10"
 POS_INPUT_NAME="100bp.err"

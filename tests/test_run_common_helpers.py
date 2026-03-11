@@ -69,7 +69,7 @@ def test_common_build_eta_process_title_formats_eta_prefix() -> None:
     )
 
     assert run.returncode == 0
-    assert run.stdout.strip() == "ETA: 01/01 1:31"
+    assert run.stdout.strip() == "ETA:01/01 1:31"
 
 
 def test_common_resolve_seed_list_defaults_to_base_seed() -> None:
