@@ -158,7 +158,7 @@ intronmodel_enable_auto_tmux() {
 	local script_name="$3"
 	shift 3
 	# shellcheck source=/dev/null
-	source "${project_root}/run/_auto_tmux.sh"
+	source "${project_root}/run/lib/auto_tmux.sh"
 	intronmodel_auto_tmux "${entrypoint}" "${script_name}" "$@"
 }
 

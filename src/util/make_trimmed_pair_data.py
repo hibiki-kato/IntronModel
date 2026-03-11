@@ -138,12 +138,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--out-pos-name",
         default="100bp_trimmed.err",
-        help="Trimmed positive output filename in raw directory.",
+        help="Trimmed positive output filename in processed directory.",
     )
     parser.add_argument(
         "--out-neg-name",
         default="100bp_trimmed.neg.err",
-        help="Trimmed negative output filename in raw directory.",
+        help="Trimmed negative output filename in processed directory.",
     )
     parser.add_argument(
         "--exon-context-bp",
@@ -475,9 +475,9 @@ def process_species(
     neg_input_name : str
         Negative source filename under raw directory.
     out_pos_name : str
-        Positive output filename under raw directory.
+        Positive output filename under processed directory.
     out_neg_name : str
-        Negative output filename under raw directory.
+        Negative output filename under processed directory.
     exon_context_bp : int
         Boundary context parameter.
     pad_with_n : bool
@@ -493,18 +493,20 @@ def process_species(
     Raises
     ------
     FileNotFoundError
-        If species raw directory or required input files are missing.
+        If required input files are missing.
     ValueError
         If strict validation fails.
     """
     raw_dir = data_root / species / "raw"
+    processed_dir = data_root / species / "processed"
     if not raw_dir.exists():
         raise FileNotFoundError(f"Raw directory not found: {raw_dir}")
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
     pos_path = raw_dir / pos_input_name
     neg_path = raw_dir / neg_input_name
-    out_pos_path = raw_dir / out_pos_name
-    out_neg_path = raw_dir / out_neg_name
+    out_pos_path = processed_dir / out_pos_name
+    out_neg_path = processed_dir / out_neg_name
 
     positive_records = _read_positive_pairs(pos_path, strict=strict)
     negative_records = _read_negative_pairs(neg_path, strict=strict)

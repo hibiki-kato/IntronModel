@@ -861,6 +861,7 @@ def _has_test_tsv_required_columns(path: Path) -> bool:
 
 def _detect_mask_test_tsv(data_root: Path, species: str) -> Path | None:
     """Detect one plausible masked transcript test TSV."""
+    processed_dir = data_root / species / "processed"
     raw_dir = data_root / species / "raw"
     candidates = (
         "transcripts_mask.tsv",
@@ -869,9 +870,10 @@ def _detect_mask_test_tsv(data_root: Path, species: str) -> Path | None:
         "transcripts_with_intron_half.tsv",
     )
     for file_name in candidates:
-        candidate = raw_dir / file_name
-        if candidate.is_file() and _has_test_tsv_required_columns(candidate):
-            return candidate
+        for base_dir in (processed_dir, raw_dir):
+            candidate = base_dir / file_name
+            if candidate.is_file() and _has_test_tsv_required_columns(candidate):
+                return candidate
     return None
 
 
@@ -910,8 +912,10 @@ def _build_mask_test_tsv(
 ) -> Path | None:
     """Build one clipped test TSV for mask-mode evaluation."""
     raw_dir = data_root / species / "raw"
+    processed_dir = data_root / species / "processed"
     if not raw_dir.is_dir():
         return None
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
     fasta_path = _detect_fasta_for_test_data(raw_dir)
     if fasta_path is None:
@@ -920,7 +924,7 @@ def _build_mask_test_tsv(
     if gtf_path is None:
         return None
 
-    output_path = raw_dir / "transcripts_with_intron_half.tsv"
+    output_path = processed_dir / "transcripts_with_intron_half.tsv"
     cmd = [
         sys.executable,
         str(PROJECT_ROOT / "src" / "util" / "make_test_data_from_gtf.py"),
@@ -966,11 +970,11 @@ def _apply_mask_mode_defaults(
 
     if env.get("TRAIN_POS_PATH", "").strip() == "":
         env["TRAIN_POS_PATH"] = str(
-            data_root / species / "raw" / f"{mask_bp}bp_trimmed_npad.err"
+            data_root / species / "processed" / f"{mask_bp}bp_trimmed_npad.err"
         )
     if env.get("TRAIN_NEG_PATH", "").strip() == "":
         env["TRAIN_NEG_PATH"] = str(
-            data_root / species / "raw" / f"{mask_bp}bp_trimmed_npad.neg.err"
+            data_root / species / "processed" / f"{mask_bp}bp_trimmed_npad.neg.err"
         )
 
     if env.get("TAG", "").strip() == "":
@@ -1005,7 +1009,7 @@ def _apply_mask_mode_defaults(
 
     print(
         f"[{species}] mask-mode test_tsv not found/generated; "
-        "fallback to raw/transcripts.tsv.",
+        "fallback to raw/transcripts.tsv (unmasked).",
         file=sys.stderr,
     )
 
@@ -1075,10 +1079,11 @@ def _run_single_species(
     output_site_score_tsv = data_root / species / "site_score" / f"{output_stem}.tsv"
     output_trans_score_tsv = data_root / species / "trans_score" / f"{output_stem}.tsv"
     output_eval_score_txt = data_root / species / "eval_score" / f"{output_stem}.txt"
-    metrics_json_path = data_root / species / "site_score" / f"{output_stem}.train.json"
-    learning_curve_png = (
-        data_root / species / "site_score" / f"{output_stem}_learning_curve.png"
-    )
+    learning_metric_dir = data_root / species / "learning_metric"
+    metrics_json_path = learning_metric_dir / f"{output_stem}.train.json"
+    learning_curve_png = learning_metric_dir / f"{output_stem}_learning_curve.png"
+
+    learning_metric_dir.mkdir(parents=True, exist_ok=True)
 
     env["TEST_TSV"] = str(test_tsv)
     env["CLASS_FILE"] = str(class_file)

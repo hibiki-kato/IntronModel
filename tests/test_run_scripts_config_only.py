@@ -128,6 +128,18 @@ def test_markov_xgboost_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_run_clean_pt_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_clean_pt.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_tune_cnn_resdil_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "tune_cnn_resdil.sh"
     run = subprocess.run(

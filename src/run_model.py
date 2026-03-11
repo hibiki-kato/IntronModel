@@ -1009,11 +1009,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         metrics_json = args.metrics_json
         if metrics_json is None:
             dirs = species_data_dirs(args.species)
-            os.makedirs(dirs["site_score"], exist_ok=True)
+            os.makedirs(dirs["learning_metric"], exist_ok=True)
             metrics_json = os.path.join(
-                dirs["site_score"],
+                dirs["learning_metric"],
                 f"{checkpoint_stem}.train.json",
             )
+        else:
+            metrics_json_parent = Path(metrics_json).parent
+            metrics_json_parent.mkdir(parents=True, exist_ok=True)
 
         with open(metrics_json, "w") as f:
             json.dump(summary, f, indent=2)

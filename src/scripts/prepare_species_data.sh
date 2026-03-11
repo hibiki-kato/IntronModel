@@ -87,6 +87,7 @@ SPECIES_DIR="${TARGET_ROOT}/${SPECIES}"
 mkdir -p "${SPECIES_DIR}/raw"
 mkdir -p "${SPECIES_DIR}/train"
 mkdir -p "${SPECIES_DIR}/site_score"
+mkdir -p "${SPECIES_DIR}/learning_metric"
 mkdir -p "${SPECIES_DIR}/trans_score"
 mkdir -p "${SPECIES_DIR}/eval_score"
 

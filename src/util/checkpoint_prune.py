@@ -148,40 +148,47 @@ def _collect_summary_candidates(
     model_name: str,
 ) -> list[SummaryCandidate]:
     """Collect summary candidates for one species/model."""
-    site_score_dir = data_root / species / "site_score"
-    if not site_score_dir.is_dir():
+    summary_dirs: list[Path] = []
+    learning_metric_dir = data_root / species / "learning_metric"
+    if learning_metric_dir.is_dir():
+        summary_dirs.append(learning_metric_dir)
+    legacy_site_score_dir = data_root / species / "site_score"
+    if legacy_site_score_dir.is_dir():
+        summary_dirs.append(legacy_site_score_dir)
+    if not summary_dirs:
         return []
 
     candidates: list[SummaryCandidate] = []
-    for summary_path in sorted(site_score_dir.glob("*.train.json")):
-        payload = read_json_object(summary_path)
-        if payload is None:
-            continue
-        summary_model = _extract_model_name(payload)
-        if summary_model != model_name:
-            continue
-        checkpoint_map = extract_checkpoint_paths(
-            payload,
-            base_dir=summary_path.parent,
-            existing_only=True,
-        )
-        checkpoint_paths = tuple(sorted(set(checkpoint_map.values())))
-        if not checkpoint_paths:
-            continue
-        modified_time = max(path.stat().st_mtime for path in checkpoint_paths)
-        candidates.append(
-            SummaryCandidate(
-                summary_path=summary_path,
-                species=species,
-                model_name=model_name,
-                validation_signature=_extract_validation_signature(payload),
-                selection_score=_extract_selection_score(payload),
-                best_pr_auc=_extract_mean_best_pr_auc(payload),
-                modified_time=modified_time,
-                checkpoint_paths=checkpoint_paths,
-                hyperparameters=_extract_hyperparameters(payload),
+    for summary_dir in summary_dirs:
+        for summary_path in sorted(summary_dir.glob("*.train.json")):
+            payload = read_json_object(summary_path)
+            if payload is None:
+                continue
+            summary_model = _extract_model_name(payload)
+            if summary_model != model_name:
+                continue
+            checkpoint_map = extract_checkpoint_paths(
+                payload,
+                base_dir=summary_path.parent,
+                existing_only=True,
             )
-        )
+            checkpoint_paths = tuple(sorted(set(checkpoint_map.values())))
+            if not checkpoint_paths:
+                continue
+            modified_time = max(path.stat().st_mtime for path in checkpoint_paths)
+            candidates.append(
+                SummaryCandidate(
+                    summary_path=summary_path,
+                    species=species,
+                    model_name=model_name,
+                    validation_signature=_extract_validation_signature(payload),
+                    selection_score=_extract_selection_score(payload),
+                    best_pr_auc=_extract_mean_best_pr_auc(payload),
+                    modified_time=modified_time,
+                    checkpoint_paths=checkpoint_paths,
+                    hyperparameters=_extract_hyperparameters(payload),
+                )
+            )
     return candidates
 
 

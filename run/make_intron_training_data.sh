@@ -22,7 +22,7 @@ Options:
 
 Notes:
   - Existing model training/inference pipeline is not modified.
-  - This script only generates dataset TSV files under data/<species>/raw.
+  - This script only generates dataset TSV files under data/<species>/processed.
 EOT
 }
 

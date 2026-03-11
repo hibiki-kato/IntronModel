@@ -212,7 +212,8 @@ def species_data_dirs(species: str) -> Dict[str, str]:
     Returns
     -------
     dict[str, str]
-        Paths for base/raw/train/trans_score/site_score/eval_score directories.
+        Paths for base/raw/train/trans_score/site_score/learning_metric/eval_score
+        directories.
     """
     base = os.path.join(data_root(), species)
     return {
@@ -221,6 +222,7 @@ def species_data_dirs(species: str) -> Dict[str, str]:
         "train": os.path.join(base, "train"),
         "trans_score": os.path.join(base, "trans_score"),
         "site_score": os.path.join(base, "site_score"),
+        "learning_metric": os.path.join(base, "learning_metric"),
         "eval_score": os.path.join(base, "eval_score"),
     }
 

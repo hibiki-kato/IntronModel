@@ -103,7 +103,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-name",
         default="100bp_mixed_one_side.neg.err",
-        help="Output filename in raw directory.",
+        help="Output filename in processed directory.",
     )
     parser.add_argument(
         "--mix-mode",
@@ -463,7 +463,7 @@ def process_species(
     neg_input_name : str
         Negative source filename in ``raw`` directory.
     output_name : str
-        Output filename in ``raw`` directory.
+        Output filename in ``processed`` directory.
     mix_mode : {"both", "donor_pos", "acceptor_pos"}
         One-sided mixing mode.
     samples_per_positive : int
@@ -481,14 +481,16 @@ def process_species(
         Run summary.
     """
     raw_dir = data_root / species / "raw"
+    processed_dir = data_root / species / "processed"
     pos_path = raw_dir / pos_input_name
     neg_path = raw_dir / neg_input_name
-    out_path = raw_dir / output_name
+    out_path = processed_dir / output_name
 
     if not pos_path.exists():
         raise FileNotFoundError(f"Positive source file not found: {pos_path}")
     if not neg_path.exists():
         raise FileNotFoundError(f"Negative source file not found: {neg_path}")
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
     positives = _read_positive_pairs(pos_path, strict=strict)
     donor_pool, acceptor_pool = _read_negative_site_pools(neg_path, strict=strict)

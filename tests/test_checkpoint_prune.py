@@ -65,9 +65,9 @@ def test_prune_keeps_top_k_per_validation_signature(tmp_path: Path) -> None:
     acc = model_root / species / "acceptor" / "placeholder.pt"
     _write_checkpoint(acc)
 
-    site_score = data_root / species / "site_score"
+    learning_metric = data_root / species / "learning_metric"
     _write_train_summary(
-        path=site_score / "a1.train.json",
+        path=learning_metric / "a1.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_a1,
         acceptor_checkpoint_path=acc,
@@ -78,7 +78,7 @@ def test_prune_keeps_top_k_per_validation_signature(tmp_path: Path) -> None:
         validation_signature="sig_a",
     )
     _write_train_summary(
-        path=site_score / "a2.train.json",
+        path=learning_metric / "a2.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_a2,
         acceptor_checkpoint_path=acc,
@@ -89,7 +89,7 @@ def test_prune_keeps_top_k_per_validation_signature(tmp_path: Path) -> None:
         validation_signature="sig_a",
     )
     _write_train_summary(
-        path=site_score / "b1.train.json",
+        path=learning_metric / "b1.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_b1,
         acceptor_checkpoint_path=acc,
@@ -132,9 +132,9 @@ def test_prune_isolates_legacy_signature(tmp_path: Path) -> None:
     acc = model_root / species / "acceptor" / "placeholder.pt"
     _write_checkpoint(acc)
 
-    site_score = data_root / species / "site_score"
+    learning_metric = data_root / species / "learning_metric"
     _write_train_summary(
-        path=site_score / "new.train.json",
+        path=learning_metric / "new.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_new,
         acceptor_checkpoint_path=acc,
@@ -145,7 +145,7 @@ def test_prune_isolates_legacy_signature(tmp_path: Path) -> None:
         validation_signature="sig_new",
     )
     _write_train_summary(
-        path=site_score / "legacy.train.json",
+        path=learning_metric / "legacy.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_legacy,
         acceptor_checkpoint_path=acc,
@@ -181,9 +181,9 @@ def test_prune_protects_checkpoint_referenced_by_best_config(tmp_path: Path) -> 
     acc = model_root / species / "acceptor" / "placeholder.pt"
     _write_checkpoint(acc)
 
-    site_score = data_root / species / "site_score"
+    learning_metric = data_root / species / "learning_metric"
     _write_train_summary(
-        path=site_score / "keep.train.json",
+        path=learning_metric / "keep.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_keep,
         acceptor_checkpoint_path=acc,
@@ -194,7 +194,7 @@ def test_prune_protects_checkpoint_referenced_by_best_config(tmp_path: Path) -> 
         validation_signature="sig_keep",
     )
     _write_train_summary(
-        path=site_score / "drop.train.json",
+        path=learning_metric / "drop.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_drop,
         acceptor_checkpoint_path=acc,
@@ -254,9 +254,9 @@ def test_prune_protects_checkpoint_referenced_by_metrics_json_field(
     acc = model_root / species / "acceptor" / "placeholder.pt"
     _write_checkpoint(acc)
 
-    site_score = data_root / species / "site_score"
+    learning_metric = data_root / species / "learning_metric"
     _write_train_summary(
-        path=site_score / "keep_metrics.train.json",
+        path=learning_metric / "keep_metrics.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_keep,
         acceptor_checkpoint_path=acc,
@@ -267,7 +267,7 @@ def test_prune_protects_checkpoint_referenced_by_metrics_json_field(
         validation_signature="sig_keep_metrics",
     )
     _write_train_summary(
-        path=site_score / "drop_metrics.train.json",
+        path=learning_metric / "drop_metrics.train.json",
         model_name=model_name,
         donor_checkpoint_path=ckpt_drop,
         acceptor_checkpoint_path=acc,

@@ -9,7 +9,7 @@ Options:
   --species <csv>              Species list (default: Dmel,Mmus,Athal)
   --data-root <path>           Data root (default: <repo>/data)
   --labeled-tsv <path>         Override labeled intron TSV path
-  --labeled-name <filename>    Labeled TSV under data/<species>/raw
+  --labeled-name <filename>    Labeled TSV under data/<species>/processed
                                (default: intron_eval_flank10.tsv)
   --site-score-tsv <path>      Evaluate only this site_score TSV
   --site-score-pattern <glob>  Pattern under data/<species>/site_score
@@ -133,9 +133,14 @@ for raw_species in "${species_tokens[@]}"; do
 	species="$(intronmodel_resolve_species_case \
 		"${token}" "${DATA_ROOT}" "eval_intron_pr_auc.sh")"
 	raw_dir="${DATA_ROOT}/${species}/raw"
+	processed_dir="${DATA_ROOT}/${species}/processed"
 	site_score_dir="${DATA_ROOT}/${species}/site_score"
 	if [[ ! -d "${raw_dir}" ]]; then
 		echo "Raw directory not found: ${raw_dir}" >&2
+		exit 2
+	fi
+	if [[ -z "${LABELED_TSV}" && ! -d "${processed_dir}" ]]; then
+		echo "Processed directory not found: ${processed_dir}" >&2
 		exit 2
 	fi
 	if [[ ! -d "${site_score_dir}" ]]; then
@@ -145,7 +150,7 @@ for raw_species in "${species_tokens[@]}"; do
 
 	labeled_tsv="${LABELED_TSV}"
 	if [[ -z "${labeled_tsv}" ]]; then
-		labeled_tsv="${raw_dir}/${LABELED_NAME}"
+		labeled_tsv="${processed_dir}/${LABELED_NAME}"
 	fi
 	if [[ ! -f "${labeled_tsv}" ]]; then
 		echo "Labeled intron TSV not found for species=${species}: ${labeled_tsv}" >&2

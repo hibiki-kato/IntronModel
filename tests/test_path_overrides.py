@@ -18,6 +18,7 @@ def test_species_data_dirs_respects_data_root_override(
     assert dirs["base"] == "/tmp/intron-data/Dmel"
     assert dirs["raw"] == "/tmp/intron-data/Dmel/raw"
     assert dirs["train"] == "/tmp/intron-data/Dmel/train"
+    assert dirs["learning_metric"] == "/tmp/intron-data/Dmel/learning_metric"
 
 
 def test_checkpoint_paths_respect_model_root_override(

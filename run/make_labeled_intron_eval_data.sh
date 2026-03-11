@@ -12,7 +12,7 @@ Options:
   --query-gtf <path>           Override query GTF path
   --reference-annotation <path>
                                Override reference annotation path
-  --out-name <filename>        Output TSV name under data/<species>/raw
+  --out-name <filename>        Output TSV name under data/<species>/processed
                                (default: intron_eval_flank10.tsv)
   --donor-len <int>            Donor window length (default: 100)
   --acceptor-len <int>         Acceptor window length (default: 100)
@@ -212,15 +212,17 @@ for raw_species in "${species_tokens[@]}"; do
 	species="$(intronmodel_resolve_species_case \
 		"${token}" "${DATA_ROOT}" "make_labeled_intron_eval_data")"
 	raw_dir="${DATA_ROOT}/${species}/raw"
+	processed_dir="${DATA_ROOT}/${species}/processed"
 	if [[ ! -d "${raw_dir}" ]]; then
 		echo "Raw directory not found: ${raw_dir}" >&2
 		exit 2
 	fi
+	mkdir -p "${processed_dir}"
 
 	fasta="${FASTA_PATH}"
 	query_gtf="${QUERY_GTF_PATH}"
 	ref_annotation="${REFERENCE_ANNOTATION_PATH}"
-	out_tsv="${raw_dir}/${OUT_NAME}"
+	out_tsv="${processed_dir}/${OUT_NAME}"
 
 	if [[ -z "${fasta}" ]]; then
 		fasta="$(resolve_fasta "${raw_dir}" || true)"

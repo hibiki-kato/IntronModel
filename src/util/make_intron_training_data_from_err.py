@@ -449,17 +449,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--out-pos-name",
         default="intron_full_flank10.pos.tsv",
-        help="Positive output TSV filename under raw directory.",
+        help="Positive output TSV filename under processed directory.",
     )
     parser.add_argument(
         "--out-qc-name",
         default="intron_full_flank10.pos.qc.tsv",
-        help="QC summary TSV filename under raw directory.",
+        help="QC summary TSV filename under processed directory.",
     )
     parser.add_argument(
         "--out-neg-request-name",
         default="intron_full_flank10.neg_coordinate_request.tsv",
-        help="Negative coordinate-request TSV filename under raw directory.",
+        help="Negative coordinate-request TSV filename under processed directory.",
     )
     parser.add_argument(
         "--strict",
@@ -1119,11 +1119,11 @@ def process_species(
     pos_input_name : str
         Positive input filename under raw directory.
     out_pos_name : str
-        Positive output TSV filename under raw directory.
+        Positive output TSV filename under processed directory.
     out_qc_name : str
-        QC output TSV filename under raw directory.
+        QC output TSV filename under processed directory.
     out_neg_request_name : str
-        Negative request output TSV filename under raw directory.
+        Negative request output TSV filename under processed directory.
     strict : bool
         Strict consistency mode.
 
@@ -1140,8 +1140,10 @@ def process_species(
         If strict checks fail.
     """
     raw_dir = data_root / species / "raw"
+    processed_dir = data_root / species / "processed"
     if not raw_dir.exists():
         raise FileNotFoundError(f"Raw directory not found for {species}: {raw_dir}")
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
     pos_path = raw_dir / pos_input_name
     if not pos_path.exists():
@@ -1246,9 +1248,12 @@ def process_species(
 
     negative_rows = _extract_negative_request_rows(species=species, neg_path=neg_path)
 
-    _write_positive_output(raw_dir / out_pos_name, output_rows)
-    _write_qc_summary(raw_dir / out_qc_name, stats)
-    _write_negative_request_output(raw_dir / out_neg_request_name, negative_rows)
+    _write_positive_output(processed_dir / out_pos_name, output_rows)
+    _write_qc_summary(processed_dir / out_qc_name, stats)
+    _write_negative_request_output(
+        processed_dir / out_neg_request_name,
+        negative_rows,
+    )
 
     return stats
 

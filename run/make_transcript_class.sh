@@ -182,6 +182,15 @@ resolve_reference_annotation() {
 	return 1
 }
 
+cleanup_gffcompare_temp_files() {
+	local processed_dir="$1"
+	rm -f \
+		"${processed_dir}"/gffcompare_tmp_* \
+		"${processed_dir}"/gffcmp_test.* \
+		"${processed_dir}"/prefix.*.refmap \
+		"${processed_dir}"/prefix.*.tmap
+}
+
 python_bin="$(intronmodel_resolve_python_bin "make_transcript_class")"
 
 IFS=',' read -r -a species_tokens <<< "${SPECIES}"
@@ -194,10 +203,12 @@ for raw_species in "${species_tokens[@]}"; do
 	species="$(intronmodel_resolve_species_case \
 		"${token}" "${DATA_ROOT}" "make_transcript_class")"
 	raw_dir="${DATA_ROOT}/${species}/raw"
+	processed_dir="${DATA_ROOT}/${species}/processed"
 	if [[ ! -d "${raw_dir}" ]]; then
 		echo "Raw directory not found: ${raw_dir}" >&2
 		exit 3
 	fi
+	mkdir -p "${processed_dir}"
 
 	query_gtf="${QUERY_GTF_PATH}"
 	ref_annotation="${REFERENCE_ANNOTATION_PATH}"
@@ -220,7 +231,7 @@ for raw_species in "${species_tokens[@]}"; do
 	fi
 
 	out_path="${raw_dir}/${OUT_NAME}"
-	tmp_prefix="${raw_dir}/gffcompare_tmp_$$"
+	tmp_prefix="${processed_dir}/gffcompare_tmp_$$"
 	tracking_path="${tmp_prefix}.tracking"
 
 	echo "[make_transcript_class.sh] species=${species}"
@@ -228,6 +239,10 @@ for raw_species in "${species_tokens[@]}"; do
 	echo "[make_transcript_class.sh] reference_annotation=${ref_annotation}"
 	echo "[make_transcript_class.sh] out=${out_path}"
 	echo "[make_transcript_class.sh] running gffcompare..."
+
+	if [[ "${KEEP_TEMP}" == "0" ]]; then
+		cleanup_gffcompare_temp_files "${processed_dir}"
+	fi
 
 	gffcompare \
 		-r "${ref_annotation}" \
@@ -246,6 +261,7 @@ for raw_species in "${species_tokens[@]}"; do
 
 	if [[ "${KEEP_TEMP}" == "0" ]]; then
 		rm -f "${tmp_prefix}".* "${tmp_prefix}"
+		cleanup_gffcompare_temp_files "${processed_dir}"
 		echo "[make_transcript_class.sh] cleaned up gffcompare temp files"
 	fi
 done

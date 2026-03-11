@@ -10,7 +10,7 @@ Options:
   --data-root <path>              Data root (default: <repo>/data)
   --pos-input-name <name>         Positive source name (default: 100bp.err)
   --neg-input-name <name>         Negative source name (default: 100bp.neg.err)
-  --output-name <name>            Output filename in raw dir
+  --output-name <name>            Output filename in processed dir
                                   (default: 100bp_mixed_one_side.neg.err)
   --mix-mode <mode>               both | donor_pos | acceptor_pos
                                   (default: both)

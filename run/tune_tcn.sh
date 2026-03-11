@@ -422,10 +422,10 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 		mask_bp="${ACCEPTOR_LEN}"
 	fi
 	if [[ -z "${TRAIN_POS_PATH}" ]]; then
-		TRAIN_POS_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.err"
+		TRAIN_POS_PATH="data/{species}/processed/${mask_bp}bp_trimmed_npad.err"
 	fi
 	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
-		TRAIN_NEG_PATH="data/{species}/raw/${mask_bp}bp_trimmed_npad.neg.err"
+		TRAIN_NEG_PATH="data/{species}/processed/${mask_bp}bp_trimmed_npad.neg.err"
 	fi
 	if [[ -z "${TAG}" ]]; then
 		TAG="mask"
