@@ -5,7 +5,7 @@ This script is intended for existing datasets that already contain legacy
 ``transcript_id, intron_index, site_type, score``.
 
 It rewrites each file to:
-``Transcript number, donor score, acceptor score, label``.
+``transcript_id, intron_index, donor_score, acceptor_score, label``.
 """
 
 from __future__ import annotations
@@ -75,11 +75,13 @@ def _load_labeled_introns(
     return labels
 
 
-def _read_legacy_site_scores(path: Path) -> ParsedSiteScores | None:
-    """Read one legacy-format site-score TSV.
+def _read_source_site_scores(path: Path) -> ParsedSiteScores | None:
+    """Read one convertible-format site-score TSV.
 
-    Returns ``None`` when the file is already in wide format or an unknown
-    schema.
+    Returns ``None`` when the file is already in target format or an unknown
+    schema. Supported input schemas:
+    - legacy long: ``transcript_id, intron_index, site_type, score``
+    - prior wide: ``Transcript number, donor score, acceptor score, label``
     """
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -87,27 +89,68 @@ def _read_legacy_site_scores(path: Path) -> ParsedSiteScores | None:
             return None
         fieldnames = set(reader.fieldnames)
         legacy_required = {"transcript_id", "intron_index", "site_type", "score"}
-        wide_required = {"Transcript number", "donor score", "acceptor score"}
+        wide_required = {
+            "transcript_id",
+            "intron_index",
+            "donor_score",
+            "acceptor_score",
+        }
+        prior_wide_required = {"Transcript number", "donor score", "acceptor score"}
         if wide_required.issubset(fieldnames):
             return None
-        if not legacy_required.issubset(fieldnames):
+        has_legacy = legacy_required.issubset(fieldnames)
+        has_prior_wide = prior_wide_required.issubset(fieldnames)
+        if not has_legacy and not has_prior_wide:
             return None
 
         grouped: dict[tuple[str, int], dict[str, float]] = {}
         converted_rows = 0
-        for line_no, raw in enumerate(reader, start=2):
-            transcript_id = str(raw["transcript_id"]).strip()
-            if transcript_id == "":
-                raise ValueError(f"Empty transcript_id at {path}:{line_no}")
-            intron_index = int(str(raw["intron_index"]))
-            site_type = str(raw["site_type"]).strip().lower()
-            if site_type not in {"donor", "acceptor", "pair"}:
-                raise ValueError(
-                    f"Unsupported site_type '{site_type}' at {path}:{line_no}"
+        if has_legacy:
+            for line_no, raw in enumerate(reader, start=2):
+                transcript_id = str(raw["transcript_id"]).strip()
+                if transcript_id == "":
+                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
+                intron_index = int(str(raw["intron_index"]))
+                site_type = str(raw["site_type"]).strip().lower()
+                if site_type not in {"donor", "acceptor", "pair"}:
+                    raise ValueError(
+                        f"Unsupported site_type '{site_type}' at {path}:{line_no}"
+                    )
+                score = float(str(raw["score"]))
+                grouped.setdefault((transcript_id, intron_index), {})[site_type] = score
+                converted_rows += 1
+        else:
+            for line_no, raw in enumerate(reader, start=2):
+                token = str(raw["Transcript number"]).strip()
+                parts = token.rsplit(":", 2)
+                if len(parts) != 3:
+                    raise ValueError(
+                        "Transcript number must be "
+                        "'<transcript_id>:<intron_index>:<combined_score>' "
+                        f"at {path}:{line_no}"
+                    )
+                transcript_id = parts[0].strip()
+                intron_index = int(parts[1].strip())
+                combined_text = parts[2].strip()
+                combined_score = (
+                    float(combined_text) if combined_text != "" else None
                 )
-            score = float(str(raw["score"]))
-            grouped.setdefault((transcript_id, intron_index), {})[site_type] = score
-            converted_rows += 1
+                donor_raw = str(raw["donor score"]).strip()
+                acceptor_raw = str(raw["acceptor score"]).strip()
+                donor_score = float(donor_raw) if donor_raw != "" else None
+                acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
+                per_site = grouped.setdefault((transcript_id, intron_index), {})
+                if donor_score is not None:
+                    per_site["donor"] = donor_score
+                if acceptor_score is not None:
+                    per_site["acceptor"] = acceptor_score
+                if (
+                    donor_score is None
+                    and acceptor_score is None
+                    and combined_score is not None
+                ):
+                    per_site["pair"] = combined_score
+                converted_rows += 1
     return ParsedSiteScores(scores=grouped, converted_rows=converted_rows)
 
 
@@ -122,7 +165,13 @@ def _write_wide_site_scores(
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(
-            ["Transcript number", "donor score", "acceptor score", "label"]
+            [
+                "transcript_id",
+                "intron_index",
+                "donor_score",
+                "acceptor_score",
+                "label",
+            ]
         )
         for key in sorted(grouped_scores.keys()):
             transcript_id, intron_index = key
@@ -130,26 +179,27 @@ def _write_wide_site_scores(
             donor_score = per_site.get("donor")
             acceptor_score = per_site.get("acceptor")
             pair_score = per_site.get("pair")
-            if donor_score is not None and acceptor_score is not None:
-                combined_score = donor_score + acceptor_score
-            elif pair_score is not None:
-                combined_score = pair_score
-            elif donor_score is not None:
-                combined_score = donor_score
-            elif acceptor_score is not None:
-                combined_score = acceptor_score
-            else:
+            if (
+                donor_score is None
+                and acceptor_score is None
+                and pair_score is None
+            ):
                 continue
-            transcript_number = (
-                f"{transcript_id}:{intron_index}:{float(combined_score):.6f}"
-            )
             donor_text = "" if donor_score is None else f"{float(donor_score):.6f}"
             acceptor_text = (
                 "" if acceptor_score is None else f"{float(acceptor_score):.6f}"
             )
             label = labels.get(key)
             label_text = "" if label is None else str(label)
-            writer.writerow([transcript_number, donor_text, acceptor_text, label_text])
+            writer.writerow(
+                [
+                    transcript_id,
+                    str(intron_index),
+                    donor_text,
+                    acceptor_text,
+                    label_text,
+                ]
+            )
             written_rows += 1
     return written_rows
 
@@ -214,7 +264,7 @@ def main() -> int:
             if not site_score_tsv.is_file():
                 continue
             scanned_files += 1
-            parsed = _read_legacy_site_scores(site_score_tsv)
+            parsed = _read_source_site_scores(site_score_tsv)
             if parsed is None:
                 skipped_files += 1
                 print(f"[reformat_site_scores_temporary] skip: {site_score_tsv}")

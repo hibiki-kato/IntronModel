@@ -87,6 +87,7 @@ SPECIES_DIR="${TARGET_ROOT}/${SPECIES}"
 mkdir -p "${SPECIES_DIR}/raw"
 mkdir -p "${SPECIES_DIR}/train"
 mkdir -p "${SPECIES_DIR}/site_score"
+mkdir -p "${SPECIES_DIR}/intron_score"
 mkdir -p "${SPECIES_DIR}/learning_metric"
 mkdir -p "${SPECIES_DIR}/trans_score"
 mkdir -p "${SPECIES_DIR}/eval_score"
@@ -118,5 +119,6 @@ if [[ ! -f "${SPECIES_DIR}/train/${DONOR_LEN}bp.err" ]]; then
 	echo "[prepare_species_data] warning: missing ${SPECIES_DIR}/train/${DONOR_LEN}bp.err"
 fi
 if [[ ! -f "${SPECIES_DIR}/train/${DONOR_LEN}bp.neg.err" ]]; then
-	echo "[prepare_species_data] warning: missing ${SPECIES_DIR}/train/${DONOR_LEN}bp.neg.err"
+	echo "[prepare_species_data] warning: missing" \
+		"${SPECIES_DIR}/train/${DONOR_LEN}bp.neg.err"
 fi

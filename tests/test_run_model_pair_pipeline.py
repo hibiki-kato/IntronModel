@@ -64,6 +64,7 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
 ) -> None:
     metrics_json = tmp_path / "train_summary.json"
     site_output_tsv = tmp_path / "site.tsv"
+    intron_output_tsv = tmp_path / "intron.tsv"
     transcript_output_tsv = tmp_path / "transcript.tsv"
     eval_output_txt = tmp_path / "eval.txt"
     class_file = tmp_path / "class.txt"
@@ -102,6 +103,8 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
             str(class_file),
             "--site_output_tsv",
             str(site_output_tsv),
+            "--intron_output_tsv",
+            str(intron_output_tsv),
             "--transcript_output_tsv",
             str(transcript_output_tsv),
             "--eval_output_txt",
@@ -142,6 +145,15 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
     summary = json.loads(metrics_json.read_text(encoding="utf-8"))
     assert summary["pair"]["best_metric"] == "pr_auc"
     assert float(summary["pair"]["best_score"]) == pytest.approx(0.93)
+
+    intron_lines = intron_output_tsv.read_text(encoding="utf-8").strip().splitlines()
+    assert intron_lines[0].split("\t") == [
+        "transcript_id",
+        "intron_index",
+        "score",
+        "label",
+    ]
+    assert len(intron_lines) == 3
 
     lines = transcript_output_tsv.read_text(encoding="utf-8").strip().splitlines()
     assert lines[0].split("\t") == [

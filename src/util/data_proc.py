@@ -212,8 +212,8 @@ def species_data_dirs(species: str) -> Dict[str, str]:
     Returns
     -------
     dict[str, str]
-        Paths for base/raw/train/trans_score/site_score/learning_metric/eval_score
-        directories.
+        Paths for base/raw/train/site_score/intron_score/trans_score/
+        learning_metric/eval_score directories.
     """
     base = os.path.join(data_root(), species)
     return {
@@ -222,6 +222,7 @@ def species_data_dirs(species: str) -> Dict[str, str]:
         "train": os.path.join(base, "train"),
         "trans_score": os.path.join(base, "trans_score"),
         "site_score": os.path.join(base, "site_score"),
+        "intron_score": os.path.join(base, "intron_score"),
         "learning_metric": os.path.join(base, "learning_metric"),
         "eval_score": os.path.join(base, "eval_score"),
     }
@@ -478,6 +479,30 @@ def default_transcript_output_path(
         name_params=params,
     )
     return os.path.join(dirs["trans_score"], f"{stem}.tsv")
+
+
+def default_intron_output_path(
+    species: str,
+    model_name: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    fallback_train_len: Optional[int] = None,
+    name_fields: Optional[Sequence[str]] = None,
+    name_params: Optional[Dict[str, object]] = None,
+) -> str:
+    """Return default intron-score TSV output path."""
+    dirs = species_data_dirs(species)
+    fields = list(name_fields) if name_fields is not None else []
+    params = name_params or {}
+    stem = build_output_stem(
+        model_name=model_name,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        fallback_train_len=fallback_train_len,
+        name_fields=fields,
+        name_params=params,
+    )
+    return os.path.join(dirs["intron_score"], f"{stem}.tsv")
 
 
 def build_run_name(

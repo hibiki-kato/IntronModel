@@ -298,6 +298,101 @@ def aggregate_pair_transcript_scores(
     return results
 
 
+def build_intron_scores(
+    site_score_rows: Iterable[Dict[str, object]],
+    intron_score_op: str = "+",
+) -> List[Dict[str, object]]:
+    """Build one intron-level score row per ``(transcript_id, intron_index)``.
+
+    Parameters
+    ----------
+    site_score_rows : Iterable[dict[str, object]]
+        Input row format:
+        ``transcript_id``, ``intron_index``, ``site_type``, ``score``.
+    intron_score_op : str, default="+"
+        Donor/acceptor combination operator when pair score is unavailable.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Row schema:
+        ``transcript_id``, ``intron_index``, ``score``.
+        Rows without derivable score are skipped.
+    """
+    if intron_score_op not in INTRON_SCORE_OP_CHOICES:
+        raise ValueError(
+            "Unsupported intron score operation: "
+            f"{intron_score_op}. Supported: {INTRON_SCORE_OP_CHOICES}"
+        )
+
+    grouped: dict[tuple[str, int], dict[str, float]] = defaultdict(dict)
+    for row in site_score_rows:
+        transcript_id = str(row["transcript_id"])
+        intron_index = int(row["intron_index"])
+        site_type = str(row["site_type"]).strip().lower()
+        score = float(row["score"])
+        grouped[(transcript_id, intron_index)][site_type] = score
+
+    results: List[Dict[str, object]] = []
+    for key in sorted(grouped.keys()):
+        transcript_id, intron_index = key
+        per_site = grouped[key]
+        if "pair" in per_site:
+            intron_score = float(per_site["pair"])
+        elif "donor" in per_site and "acceptor" in per_site:
+            intron_score = _combine_intron_score(
+                donor_score=float(per_site["donor"]),
+                acceptor_score=float(per_site["acceptor"]),
+                op=intron_score_op,
+            )
+        else:
+            continue
+        results.append(
+            {
+                "transcript_id": transcript_id,
+                "intron_index": intron_index,
+                "score": intron_score,
+            }
+        )
+    return results
+
+
+def write_intron_scores(
+    output_tsv: str,
+    rows: List[Dict[str, object]],
+    labels: Dict[tuple[str, int], int] | None = None,
+) -> None:
+    """Write intron-level scores with optional labels.
+
+    Parameters
+    ----------
+    output_tsv : str
+        Output TSV path.
+    rows : list[dict[str, object]]
+        Row schema:
+        ``transcript_id``, ``intron_index``, ``score``.
+    labels : dict[tuple[str, int], int] | None, default=None
+        Optional intron labels keyed by ``(transcript_id, intron_index)``.
+    """
+    outdir = os.path.dirname(output_tsv)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+    label_map = labels or {}
+
+    with open(output_tsv, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["transcript_id", "intron_index", "score", "label"])
+        for row in rows:
+            transcript_id = str(row["transcript_id"])
+            intron_index = int(row["intron_index"])
+            score = float(row["score"])
+            label = label_map.get((transcript_id, intron_index))
+            label_text = "" if label is None else str(int(label))
+            writer.writerow(
+                [transcript_id, str(intron_index), f"{score:.6f}", label_text]
+            )
+
+
 def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
     """Write transcript-level score rows to a 5-column TSV file."""
     outdir = os.path.dirname(output_tsv)
@@ -320,13 +415,12 @@ def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
 
 
 def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
-    """Write site-level scores to the wide 4-column TSV format.
+    """Write site-level scores to the wide 5-column TSV format.
 
     Output schema:
-    ``Transcript number``, ``donor score``, ``acceptor score``, ``label``.
-    ``Transcript number`` encodes
-    ``<transcript_id>:<intron_index>:<combined_score>`` where combined score
-    is donor+acceptor when both are present, otherwise the available score.
+    ``transcript_id``, ``intron_index``, ``donor_score``,
+    ``acceptor_score``, ``label``.
+    Donor/acceptor columns contain per-site probabilities directly.
     ``label`` is left empty here and can be filled by post-processing scripts.
     """
     outdir = os.path.dirname(output_tsv)
@@ -344,7 +438,13 @@ def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
     with open(output_tsv, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(
-            ["Transcript number", "donor score", "acceptor score", "label"]
+            [
+                "transcript_id",
+                "intron_index",
+                "donor_score",
+                "acceptor_score",
+                "label",
+            ]
         )
         for key in sorted(grouped.keys()):
             transcript_id, intron_index = key
@@ -352,25 +452,20 @@ def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
             donor_score = per_site.get("donor")
             acceptor_score = per_site.get("acceptor")
             pair_score = per_site.get("pair")
-            if donor_score is not None and acceptor_score is not None:
-                combined_score = donor_score + acceptor_score
-            elif pair_score is not None:
-                combined_score = pair_score
-            elif donor_score is not None:
-                combined_score = donor_score
-            elif acceptor_score is not None:
-                combined_score = acceptor_score
-            else:
+            if (
+                donor_score is None
+                and acceptor_score is None
+                and pair_score is None
+            ):
                 continue
 
-            transcript_number = (
-                f"{transcript_id}:{intron_index}:{float(combined_score):.6f}"
-            )
             donor_text = "" if donor_score is None else f"{float(donor_score):.6f}"
             acceptor_text = (
                 "" if acceptor_score is None else f"{float(acceptor_score):.6f}"
             )
-            writer.writerow([transcript_number, donor_text, acceptor_text, ""])
+            writer.writerow(
+                [transcript_id, str(intron_index), donor_text, acceptor_text, ""]
+            )
 
 
 def _parse_transcript_number(value: str) -> tuple[str, int, float | None]:
@@ -399,7 +494,13 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
             return rows
         fieldnames = set(reader.fieldnames)
         legacy_required = {"transcript_id", "intron_index", "site_type", "score"}
-        wide_required = {"Transcript number", "donor score", "acceptor score"}
+        wide_required = {
+            "transcript_id",
+            "intron_index",
+            "donor_score",
+            "acceptor_score",
+        }
+        prior_wide_required = {"Transcript number", "donor score", "acceptor score"}
 
         if legacy_required.issubset(fieldnames):
             for raw in reader:
@@ -414,6 +515,34 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
             return rows
 
         if wide_required.issubset(fieldnames):
+            for raw in reader:
+                transcript_id = str(raw["transcript_id"]).strip()
+                intron_index = int(str(raw["intron_index"]))
+                donor_raw = str(raw["donor_score"]).strip()
+                acceptor_raw = str(raw["acceptor_score"]).strip()
+                donor_score = float(donor_raw) if donor_raw != "" else None
+                acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
+                if donor_score is not None:
+                    rows.append(
+                        {
+                            "transcript_id": transcript_id,
+                            "intron_index": intron_index,
+                            "site_type": "donor",
+                            "score": donor_score,
+                        }
+                    )
+                if acceptor_score is not None:
+                    rows.append(
+                        {
+                            "transcript_id": transcript_id,
+                            "intron_index": intron_index,
+                            "site_type": "acceptor",
+                            "score": acceptor_score,
+                        }
+                    )
+            return rows
+
+        if prior_wide_required.issubset(fieldnames):
             for raw in reader:
                 transcript_id, intron_index, combined_score = _parse_transcript_number(
                     str(raw["Transcript number"])
@@ -440,7 +569,11 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             "score": acceptor_score,
                         }
                     )
-                if donor_score is None and acceptor_score is None and combined_score is not None:
+                if (
+                    donor_score is None
+                    and acceptor_score is None
+                    and combined_score is not None
+                ):
                     rows.append(
                         {
                             "transcript_id": transcript_id,
@@ -454,5 +587,6 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
     raise ValueError(
         "Unsupported site_score TSV schema. Expected either "
         "legacy columns (transcript_id, intron_index, site_type, score) or "
-        "wide columns (Transcript number, donor score, acceptor score)."
+        "wide columns "
+        "(transcript_id, intron_index, donor_score, acceptor_score)."
     )

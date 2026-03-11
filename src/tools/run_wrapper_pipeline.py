@@ -1077,6 +1077,9 @@ def _run_single_species(
     else:
         class_file = data_root / species / "raw" / "transcript_class.txt"
     output_site_score_tsv = data_root / species / "site_score" / f"{output_stem}.tsv"
+    output_intron_score_tsv = (
+        data_root / species / "intron_score" / f"{output_stem}.tsv"
+    )
     output_trans_score_tsv = data_root / species / "trans_score" / f"{output_stem}.tsv"
     output_eval_score_txt = data_root / species / "eval_score" / f"{output_stem}.txt"
     learning_metric_dir = data_root / species / "learning_metric"
@@ -1088,6 +1091,7 @@ def _run_single_species(
     env["TEST_TSV"] = str(test_tsv)
     env["CLASS_FILE"] = str(class_file)
     env["OUTPUT_SITE_SCORE_TSV"] = str(output_site_score_tsv)
+    env["OUTPUT_INTRON_SCORE_TSV"] = str(output_intron_score_tsv)
     env["OUTPUT_TRANS_SCORE_TSV"] = str(output_trans_score_tsv)
     env["OUTPUT_EVAL_SCORE_TXT"] = str(output_eval_score_txt)
 
@@ -1109,6 +1113,8 @@ def _run_single_species(
             env["CLASS_FILE"],
             "--site_output_tsv",
             env["OUTPUT_SITE_SCORE_TSV"],
+            "--intron_output_tsv",
+            env["OUTPUT_INTRON_SCORE_TSV"],
             "--transcript_output_tsv",
             env["OUTPUT_TRANS_SCORE_TSV"],
             "--eval_output_txt",
@@ -1178,6 +1184,7 @@ def _run_single_species(
 
     print(f"[{spec.script_name}] Done")
     print(f"[{spec.script_name}] site_score={output_site_score_tsv}")
+    print(f"[{spec.script_name}] intron_score={output_intron_score_tsv}")
     print(f"[{spec.script_name}] transcript_score={output_trans_score_tsv}")
     print(f"[{spec.script_name}] eval_score={output_eval_score_txt}")
     return 0

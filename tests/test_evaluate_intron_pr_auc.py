@@ -36,12 +36,11 @@ def _write_site_score_wide_tsv(
     rows: list[tuple[str, int, float, float, int]],
 ) -> None:
     """Write site score TSV in wide format."""
-    lines = ["Transcript number\tdonor score\tacceptor score\tlabel"]
+    lines = ["transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel"]
     for transcript_id, intron_index, donor_score, acceptor_score, label in rows:
-        combined = donor_score + acceptor_score
-        token = f"{transcript_id}:{intron_index}:{combined:.6f}"
         lines.append(
-            f"{token}\t{donor_score:.6f}\t{acceptor_score:.6f}\t{label}"
+            f"{transcript_id}\t{intron_index}\t"
+            f"{donor_score:.6f}\t{acceptor_score:.6f}\t{label}"
         )
     _write_text(path, "\n".join(lines) + "\n")
 

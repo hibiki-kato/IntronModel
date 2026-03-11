@@ -267,7 +267,13 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
     _set_csv_field_limit_max()
 
     legacy_required = {"transcript_id", "intron_index", "site_type", "score"}
-    wide_required = {"Transcript number", "donor score", "acceptor score"}
+    wide_required = {
+        "transcript_id",
+        "intron_index",
+        "donor_score",
+        "acceptor_score",
+    }
+    prior_wide_required = {"Transcript number", "donor score", "acceptor score"}
     site_scores: dict[tuple[str, int], dict[str, float]] = {}
 
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -306,6 +312,29 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                     )
                 per_site[site_type] = score
         elif wide_required.issubset(fieldnames):
+            for line_no, raw in enumerate(reader, start=2):
+                transcript_id = str(raw["transcript_id"]).strip()
+                if transcript_id == "":
+                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
+                try:
+                    intron_index = int(str(raw["intron_index"]))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid intron_index at {path}:{line_no}"
+                    ) from exc
+
+                donor_raw = str(raw["donor_score"]).strip()
+                acceptor_raw = str(raw["acceptor_score"]).strip()
+                donor_score = float(donor_raw) if donor_raw != "" else None
+                acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
+
+                key = (transcript_id, intron_index)
+                per_site = site_scores.setdefault(key, {})
+                if donor_score is not None:
+                    per_site["donor"] = donor_score
+                if acceptor_score is not None:
+                    per_site["acceptor"] = acceptor_score
+        elif prior_wide_required.issubset(fieldnames):
             for line_no, raw in enumerate(reader, start=2):
                 transcript_number = str(raw["Transcript number"]).strip()
                 parts = transcript_number.rsplit(":", 2)
@@ -357,7 +386,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
             raise ValueError(
                 "Site score TSV must include columns: "
                 "transcript_id, intron_index, site_type, score "
-                "or Transcript number, donor score, acceptor score"
+                "or transcript_id, intron_index, donor_score, acceptor_score"
             )
 
     if not site_scores:

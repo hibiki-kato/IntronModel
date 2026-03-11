@@ -8,6 +8,7 @@ import pytest
 from util.transcript_eval import (
     aggregate_pair_transcript_scores,
     aggregate_transcript_scores,
+    build_intron_scores,
     read_site_scores,
     write_site_scores,
 )
@@ -211,8 +212,11 @@ def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
     ]
     write_site_scores(str(output_tsv), rows)
     lines = output_tsv.read_text(encoding="utf-8").strip().splitlines()
-    assert lines[0] == "Transcript number\tdonor score\tacceptor score\tlabel"
-    assert lines[1] == "tx1:1:1.730000\t0.910000\t0.820000"
+    assert (
+        lines[0]
+        == "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel"
+    )
+    assert lines[1] == "tx1\t1\t0.910000\t0.820000"
 
 
 def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
@@ -221,9 +225,9 @@ def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
     site_score_tsv.write_text(
         "\n".join(
             [
-                "Transcript number\tdonor score\tacceptor score\tlabel",
-                "tx1:1:1.700000\t0.900000\t0.800000\t1",
-                "tx2:2:0.250000\t\t\t0",
+                "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel",
+                "tx1\t1\t0.900000\t0.800000\t1",
+                "tx2\t2\t\t\t0",
             ]
         )
         + "\n",
@@ -243,10 +247,50 @@ def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
             "site_type": "acceptor",
             "score": 0.8,
         },
+    ]
+
+
+def test_write_site_scores_keeps_pair_rows_as_blank_scores(tmp_path: Path) -> None:
+    """Keep pair-only rows with blank donor/acceptor in wide output."""
+    output_tsv = tmp_path / "pair.tsv"
+    rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx_pair",
+            "intron_index": 3,
+            "site_type": "pair",
+            "score": 0.55,
+        }
+    ]
+    write_site_scores(str(output_tsv), rows)
+    lines = output_tsv.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[1] == "tx_pair\t3\t\t\t"
+
+
+def test_build_intron_scores_uses_pair_or_donor_acceptor() -> None:
+    """Build intron scores from mixed donor/acceptor and pair rows."""
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": 0.5,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": 0.2,
+        },
         {
             "transcript_id": "tx2",
             "intron_index": 2,
             "site_type": "pair",
-            "score": 0.25,
+            "score": 0.7,
         },
+    ]
+    rows = build_intron_scores(site_score_rows=site_rows, intron_score_op="+")
+    assert rows == [
+        {"transcript_id": "tx1", "intron_index": 1, "score": 0.7},
+        {"transcript_id": "tx2", "intron_index": 2, "score": 0.7},
     ]

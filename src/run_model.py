@@ -8,6 +8,7 @@ train -> infer -> transcript -> eval.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ from util.checkpoint_prune import prune_species_model_checkpoints
 from util.data_proc import (
     NAME_FIELD_CHOICES,
     NAME_FIELD_LABELS,
+    default_intron_output_path,
     default_site_output_path,
     default_transcript_output_path,
     infer_default_train_paths,
@@ -43,7 +45,9 @@ from util.transcript_eval import (
     TRANSCRIPT_SCORE_AGG_CHOICES,
     aggregate_pair_transcript_scores,
     aggregate_transcript_scores,
+    build_intron_scores,
     read_site_scores,
+    write_intron_scores,
     write_site_scores,
     write_transcript_scores,
 )
@@ -76,6 +80,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "test_tsv",
         "site_score_tsv",
         "site_output_tsv",
+        "intron_output_tsv",
         "transcript_output_tsv",
         "metrics_json",
         "class_file",
@@ -120,6 +125,17 @@ MAX_CHECKPOINT_STEM_LENGTH: int = 200
 CHECKPOINT_STEM_HASH_CHARS: int = 12
 
 
+def _set_csv_field_limit_max() -> None:
+    """Set CSV field-size limit to the largest supported value."""
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
+
+
 def _add_shared_common_args(parser: argparse.ArgumentParser) -> None:
     """Register model-agnostic arguments."""
     parser.add_argument("--model", choices=available_models(), default="cnn")
@@ -154,6 +170,7 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--test_tsv", default=None)
     parser.add_argument("--site_score_tsv", default=None)
     parser.add_argument("--site_output_tsv", default=None)
+    parser.add_argument("--intron_output_tsv", default=None)
     parser.add_argument("--transcript_output_tsv", default=None)
     parser.add_argument("--metrics_json", default=None)
     parser.add_argument("--class_file", default=None)
@@ -190,7 +207,7 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--intron_score_op",
         choices=list(INTRON_SCORE_OP_CHOICES),
-        default="+",
+        default="*",
         help="How to combine donor and acceptor scores into intron score.",
     )
     parser.add_argument(
@@ -758,7 +775,7 @@ def _resolve_pipeline_paths(
     donor_len: Optional[int],
     acceptor_len: Optional[int],
     inferred_train_len: Optional[int],
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str]:
     """Resolve default paths for pipeline artifacts."""
     dirs = species_data_dirs(args.species)
     name_fields = parse_name_fields(args.name_fields)
@@ -787,6 +804,15 @@ def _resolve_pipeline_paths(
             name_params=name_params,
         )
     )
+    intron_output_tsv = args.intron_output_tsv or default_intron_output_path(
+        species=args.species,
+        model_name=args.model,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        fallback_train_len=inferred_train_len,
+        name_fields=name_fields,
+        name_params=name_params,
+    )
 
     if args.eval_output_txt:
         eval_output_txt = args.eval_output_txt
@@ -798,9 +824,42 @@ def _resolve_pipeline_paths(
         test_tsv,
         class_file,
         site_output_tsv,
+        intron_output_tsv,
         transcript_output_tsv,
         eval_output_txt,
     )
+
+
+def _load_optional_intron_labels(
+    species: str,
+    labeled_name: str = "intron_eval_flank10.tsv",
+) -> dict[tuple[str, int], int]:
+    """Load optional intron labels from ``data/<species>/processed``."""
+    _set_csv_field_limit_max()
+    species_dirs = species_data_dirs(species)
+    labeled_path = os.path.join(species_dirs["base"], "processed", labeled_name)
+    if not os.path.exists(labeled_path):
+        return {}
+
+    labels: dict[tuple[str, int], int] = {}
+    with open(labeled_path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"transcript_id", "intron_index", "label"}
+        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+            return {}
+        for raw in reader:
+            transcript_id = str(raw["transcript_id"]).strip()
+            if transcript_id == "":
+                continue
+            try:
+                intron_index = int(str(raw["intron_index"]))
+                label = int(str(raw["label"]))
+            except ValueError:
+                continue
+            if label not in {0, 1}:
+                continue
+            labels[(transcript_id, intron_index)] = label
+    return labels
 
 
 def _resolve_ref_gff_file(
@@ -978,6 +1037,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         args.test_tsv,
         class_file,
         site_output_tsv,
+        intron_output_tsv,
         transcript_output_tsv,
         eval_output_txt,
     ) = _resolve_pipeline_paths(
@@ -1077,6 +1137,19 @@ def run_pipeline(args: argparse.Namespace) -> None:
         write_site_scores(site_output_tsv, site_rows)
         site_score_tsv = site_output_tsv
         print(f"Saved site scores: {site_output_tsv}")
+
+    intron_rows = build_intron_scores(
+        site_score_rows=site_rows,
+        intron_score_op=args.intron_score_op,
+    )
+    intron_labels = _load_optional_intron_labels(args.species)
+    write_intron_scores(
+        intron_output_tsv,
+        intron_rows,
+        labels=intron_labels,
+    )
+    print(f"Saved intron scores: {intron_output_tsv}")
+    print(f"Total introns: {len(intron_rows)}")
 
     if model_tasks == ("pair",):
         transcript_rows = aggregate_pair_transcript_scores(
