@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
 from util.transcript_eval import (
     aggregate_pair_transcript_scores,
     aggregate_transcript_scores,
+    read_site_scores,
+    write_site_scores,
 )
 
 
@@ -187,3 +190,63 @@ def test_aggregate_pair_transcript_scores_softmin_wavg() -> None:
 
     assert rows[0]["min_intron_index"] == 1
     assert float(rows[0]["min_donor_plus_acceptor"]) == pytest.approx(expected)
+
+
+def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
+    """Write wide-format site_score TSV with one row per intron."""
+    output_tsv = tmp_path / "site.tsv"
+    rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": 0.91,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": 0.82,
+        },
+    ]
+    write_site_scores(str(output_tsv), rows)
+    lines = output_tsv.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0] == "Transcript number\tdonor score\tacceptor score\tlabel"
+    assert lines[1] == "tx1:1:1.730000\t0.910000\t0.820000"
+
+
+def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
+    """Read wide-format TSV into donor/acceptor row dictionaries."""
+    site_score_tsv = tmp_path / "site.tsv"
+    site_score_tsv.write_text(
+        "\n".join(
+            [
+                "Transcript number\tdonor score\tacceptor score\tlabel",
+                "tx1:1:1.700000\t0.900000\t0.800000\t1",
+                "tx2:2:0.250000\t\t\t0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = read_site_scores(str(site_score_tsv))
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": 0.9,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": 0.8,
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 2,
+            "site_type": "pair",
+            "score": 0.25,
+        },
+    ]

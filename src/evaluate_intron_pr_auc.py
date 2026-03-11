@@ -266,45 +266,99 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
         raise FileNotFoundError(f"Site score TSV not found: {path}")
     _set_csv_field_limit_max()
 
-    required = {"transcript_id", "intron_index", "site_type", "score"}
+    legacy_required = {"transcript_id", "intron_index", "site_type", "score"}
+    wide_required = {"Transcript number", "donor score", "acceptor score"}
     site_scores: dict[tuple[str, int], dict[str, float]] = {}
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+        if reader.fieldnames is None:
+            raise ValueError(f"Site score TSV is missing header: {path}")
+        fieldnames = set(reader.fieldnames)
+
+        if legacy_required.issubset(fieldnames):
+            for line_no, raw in enumerate(reader, start=2):
+                transcript_id = str(raw["transcript_id"]).strip()
+                if transcript_id == "":
+                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
+                try:
+                    intron_index = int(str(raw["intron_index"]))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid intron_index at {path}:{line_no}"
+                    ) from exc
+                site_type = str(raw["site_type"]).strip().lower()
+                if site_type not in {"donor", "acceptor", "pair"}:
+                    raise ValueError(
+                        f"Unsupported site_type '{site_type}' at {path}:{line_no}"
+                    )
+                try:
+                    score = float(str(raw["score"]))
+                except ValueError as exc:
+                    raise ValueError(f"Invalid score at {path}:{line_no}") from exc
+
+                key = (transcript_id, intron_index)
+                per_site = site_scores.setdefault(key, {})
+                if site_type in per_site:
+                    raise ValueError(
+                        "Duplicate site score for key "
+                        f"{transcript_id}:{intron_index}:{site_type} in {path}"
+                    )
+                per_site[site_type] = score
+        elif wide_required.issubset(fieldnames):
+            for line_no, raw in enumerate(reader, start=2):
+                transcript_number = str(raw["Transcript number"]).strip()
+                parts = transcript_number.rsplit(":", 2)
+                if len(parts) != 3:
+                    raise ValueError(
+                        "Transcript number must be "
+                        "'<transcript_id>:<intron_index>:<combined_score>' "
+                        f"at {path}:{line_no}"
+                    )
+                transcript_id = parts[0].strip()
+                if transcript_id == "":
+                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
+                try:
+                    intron_index = int(parts[1].strip())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid intron_index in Transcript number at "
+                        f"{path}:{line_no}"
+                    ) from exc
+                combined_raw = parts[2].strip()
+                try:
+                    combined_score = (
+                        float(combined_raw) if combined_raw != "" else None
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid combined score in Transcript number at "
+                        f"{path}:{line_no}"
+                    ) from exc
+
+                donor_raw = str(raw["donor score"]).strip()
+                acceptor_raw = str(raw["acceptor score"]).strip()
+                donor_score = float(donor_raw) if donor_raw != "" else None
+                acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
+
+                key = (transcript_id, intron_index)
+                per_site = site_scores.setdefault(key, {})
+                if donor_score is not None:
+                    per_site["donor"] = donor_score
+                if acceptor_score is not None:
+                    per_site["acceptor"] = acceptor_score
+                if (
+                    donor_score is None
+                    and acceptor_score is None
+                    and combined_score is not None
+                ):
+                    per_site["pair"] = combined_score
+        else:
             raise ValueError(
                 "Site score TSV must include columns: "
-                "transcript_id, intron_index, site_type, score"
+                "transcript_id, intron_index, site_type, score "
+                "or Transcript number, donor score, acceptor score"
             )
-
-        for line_no, raw in enumerate(reader, start=2):
-            transcript_id = str(raw["transcript_id"]).strip()
-            if transcript_id == "":
-                raise ValueError(f"Empty transcript_id at {path}:{line_no}")
-            try:
-                intron_index = int(str(raw["intron_index"]))
-            except ValueError as exc:
-                raise ValueError(
-                    f"Invalid intron_index at {path}:{line_no}"
-                ) from exc
-            site_type = str(raw["site_type"]).strip().lower()
-            if site_type not in {"donor", "acceptor", "pair"}:
-                raise ValueError(
-                    f"Unsupported site_type '{site_type}' at {path}:{line_no}"
-                )
-            try:
-                score = float(str(raw["score"]))
-            except ValueError as exc:
-                raise ValueError(f"Invalid score at {path}:{line_no}") from exc
-
-            key = (transcript_id, intron_index)
-            per_site = site_scores.setdefault(key, {})
-            if site_type in per_site:
-                raise ValueError(
-                    "Duplicate site score for key "
-                    f"{transcript_id}:{intron_index}:{site_type} in {path}"
-                )
-            per_site[site_type] = score
 
     if not site_scores:
         raise ValueError(f"No valid site score rows found: {path}")

@@ -31,6 +31,21 @@ def _write_site_score_tsv(
     _write_text(path, "\n".join(lines) + "\n")
 
 
+def _write_site_score_wide_tsv(
+    path: Path,
+    rows: list[tuple[str, int, float, float, int]],
+) -> None:
+    """Write site score TSV in wide format."""
+    lines = ["Transcript number\tdonor score\tacceptor score\tlabel"]
+    for transcript_id, intron_index, donor_score, acceptor_score, label in rows:
+        combined = donor_score + acceptor_score
+        token = f"{transcript_id}:{intron_index}:{combined:.6f}"
+        lines.append(
+            f"{token}\t{donor_score:.6f}\t{acceptor_score:.6f}\t{label}"
+        )
+    _write_text(path, "\n".join(lines) + "\n")
+
+
 def test_evaluate_labeled_introns_donor_acceptor_perfect_rank(
     tmp_path: Path,
 ) -> None:
@@ -173,3 +188,43 @@ def test_evaluate_labeled_introns_rejects_single_class_labels(
             intron_score_op="*",
             score_source="donor_acceptor",
         )
+
+
+def test_evaluate_labeled_introns_reads_wide_site_score_format(
+    tmp_path: Path,
+) -> None:
+    """Compute metrics from the new wide site_score format."""
+    labeled_tsv = tmp_path / "labeled.tsv"
+    site_score_tsv = tmp_path / "site_score.tsv"
+
+    _write_labeled_tsv(
+        labeled_tsv,
+        rows=[
+            ("tx1", 1, 1),
+            ("tx2", 1, 0),
+            ("tx3", 1, 1),
+            ("tx4", 1, 0),
+        ],
+    )
+    _write_site_score_wide_tsv(
+        site_score_tsv,
+        rows=[
+            ("tx1", 1, 0.95, 0.90, 1),
+            ("tx2", 1, 0.20, 0.20, 0),
+            ("tx3", 1, 0.90, 0.85, 1),
+            ("tx4", 1, 0.25, 0.30, 0),
+        ],
+    )
+
+    summary, rows = evaluate_labeled_introns(
+        labeled_tsv=labeled_tsv,
+        site_score_tsv=site_score_tsv,
+        intron_score_op="*",
+        score_source="donor_acceptor",
+    )
+
+    assert summary.used_introns == 4
+    assert summary.skipped_missing_score_introns == 0
+    assert summary.pr_auc == pytest.approx(1.0)
+    assert summary.roc_auc == pytest.approx(1.0)
+    assert len(rows) == 4
