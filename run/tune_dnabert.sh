@@ -11,12 +11,12 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-SPECIES="Mmus"
+SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
-DNABERT_VARIANT="6"
+DNABERT_VARIANT="2"
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
 PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"

@@ -21,6 +21,7 @@ PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
     "Athal": (10.0, 52.0, 48.0, 75.0),
     "Dmel": (40.0, 52.0, 40.0, 55.0),
     "Mmus": (10.0, 18.0, 40.0, 46.0),
+    "Hsap": (10.0, 19.0, 26.0, 35.0),
 }
 FALLBACK_PLOT_BOUNDS: tuple[float, float, float, float] = (40.0, 50.0, 40.0, 50.0)
 

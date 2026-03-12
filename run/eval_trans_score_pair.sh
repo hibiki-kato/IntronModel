@@ -30,6 +30,10 @@ CONDA_ENV="intronmodel"
 USE_CONDA_ACTIVATE="1"
 VISUALIZE="true"
 OUTPUT_PNG=""
+X_MIN=""
+X_MAX=""
+Y_MIN=""
+Y_MAX=""
 TARGET_SPECIES=("Dmel")
 SCORE_INPUTS=("cnn_pair.tsv")
 CLASS_FILE_OVERRIDE=""
@@ -137,6 +141,42 @@ resolve_ref_gff() {
 	return 0
 }
 
+set_defaults_for_species() {
+	local sp="$1"
+	case "${sp}" in
+	Athal)
+		DEFAULT_X_MIN="10.0"
+		DEFAULT_X_MAX="52.0"
+		DEFAULT_Y_MIN="48.0"
+		DEFAULT_Y_MAX="75.0"
+		;;
+	Dmel)
+		DEFAULT_X_MIN="40.0"
+		DEFAULT_X_MAX="52.0"
+		DEFAULT_Y_MIN="40.0"
+		DEFAULT_Y_MAX="55.0"
+		;;
+	Mmus)
+		DEFAULT_X_MIN="10.0"
+		DEFAULT_X_MAX="18.0"
+		DEFAULT_Y_MIN="40.0"
+		DEFAULT_Y_MAX="46.0"
+		;;
+	Hsap)
+		DEFAULT_X_MIN="10.0"
+		DEFAULT_X_MAX="19.0"
+		DEFAULT_Y_MIN="26.0"
+		DEFAULT_Y_MAX="35.0"
+		;;
+	*)
+		DEFAULT_X_MIN="40.0"
+		DEFAULT_X_MAX="50.0"
+		DEFAULT_Y_MIN="40.0"
+		DEFAULT_Y_MAX="50.0"
+		;;
+	esac
+}
+
 for species in "${TARGET_SPECIES[@]}"; do
 	RAW_DIR="${DATA_ROOT}/${species}/raw"
 	TRANS_SCORE_DIR="${DATA_ROOT}/${species}/trans_score"
@@ -150,6 +190,11 @@ for species in "${TARGET_SPECIES[@]}"; do
 	if [[ -z "${REF_GFF}" ]]; then
 		REF_GFF="$(resolve_ref_gff "${RAW_DIR}" || true)"
 	fi
+	set_defaults_for_species "${species}"
+	x_min_final="${X_MIN:-${DEFAULT_X_MIN}}"
+	x_max_final="${X_MAX:-${DEFAULT_X_MAX}}"
+	y_min_final="${Y_MIN:-${DEFAULT_Y_MIN}}"
+	y_max_final="${Y_MAX:-${DEFAULT_Y_MAX}}"
 
 	if [[ ! -d "${TRANS_SCORE_DIR}" ]]; then
 		echo "trans_score directory not found: ${TRANS_SCORE_DIR}" >&2
@@ -186,6 +231,10 @@ for species in "${TARGET_SPECIES[@]}"; do
 			--output_file "${output_file}"
 			--species "${species}"
 			--visualize "${VISUALIZE}"
+			--x_min "${x_min_final}"
+			--x_max "${x_max_final}"
+			--y_min "${y_min_final}"
+			--y_max "${y_max_final}"
 		)
 		if [[ -n "${OUTPUT_PNG}" ]]; then
 			RUN_ARGS+=(--output_png "${OUTPUT_PNG}")

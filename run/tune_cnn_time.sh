@@ -54,7 +54,7 @@ NAME_FIELDS="none"
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-MASK_MODE="on"
+MASK_MODE="off"
 UPDATE_DOUBLE_DESCENT_PLOT="1"
 
 SEARCH_ALGO="history_guided"
@@ -75,12 +75,6 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 JOB_ORDER=(
 	"Hsap:acceptor"
 	"Hsap:donor"
-	"Hsap:acceptor"
-	"Dmel:donor"
-	"Hsap:acceptor"
-	"Hsap:donor"
-	"Hsap:acceptor"
-	"Dmel:acceptor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'

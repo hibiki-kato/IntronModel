@@ -16,6 +16,17 @@ def test_resolve_plot_bounds_for_known_species() -> None:
     assert bounds == (10.0, 18.0, 40.0, 46.0)
 
 
+def test_resolve_plot_bounds_for_hsap_defaults() -> None:
+    bounds = resolve_plot_bounds(
+        species="Hsap",
+        x_min=None,
+        x_max=None,
+        y_min=None,
+        y_max=None,
+    )
+    assert bounds == (10.0, 19.0, 26.0, 35.0)
+
+
 def test_resolve_plot_bounds_unknown_species_requires_explicit_bounds() -> None:
     with pytest.raises(ValueError, match="Unknown species"):
         resolve_plot_bounds(
