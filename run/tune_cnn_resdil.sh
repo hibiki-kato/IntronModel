@@ -68,6 +68,7 @@ MASK_MODE="off"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
+  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
@@ -109,6 +110,7 @@ JSON
 
 DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
 {
+  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",

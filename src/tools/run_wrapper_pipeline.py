@@ -37,6 +37,11 @@ from util.process_title import apply_process_title_from_env
 
 _ = apply_process_title_from_env()
 
+_SITE_WINDOW_TUNED_KEY_MAP: dict[str, str] = {
+    "donor_len": "DONOR_LEN",
+    "acceptor_len": "ACCEPTOR_LEN",
+}
+
 
 @dataclass(frozen=True)
 class WrapperSpec:
@@ -373,6 +378,12 @@ def _apply_tuned_overrides(
                 task_prefix=task_prefix,
                 key_map=spec.tuned_key_map,
             )
+            global_assignments = _extract_tuned_assignments(
+                config_path=resolved,
+                task_prefix=None,
+                key_map=_SITE_WINDOW_TUNED_KEY_MAP,
+            )
+            assignments.update(global_assignments)
         except ValueError as exc:
             if use_mode == "required":
                 raise
@@ -384,17 +395,17 @@ def _apply_tuned_overrides(
             continue
 
         applied_count = 0
-        kept_manual_count = 0
+        overridden_existing_count = 0
         for var_name, value in assignments.items():
             if env.get(var_name, "") != "":
-                kept_manual_count += 1
-                continue
+                overridden_existing_count += 1
             env[var_name] = value
             applied_count += 1
 
         print(
             f"[{spec.script_name}] tuned {task} loaded from {resolved} "
-            f"(applied={applied_count}, kept_manual={kept_manual_count})"
+            f"(applied={applied_count}, "
+            f"overridden_existing={overridden_existing_count})"
         )
         resolved_configs[task] = resolved.resolve()
     return resolved_configs

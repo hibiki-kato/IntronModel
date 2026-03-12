@@ -87,6 +87,7 @@ def _load_registry_models(registry_path: Path) -> dict[str, str]:
 
     source = registry_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
+
     def parse_mapping_node(value: ast.AST) -> dict[str, str]:
         if not isinstance(value, ast.Dict):
             raise ValueError("_MODEL_TO_MODULE is not a literal dictionary.")
@@ -145,8 +146,7 @@ def _discover_run_scripts(run_dir: Path) -> set[str]:
 
     root = run_dir.parent
     return {
-        str(path.relative_to(root).as_posix())
-        for path in sorted(run_dir.glob("*.sh"))
+        str(path.relative_to(root).as_posix()) for path in sorted(run_dir.glob("*.sh"))
     }
 
 

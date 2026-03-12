@@ -60,6 +60,7 @@ NAME_FIELDS="none"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
+  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 8e-4, "scale": "log"},
   "batch_size": {
     "type": "categorical",
@@ -98,6 +99,7 @@ JSON
 
 DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
 {
+  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 6e-5, "max": 6e-4, "scale": "log"},
   "batch_size": {
     "type": "categorical",

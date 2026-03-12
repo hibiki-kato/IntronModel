@@ -207,3 +207,82 @@ def test_apply_tuned_overrides_reads_mask_tuning_dir_for_cnn(
     assert resolved["donor"] == tuned_config.resolve()
     assert env["DONOR_LR"] == "0.0007"
     assert env["DONOR_BATCH_SIZE"] == "1024"
+
+
+def test_apply_tuned_overrides_loads_target_specific_window_len(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    donor_config = (
+        tmp_path / species / "tuning" / "cnn" / "donor" / "best_config.json"
+    )
+    donor_config.parent.mkdir(parents=True, exist_ok=True)
+    donor_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "donor_len": 80,
+                    "lr": 0.0007,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "cnn",
+        "SPECIES": species,
+        "TRAIN_TARGET": "donor",
+        "USE_TUNED_HPARAMS": "required",
+        "DONOR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "DONOR_LEN": "100",
+        "ACCEPTOR_LEN": "100",
+        "DONOR_LR": "0.1",
+    }
+    _ = _apply_tuned_overrides(SPECS["cnn.sh"], env, tmp_path)
+
+    assert env["DONOR_LEN"] == "80"
+    assert env["ACCEPTOR_LEN"] == "100"
+    assert env["DONOR_LR"] == "0.0007"
+
+
+def test_apply_tuned_overrides_loads_both_window_lens_for_pair_target(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    pair_config = (
+        tmp_path / species / "tuning" / "cnn_pair" / "pair" / "best_config.json"
+    )
+    pair_config.parent.mkdir(parents=True, exist_ok=True)
+    pair_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "donor_len": 90,
+                    "acceptor_len": 70,
+                    "lr": 0.001,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "cnn_pair",
+        "SPECIES": species,
+        "TRAIN_TARGET": "pair",
+        "USE_TUNED_HPARAMS": "required",
+        "PAIR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "DONOR_LEN": "",
+        "ACCEPTOR_LEN": "",
+        "LR": "",
+    }
+    _ = _apply_tuned_overrides(SPECS["cnn_pair.sh"], env, tmp_path)
+
+    assert env["DONOR_LEN"] == "90"
+    assert env["ACCEPTOR_LEN"] == "70"
+    assert env["LR"] == "0.001"

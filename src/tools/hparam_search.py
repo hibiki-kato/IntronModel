@@ -74,6 +74,11 @@ SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "pair_max_f1",
 )
 SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
+_SITE_WINDOW_LEN_KEYS: tuple[str, str] = ("donor_len", "acceptor_len")
+_SITE_WINDOW_LEN_DEFAULT: int = 100
+_SITE_WINDOW_LEN_MIN: int = 40
+_SITE_WINDOW_LEN_MAX: int = 100
+_SITE_WINDOW_LEN_STEP: int = 10
 _CONTEXT_ARG_IGNORE_KEYS: set[str] = {
     "allow_tf32",
     "amp_dtype",
@@ -327,6 +332,41 @@ def _validate_search_space(
     return normalized
 
 
+def _site_window_len_spec() -> dict[str, object]:
+    """Return canonical search spec for donor/acceptor sequence window length."""
+    return {
+        "type": "int",
+        "min": _SITE_WINDOW_LEN_MIN,
+        "max": _SITE_WINDOW_LEN_MAX,
+        "step": _SITE_WINDOW_LEN_STEP,
+    }
+
+
+def _resolve_site_window_len_search_keys(
+    base_args: dict[str, ArgValue],
+) -> tuple[str, ...]:
+    """Resolve which site-window length keys should be searched."""
+    raw_train_target = base_args.get("train_target", "both")
+    train_target = str(raw_train_target).strip().lower()
+    if train_target == "donor":
+        return ("donor_len",)
+    if train_target == "acceptor":
+        return ("acceptor_len",)
+    return _SITE_WINDOW_LEN_KEYS
+
+
+def _inject_site_window_len_space(
+    search_space: dict[str, dict[str, object]],
+    base_args: dict[str, ArgValue],
+) -> dict[str, dict[str, object]]:
+    """Ensure donor_len and acceptor_len are always part of search space."""
+    normalized = dict(search_space)
+    for key in _resolve_site_window_len_search_keys(base_args):
+        if key not in normalized:
+            normalized[key] = _site_window_len_spec()
+    return normalized
+
+
 def load_config(path: Path) -> SearchConfig:
     """Load and validate search configuration from JSON."""
     try:
@@ -409,7 +449,17 @@ def load_config(path: Path) -> SearchConfig:
             "objective_metric must be one of: "
             f"{', '.join(SUPPORTED_OBJECTIVE_METRIC_NAMES)}."
         )
-    normalized_space = _validate_search_space(search_space)
+    normalized_base_args: dict[str, ArgValue] = {
+        str(key): value for key, value in base_args.items()
+    }
+    normalized_base_args["model"] = model_name.strip()
+    normalized_base_args.setdefault("donor_len", _SITE_WINDOW_LEN_DEFAULT)
+    normalized_base_args.setdefault("acceptor_len", _SITE_WINDOW_LEN_DEFAULT)
+
+    normalized_space = _inject_site_window_len_space(
+        _validate_search_space(search_space),
+        normalized_base_args,
+    )
     global_best_config_raw = raw.get("global_best_config_path")
     global_best_config_path: Optional[Path]
     if global_best_config_raw is None:
@@ -434,11 +484,6 @@ def load_config(path: Path) -> SearchConfig:
         raise ValueError("full_overrides must be an object.")
     skip_full_phase = _to_bool(raw.get("skip_full_phase", False))
     enable_visualization = _to_bool(raw.get("enable_visualization", True))
-
-    normalized_base_args: dict[str, ArgValue] = {
-        str(key): value for key, value in base_args.items()
-    }
-    normalized_base_args["model"] = model_name.strip()
 
     return SearchConfig(
         project_root=project_root,
@@ -924,6 +969,7 @@ def load_historical_trials(
     search_space: dict[str, dict[str, object]],
     objective_metric: str,
     top_n: int,
+    base_args: Optional[dict[str, ArgValue]] = None,
 ) -> list[tuple[float, dict[str, Scalar]]]:
     """Load successful historical trials from sibling run directories."""
     tuning_root = output_dir.parent
@@ -955,10 +1001,24 @@ def load_historical_trials(
                         params: dict[str, Scalar] = {}
                         valid = True
                         for key in sorted(search_space):
+                            spec = search_space[key]
                             parsed = _parse_history_param_value(
                                 raw_value=row.get(key, ""),
-                                spec=search_space[key],
+                                spec=spec,
                             )
+                            if parsed is None:
+                                fallback: Optional[Scalar] = None
+                                if base_args is not None:
+                                    base_raw = base_args.get(key)
+                                    if isinstance(base_raw, (int, float, str, bool)):
+                                        fallback = base_raw
+                                if fallback is None and key in _SITE_WINDOW_LEN_KEYS:
+                                    fallback = _SITE_WINDOW_LEN_DEFAULT
+                                if fallback is not None and _value_matches_spec(
+                                    fallback,
+                                    spec,
+                                ):
+                                    parsed = fallback
                             if parsed is None:
                                 valid = False
                                 break
@@ -4231,6 +4291,7 @@ def run_search(config: SearchConfig) -> int:
             search_space=config.search_space,
             objective_metric=config.objective_metric,
             top_n=config.history_top_n,
+            base_args=config.base_args,
         )
         print(
             "[hparam_search] Search algorithm: history_guided "

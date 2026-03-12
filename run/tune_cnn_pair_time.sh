@@ -77,13 +77,16 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
+	"Hsap"
+	"Hsap"
+	"Hsap"
 	"Dmel"
-	"Mmus"
-	"Athal"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 {
+  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
@@ -601,7 +604,7 @@ JSON
 done
 
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
-	final_plot_species=("Athal" "Dmel" "Mmus")
+	final_plot_species=("Hsap" "Dmel")
 	for final_species in "${final_plot_species[@]}"; do
 		run_double_descent_plot \
 			"${PYTHON_BIN}" \

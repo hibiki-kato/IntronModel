@@ -77,6 +77,58 @@ def test_load_config_accepts_history_guided_settings(tmp_path: Path) -> None:
     assert loaded.guided_mutation_rate == pytest.approx(0.4)
 
 
+def test_load_config_injects_site_window_len_defaults(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    base_args = dict(config["base_args"])
+    _ = base_args.pop("donor_len", None)
+    _ = base_args.pop("acceptor_len", None)
+    config["base_args"] = base_args
+    config_path = tmp_path / "site_window_defaults.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.base_args["donor_len"] == 100
+    assert loaded.base_args["acceptor_len"] == 100
+    assert loaded.search_space["donor_len"] == {
+        "type": "int",
+        "min": 40,
+        "max": 100,
+        "step": 10,
+    }
+    assert loaded.search_space["acceptor_len"] == {
+        "type": "int",
+        "min": 40,
+        "max": 100,
+        "step": 10,
+    }
+
+
+@pytest.mark.parametrize(
+    ("train_target", "expected_keys"),
+    [
+        ("donor", {"donor_len"}),
+        ("acceptor", {"acceptor_len"}),
+    ],
+)
+def test_load_config_injects_only_target_window_len_for_single_target_tuning(
+    tmp_path: Path,
+    train_target: str,
+    expected_keys: set[str],
+) -> None:
+    config = _base_config_dict(tmp_path)
+    base_args = dict(config["base_args"])
+    base_args["train_target"] = train_target
+    config["base_args"] = base_args
+    config_path = tmp_path / f"single_target_{train_target}.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    actual_keys = {key for key in loaded.search_space if key.endswith("_len")}
+    assert actual_keys == expected_keys
+
+
 @pytest.mark.parametrize(
     "objective_metric",
     [
@@ -2388,6 +2440,46 @@ def test_load_historical_trials_reads_and_ranks_sibling_runs(
     assert loaded[0][1]["batch_size"] == 1024
     assert loaded[1][0] == pytest.approx(0.82)
     assert loaded[1][1]["kernel_size"] == 7
+
+
+def test_load_historical_trials_defaults_missing_window_lengths_to_100(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [512]},
+            "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+            "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+        }
+    )
+    tuning_root = tmp_path / "tuning" / "cnn" / "donor"
+    current_output = tuning_root / "20260220_000000"
+    current_output.mkdir(parents=True, exist_ok=True)
+
+    run_one = tuning_root / "20260219_010101"
+    run_one.mkdir(parents=True, exist_ok=True)
+    (run_one / "quick_trials.tsv").write_text(
+        "\n".join(
+            [
+                "\t".join(["status", "objective_score", "batch_size"]),
+                "\t".join(["success", "0.82", "512"]),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = hparam_search.load_historical_trials(
+        output_dir=current_output,
+        search_space=search_space,
+        objective_metric="mean_pr_auc",
+        top_n=5,
+        base_args={},
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0][1]["donor_len"] == 100
+    assert loaded[0][1]["acceptor_len"] == 100
 
 
 def test_build_trial_params_history_guided_is_reproducible(

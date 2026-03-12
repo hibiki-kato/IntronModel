@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 set -a
-SPECIES="Hsap"
+SPECIES="Mmus, Athal, Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TEST_TSV_PATH=""

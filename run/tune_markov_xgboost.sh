@@ -11,8 +11,8 @@ fi
 # CONFIG (edit here)
 # --------------------------
 SPECIES="Dmel"
-DONOR_LEN="50"
-ACCEPTOR_LEN="50"
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
 BASE_SEED="1337"
 
@@ -71,6 +71,8 @@ MAX_OOM_RETRIES="0"
 
 DEFAULT_SEARCH_SPACE_JSON="$(cat <<'JSON'
 {
+  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "xgb_n_estimators": {
     "type": "categorical",
     "values": [200, 300, 400, 600, 800]

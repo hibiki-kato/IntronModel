@@ -68,19 +68,22 @@ CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
 CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
-# Equal-species wall-clock scheduling with acceptor-heavy target mix.
-# Keep this list to Dmel/Mmus only to avoid long Athal-only cycles.
+# Hsap-priority scheduling with acceptor-heavy target mix.
+# Keep Hsap:others around 3:1.
 JOB_ORDER=(
-	"Dmel:acceptor"
-	"Mmus:acceptor"
+	"Hsap:acceptor"
+	"Hsap:donor"
+	"Hsap:acceptor"
 	"Dmel:donor"
-	"Mmus:donor"
+	"Hsap:acceptor"
+	"Hsap:donor"
+	"Hsap:acceptor"
 	"Dmel:acceptor"
-	"Mmus:acceptor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
+  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
@@ -122,6 +125,7 @@ JSON
 
 DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
 {
+  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",

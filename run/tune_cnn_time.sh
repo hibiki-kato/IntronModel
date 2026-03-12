@@ -70,20 +70,22 @@ CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
 CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
-# Higher-frequency short cycles with Mmus-heavy scheduling.
+# Hsap-priority short cycles.
+# Keep Hsap:others around 3:1.
 JOB_ORDER=(
-	"Mmus:donor"
-	"Mmus:acceptor"
-	"Athal:donor"
+	"Hsap:acceptor"
+	"Hsap:donor"
+	"Hsap:acceptor"
 	"Dmel:donor"
-	"Mmus:donor"
-	"Mmus:acceptor"
-	"Athal:acceptor"
+	"Hsap:acceptor"
+	"Hsap:donor"
+	"Hsap:acceptor"
 	"Dmel:acceptor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
+  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
@@ -134,6 +136,7 @@ JSON
 
 DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
 {
+  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
@@ -618,12 +621,10 @@ done
 
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 	final_plot_jobs=(
-		"Athal:donor"
-		"Athal:acceptor"
+		"Hsap:donor"
+		"Hsap:acceptor"
 		"Dmel:donor"
 		"Dmel:acceptor"
-		"Mmus:donor"
-		"Mmus:acceptor"
 	)
 	for final_pair in "${final_plot_jobs[@]}"; do
 		final_species="${final_pair%%:*}"
