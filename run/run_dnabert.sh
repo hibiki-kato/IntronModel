@@ -28,6 +28,12 @@ TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
 NAME_FIELDS=""
+# Optional output/data overrides for trunc-data runs.
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+TRUNC_MODE="off"
+MASK_TEST_TSV_PATH=""
 VISUALIZE="true"
 SKIP_TRAINING="0"
 CONTINUE_TRAINING="0"
@@ -159,6 +165,12 @@ if [[ -z "${PRETRAINED_MODEL_NAME}" ]]; then
 	)"
 	export PRETRAINED_MODEL_RELATIVE_PATH
 fi
+if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
+	echo "[dnabert.sh] TRUNC_MODE must be off|on." >&2
+	exit 1
+fi
+MASK_MODE="${TRUNC_MODE}"
+export MASK_MODE
 
 PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
 	python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \

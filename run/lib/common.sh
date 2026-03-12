@@ -311,6 +311,47 @@ intronmodel_resolve_species_template() {
 }
 
 
+intronmodel_resolve_and_validate_train_paths() {
+	local script_tag="$1"
+	local species="$2"
+	local train_pos_path="${3-}"
+	local train_neg_path="${4-}"
+
+	local resolved_pos=""
+	local resolved_neg=""
+	if [[ -n "${train_pos_path}" ]]; then
+		resolved_pos="$(
+			intronmodel_resolve_species_template "${train_pos_path}" "${species}"
+		)"
+	fi
+	if [[ -n "${train_neg_path}" ]]; then
+		resolved_neg="$(
+			intronmodel_resolve_species_template "${train_neg_path}" "${species}"
+		)"
+	fi
+
+	if [[ -z "${resolved_pos}" && -z "${resolved_neg}" ]]; then
+		printf '\t\n'
+		return 0
+	fi
+	if [[ -z "${resolved_pos}" || -z "${resolved_neg}" ]]; then
+		echo "[${script_tag}] TRAIN_POS_PATH and TRAIN_NEG_PATH must be set together." >&2
+		return 1
+	fi
+	if [[ ! -f "${resolved_pos}" ]]; then
+		echo "[${script_tag}] TRAIN_POS_PATH not found for species=${species}:" \
+			"${resolved_pos}" >&2
+		return 1
+	fi
+	if [[ ! -f "${resolved_neg}" ]]; then
+		echo "[${script_tag}] TRAIN_NEG_PATH not found for species=${species}:" \
+			"${resolved_neg}" >&2
+		return 1
+	fi
+	printf '%s\t%s\n' "${resolved_pos}" "${resolved_neg}"
+}
+
+
 intronmodel_resolve_seed_list() {
 	local script_tag="$1"
 	local base_seed="$2"

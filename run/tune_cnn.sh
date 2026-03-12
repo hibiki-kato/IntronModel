@@ -69,7 +69,7 @@ NAME_FIELDS="none"
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-MASK_MODE="off"
+MASK_MODE="on"
 MAX_POOL_SIZE="2"
 CONV_STRIDE="1"
 HEAD_TYPE="gap"
@@ -614,15 +614,24 @@ for TARGET in "${TARGET_LIST[@]}"; do
 		TARGET_START_SECONDS="${SECONDS}"
 		CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
 		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		resolved_train_paths="$(
+			intronmodel_resolve_and_validate_train_paths \
+				"tune_cnn.sh" \
+				"${SPECIES}" \
+				"${TRAIN_POS_PATH}" \
+				"${TRAIN_NEG_PATH}"
+		)" || exit 1
+		IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+			"${resolved_train_paths}"
 		TRAIN_POS_PATH_JSON="$(
 			intronmodel_json_string_or_null \
 				"${PYTHON_BIN}" \
-				"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
+				"${TRAIN_POS_PATH_RESOLVED}"
 		)"
 		TRAIN_NEG_PATH_JSON="$(
 			intronmodel_json_string_or_null \
 				"${PYTHON_BIN}" \
-				"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
+				"${TRAIN_NEG_PATH_RESOLVED}"
 		)"
 		cat > "${CONFIG_PATH}" <<JSON
 {

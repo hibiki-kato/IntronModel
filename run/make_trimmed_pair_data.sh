@@ -38,6 +38,7 @@ OUT_NEG_NAME="100bp_trimmed.neg.err"
 EXON_CONTEXT_BP="3"
 PAD_WITH_N="0"
 STRICT="1"
+INTRONMODEL_AUTO_TMUX=off
 
 # --------------------------
 # Runtime implementation

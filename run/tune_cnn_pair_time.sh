@@ -36,7 +36,7 @@ FULL_COMPILE_MODE="off"
 
 GPU_IDS="auto"
 # Keep default conservative for single-GPU runs.
-MAX_PARALLEL_TRIALS="auto"
+MAX_PARALLEL_TRIALS="2"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -60,7 +60,7 @@ MAX_MODEL_PARAMS_MODEL_FACTOR="0.75"
 VISUALIZE="none"
 NAME_FIELDS="none"
 SEQUENCE_TRANSFORM="none"
-UPDATE_DOUBLE_DESCENT_PLOT="1"
+UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
 HISTORY_TOP_N="512"
@@ -78,9 +78,9 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
 	"Hsap"
-	"Hsap"
-	"Hsap"
 	"Dmel"
+	"Athal"
+	"Mmus"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
@@ -450,15 +450,24 @@ while true; do
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
 	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+	resolved_train_paths="$(
+		intronmodel_resolve_and_validate_train_paths \
+			"tune_cnn_pair_time.sh" \
+			"${species}" \
+			"${TRAIN_POS_PATH}" \
+			"${TRAIN_NEG_PATH}"
+	)" || exit 1
+	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+		"${resolved_train_paths}"
 	TRAIN_POS_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${species}")"
+			"${TRAIN_POS_PATH_RESOLVED}"
 	)"
 	TRAIN_NEG_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${species}")"
+			"${TRAIN_NEG_PATH_RESOLVED}"
 	)"
 	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_PAIR}"
 	search_space_path=""

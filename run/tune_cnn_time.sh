@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="780"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -26,7 +26,7 @@ TOP_K="8"
 FULL_EPOCHS="10"
 
 GPU_IDS="auto"
-MAX_PARALLEL_TRIALS="auto"
+MAX_PARALLEL_TRIALS="2"
 TRIAL_PROCESS_MODE="persistent_all"
 
 DEVICE="auto"
@@ -55,7 +55,7 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="off"
-UPDATE_DOUBLE_DESCENT_PLOT="1"
+UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
 HISTORY_TOP_N="512"
@@ -75,6 +75,12 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 JOB_ORDER=(
 	"Hsap:acceptor"
 	"Hsap:donor"
+	"Athal:acceptor"
+	"Athal:donor"
+	"Dmel:acceptor"
+	"Dmel:donor"
+	"Mmus:acceptor"
+	"Mmus:donor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
@@ -458,15 +464,24 @@ while true; do
 		config_path="${output_dir}/hparam_search_config.json"
 		mkdir -p "${output_dir}"
 		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		resolved_train_paths="$(
+			intronmodel_resolve_and_validate_train_paths \
+				"temp_tune_cnn_6h.sh" \
+				"${species}" \
+				"${TRAIN_POS_PATH}" \
+				"${TRAIN_NEG_PATH}"
+		)" || exit 1
+		IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+			"${resolved_train_paths}"
 		TRAIN_POS_PATH_JSON="$(
 			intronmodel_json_string_or_null \
 				"${PYTHON_BIN}" \
-				"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${species}")"
+				"${TRAIN_POS_PATH_RESOLVED}"
 		)"
 		TRAIN_NEG_PATH_JSON="$(
 			intronmodel_json_string_or_null \
 				"${PYTHON_BIN}" \
-				"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${species}")"
+				"${TRAIN_NEG_PATH_RESOLVED}"
 		)"
 		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
 		if [[ "${target}" == "acceptor" ]]; then

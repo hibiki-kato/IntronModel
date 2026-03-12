@@ -42,6 +42,7 @@ SAMPLES_PER_POSITIVE="1"
 SEED="1337"
 SHUFFLE="1"
 STRICT="1"
+INTRONMODEL_AUTO_TMUX=off
 
 # --------------------------
 # Runtime implementation

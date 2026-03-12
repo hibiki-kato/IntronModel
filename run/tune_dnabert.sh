@@ -62,6 +62,11 @@ FULL_COMPILE_MODE="auto"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+# Optional output/data overrides for trunc-data tuning runs.
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+TRUNC_MODE="off"
 
 # Practical search space for consumer GPUs (~12GB) and smaller DNABERT runs.
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
@@ -404,6 +409,9 @@ resolve_dnabert_model \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
 TUNING_MODEL_NAME="${MODEL_NAME}"
+if [[ "${TRUNC_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${MODEL_NAME}_trunc"
+fi
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
 	exit 1
@@ -473,6 +481,30 @@ fi
 if ! awk -v x="${GUIDED_MUTATION_RATE}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
 	echo "[tune_dnabert.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
 	exit 1
+fi
+if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
+	echo "[tune_dnabert.sh] TRUNC_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${TRUNC_MODE}" == "on" ]]; then
+	trunc_bp="${DONOR_LEN}"
+	if (( ACCEPTOR_LEN > DONOR_LEN )); then
+		trunc_bp="${ACCEPTOR_LEN}"
+	fi
+	if [[ -z "${TRAIN_POS_PATH}" ]]; then
+		TRAIN_POS_PATH="data/{species}/processed/${trunc_bp}bp_trimmed_npad.err"
+	fi
+	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
+		TRAIN_NEG_PATH="data/{species}/processed/${trunc_bp}bp_trimmed_npad.neg.err"
+	fi
+	if [[ -z "${TAG}" ]]; then
+		TAG="trunc"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
 fi
 if [[ "${QUICK_TRIALS_MODE}" == "budget" ]]; then
 	if [[ "${TARGET_TIME_BUDGET_MINUTES}" -le 0 && "${TOTAL_TIME_BUDGET_MINUTES}" -le 0 ]]; then
@@ -593,6 +625,17 @@ for TARGET in "${TARGET_LIST[@]}"; do
 	fi
 
 	CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
+	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+	TRAIN_POS_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
+	)"
+	TRAIN_NEG_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
+	)"
 	cat > "${CONFIG_PATH}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
@@ -619,6 +662,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "model": "${MODEL_NAME}",
     "species": "${SPECIES}",
     "train_target": "${TARGET}",
+    "tag": ${TAG_JSON},
     "seed": ${BASE_SEED},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
@@ -640,8 +684,8 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "pin_memory": ${PIN_MEMORY},
     "min_batch_size": ${MIN_BATCH_SIZE},
     "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": null,
-    "train_neg_path": null
+    "train_pos_path": ${TRAIN_POS_PATH_JSON},
+    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},

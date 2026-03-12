@@ -418,10 +418,12 @@ def _resolve_tuned_model_name(
     mask_mode: str,
 ) -> str:
     """Resolve tuning directory model name with mask-mode separation."""
+    normalized_mode = _normalize_on_off_mode(mask_mode, "MASK_MODE")
     if spec.script_name == "dnabert.sh":
+        if normalized_mode == "on":
+            return f"{model_name}_trunc"
         return model_name
 
-    normalized_mode = _normalize_on_off_mode(mask_mode, "MASK_MODE")
     mask_enabled_models = {"cnn", "cnn_pair", "cnn_resdil", "tcn"}
     if normalized_mode == "on" and model_name in mask_enabled_models:
         return f"{model_name}_mask"
@@ -988,8 +990,12 @@ def _apply_mask_mode_defaults(
             data_root / species / "processed" / f"{mask_bp}bp_trimmed_npad.neg.err"
         )
 
+    default_tag = "mask"
+    model_name = str(env.get("MODEL", "")).strip().lower()
+    if model_name.startswith("dnabert"):
+        default_tag = "trunc"
     if env.get("TAG", "").strip() == "":
-        env["TAG"] = "mask"
+        env["TAG"] = default_tag
     _ensure_tag_name_field(env)
 
     if env.get("TEST_TSV_PATH", "").strip() != "":

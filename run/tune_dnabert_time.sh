@@ -14,7 +14,6 @@ fi
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="780"
 
-SPECIES="Dmel Mmus Athal Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
@@ -30,7 +29,7 @@ QUICK_TRIALS="6"
 QUICK_EPOCHS="2"
 TOP_K="2"
 FULL_EPOCHS="6"
-QUICK_COMPILE_MODE="off"
+QUICK_COMPILE_MODE="on"
 FULL_COMPILE_MODE="auto"
 
 GPU_IDS="auto"
@@ -54,7 +53,12 @@ MAX_OOM_RETRIES="5"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
-UPDATE_DOUBLE_DESCENT_PLOT="1"
+# Optional output/data overrides for trunc-data tuning runs.
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+TRUNC_MODE="off"
+UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
 HISTORY_TOP_N="512"
@@ -351,6 +355,30 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	echo "[tune_dnabert_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
 	exit 1
 fi
+if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
+	echo "[tune_dnabert_time.sh] TRUNC_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${TRUNC_MODE}" == "on" ]]; then
+	trunc_bp="${DONOR_LEN}"
+	if (( ACCEPTOR_LEN > DONOR_LEN )); then
+		trunc_bp="${ACCEPTOR_LEN}"
+	fi
+	if [[ -z "${TRAIN_POS_PATH}" ]]; then
+		TRAIN_POS_PATH="data/{species}/processed/${trunc_bp}bp_trimmed_npad.err"
+	fi
+	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
+		TRAIN_NEG_PATH="data/{species}/processed/${trunc_bp}bp_trimmed_npad.neg.err"
+	fi
+	if [[ -z "${TAG}" ]]; then
+		TAG="trunc"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 
 PYTHON_BIN="$(resolve_python_bin)"
 MODEL_NAME=""
@@ -362,6 +390,9 @@ resolve_dnabert_model \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
 TUNING_MODEL_NAME="${MODEL_NAME}"
+if [[ "${TRUNC_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${MODEL_NAME}_trunc"
+fi
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert_time.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
 	exit 1
@@ -434,6 +465,26 @@ while true; do
 		objective_metric="${target}_pr_auc"
 		config_path="${output_dir}/hparam_search_config.json"
 		mkdir -p "${output_dir}"
+		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		resolved_train_paths="$(
+			intronmodel_resolve_and_validate_train_paths \
+				"tune_dnabert_time.sh" \
+				"${species}" \
+				"${TRAIN_POS_PATH}" \
+				"${TRAIN_NEG_PATH}"
+		)" || exit 1
+		IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+			"${resolved_train_paths}"
+		TRAIN_POS_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"${TRAIN_POS_PATH_RESOLVED}"
+		)"
+		TRAIN_NEG_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"${TRAIN_NEG_PATH_RESOLVED}"
+		)"
 		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
 		if [[ "${target}" == "acceptor" ]]; then
 			target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
@@ -494,6 +545,7 @@ while true; do
     "model": "${MODEL_NAME}",
     "species": "${species}",
     "train_target": "${target}",
+    "tag": ${TAG_JSON},
     "seed": ${BASE_SEED},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
@@ -515,8 +567,8 @@ while true; do
     "pin_memory": ${PIN_MEMORY},
     "min_batch_size": ${MIN_BATCH_SIZE},
     "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": null,
-    "train_neg_path": null
+    "train_pos_path": ${TRAIN_POS_PATH_JSON},
+    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},
