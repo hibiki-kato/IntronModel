@@ -57,6 +57,7 @@ FULL_COMPILE_MODE="auto"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+PROCESS_TITLE="${PROCESS_TITLE:-tune_bert}"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
@@ -580,7 +581,10 @@ JSON
 
 	echo "[tune_bert.sh] target=${TARGET}"
 	echo "[tune_bert.sh] output_dir=${OUTPUT_DIR}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+	if ! intronmodel_run_with_process_title \
+		"${PROCESS_TITLE}" \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${CONFIG_PATH}"; then
 		target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 		target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"

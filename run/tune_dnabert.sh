@@ -67,6 +67,7 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
+PROCESS_TITLE="${PROCESS_TITLE:-tune_dnabert}"
 
 # Practical search space for consumer GPUs (~12GB) and smaller DNABERT runs.
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
@@ -701,7 +702,10 @@ JSON
 
 	echo "[tune_dnabert.sh] target=${TARGET}"
 	echo "[tune_dnabert.sh] output_dir=${OUTPUT_DIR}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+	if ! intronmodel_run_with_process_title \
+		"${PROCESS_TITLE}" \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${CONFIG_PATH}"; then
 		target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 		target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"

@@ -186,6 +186,14 @@ format_elapsed() {
 	intronmodel_format_elapsed "$1"
 }
 
+format_eta() {
+	intronmodel_format_eta_epoch "$1"
+}
+
+build_eta_process_title() {
+	intronmodel_build_eta_process_title "$1"
+}
+
 resolve_species_case() {
 	intronmodel_resolve_species_case "$1" "$2" ""
 }
@@ -365,11 +373,15 @@ RESOLVED_MAX_MODEL_PARAMS="$(
 		"${MAX_MODEL_PARAMS_MEM_FRACTION}" \
 		"${MAX_MODEL_PARAMS_RESERVE_MIB}" \
 		"${MAX_MODEL_PARAMS_BYTES_PER_PARAM}" \
-		"${MAX_MODEL_PARAMS_MODEL_FACTOR}" \
-		"${PYTHON_BIN}"
+	"${MAX_MODEL_PARAMS_MODEL_FACTOR}" \
+	"${PYTHON_BIN}"
 )"
 START_SECONDS="${SECONDS}"
+START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
+ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
+ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
+RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
@@ -551,7 +563,10 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=%s\n' \
 		"${remaining_hms}" "${species}" "${target}"
-	if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+	if ! intronmodel_run_with_process_title \
+		"${RUNTIME_PROCESS_TITLE}" \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${config_path}"; then
 		echo "[tune_cnn_resdil_time.sh] cycle=${job_index} failed "\
 			"species=${species} target=${target}" >&2

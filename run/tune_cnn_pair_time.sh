@@ -12,13 +12,14 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="780"
+TIME_BUDGET_MINUTES="330"
 
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="on"
+CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
@@ -339,6 +340,10 @@ if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
 	echo "[tune_cnn_pair_time.sh] MASK_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[tune_cnn_pair_time.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
 if [[ "${MASK_MODE}" == "on" ]]; then
 	mask_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -359,10 +364,25 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 
 TUNING_MODEL_NAME="cnn_pair"
 if [[ "${MASK_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="cnn_pair_mask"
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
 fi
 
 PYTHON_BIN="$(resolve_python_bin)"
@@ -447,6 +467,9 @@ while true; do
 	fi
 
 	objective_metric="pair_pr_auc"
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		objective_metric="test_max_f1"
+	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
 	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"

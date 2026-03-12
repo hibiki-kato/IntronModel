@@ -55,6 +55,7 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="off"
+CHEAT_MODE="off"
 UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
@@ -352,6 +353,10 @@ if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
 	echo "[temp_tune_cnn_6h.sh] MASK_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[temp_tune_cnn_6h.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
 if [[ "${MASK_MODE}" == "on" ]]; then
 	mask_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -372,10 +377,25 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 
 TUNING_MODEL_NAME="cnn"
 if [[ "${MASK_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="cnn_mask"
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
 fi
 
 PYTHON_BIN="$(resolve_python_bin)"
@@ -461,6 +481,9 @@ while true; do
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
 		objective_metric="${target}_pr_auc"
+		if [[ "${CHEAT_MODE}" == "on" ]]; then
+			objective_metric="test_max_f1"
+		fi
 		config_path="${output_dir}/hparam_search_config.json"
 		mkdir -p "${output_dir}"
 		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"

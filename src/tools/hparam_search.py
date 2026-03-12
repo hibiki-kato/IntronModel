@@ -72,6 +72,7 @@ SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "donor_max_f1",
     "acceptor_max_f1",
     "pair_max_f1",
+    "test_max_f1",
 )
 SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
 _SITE_WINDOW_LEN_KEYS: tuple[str, str] = ("donor_len", "acceptor_len")
@@ -765,6 +766,49 @@ def _parse_objective_metric_name(objective_metric: str) -> tuple[str, str]:
         raise ValueError(f"Unsupported objective metric: {objective_metric}")
     scope, metric_name = objective_metric.split("_", maxsplit=1)
     return scope, metric_name
+
+
+def _is_test_objective_metric(objective_metric: str) -> bool:
+    """Return whether objective selection uses held-out test evaluation."""
+    scope, _ = _parse_objective_metric_name(objective_metric)
+    return scope == "test"
+
+
+def _extract_max_f1_from_eval_output(path: Path) -> Optional[float]:
+    """Extract maximum F1 score from ``evaluate_scores`` text output."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    best_f1: Optional[float] = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line == "":
+            continue
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            f1_value = float(parts[5])
+        except ValueError:
+            continue
+        if not math.isfinite(f1_value):
+            continue
+        if best_f1 is None or f1_value > best_f1:
+            best_f1 = f1_value
+    return best_f1
+
+
+def _extract_test_objective_score(
+    *,
+    objective_metric: str,
+    eval_output_path: Path,
+) -> Optional[float]:
+    """Extract one held-out test objective score from evaluation artifacts."""
+    if objective_metric == "test_max_f1":
+        return _extract_max_f1_from_eval_output(eval_output_path)
+    return None
 
 
 def _select_objective_score(
@@ -1916,7 +1960,20 @@ def _run_trial_with_command_runner(
     if model_name.strip().lower() == "cnn":
         merged_args.setdefault("report_train_metrics", 0)
     merged_args["species"] = config.species
-    merged_args["train_only"] = True
+    uses_test_objective = _is_test_objective_metric(config.objective_metric)
+    eval_output_path: Optional[Path] = None
+    if uses_test_objective:
+        merged_args["train_only"] = False
+        trial_artifact_base = metrics_json.parent / metrics_json.stem
+        merged_args["site_output_tsv"] = str(trial_artifact_base) + ".site.tsv"
+        merged_args["intron_output_tsv"] = str(trial_artifact_base) + ".intron.tsv"
+        merged_args["transcript_output_tsv"] = (
+            str(trial_artifact_base) + ".transcript.tsv"
+        )
+        eval_output_path = Path(str(trial_artifact_base) + ".eval.txt")
+        merged_args["eval_output_txt"] = str(eval_output_path)
+    else:
+        merged_args["train_only"] = True
     merged_args["metrics_json"] = str(metrics_json)
     resolved_num_workers = _resolve_trial_num_workers(merged_args.get("num_workers"))
     if resolved_num_workers is not None:
@@ -2092,6 +2149,30 @@ def _run_trial_with_command_runner(
         objective_metric=config.objective_metric,
         pair_objective_metric="pair_max_f1",
     )
+    test_max_f1: Optional[float] = None
+    if uses_test_objective:
+        if eval_output_path is None:
+            return _build_failed_trial_result(
+                config=config,
+                phase=phase,
+                trial_id=trial_id,
+                assigned_gpu_id=assigned_gpu_id,
+                sampled_params=sampled_params,
+                effective_batch_size=current_batch,
+                oom_retries=oom_retries,
+                error_message="Internal error: missing test objective output path.",
+                return_code=return_code,
+                duration_sec=duration_sec,
+                metrics_json=metrics_json,
+                log_file=log_file,
+                donor_pr_auc=donor_pr_auc,
+                acceptor_pr_auc=acceptor_pr_auc,
+                mean_pr_auc=mean_pr_auc,
+            )
+        test_max_f1 = _extract_test_objective_score(
+            objective_metric=config.objective_metric,
+            eval_output_path=eval_output_path,
+        )
     objective_values: dict[str, Optional[float]] = {
         "mean_pr_auc": mean_pr_auc,
         "donor_pr_auc": donor_pr_auc,
@@ -2105,6 +2186,7 @@ def _run_trial_with_command_runner(
         "donor_max_f1": donor_max_f1,
         "acceptor_max_f1": acceptor_max_f1,
         "pair_max_f1": pair_max_f1,
+        "test_max_f1": test_max_f1,
     }
     objective_score = _select_objective_score(config.objective_metric, objective_values)
     if objective_score is None:
@@ -2323,7 +2405,11 @@ def _derive_validation_protocol_from_args(
             else None
         ),
         metric_primary=objective_metric,
-        split_type="stratified_site",
+        split_type=(
+            "test_transcript_eval"
+            if _is_test_objective_metric(objective_metric)
+            else "stratified_site"
+        ),
     )
 
 

@@ -65,6 +65,7 @@ TAG=""
 DEVICE="cpu"
 VISUALIZE="none"
 NAME_FIELDS="none"
+PROCESS_TITLE="${PROCESS_TITLE:-tune_markov_xgboost}"
 
 MIN_BATCH_SIZE="1"
 MAX_OOM_RETRIES="0"
@@ -438,7 +439,10 @@ cat > "${CONFIG_PATH}" <<JSON
 JSON
 
 echo "[tune_markov_xgboost.sh] output_dir=${OUTPUT_DIR}"
-if ! "${PYTHON_BIN}" "${PROJECT_ROOT}/src/tools/hparam_search.py" \
+if ! intronmodel_run_with_process_title \
+	"${PROCESS_TITLE}" \
+	"${PYTHON_BIN}" \
+	"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 	--config "${CONFIG_PATH}"; then
 	echo "[tune_markov_xgboost.sh] tuning failed." >&2
 	exit 1

@@ -70,6 +70,7 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="on"
+CHEAT_MODE="off"
 MAX_POOL_SIZE="2"
 CONV_STRIDE="1"
 HEAD_TYPE="gap"
@@ -475,6 +476,10 @@ if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
 	echo "[tune_cnn.sh] MASK_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[tune_cnn.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
 if [[ "${MASK_MODE}" == "on" ]]; then
 	mask_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -495,10 +500,25 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 
 TUNING_MODEL_NAME="cnn"
 if [[ "${MASK_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="cnn_mask"
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
 fi
 
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -508,6 +528,9 @@ echo "[tune_cnn.sh] seeds=${SEED_VALUES[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		OBJECTIVE_METRIC="test_max_f1"
+	fi
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(

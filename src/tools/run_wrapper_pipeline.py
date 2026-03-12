@@ -322,6 +322,7 @@ def _apply_tuned_overrides(
         spec=spec,
         model_name=model_name,
         mask_mode=env.get("MASK_MODE", "off"),
+        tuned_hparams_mode=env.get("TUNED_HPARAMS_MODE", "normal"),
     )
 
     if env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == "":
@@ -416,18 +417,27 @@ def _resolve_tuned_model_name(
     spec: WrapperSpec,
     model_name: str,
     mask_mode: str,
+    tuned_hparams_mode: str = "normal",
 ) -> str:
-    """Resolve tuning directory model name with mask-mode separation."""
+    """Resolve tuning directory model name with mask/cheat-mode separation."""
     normalized_mode = _normalize_on_off_mode(mask_mode, "MASK_MODE")
+    normalized_tuned_mode = _normalize_tuned_hparams_mode(
+        tuned_hparams_mode,
+        "TUNED_HPARAMS_MODE",
+    )
     if spec.script_name == "dnabert.sh":
+        resolved = model_name
         if normalized_mode == "on":
-            return f"{model_name}_trunc"
-        return model_name
+            resolved = f"{model_name}_trunc"
+        return resolved
 
     mask_enabled_models = {"cnn", "cnn_pair", "cnn_resdil", "tcn"}
+    resolved = model_name
     if normalized_mode == "on" and model_name in mask_enabled_models:
-        return f"{model_name}_mask"
-    return model_name
+        resolved = f"{model_name}_mask"
+    if normalized_tuned_mode == "cheat" and model_name in mask_enabled_models:
+        resolved = f"{resolved}_cheat"
+    return resolved
 
 
 def _resolve_expected_checkpoint_paths_for_run(
@@ -724,6 +734,10 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
             ("off", "auto", "required"),
             "USE_TUNED_HPARAMS",
         )
+        _normalize_tuned_hparams_mode(
+            env.get("TUNED_HPARAMS_MODE", "normal"),
+            "TUNED_HPARAMS_MODE",
+        )
     _normalize_on_off_mode(env.get("MASK_MODE", "off"), "MASK_MODE")
 
     mps_max_batch_size = _as_int(
@@ -844,6 +858,16 @@ def _normalize_on_off_mode(value: str, key: str) -> str:
     if normalized in {"1", "on", "true"}:
         return "on"
     raise ValueError(f"{key} must be off|on.")
+
+
+def _normalize_tuned_hparams_mode(value: str, key: str) -> str:
+    """Normalize tuned-hparams source mode with strict validation."""
+    normalized = value.strip().lower()
+    if normalized in {"", "normal", "standard", "default", "off"}:
+        return "normal"
+    if normalized == "cheat":
+        return "cheat"
+    raise ValueError(f"{key} must be normal|cheat.")
 
 
 def _ensure_tag_name_field(env: dict[str, str]) -> None:
@@ -1031,6 +1055,23 @@ def _apply_mask_mode_defaults(
     )
 
 
+def _apply_cheat_mode_defaults(env: dict[str, str]) -> None:
+    """Apply output naming defaults when cheat tuned-hparams mode is enabled."""
+    mode = _normalize_tuned_hparams_mode(
+        env.get("TUNED_HPARAMS_MODE", "normal"),
+        "TUNED_HPARAMS_MODE",
+    )
+    if mode != "cheat":
+        return
+
+    raw_tag = env.get("TAG", "").strip()
+    if raw_tag == "":
+        env["TAG"] = "cheat"
+    elif "cheat" not in raw_tag.lower():
+        env["TAG"] = f"{raw_tag}_cheat"
+    _ensure_tag_name_field(env)
+
+
 def _run_single_species(
     spec: WrapperSpec,
     *,
@@ -1063,6 +1104,7 @@ def _run_single_species(
         species=species,
         process_env=process_env,
     )
+    _apply_cheat_mode_defaults(env)
 
     tuned_config_paths: dict[TaskName, Path] = {}
     if spec.supports_tuned_hparams:

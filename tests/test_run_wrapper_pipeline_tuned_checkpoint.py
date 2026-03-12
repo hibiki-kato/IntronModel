@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tools.run_wrapper_pipeline import (
     SPECS,
+    _apply_cheat_mode_defaults,
     _apply_tuned_overrides,
     _resolve_tuned_model_name,
     _resolve_tuned_checkpoint_path,
@@ -170,6 +171,38 @@ def test_resolve_tuned_model_name_appends_mask_suffix_for_mask_mode() -> None:
     assert resolved == "cnn_mask"
 
 
+def test_resolve_tuned_model_name_appends_cheat_suffix_for_cheat_mode() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["cnn_pair.sh"],
+        model_name="cnn_pair",
+        mask_mode="off",
+        tuned_hparams_mode="cheat",
+    )
+    assert resolved == "cnn_pair_cheat"
+
+
+def test_resolve_tuned_model_name_combines_mask_and_cheat_suffixes() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["cnn.sh"],
+        model_name="cnn",
+        mask_mode="on",
+        tuned_hparams_mode="cheat",
+    )
+    assert resolved == "cnn_mask_cheat"
+
+
+def test_apply_cheat_mode_defaults_appends_cheat_to_tag_and_name_fields() -> None:
+    env: dict[str, str] = {
+        "TUNED_HPARAMS_MODE": "cheat",
+        "TAG": "exp1",
+        "NAME_FIELDS": "bp_avg",
+    }
+    _apply_cheat_mode_defaults(env)
+
+    assert env["TAG"] == "exp1_cheat"
+    assert env["NAME_FIELDS"] == "bp_avg,tag"
+
+
 def test_apply_tuned_overrides_reads_mask_tuning_dir_for_cnn(
     tmp_path: Path,
 ) -> None:
@@ -207,6 +240,50 @@ def test_apply_tuned_overrides_reads_mask_tuning_dir_for_cnn(
     assert resolved["donor"] == tuned_config.resolve()
     assert env["DONOR_LR"] == "0.0007"
     assert env["DONOR_BATCH_SIZE"] == "1024"
+
+
+def test_apply_tuned_overrides_reads_cheat_tuning_dir_for_cnn_pair(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    tuned_config = (
+        tmp_path
+        / species
+        / "tuning"
+        / "cnn_pair_cheat"
+        / "pair"
+        / "best_config.json"
+    )
+    tuned_config.parent.mkdir(parents=True, exist_ok=True)
+    tuned_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "lr": 0.0006,
+                    "batch_size": 768,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "cnn_pair",
+        "SPECIES": species,
+        "TRAIN_TARGET": "pair",
+        "USE_TUNED_HPARAMS": "required",
+        "TUNED_HPARAMS_MODE": "cheat",
+        "PAIR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "LR": "",
+        "BATCH_SIZE": "",
+    }
+    resolved = _apply_tuned_overrides(SPECS["cnn_pair.sh"], env, tmp_path)
+
+    assert resolved["pair"] == tuned_config.resolve()
+    assert env["LR"] == "0.0006"
+    assert env["BATCH_SIZE"] == "768"
 
 
 def test_apply_tuned_overrides_loads_target_specific_window_len(

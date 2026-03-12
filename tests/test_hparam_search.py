@@ -135,6 +135,7 @@ def test_load_config_injects_only_target_window_len_for_single_target_tuning(
         "pair_pr_auc",
         "donor_roc_auc",
         "mean_max_f1",
+        "test_max_f1",
     ],
 )
 def test_load_config_accepts_supported_objective_metrics(
@@ -158,6 +159,19 @@ def test_load_config_rejects_invalid_search_algo(tmp_path: Path) -> None:
     config_path.write_text(json.dumps(config), encoding="utf-8")
     with pytest.raises(ValueError, match="search_algo"):
         _ = hparam_search.load_config(config_path)
+
+
+def test_derive_validation_protocol_uses_test_split_for_test_objective() -> None:
+    protocol = hparam_search._derive_validation_protocol_from_args(
+        merged_args={
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 512,
+        },
+        objective_metric="test_max_f1",
+    )
+
+    assert protocol["split_type"] == "test_transcript_eval"
 
 
 def test_load_config_accepts_trial_process_mode(tmp_path: Path) -> None:
@@ -1005,6 +1019,96 @@ def test_run_trial_succeeds_with_max_f1_objective(
     assert result.status == "success"
     assert result.objective_metric == "pair_max_f1"
     assert result.objective_score == pytest.approx(0.77)
+
+
+def test_run_trial_succeeds_with_test_max_f1_objective(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="test_max_f1",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={},
+        full_overrides={},
+        search_space=hparam_search._validate_search_space(config_dict["search_space"]),
+    )
+    captured_train_only: list[bool] = []
+    captured_eval_output: list[str] = []
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        captured_train_only.append("--train_only" in cmd)
+        metrics_path: Optional[Path] = None
+        eval_output_path: Optional[Path] = None
+        for idx, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[idx + 1])
+            if token == "--eval_output_txt":
+                eval_output_path = Path(cmd[idx + 1])
+                captured_eval_output.append(cmd[idx + 1])
+        assert metrics_path is not None
+        assert eval_output_path is not None
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "donor": {"best_pr_auc": 0.66},
+                    "acceptor": {"best_pr_auc": 0.61},
+                }
+            ),
+            encoding="utf-8",
+        )
+        eval_output_path.write_text(
+            "tx1 0.1 = 15.0 20.0 17.1\n"
+            "tx2 0.2 = 18.0 22.0 19.8\n",
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+
+    result = hparam_search.run_trial(
+        config=config,
+        phase="quick",
+        trial_id=0,
+        sampled_params={"batch_size": 512, "lr": 1e-4},
+        overrides={"epochs": 1},
+        assigned_gpu_id=None,
+        metrics_json=tmp_path / "metrics_test_max_f1.json",
+        log_file=tmp_path / "trial_test_max_f1.log",
+    )
+
+    assert result.status == "success"
+    assert result.objective_metric == "test_max_f1"
+    assert result.objective_score == pytest.approx(19.8)
+    assert captured_train_only == [False]
+    assert captured_eval_output
 
 
 def test_run_trial_ignores_architecture_helper_keys_in_base_args(
