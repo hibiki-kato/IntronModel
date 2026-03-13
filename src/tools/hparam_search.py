@@ -72,6 +72,7 @@ SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "donor_max_f1",
     "acceptor_max_f1",
     "pair_max_f1",
+    "test_pr_auc",
     "test_max_f1",
 )
 SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
@@ -809,6 +810,268 @@ def _extract_test_objective_score(
     if objective_metric == "test_max_f1":
         return _extract_max_f1_from_eval_output(eval_output_path)
     return None
+
+
+def _to_optional_int(value: object) -> Optional[int]:
+    """Convert scalar-like values to an optional integer."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_hparam_data_root(project_root: Path) -> Path:
+    """Resolve data root from env override or ``<project_root>/data``."""
+    raw = os.environ.get("INTRONMODEL_DATA_ROOT", "").strip()
+    if raw == "":
+        return (project_root / "data").resolve()
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    return path.resolve()
+
+
+def _resolve_test_pr_auc_score_source(train_target: str) -> str:
+    """Resolve score-source mode from training target."""
+    if train_target == "donor":
+        return "donor"
+    if train_target == "acceptor":
+        return "acceptor"
+    if train_target == "pair":
+        return "pair"
+    return "donor_acceptor"
+
+
+def _score_site_rows_single_task_model(
+    *,
+    model_name: str,
+    task: str,
+    checkpoint_path: Path,
+    site_rows: list[dict[str, object]],
+    device: str,
+    batch_size: int,
+    sequence_transform: str,
+) -> list[dict[str, object]]:
+    """Score donor/acceptor site rows for one single-task model checkpoint."""
+    from models.registry import load_model_module
+    from util.sequence_transform import apply_site_sequence_transform
+
+    model_module = load_model_module(model_name)
+    if not hasattr(model_module, "load_task_model") or not hasattr(
+        model_module, "score_sequences"
+    ):
+        raise ValueError(
+            f"Model '{model_name}' does not support test_pr_auc site scoring."
+        )
+
+    transformed_rows: list[dict[str, object]] = []
+    for row in site_rows:
+        row_site_type = str(row["site_type"])
+        if row_site_type != task:
+            continue
+        transformed_seq = apply_site_sequence_transform(
+            str(row["seq"]),
+            site_type=row_site_type,
+            transform_mode=sequence_transform,
+            intron_half_length=(
+                int(row["intron_half_length"])
+                if row.get("intron_half_length") is not None
+                else None
+            ),
+        )
+        transformed = dict(row)
+        transformed["seq"] = transformed_seq
+        transformed_rows.append(transformed)
+
+    if not transformed_rows:
+        return []
+
+    model, checkpoint_payload = model_module.load_task_model(str(checkpoint_path), device)
+    window_len = int(checkpoint_payload.get("window_len", 50))
+    sequences = [str(row["seq"]) for row in transformed_rows]
+    scores = model_module.score_sequences(
+        model,
+        sequences,
+        window_len,
+        device,
+        batch_size=batch_size,
+    )
+
+    out_rows: list[dict[str, object]] = []
+    for row, score in zip(transformed_rows, scores):
+        out_rows.append(
+            {
+                "transcript_id": str(row["transcript_id"]),
+                "intron_index": int(row["intron_index"]),
+                "site_type": task,
+                "score": float(score),
+            }
+        )
+    return out_rows
+
+
+def _score_site_rows_pair_model(
+    *,
+    checkpoint_path: Path,
+    pair_rows: list[dict[str, object]],
+    device: str,
+    batch_size: int,
+    sequence_transform: str,
+) -> list[dict[str, object]]:
+    """Score pair-site rows for one pair-model checkpoint."""
+    from models import cnn_pair
+
+    return cnn_pair.infer_pair_site_scores(
+        pair_rows=pair_rows,
+        pair_model_path=str(checkpoint_path),
+        device=device,
+        batch_size=batch_size,
+        sequence_transform=sequence_transform,
+    )
+
+
+def _compute_test_pr_auc_objective(
+    *,
+    config: SearchConfig,
+    merged_args: dict[str, ArgValue],
+    metrics_json: Path,
+    trial_artifact_base: Path,
+) -> Optional[float]:
+    """Compute external-test PR-AUC objective for one trial."""
+    from evaluate_intron_pr_auc import evaluate_labeled_introns
+    from util.data_proc import read_test_pair_rows, read_test_site_rows, resolve_test_tsv
+    from util.transcript_eval import write_site_scores
+
+    model_name = str(merged_args.get("model", "")).strip()
+    species = str(merged_args.get("species", config.species)).strip()
+    if model_name == "" or species == "":
+        return None
+
+    train_target_raw = merged_args.get("train_target", "both")
+    train_target = str(train_target_raw).strip().lower() or "both"
+    if train_target not in {"both", "donor", "acceptor", "pair"}:
+        return None
+
+    donor_len = _to_optional_int(merged_args.get("donor_len"))
+    acceptor_len = _to_optional_int(merged_args.get("acceptor_len"))
+    sequence_transform = str(merged_args.get("sequence_transform", "none")).strip()
+    if sequence_transform == "":
+        sequence_transform = "none"
+    batch_size = _to_optional_int(merged_args.get("batch_size"))
+    if batch_size is None or batch_size <= 0:
+        batch_size = 512
+    device = str(merged_args.get("device", "auto")).strip() or "auto"
+
+    test_tsv_override = merged_args.get("test_tsv")
+    test_tsv_arg = (
+        str(test_tsv_override)
+        if isinstance(test_tsv_override, (str, Path))
+        else None
+    )
+    test_tsv = Path(resolve_test_tsv(species, test_tsv_arg))
+
+    checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
+    scored_rows: list[dict[str, object]] = []
+    if model_name == "cnn_pair":
+        pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
+        if pair_checkpoint_raw is None:
+            return None
+        pair_rows, _skipped_short, _skipped_unpaired = read_test_pair_rows(
+            str(test_tsv),
+            donor_len,
+            acceptor_len,
+        )
+        if not pair_rows:
+            return None
+        scored_rows = _score_site_rows_pair_model(
+            checkpoint_path=Path(pair_checkpoint_raw),
+            pair_rows=pair_rows,
+            device=device,
+            batch_size=batch_size,
+            sequence_transform=sequence_transform,
+        )
+    else:
+        site_rows, _skipped_short = read_test_site_rows(
+            str(test_tsv),
+            donor_len,
+            acceptor_len,
+        )
+        tasks_to_score: tuple[str, ...]
+        if train_target == "both":
+            tasks_to_score = ("donor", "acceptor")
+        elif train_target in {"donor", "acceptor"}:
+            tasks_to_score = (train_target,)
+        else:
+            return None
+
+        for task in tasks_to_score:
+            checkpoint_key = f"{task}_checkpoint_path"
+            checkpoint_raw = checkpoint_paths.get(checkpoint_key)
+            if checkpoint_raw is None:
+                return None
+            task_rows = _score_site_rows_single_task_model(
+                model_name=model_name,
+                task=task,
+                checkpoint_path=Path(checkpoint_raw),
+                site_rows=site_rows,
+                device=device,
+                batch_size=batch_size,
+                sequence_transform=sequence_transform,
+            )
+            scored_rows.extend(task_rows)
+
+    if not scored_rows:
+        return None
+
+    site_score_tsv = Path(str(trial_artifact_base) + ".site.tsv")
+    write_site_scores(str(site_score_tsv), scored_rows)
+
+    labeled_intron_raw = merged_args.get("labeled_intron_tsv")
+    if isinstance(labeled_intron_raw, (str, Path)) and str(labeled_intron_raw).strip():
+        labeled_intron_tsv = Path(str(labeled_intron_raw))
+    else:
+        data_root = _resolve_hparam_data_root(config.project_root)
+        labeled_intron_tsv = data_root / species / "processed" / "intron_eval_flank10.tsv"
+
+    intron_score_op_raw = merged_args.get("intron_score_op", "*")
+    intron_score_op = str(intron_score_op_raw).strip() or "*"
+    score_source = _resolve_test_pr_auc_score_source(train_target)
+    summary, rows = evaluate_labeled_introns(
+        labeled_tsv=labeled_intron_tsv,
+        site_score_tsv=site_score_tsv,
+        intron_score_op=intron_score_op,
+        score_source=score_source,
+        strict_missing=False,
+    )
+    objective_summary_path = Path(str(trial_artifact_base) + ".test_pr_auc.json")
+    objective_payload = {
+        "pr_auc": float(summary.pr_auc),
+        "used_introns": int(summary.used_introns),
+        "positive_count": int(summary.positive_count),
+        "negative_count": int(summary.negative_count),
+        "score_source": summary.score_source,
+        "site_score_tsv": str(site_score_tsv),
+        "labeled_intron_tsv": str(labeled_intron_tsv),
+        "rows_written": len(rows),
+    }
+    objective_summary_path.write_text(
+        json.dumps(objective_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return float(summary.pr_auc)
 
 
 def _select_objective_score(
@@ -1960,11 +2223,12 @@ def _run_trial_with_command_runner(
     if model_name.strip().lower() == "cnn":
         merged_args.setdefault("report_train_metrics", 0)
     merged_args["species"] = config.species
-    uses_test_objective = _is_test_objective_metric(config.objective_metric)
+    trial_artifact_base = metrics_json.parent / metrics_json.stem
+    is_test_max_f1_objective = config.objective_metric == "test_max_f1"
+    is_test_pr_auc_objective = config.objective_metric == "test_pr_auc"
     eval_output_path: Optional[Path] = None
-    if uses_test_objective:
+    if is_test_max_f1_objective:
         merged_args["train_only"] = False
-        trial_artifact_base = metrics_json.parent / metrics_json.stem
         merged_args["site_output_tsv"] = str(trial_artifact_base) + ".site.tsv"
         merged_args["intron_output_tsv"] = str(trial_artifact_base) + ".intron.tsv"
         merged_args["transcript_output_tsv"] = (
@@ -2150,7 +2414,7 @@ def _run_trial_with_command_runner(
         pair_objective_metric="pair_max_f1",
     )
     test_max_f1: Optional[float] = None
-    if uses_test_objective:
+    if is_test_max_f1_objective:
         if eval_output_path is None:
             return _build_failed_trial_result(
                 config=config,
@@ -2173,6 +2437,33 @@ def _run_trial_with_command_runner(
             objective_metric=config.objective_metric,
             eval_output_path=eval_output_path,
         )
+    test_pr_auc: Optional[float] = None
+    if is_test_pr_auc_objective:
+        try:
+            test_pr_auc = _compute_test_pr_auc_objective(
+                config=config,
+                merged_args=merged_args,
+                metrics_json=metrics_json,
+                trial_artifact_base=trial_artifact_base,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            return _build_failed_trial_result(
+                config=config,
+                phase=phase,
+                trial_id=trial_id,
+                assigned_gpu_id=assigned_gpu_id,
+                sampled_params=sampled_params,
+                effective_batch_size=current_batch,
+                oom_retries=oom_retries,
+                error_message=f"test_pr_auc evaluation failed: {exc}",
+                return_code=return_code,
+                duration_sec=duration_sec,
+                metrics_json=metrics_json,
+                log_file=log_file,
+                donor_pr_auc=donor_pr_auc,
+                acceptor_pr_auc=acceptor_pr_auc,
+                mean_pr_auc=mean_pr_auc,
+            )
     objective_values: dict[str, Optional[float]] = {
         "mean_pr_auc": mean_pr_auc,
         "donor_pr_auc": donor_pr_auc,
@@ -2186,6 +2477,7 @@ def _run_trial_with_command_runner(
         "donor_max_f1": donor_max_f1,
         "acceptor_max_f1": acceptor_max_f1,
         "pair_max_f1": pair_max_f1,
+        "test_pr_auc": test_pr_auc,
         "test_max_f1": test_max_f1,
     }
     objective_score = _select_objective_score(config.objective_metric, objective_values)

@@ -12,18 +12,20 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="780"
-
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-VAL_FRAC="0.1"
-BASE_SEED="1337"
-PROCESS_TITLE="ETA"
-
+TIME_BUDGET_MINUTES="60"
+MASK_MODE="off"
+CHEAT_MODE="off"
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"
 TOP_K="8"
 FULL_EPOCHS="10"
+VAL_FRAC="0.1"
+
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
+BASE_SEED="1337"
+PROCESS_TITLE="ETA"
+
 
 GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="2"
@@ -54,8 +56,6 @@ NAME_FIELDS="none"
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-MASK_MODE="off"
-CHEAT_MODE="off"
 UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
@@ -482,7 +482,7 @@ while true; do
 	fi
 		objective_metric="${target}_pr_auc"
 		if [[ "${CHEAT_MODE}" == "on" ]]; then
-			objective_metric="test_max_f1"
+			objective_metric="test_pr_auc"
 		fi
 		config_path="${output_dir}/hparam_search_config.json"
 		mkdir -p "${output_dir}"

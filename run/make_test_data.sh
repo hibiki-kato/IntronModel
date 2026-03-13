@@ -12,7 +12,7 @@ Options:
   --clip-short-intron     Keep intronic context within intron length
   --fasta <path>          Override FASTA path (.fna)
   --gtf <path>            Override GTF path
-  --out-tsv <path>        Output TSV path
+  --out-tsv <path>        Output TSV path (default: data/<species>/processed/transcripts.tsv)
   --feature <name>        GTF feature to use (default: exon)
   --limit <int>           Max rows to write (default: 0; no limit)
   -h, --help              Show this help
@@ -102,10 +102,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 RAW_DIR="${DATA_ROOT}/${SPECIES}/raw"
+PROCESSED_DIR="${DATA_ROOT}/${SPECIES}/processed"
 if [[ ! -d "${RAW_DIR}" ]]; then
 	echo "Raw directory not found: ${RAW_DIR}" >&2
 	exit 2
 fi
+mkdir -p "${PROCESSED_DIR}"
 
 if [[ -z "${FASTA_PATH}" ]]; then
 	shopt -s nullglob
@@ -145,7 +147,7 @@ if [[ -z "${GTF_PATH}" ]]; then
 fi
 
 if [[ -z "${OUT_TSV}" ]]; then
-	OUT_TSV="${RAW_DIR}/transcripts.tsv"
+	OUT_TSV="${PROCESSED_DIR}/transcripts.tsv"
 fi
 
 echo "[make_test_data.sh] species=${SPECIES}"

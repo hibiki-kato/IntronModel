@@ -85,6 +85,7 @@ fi
 
 SPECIES_DIR="${TARGET_ROOT}/${SPECIES}"
 mkdir -p "${SPECIES_DIR}/raw"
+mkdir -p "${SPECIES_DIR}/processed"
 mkdir -p "${SPECIES_DIR}/train"
 mkdir -p "${SPECIES_DIR}/site_score"
 mkdir -p "${SPECIES_DIR}/intron_score"
@@ -104,7 +105,7 @@ make_test_args=(
 	--species "${SPECIES}"
 	--donor-len "${DONOR_LEN}"
 	--acceptor-len "${ACCEPTOR_LEN}"
-	--out-tsv "${SPECIES_DIR}/raw/transcripts.tsv"
+	--out-tsv "${SPECIES_DIR}/processed/transcripts.tsv"
 )
 if [[ "${CLIP_SHORT_INTRON}" == "1" ]]; then
 	make_test_args+=(--clip-short-intron)
@@ -113,7 +114,7 @@ fi
 bash "${PROJECT_ROOT}/run/make_test_data.sh" "${make_test_args[@]}"
 
 echo "[prepare_species_data] prepared directories under ${SPECIES_DIR}"
-echo "[prepare_species_data] generated raw/transcripts.tsv"
+echo "[prepare_species_data] generated processed/transcripts.tsv"
 
 if [[ ! -f "${SPECIES_DIR}/train/${DONOR_LEN}bp.err" ]]; then
 	echo "[prepare_species_data] warning: missing ${SPECIES_DIR}/train/${DONOR_LEN}bp.err"

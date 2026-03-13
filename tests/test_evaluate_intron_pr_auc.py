@@ -227,3 +227,43 @@ def test_evaluate_labeled_introns_reads_wide_site_score_format(
     assert summary.pr_auc == pytest.approx(1.0)
     assert summary.roc_auc == pytest.approx(1.0)
     assert len(rows) == 4
+
+
+def test_evaluate_labeled_introns_supports_donor_only_score_source(
+    tmp_path: Path,
+) -> None:
+    """Compute metrics from donor-only scores."""
+    labeled_tsv = tmp_path / "labeled.tsv"
+    site_score_tsv = tmp_path / "site_score.tsv"
+
+    _write_labeled_tsv(
+        labeled_tsv,
+        rows=[
+            ("tx1", 1, 1),
+            ("tx2", 1, 0),
+            ("tx3", 1, 1),
+            ("tx4", 1, 0),
+        ],
+    )
+    _write_site_score_tsv(
+        site_score_tsv,
+        rows=[
+            ("tx1", 1, "donor", 0.95),
+            ("tx2", 1, "donor", 0.20),
+            ("tx3", 1, "donor", 0.90),
+            ("tx4", 1, "donor", 0.25),
+        ],
+    )
+
+    summary, rows = evaluate_labeled_introns(
+        labeled_tsv=labeled_tsv,
+        site_score_tsv=site_score_tsv,
+        intron_score_op="*",
+        score_source="donor",
+    )
+
+    assert summary.used_introns == 4
+    assert summary.skipped_missing_score_introns == 0
+    assert summary.pr_auc == pytest.approx(1.0)
+    assert summary.roc_auc == pytest.approx(1.0)
+    assert len(rows) == 4

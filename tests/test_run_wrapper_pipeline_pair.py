@@ -225,7 +225,9 @@ def test_resolve_species_path_template_replaces_all_tokens() -> None:
 
 def test_apply_mask_mode_defaults_sets_tag_and_paths(tmp_path: Path) -> None:
     raw_dir = tmp_path / "Dmel" / "raw"
+    processed_dir = tmp_path / "Dmel" / "processed"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
     (raw_dir / "transcripts_mask.tsv").write_text(
         "transcript_id\tsite_type\tintron_index\tseq\n",
         encoding="utf-8",
@@ -250,8 +252,8 @@ def test_apply_mask_mode_defaults_sets_tag_and_paths(tmp_path: Path) -> None:
 
     assert env["TAG"] == "mask"
     assert env["NAME_FIELDS"] == "tag"
-    assert env["TRAIN_POS_PATH"] == str(raw_dir / "100bp_trimmed_npad.err")
-    assert env["TRAIN_NEG_PATH"] == str(raw_dir / "100bp_trimmed_npad.neg.err")
+    assert env["TRAIN_POS_PATH"] == str(processed_dir / "100bp_trimmed_npad.err")
+    assert env["TRAIN_NEG_PATH"] == str(processed_dir / "100bp_trimmed_npad.neg.err")
     assert env["TEST_TSV_PATH"] == str(raw_dir / "transcripts_mask.tsv")
 
 

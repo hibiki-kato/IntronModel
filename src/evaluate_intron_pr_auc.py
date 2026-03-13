@@ -25,7 +25,13 @@ except ImportError:  # pragma: no cover
     roc_auc_score = None
 
 INTRON_SCORE_OP_CHOICES: tuple[str, ...] = ("+", "*", "harmonic", "min")
-SCORE_SOURCE_CHOICES: tuple[str, ...] = ("auto", "donor_acceptor", "pair")
+SCORE_SOURCE_CHOICES: tuple[str, ...] = (
+    "auto",
+    "donor_acceptor",
+    "pair",
+    "donor",
+    "acceptor",
+)
 
 
 def _set_csv_field_limit_max() -> None:
@@ -426,6 +432,10 @@ def _resolve_intron_score(
 
     if score_source == "pair":
         return pair_score, donor_score, acceptor_score, pair_score
+    if score_source == "donor":
+        return donor_score, donor_score, acceptor_score, pair_score
+    if score_source == "acceptor":
+        return acceptor_score, donor_score, acceptor_score, pair_score
     if score_source == "donor_acceptor":
         if donor_score is None or acceptor_score is None:
             return None, donor_score, acceptor_score, pair_score
@@ -476,7 +486,9 @@ def evaluate_labeled_introns(
         Intron score source mode:
         ``auto`` uses donor+acceptor when both exist, otherwise pair;
         ``donor_acceptor`` requires donor+acceptor;
-        ``pair`` requires pair score.
+        ``pair`` requires pair score;
+        ``donor`` uses donor score only;
+        ``acceptor`` uses acceptor score only.
     strict_missing : bool, default=False
         If ``True``, raise when some labeled introns cannot be scored.
 

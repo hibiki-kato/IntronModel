@@ -648,6 +648,9 @@ def resolve_test_tsv(species: str, test_tsv: Optional[str]) -> str:
     if test_tsv:
         return test_tsv
     dirs = species_data_dirs(species)
+    processed_path = os.path.join(dirs["base"], "processed", "transcripts.tsv")
+    if os.path.exists(processed_path):
+        return processed_path
     return os.path.join(dirs["raw"], "transcripts.tsv")
 
 

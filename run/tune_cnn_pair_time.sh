@@ -468,7 +468,7 @@ while true; do
 
 	objective_metric="pair_pr_auc"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
-		objective_metric="test_max_f1"
+		objective_metric="test_pr_auc"
 	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"

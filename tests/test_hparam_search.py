@@ -135,6 +135,7 @@ def test_load_config_injects_only_target_window_len_for_single_target_tuning(
         "pair_pr_auc",
         "donor_roc_auc",
         "mean_max_f1",
+        "test_pr_auc",
         "test_max_f1",
     ],
 )
@@ -1109,6 +1110,107 @@ def test_run_trial_succeeds_with_test_max_f1_objective(
     assert result.objective_score == pytest.approx(19.8)
     assert captured_train_only == [False]
     assert captured_eval_output
+
+
+def test_run_trial_succeeds_with_test_pr_auc_objective(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="test_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn",
+            "species": "Dmel",
+            "train_target": "donor",
+            "batch_size": 512,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=hparam_search._validate_search_space(config_dict["search_space"]),
+    )
+    captured_train_only: list[bool] = []
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        captured_train_only.append("--train_only" in cmd)
+        metrics_path: Optional[Path] = None
+        for idx, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[idx + 1])
+                break
+        assert metrics_path is not None
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "donor": {"best_pr_auc": 0.66},
+                    "donor_checkpoint_path": str(tmp_path / "donor.pt"),
+                    "acceptor_checkpoint_path": str(tmp_path / "acceptor.pt"),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    def _fake_compute_test_pr_auc_objective(
+        *,
+        config: hparam_search.SearchConfig,
+        merged_args: dict[str, hparam_search.ArgValue],
+        metrics_json: Path,
+        trial_artifact_base: Path,
+    ) -> Optional[float]:
+        del config, metrics_json, trial_artifact_base
+        assert merged_args["train_only"] is True
+        return 0.731
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "_compute_test_pr_auc_objective",
+        _fake_compute_test_pr_auc_objective,
+    )
+
+    result = hparam_search.run_trial(
+        config=config,
+        phase="quick",
+        trial_id=0,
+        sampled_params={"batch_size": 512, "lr": 1e-4},
+        overrides={"epochs": 1},
+        assigned_gpu_id=None,
+        metrics_json=tmp_path / "metrics_test_pr_auc.json",
+        log_file=tmp_path / "trial_test_pr_auc.log",
+    )
+
+    assert result.status == "success"
+    assert result.objective_metric == "test_pr_auc"
+    assert result.objective_score == pytest.approx(0.731)
+    assert captured_train_only == [True]
 
 
 def test_run_trial_ignores_architecture_helper_keys_in_base_args(

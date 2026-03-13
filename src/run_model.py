@@ -30,6 +30,7 @@ from util.data_proc import (
     normalize_tag_name_value,
     parse_name_fields,
     project_root,
+    resolve_test_tsv,
     resolve_effective_window_lengths,
     species_data_dirs,
 )
@@ -781,7 +782,7 @@ def _resolve_pipeline_paths(
     name_fields = parse_name_fields(args.name_fields)
     name_params = dict(vars(args))
 
-    test_tsv = args.test_tsv or os.path.join(dirs["raw"], "transcripts.tsv")
+    test_tsv = resolve_test_tsv(args.species, args.test_tsv)
     class_file = args.class_file or os.path.join(dirs["raw"], "transcript_class.txt")
     site_output_tsv = args.site_output_tsv or default_site_output_path(
         species=args.species,

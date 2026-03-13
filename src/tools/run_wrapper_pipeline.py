@@ -1052,7 +1052,7 @@ def _apply_mask_mode_defaults(
 
     print(
         f"[{species}] mask-mode test_tsv not found/generated; "
-        "fallback to raw/transcripts.tsv (unmasked).",
+        "fallback to default transcript TSV search order.",
         file=sys.stderr,
     )
 
@@ -1131,7 +1131,11 @@ def _run_single_species(
     if raw_test_tsv_path != "":
         test_tsv = Path(raw_test_tsv_path)
     else:
-        test_tsv = data_root / species / "raw" / "transcripts.tsv"
+        processed_test_tsv = data_root / species / "processed" / "transcripts.tsv"
+        if processed_test_tsv.is_file():
+            test_tsv = processed_test_tsv
+        else:
+            test_tsv = data_root / species / "raw" / "transcripts.tsv"
     raw_class_file_path = env.get("CLASS_FILE_PATH", "").strip()
     if raw_class_file_path != "":
         class_file = Path(raw_class_file_path)

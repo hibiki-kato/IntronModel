@@ -529,7 +529,7 @@ echo "[tune_cnn.sh] seeds=${SEED_VALUES[*]}"
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
-		OBJECTIVE_METRIC="test_max_f1"
+		OBJECTIVE_METRIC="test_pr_auc"
 	fi
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
