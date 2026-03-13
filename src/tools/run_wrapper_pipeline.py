@@ -10,9 +10,10 @@ import resource
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 SRC_ROOT: Path = PROJECT_ROOT / "src"
@@ -717,6 +718,7 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
     )
     model_name = _require_env(env, "MODEL")
     model_tasks = checkpoint_tasks_for_model(model_name)
+    model_tasks = checkpoint_tasks_for_model(model_name)
     train_target = _require_env(env, "TRAIN_TARGET")
     allowed_targets = (
         ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
@@ -1201,6 +1203,7 @@ def _run_single_species(
             f"train_only={env['TRAIN_ONLY']}"
         )
 
+    species_run_start = time.monotonic()
     process = subprocess.run(
         [sys.executable, str(project_root / "src" / "run_model.py"), *run_args],
         check=False,
@@ -1246,7 +1249,123 @@ def _run_single_species(
     print(f"[{spec.script_name}] intron_score={output_intron_score_tsv}")
     print(f"[{spec.script_name}] transcript_score={output_trans_score_tsv}")
     print(f"[{spec.script_name}] eval_score={output_eval_score_txt}")
+    elapsed_seconds = time.monotonic() - species_run_start
+    _log_validation_summary(
+        spec_name=spec.script_name,
+        species=species,
+        elapsed_seconds=elapsed_seconds,
+        metrics_json_path=metrics_json_path,
+        eval_score_path=output_eval_score_txt,
+        model_tasks=model_tasks,
+    )
     return 0
+
+
+def _format_elapsed_seconds(total_seconds: float) -> str:
+    """Format a duration in seconds as HH:MM:SS."""
+
+    total = int(total_seconds)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _summarize_training_best_scores(
+    metrics_json_path: Path,
+    model_tasks: Sequence[str],
+) -> list[str]:
+    """Return formatted train-validation summaries for the requested tasks."""
+
+    if not metrics_json_path.is_file():
+        return []
+    try:
+        payload = json.loads(metrics_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+    summary_parts: list[str] = []
+    for task in model_tasks:
+        task_payload = payload.get(task)
+        if not isinstance(task_payload, dict):
+            continue
+        best_metric = str(task_payload.get("best_metric") or "score")
+        best_score = task_payload.get("best_score")
+        if best_score is None:
+            continue
+        try:
+            best_score_value = float(best_score)
+        except (TypeError, ValueError):
+            continue
+        summary_parts.append(f"{task} {best_metric}={best_score_value:.4f}")
+    return summary_parts
+
+
+def _summarize_eval_best_metrics(eval_score_path: Path) -> tuple[float, float, float] | None:
+    """Pick the best F1 snapshot from a transcript evaluation output."""
+
+    if not eval_score_path.is_file():
+        return None
+    best_f1 = -math.inf
+    best_precision = 0.0
+    best_sensitivity = 0.0
+    try:
+        with eval_score_path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+                try:
+                    sensitivity = float(parts[-3])
+                    precision = float(parts[-2])
+                    f1 = float(parts[-1])
+                except ValueError:
+                    continue
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_precision = precision
+                    best_sensitivity = sensitivity
+    except OSError:
+        return None
+    if best_f1 == -math.inf:
+        return None
+    return best_sensitivity, best_precision, best_f1
+
+
+def _log_validation_summary(
+    *,
+    spec_name: str,
+    species: str,
+    elapsed_seconds: float,
+    metrics_json_path: Path,
+    eval_score_path: Path,
+    model_tasks: Sequence[str],
+) -> None:
+    """Log a combined train/test validation summary plus elapsed time."""
+
+    details: list[str] = []
+    training_parts = _summarize_training_best_scores(
+        metrics_json_path,
+        model_tasks,
+    )
+    if training_parts:
+        details.append("train=" + ",".join(training_parts))
+    eval_summary = _summarize_eval_best_metrics(eval_score_path)
+    if eval_summary is not None:
+        sensitivity, precision, f1 = eval_summary
+        details.append(
+            f"test_best_f1={f1:.2f} sens={sensitivity:.2f} prec={precision:.2f}"
+        )
+    elapsed_label = _format_elapsed_seconds(elapsed_seconds)
+    message = (
+        f"[{spec_name}] species={species} elapsed={elapsed_label} "
+        f"({int(elapsed_seconds)}s)"
+    )
+    if details:
+        message += " " + " ".join(details)
+    print(message)
 
 
 def _detect_visible_gpu_ids() -> list[str]:

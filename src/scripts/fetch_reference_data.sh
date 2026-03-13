@@ -8,7 +8,7 @@ Usage: bash src/scripts/fetch_reference_data.sh [options]
 Copy or symlink external reference files into data/<species>/raw.
 
 Options:
-  --species <name>      Athal|Dmel|Mmus|all (default: all)
+	--species <name>      Athal|Dmel|Hsap|Mmus|all (default: all)
   --source-root <path>  External root containing <species>/raw files (required)
   --target-root <path>  Repository data root (default: INTRONMODEL_DATA_ROOT or ./data)
   --mode <name>         copy|symlink (default: copy)
@@ -116,10 +116,11 @@ copy_species() {
 if [[ "${SPECIES}" == "all" ]]; then
 	copy_species "Athal"
 	copy_species "Dmel"
+	copy_species "Hsap"
 	copy_species "Mmus"
 else
 	case "${SPECIES}" in
-	Athal | Dmel | Mmus)
+	Athal | Dmel | Hsap | Mmus)
 		copy_species "${SPECIES}"
 		;;
 	*)

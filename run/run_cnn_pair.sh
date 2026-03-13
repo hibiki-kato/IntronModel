@@ -12,12 +12,12 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 set -a
-SPECIES="Mmus, Athal, Dmel"
+SPECIES="Mmus, Athal, Dmel, Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
-MASK_MODE="off"
+MASK_MODE="on"
 MASK_TEST_TSV_PATH=""
 
 EPOCHS="10"

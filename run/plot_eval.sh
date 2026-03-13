@@ -19,7 +19,7 @@ Options:
 Species default ranges:
   Athal: x=[10.0, 52.0], y=[48.0, 75.0]
   Dmel : x=[40.0, 52.0], y=[40.0, 55.0]
-  Hsap : x=[10.0, 19.0], y=[26.0, 35.0]
+  Hsap : x=[10.0, 19.0], y=[27.0, 36.0]
   Mmus : x=[10.0, 18.0], y=[40.0, 46.0]
 EOT
 }
@@ -30,7 +30,7 @@ EOT
 CONDA_ENV="intronmodel"
 SPECIES="Mmus, Athal, Dmel, Hsap"
 OUTPUT_PNG=""
-INTERACTIVE="0"
+INTERACTIVE="1"
 X_MIN=""
 X_MAX=""
 Y_MIN=""
@@ -61,8 +61,8 @@ set_defaults_for_species() {
 	Hsap)
 		DEFAULT_X_MIN="10.0"
 		DEFAULT_X_MAX="19.0"
-		DEFAULT_Y_MIN="26.0"
-		DEFAULT_Y_MAX="35.0"
+		DEFAULT_Y_MIN="27.0"
+		DEFAULT_Y_MAX="37.0"
 		;;
 	*)
 		if [[ -z "${X_MIN}" || -z "${X_MAX}" || -z "${Y_MIN}" || -z "${Y_MAX}" ]]; then

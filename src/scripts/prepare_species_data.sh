@@ -8,7 +8,7 @@ Usage: bash src/scripts/prepare_species_data.sh [options]
 Prepare species-level data directories and generated files.
 
 Options:
-  --species <name>        Athal|Dmel|Mmus (default: Dmel)
+	--species <name>        Athal|Dmel|Hsap|Mmus (default: Dmel)
   --donor-len <int>       Donor window length (default: 100)
   --acceptor-len <int>    Acceptor window length (default: 100)
   --clip-short-intron     Keep intronic context within intron length
@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${SPECIES}" in
-Athal | Dmel | Mmus)
+Athal | Dmel | Hsap | Mmus)
 	;;
 *)
 	echo "Invalid --species value: ${SPECIES}" >&2

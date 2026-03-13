@@ -12,8 +12,8 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced per-task overrides are kept below.
 set -a
-DNABERT_VARIANT="6"
-SPECIES="Mmus, Dmel, Athal, Hsap"
+DNABERT_VARIANT="2"
+SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
@@ -28,6 +28,7 @@ TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
 NAME_FIELDS=""
+PROCESS_TITLE=""  # optional: supply a short process title or ETA note
 # Optional output/data overrides for trunc-data runs.
 TAG=""
 TRAIN_POS_PATH=""
@@ -172,6 +173,10 @@ fi
 MASK_MODE="${TRUNC_MODE}"
 export MASK_MODE
 
-PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-	python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \
-		--script-name "dnabert.sh"
+(
+	export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+	intronmodel_run_with_process_title \
+		"${PROCESS_TITLE}" \
+		python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \
+			--script-name "dnabert.sh"
+)

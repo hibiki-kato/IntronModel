@@ -13,14 +13,14 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 MODEL="cnn"
-SPECIES="Hsap"
+SPECIES="Athal, Dmel, Mmus, Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRAIN_POS_PATH="data/{species}/raw/100bp.err"
 TRAIN_NEG_PATH="data/{species}/raw/100bp.neg.err"
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
-MASK_MODE="off"
+MASK_MODE="on"
 MASK_TEST_TSV_PATH=""
 
 EPOCHS="15"
