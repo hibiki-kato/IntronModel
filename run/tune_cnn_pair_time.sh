@@ -22,7 +22,7 @@ MASK_MODE="on"
 CHEAT_MODE="on"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
-VAL_FRAC="0.1"
+VAL_FRAC="0.2"
 BASE_SEED="1337"
 # Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
 SEED_LIST=""
