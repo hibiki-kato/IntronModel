@@ -254,6 +254,11 @@ def test_run_tcn_sh_includes_head_type_config() -> None:
     assert 'HEAD_TYPE="gap"' in content
 
 
+def test_run_dnabert_sh_sets_default_process_title() -> None:
+    content = (_project_root() / "run" / "run_dnabert.sh").read_text(encoding="utf-8")
+    assert 'PROCESS_TITLE="use? email me"' in content
+
+
 def test_run_scripts_are_shellcheck_parsable() -> None:
     root = _project_root()
     cnn = subprocess.run(

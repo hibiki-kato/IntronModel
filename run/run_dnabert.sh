@@ -28,7 +28,7 @@ TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
 NAME_FIELDS=""
-PROCESS_TITLE=""  # optional: supply a short process title or ETA note
+PROCESS_TITLE="use? email me"
 # Optional output/data overrides for trunc-data runs.
 TAG=""
 TRAIN_POS_PATH=""
