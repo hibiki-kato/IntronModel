@@ -630,7 +630,7 @@ class DnaBertTokenDataset(Dataset):
 
 
 class DnaBertBinaryClassifier(nn.Module):
-    """Binary classifier with a frozen CNN readout on top of DNABERT."""
+    """Binary classifier with a CNN readout on top of a DNABERT backbone."""
 
     def __init__(
         self,
@@ -655,11 +655,9 @@ class DnaBertBinaryClassifier(nn.Module):
         self.frozen_head_kernel_size = int(frozen_head_kernel_size)
         self.frozen_head_padding = self.frozen_head_kernel_size // 2
 
-        # Keep the legacy linear module for checkpoint compatibility, and freeze it
-        # explicitly so the final readout remains non-trainable.
+        # Keep legacy classifier parameter names so old checkpoints remain
+        # compatible while reusing these weights in a separable CNN readout.
         self.classifier = nn.Linear(hidden_size, 1)
-        for parameter in self.classifier.parameters():
-            parameter.requires_grad_(False)
 
         temporal_kernel = torch.arange(
             1,
@@ -669,31 +667,21 @@ class DnaBertBinaryClassifier(nn.Module):
         center = float(self.frozen_head_padding + 1)
         temporal_kernel = center - torch.abs(temporal_kernel - center)
         temporal_kernel = temporal_kernel / temporal_kernel.sum()
-        channel_kernel = torch.full(
-            (hidden_size,),
-            fill_value=1.0 / float(hidden_size),
-            dtype=torch.float32,
-        )
         self.register_buffer(
             "_frozen_temporal_kernel",
             temporal_kernel,
             persistent=False,
         )
-        self.register_buffer(
-            "_frozen_channel_kernel",
-            channel_kernel,
-            persistent=False,
-        )
-        self.register_buffer(
-            "_frozen_head_bias",
-            torch.zeros((1,), dtype=torch.float32),
-            persistent=False,
-        )
 
-    def assert_frozen_final_head(self) -> None:
-        """Raise when the final readout layer unexpectedly becomes trainable."""
-        if any(parameter.requires_grad for parameter in self.classifier.parameters()):
-            raise RuntimeError("DNABERT final CNN head must remain non-trainable.")
+    def freeze_backbone(self) -> None:
+        """Freeze all backbone parameters to train only the task head."""
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad_(False)
+
+    def assert_backbone_frozen(self) -> None:
+        """Raise when any backbone parameter unexpectedly requires gradients."""
+        if any(parameter.requires_grad for parameter in self.backbone.parameters()):
+            raise RuntimeError("DNABERT backbone must remain non-trainable.")
 
     def forward(
         self,
@@ -729,13 +717,13 @@ class DnaBertBinaryClassifier(nn.Module):
         token_hidden = self.dropout(self.head_norm(hidden))
         token_features = token_hidden.transpose(1, 2).contiguous()
         frozen_kernel = (
-            self._frozen_channel_kernel.view(1, -1, 1)
+            self.classifier.weight.view(1, -1, 1)
             * self._frozen_temporal_kernel.view(1, 1, -1)
         )
         logits_map = F.conv1d(
             token_features,
             weight=frozen_kernel,
-            bias=self._frozen_head_bias,
+            bias=self.classifier.bias,
             padding=self.frozen_head_padding,
         )
         mask = attention_mask.to(dtype=logits_map.dtype).unsqueeze(1)
@@ -1491,7 +1479,6 @@ def train_task_model(
                 dropout=dropout,
                 head_layer_norm=head_layer_norm_bool,
             ).to(device)
-            model.assert_frozen_final_head()
             initialized_from_checkpoint = False
             if init_checkpoint_path is not None:
                 ckpt = torch.load(
@@ -1510,7 +1497,6 @@ def train_task_model(
                     )
                 normalized_state = _normalize_checkpoint_state_dict(model_state_obj)
                 model.load_state_dict(normalized_state)
-                model.assert_frozen_final_head()
                 initialized_from_checkpoint = True
                 print(f"[{task}] initialized from checkpoint: {init_checkpoint_path}")
 
