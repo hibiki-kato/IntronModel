@@ -52,7 +52,12 @@ from util.transcript_eval import (
     write_site_scores,
     write_transcript_scores,
 )
-from util.unique_intron import UNIQUE_MAP_TSV_NAME, UniqueMapMember, load_unique_map
+from util.unique_intron import (
+    UNIQUE_MAP_TSV_NAME,
+    UniqueMapMember,
+    invert_unique_map,
+    load_unique_map,
+)
 
 try:
     from util.losses import LOSS_NAME_CHOICES
@@ -921,15 +926,24 @@ def _expand_unique_site_rows(
     ------
     ValueError
         If some site rows cannot be mapped back to original transcript introns.
+
+    Notes
+    -----
+    Some inference paths already emit rows keyed by original intron IDs
+    instead of unique IDs. Those rows are passed through unchanged.
     """
     expanded_rows: list[dict[str, object]] = []
     missing_keys: set[tuple[str, int]] = set()
+    reverse_unique_map = invert_unique_map(unique_map)
     for row in site_score_rows:
         unique_transcript_id = str(row["transcript_id"]).strip()
         unique_intron_index = int(row["intron_index"])
         unique_key = (unique_transcript_id, unique_intron_index)
         mapped_members = unique_map.get(unique_key)
         if mapped_members is None:
+            if unique_key in reverse_unique_map:
+                expanded_rows.append(dict(row))
+                continue
             missing_keys.add(unique_key)
             continue
         for member in mapped_members:

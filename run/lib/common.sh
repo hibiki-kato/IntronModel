@@ -101,6 +101,39 @@ intronmodel_init_paths() {
 	MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
 	export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
 	export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+	intronmodel_configure_hf_cache
+}
+
+
+intronmodel_configure_hf_cache() {
+	local default_cache_root
+	default_cache_root="${TMPDIR:-/tmp}/intronmodel-cache-${USER}"
+
+	# Use one writable cache root for Hugging Face artifacts when callers do not
+	# set explicit cache paths. This avoids permission issues on shared HOME/AFS.
+	if [[ -z "${XDG_CACHE_HOME:-}" ]]; then
+		XDG_CACHE_HOME="${default_cache_root}"
+	fi
+	mkdir -p "${XDG_CACHE_HOME}"
+	export XDG_CACHE_HOME
+
+	if [[ -z "${HF_HOME:-}" ]]; then
+		HF_HOME="${XDG_CACHE_HOME}/huggingface"
+	fi
+	mkdir -p "${HF_HOME}"
+	export HF_HOME
+
+	if [[ -z "${TRANSFORMERS_CACHE:-}" ]]; then
+		TRANSFORMERS_CACHE="${HF_HOME}/hub"
+	fi
+	mkdir -p "${TRANSFORMERS_CACHE}"
+	export TRANSFORMERS_CACHE
+
+	if [[ -z "${HF_MODULES_CACHE:-}" ]]; then
+		HF_MODULES_CACHE="${HF_HOME}/modules"
+	fi
+	mkdir -p "${HF_MODULES_CACHE}"
+	export HF_MODULES_CACHE
 }
 
 

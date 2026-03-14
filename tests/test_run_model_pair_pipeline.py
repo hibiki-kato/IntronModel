@@ -104,6 +104,30 @@ def test_expand_unique_site_rows_raises_when_mapping_missing() -> None:
         )
 
 
+def test_expand_unique_site_rows_allows_original_keyed_rows() -> None:
+    """Pass through rows that are already keyed by original introns."""
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "txA",
+            "intron_index": 2,
+            "site_type": "pair",
+            "score": 0.42,
+        }
+    ]
+    unique_map = {
+        ("uintron_00000001", 1): [
+            UniqueMapMember(transcript_id="txA", intron_index=2),
+        ]
+    }
+
+    mapped = run_model._expand_unique_site_rows(
+        site_score_rows=site_rows,
+        unique_map=unique_map,
+    )
+
+    assert mapped == site_rows
+
+
 def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
