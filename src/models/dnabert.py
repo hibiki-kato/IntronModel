@@ -1325,6 +1325,9 @@ def train_task_model(
     use_persistent_workers = (
         _bool_from_flag(persistent_workers) and resolved_num_workers > 0
     )
+    # DNABERT keeps train/val/train-eval loaders alive for the full training loop.
+    # Persisting all three worker pools can exhaust file descriptors on large nodes.
+    eval_persistent_workers = False
     use_amp_bool = _bool_from_flag(use_amp) and device == "cuda"
     allow_tf32_bool = _bool_from_flag(allow_tf32)
     deterministic_bool = _bool_from_flag(deterministic)
@@ -1463,7 +1466,7 @@ def train_task_model(
         }
         if resolved_num_workers > 0:
             val_loader_kwargs["prefetch_factor"] = prefetch_factor
-            val_loader_kwargs["persistent_workers"] = use_persistent_workers
+            val_loader_kwargs["persistent_workers"] = eval_persistent_workers
         val_loader = DataLoader(**val_loader_kwargs)
         train_eval_loader_kwargs: dict[str, object] = {
             "dataset": train_ds,
@@ -1474,13 +1477,16 @@ def train_task_model(
         }
         if resolved_num_workers > 0:
             train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-            train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
+            train_eval_loader_kwargs["persistent_workers"] = (
+                eval_persistent_workers
+            )
         train_eval_loader = DataLoader(**train_eval_loader_kwargs)
 
         print(
             f"[{task}] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
-            f"workers={resolved_num_workers} train_eval=on"
+            f"workers={resolved_num_workers} train_eval=on "
+            f"persistent(train={int(use_persistent_workers)},eval=0)"
         )
 
         try:
@@ -1823,6 +1829,7 @@ def train_task_model(
                     prefetch_factor if resolved_num_workers > 0 else None
                 ),
                 "persistent_workers": use_persistent_workers,
+                "eval_persistent_workers": eval_persistent_workers,
                 "pin_memory": use_pin_memory,
                 "effective_batch_size": effective_batch_size,
                 "oom_retries": oom_retries,
