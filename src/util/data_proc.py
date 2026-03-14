@@ -648,10 +648,17 @@ def resolve_test_tsv(species: str, test_tsv: Optional[str]) -> str:
     if test_tsv:
         return test_tsv
     dirs = species_data_dirs(species)
-    processed_path = os.path.join(dirs["base"], "processed", "transcripts.tsv")
-    if os.path.exists(processed_path):
+    processed_path = os.path.join(
+        dirs["base"], "processed", "transcripts.unique.tsv"
+    )
+    if os.path.isfile(processed_path):
         return processed_path
-    return os.path.join(dirs["raw"], "transcripts.tsv")
+    raise FileNotFoundError(
+        "Missing required processed unique transcript TSV. "
+        f"species={species} path={processed_path}. "
+        "Generate it with run/make_unique_intron_assets.sh "
+        "or pass --test_tsv explicitly."
+    )
 
 
 def resolve_effective_window_lengths(

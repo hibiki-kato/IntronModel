@@ -136,7 +136,9 @@ def test_build_annotation_coverage_rows_counts_reference_query_and_inference(
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
     (raw_dir / "reference.fix.gff").write_text(
         "\n".join(
@@ -188,7 +190,7 @@ def test_build_annotation_coverage_rows_counts_reference_query_and_inference(
         + "\n",
         encoding="utf-8",
     )
-    (raw_dir / "transcripts.tsv").write_text(
+    (processed_dir / "transcripts.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tgene_id\tsite_type\tintron_index\tseq",
@@ -220,9 +222,11 @@ def test_build_evaluation_transcript_intron_count_rows(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
-    (raw_dir / "transcripts.tsv").write_text(
+    (processed_dir / "transcripts.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tsite_type\tseq",
@@ -272,9 +276,11 @@ def test_build_evaluation_transcript_group_intron_count_rows(
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
-    (raw_dir / "transcripts.tsv").write_text(
+    (processed_dir / "transcripts.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tsite_type\tseq",
@@ -345,7 +351,9 @@ def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
     (raw_dir / "transcript_class.txt").write_text(
         "\n".join(
@@ -359,7 +367,7 @@ def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    (raw_dir / "intron_eval_flank10.tsv").write_text(
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tlabel",
@@ -371,6 +379,27 @@ def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
                 "tx_true\t1\t0",
                 "tx_contained\t1\t0",
                 "tx_missing\t1\t0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tseq",
+                "tx_false_a\t1\tdonor\tAAAA",
+                "tx_false_a\t1\tacceptor\tCCCC",
+                "tx_false_a\t2\tdonor\tGGGG",
+                "tx_false_a\t2\tacceptor\tTTTT",
+                "tx_false_b\t3\tdonor\tACGT",
+                "tx_false_b\t3\tacceptor\tTGCA",
+                "tx_false_b\t8\tdonor\tCAAA",
+                "tx_false_b\t8\tacceptor\tTTTG",
+                "tx_true\t1\tdonor\tAGGA",
+                "tx_true\t1\tacceptor\tTCCT",
+                "tx_contained\t1\tdonor\tATAT",
+                "tx_contained\t1\tacceptor\tTATA",
             ]
         )
         + "\n",
@@ -513,9 +542,11 @@ def test_collect_species_intron_length_profiles(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
-    (raw_dir / "transcripts.tsv").write_text(
+    (processed_dir / "transcripts.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
@@ -563,9 +594,11 @@ def test_build_intron_count_comparison_rows(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
-    (raw_dir / "transcripts.tsv").write_text(
+    (processed_dir / "transcripts.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
@@ -640,9 +673,11 @@ def test_quality_duplicate_and_overlap_rows(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
-    (raw_dir / "transcripts.tsv").write_text(
+    (processed_dir / "transcripts.tsv").write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tsite_type\tboundary_pos\tseq",
@@ -737,7 +772,9 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
     (raw_dir / "100bp.err").write_text(
         "\n".join(
@@ -760,13 +797,28 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
         + "\n",
         encoding="utf-8",
     )
-    (raw_dir / "intron_eval_flank10.tsv").write_text(
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
         "\n".join(
             [
                 "species\ttranscript_id\tintron_index\tdonor_label\tacceptor_label",
                 "SpX\ttx1\t1\t1\t0",
                 "SpX\ttx2\t2\t0\t1",
                 "SpX\ttx3\t3\t1\t1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tseq",
+                "tx1\t1\tdonor\tAAAA",
+                "tx1\t1\tacceptor\tCCCC",
+                "tx2\t2\tdonor\tTTTT",
+                "tx2\t2\tacceptor\tGGGG",
+                "tx3\t3\tdonor\tPPPP",
+                "tx3\t3\tacceptor\tQQQQ",
             ]
         )
         + "\n",
@@ -792,7 +844,9 @@ def test_build_train_test_site_label_consistency_rows(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
     (raw_dir / "100bp.err").write_text(
         "\n".join(
@@ -816,7 +870,7 @@ def test_build_train_test_site_label_consistency_rows(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    (raw_dir / "intron_eval_flank10.tsv").write_text(
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
         "\n".join(
             [
                 (
@@ -827,6 +881,26 @@ def test_build_train_test_site_label_consistency_rows(tmp_path: Path) -> None:
                 "SpX\ttx2\t2\t0\t0\tTTTT\tGGGG",
                 "SpX\ttx3\t3\t1\t1\tPPPP\tQQQQ",
                 "SpX\ttx4\t4\t1\t0\tXXXX\tYYYY",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "transcript_id\tintron_index\tsite_type\tseq\t"
+                    "donor_seq_100bp\tacceptor_seq_100bp"
+                ),
+                "tx1\t1\tdonor\tAAAA\tAAAA\tCCCC",
+                "tx1\t1\tacceptor\tCCCC\tAAAA\tCCCC",
+                "tx2\t2\tdonor\tTTTT\tTTTT\tGGGG",
+                "tx2\t2\tacceptor\tGGGG\tTTTT\tGGGG",
+                "tx3\t3\tdonor\tPPPP\tPPPP\tQQQQ",
+                "tx3\t3\tacceptor\tQQQQ\tPPPP\tQQQQ",
+                "tx4\t4\tdonor\tXXXX\tXXXX\tYYYY",
+                "tx4\t4\tacceptor\tYYYY\tXXXX\tYYYY",
             ]
         )
         + "\n",
@@ -854,7 +928,9 @@ def test_build_train_test_site_label_consistency_rows_with_bp(tmp_path: Path) ->
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
     (raw_dir / "100bp.err").write_text(
         "DEBUG donor AAXX acceptor XXAA + TX1 10\n",
@@ -864,7 +940,7 @@ def test_build_train_test_site_label_consistency_rows_with_bp(tmp_path: Path) ->
         "DEBUG pair CCCC GGGG + 10\n",
         encoding="utf-8",
     )
-    (raw_dir / "intron_eval_flank10.tsv").write_text(
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
         "\n".join(
             [
                 (
@@ -872,6 +948,20 @@ def test_build_train_test_site_label_consistency_rows_with_bp(tmp_path: Path) ->
                     "acceptor_label\tdonor_seq_100bp\tacceptor_seq_100bp"
                 ),
                 "SpX\ttx1\t1\t1\t1\tAAZZ\tZZAA",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "transcript_id\tintron_index\tsite_type\tseq\t"
+                    "donor_seq_100bp\tacceptor_seq_100bp"
+                ),
+                "tx1\t1\tdonor\tAAZZ\tAAZZ\tZZAA",
+                "tx1\t1\tacceptor\tZZAA\tAAZZ\tZZAA",
             ]
         )
         + "\n",
@@ -900,10 +990,12 @@ def test_build_site_label_count_rows_handles_large_tsv_fields(
     data_root = tmp_path / "data"
     species_dir = data_root / "SpX"
     raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
     raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
 
     large_context = "A" * 150_000
-    (raw_dir / "intron_eval_flank10.tsv").write_text(
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
         "\n".join(
             [
                 (
@@ -912,6 +1004,19 @@ def test_build_site_label_count_rows_handles_large_tsv_fields(
                 ),
                 f"SpX\ttx1\t1\t1\t0\t{large_context}",
                 f"SpX\ttx2\t2\t0\t1\t{large_context}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tseq",
+                "tx1\t1\tdonor\tAAAA",
+                "tx1\t1\tacceptor\tCCCC",
+                "tx2\t2\tdonor\tTTTT",
+                "tx2\t2\tacceptor\tGGGG",
             ]
         )
         + "\n",

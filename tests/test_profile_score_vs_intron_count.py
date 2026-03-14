@@ -24,8 +24,8 @@ from score.profile_score_vs_intron_count import (  # noqa: E402
 def test_load_transcript_intron_counts_counts_unique_intron_indices(
     tmp_path: Path,
 ) -> None:
-    raw_tsv = tmp_path / "transcripts.tsv"
-    raw_tsv.write_text(
+    processed_tsv = tmp_path / "transcripts.tsv"
+    processed_tsv.write_text(
         "\n".join(
             [
                 "transcript_id\tintron_index\tsite_type",
@@ -40,7 +40,7 @@ def test_load_transcript_intron_counts_counts_unique_intron_indices(
         encoding="utf-8",
     )
 
-    counts = load_transcript_intron_counts(raw_tsv)
+    counts = load_transcript_intron_counts(processed_tsv)
 
     assert counts == {"tx1": 2, "tx2": 1}
 

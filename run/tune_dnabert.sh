@@ -20,6 +20,7 @@ DNABERT_VARIANT="2"
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
 PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
+PRETRAINED_MODEL_RELATIVE_PATH_S="pretrained/dnabert-s"
 PRETRAINED_REVISION=""
 QUICK_TRIALS="6"
 QUICK_EPOCHS="3"
@@ -186,23 +187,33 @@ resolve_dnabert_model() {
 	local model_root="$3"
 	local relative_path_2="$4"
 	local relative_path_6="$5"
+	local relative_path_s="$6"
 
-	if [[ "${variant}" != "2" && "${variant}" != "6" ]]; then
-		echo "[tune_dnabert.sh] DNABERT_VARIANT must be 2 or 6." >&2
+	local normalized_variant="${variant,,}"
+	if [[ "${normalized_variant}" != "2" \
+		&& "${normalized_variant}" != "6" \
+		&& "${normalized_variant}" != "s" ]]; then
+		echo "[tune_dnabert.sh] DNABERT_VARIANT must be 2, 6, or s." >&2
 		return 1
 	fi
 
-	MODEL_NAME="dnabert${variant}"
+	if [[ "${normalized_variant}" == "s" ]]; then
+		MODEL_NAME="dnaberts"
+	else
+		MODEL_NAME="dnabert${normalized_variant}"
+	fi
 	if [[ -n "${explicit_pretrained}" ]]; then
 		PRETRAINED_MODEL_NAME_RESOLVED="${explicit_pretrained}"
 		return 0
 	fi
 
 	local relative_path
-	if [[ "${variant}" == "2" ]]; then
+	if [[ "${normalized_variant}" == "2" ]]; then
 		relative_path="${relative_path_2}"
-	else
+	elif [[ "${normalized_variant}" == "6" ]]; then
 		relative_path="${relative_path_6}"
+	else
+		relative_path="${relative_path_s}"
 	fi
 
 	if [[ -z "${relative_path}" ]]; then
@@ -408,7 +419,8 @@ resolve_dnabert_model \
 	"${PRETRAINED_MODEL_NAME}" \
 	"${MODEL_ROOT}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
-	"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+	"${PRETRAINED_MODEL_RELATIVE_PATH_6}" \
+	"${PRETRAINED_MODEL_RELATIVE_PATH_S}"
 TUNING_MODEL_NAME="${MODEL_NAME}"
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="${MODEL_NAME}_trunc"

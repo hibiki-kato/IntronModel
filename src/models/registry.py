@@ -46,6 +46,7 @@ _MODEL_TO_MODULE: dict[str, str] = {
     "dnabert": "models.dnabert",
     "dnabert2": "models.dnabert",
     "dnabert6": "models.dnabert",
+    "dnaberts": "models.dnabert",
     "reservoir": "models.reservoir",
     "reservoir_legacy": "models.reservoir_legacy",
     "cnn_resdil": "models.cnn_resdil",

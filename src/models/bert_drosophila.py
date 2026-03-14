@@ -780,7 +780,7 @@ def main():
     neg_path = f"../data/{species}/train/{bp}bp.neg.err"
     donor_model_dir = "../model/dirosophila/donar/bert"
     acceptor_model_dir = "../model/dirosophila/acceptor/bert"
-    test_tsv = f"../data/{species}/raw/transcripts.tsv"
+    test_tsv = f"../data/{species}/processed/transcripts.tsv"
     output_tsv = f"../data/{species}/trans_score/bert{bp}bp.tsv"
 
     if args.device == "auto":

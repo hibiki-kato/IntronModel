@@ -12,8 +12,8 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced per-task overrides are kept below.
 set -a
-DNABERT_VARIANT="2"
-SPECIES="Hsap"
+DNABERT_VARIANT="S"
+SPECIES="Athal, Dmel, Mmus, Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRUNC_MODE="off"
@@ -21,6 +21,7 @@ TRUNC_MODE="off"
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
 PRETRAINED_MODEL_RELATIVE_PATH_6="pretrained/dnabert6"
+PRETRAINED_MODEL_RELATIVE_PATH_S="pretrained/dnabert-s"
 PRETRAINED_REVISION=""
 TRUST_REMOTE_CODE="1"
 
@@ -135,17 +136,23 @@ resolve_dnabert_relative_path() {
 	local variant="$1"
 	local relative_path_2="$2"
 	local relative_path_6="$3"
+	local relative_path_s="$4"
 
-	if [[ "${variant}" != "2" && "${variant}" != "6" ]]; then
-		echo "[dnabert.sh] DNABERT_VARIANT must be 2 or 6." >&2
+	local normalized_variant="${variant,,}"
+	if [[ "${normalized_variant}" != "2" \
+		&& "${normalized_variant}" != "6" \
+		&& "${normalized_variant}" != "s" ]]; then
+		echo "[dnabert.sh] DNABERT_VARIANT must be 2, 6, or s." >&2
 		return 1
 	fi
 
 	local resolved_path
-	if [[ "${variant}" == "2" ]]; then
+	if [[ "${normalized_variant}" == "2" ]]; then
 		resolved_path="${relative_path_2}"
-	else
+	elif [[ "${normalized_variant}" == "6" ]]; then
 		resolved_path="${relative_path_6}"
+	else
+		resolved_path="${relative_path_s}"
 	fi
 	if [[ -z "${resolved_path}" ]]; then
 		echo "[dnabert.sh] pretrained relative path is empty for variant=${variant}." >&2
@@ -162,7 +169,8 @@ if [[ -z "${PRETRAINED_MODEL_NAME}" ]]; then
 		resolve_dnabert_relative_path \
 			"${DNABERT_VARIANT}" \
 			"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
-			"${PRETRAINED_MODEL_RELATIVE_PATH_6}"
+			"${PRETRAINED_MODEL_RELATIVE_PATH_6}" \
+			"${PRETRAINED_MODEL_RELATIVE_PATH_S}"
 	)"
 	export PRETRAINED_MODEL_RELATIVE_PATH
 fi

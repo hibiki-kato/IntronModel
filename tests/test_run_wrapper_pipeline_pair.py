@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import tools.run_wrapper_pipeline as run_wrapper_pipeline
 from tools.run_wrapper_pipeline import SPECS, WrapperSpec
 from tools.run_wrapper_pipeline import (
@@ -297,3 +299,40 @@ def test_apply_mask_mode_defaults_builds_mask_test_tsv_when_missing(
     )
 
     assert env["TEST_TSV_PATH"] == str(generated)
+
+
+def test_run_single_species_requires_processed_transcripts_tsv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    species = "Dmel"
+    spec = SPECS["cnn_pair.sh"]
+    env: dict[str, str] = {}
+    _apply_wrapper_defaults(spec, env)
+    env["MPS_MAX_BATCH_SIZE"] = "2048"
+    env["MODEL"] = "cnn_pair"
+    env["DONOR_LEN"] = "100"
+    env["ACCEPTOR_LEN"] = "100"
+
+    species_raw_dir = tmp_path / species / "raw"
+    species_raw_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(run_wrapper_pipeline, "_stem_params", lambda *_args: {})
+    monkeypatch.setattr(
+        run_wrapper_pipeline,
+        "build_output_stem",
+        lambda **_kwargs: "unit_stem",
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="Missing required processed unique transcript TSV",
+    ):
+        run_wrapper_pipeline._run_single_species(
+            spec=spec,
+            project_root=tmp_path,
+            data_root=tmp_path,
+            env=env,
+            species=species,
+            process_env={},
+        )

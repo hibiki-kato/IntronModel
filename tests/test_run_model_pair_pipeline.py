@@ -9,6 +9,7 @@ import pytest
 
 import evaluate_scores
 import run_model
+from util.unique_intron import UniqueMapMember
 
 
 class _DummyPairModelModule:
@@ -56,6 +57,51 @@ class _DummyPairModelModule:
                 "score": 0.75,
             },
         ]
+
+
+def test_expand_unique_site_rows_maps_back_members() -> None:
+    """Expand one unique site row into multiple original transcript introns."""
+    unique_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "uintron_00000001",
+            "intron_index": 1,
+            "site_type": "pair",
+            "score": 0.42,
+        }
+    ]
+    unique_map = {
+        ("uintron_00000001", 1): [
+            UniqueMapMember(transcript_id="txA", intron_index=2),
+            UniqueMapMember(transcript_id="txB", intron_index=7),
+        ]
+    }
+
+    mapped = run_model._expand_unique_site_rows(
+        site_score_rows=unique_rows,
+        unique_map=unique_map,
+    )
+
+    assert len(mapped) == 2
+    assert {str(row["transcript_id"]) for row in mapped} == {"txA", "txB"}
+    assert {int(row["intron_index"]) for row in mapped} == {2, 7}
+
+
+def test_expand_unique_site_rows_raises_when_mapping_missing() -> None:
+    """Raise when unique site rows cannot be mapped back to originals."""
+    unique_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "uintron_99999999",
+            "intron_index": 1,
+            "site_type": "pair",
+            "score": 0.42,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="unmapped introns"):
+        _ = run_model._expand_unique_site_rows(
+            site_score_rows=unique_rows,
+            unique_map={},
+        )
 
 
 def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
@@ -138,6 +184,18 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
         evaluate_scores,
         "plot_eval_scores",
         lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("tx1", 2): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
     )
 
     run_model.run_pipeline(args)

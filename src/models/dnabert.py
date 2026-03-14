@@ -16,6 +16,7 @@ from pathlib import Path
 import random
 import shutil
 import sys
+import time
 from typing import (
     ContextManager,
     Dict,
@@ -1464,11 +1465,22 @@ def train_task_model(
             val_loader_kwargs["prefetch_factor"] = prefetch_factor
             val_loader_kwargs["persistent_workers"] = use_persistent_workers
         val_loader = DataLoader(**val_loader_kwargs)
+        train_eval_loader_kwargs: dict[str, object] = {
+            "dataset": train_ds,
+            "batch_size": effective_batch_size,
+            "shuffle": False,
+            "num_workers": resolved_num_workers,
+            "pin_memory": use_pin_memory,
+        }
+        if resolved_num_workers > 0:
+            train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
+            train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
+        train_eval_loader = DataLoader(**train_eval_loader_kwargs)
 
         print(
             f"[{task}] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
-            f"workers={resolved_num_workers}"
+            f"workers={resolved_num_workers} train_eval=on"
         )
 
         try:
@@ -1572,13 +1584,13 @@ def train_task_model(
             best_roc_auc: Optional[float] = None
             best_acc_at_0_5: Optional[float] = None
             epoch_history: list[dict[str, object]] = []
-            log_every = max(1, epochs // 5)
             epochs_completed = 0
             epochs_since_improvement = 0
             stopped_early = False
 
             for epoch in range(1, epochs + 1):
                 epochs_completed = epoch
+                epoch_started_at = time.perf_counter()
                 model.train()
                 running_loss = torch.zeros((), dtype=torch.float64)
                 for input_ids, attention_mask, labels in train_loader:
@@ -1645,9 +1657,18 @@ def train_task_model(
                     use_amp=use_amp_bool,
                     amp_dtype=amp_dtype_resolved,
                 )
+                train_metrics = evaluate(
+                    model=model,
+                    loader=train_eval_loader,
+                    device=device,
+                    use_amp=use_amp_bool,
+                    amp_dtype=amp_dtype_resolved,
+                )
+                train_pr_auc = train_metrics.get("pr_auc")
                 pr_auc = val_metrics.get("pr_auc")
                 roc_auc = val_metrics.get("roc_auc")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
+                epoch_elapsed_sec = time.perf_counter() - epoch_started_at
                 if pr_auc is not None:
                     best_pr_auc = (
                         pr_auc if best_pr_auc is None else max(best_pr_auc, pr_auc)
@@ -1704,9 +1725,12 @@ def train_task_model(
                     {
                         "epoch": epoch,
                         "train_loss": train_loss,
+                        "train_pr_auc": train_pr_auc,
+                        "test_pr_auc": pr_auc,
                         "pr_auc": pr_auc,
                         "roc_auc": roc_auc,
                         "acc@0.5": acc_at_0_5,
+                        "elapsed_sec": epoch_elapsed_sec,
                         "objective_metric": score_name,
                         "objective_score": score,
                         "improved": improved,
@@ -1716,16 +1740,22 @@ def train_task_model(
                     }
                 )
 
-                should_log = (
-                    epoch == 1 or epoch == epochs or epoch % log_every == 0 or improved
+                mark = "*" if improved else "-"
+                train_pr_auc_text = (
+                    "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
                 )
-                if should_log:
-                    mark = "*" if improved else "-"
-                    print(
-                        f"[{task}] {mark} epoch {epoch}/{epochs} "
-                        f"loss={train_loss:.4f} {score_name}={score:.4f} "
-                        f"best={best_score:.4f} (ep {best_epoch})"
-                    )
+                test_pr_auc_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
+                objective_text = (
+                    "" if score_name == "pr_auc" else f"{score_name}={score:.4f} "
+                )
+                print(
+                    f"[{task}] {mark} epoch {epoch}/{epochs} "
+                    f"loss={train_loss:.4f} train_pr_auc={train_pr_auc_text} "
+                    f"test_pr_auc={test_pr_auc_text} "
+                    f"elapsed={epoch_elapsed_sec:.2f}s "
+                    f"{objective_text}best={best_score:.4f} "
+                    f"(ep {best_epoch})"
+                )
 
                 if (
                     early_stop_patience > 0
@@ -1734,7 +1764,8 @@ def train_task_model(
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
-                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                        f"(patience={early_stop_patience}, "
+                        f"min_delta={early_stop_min_delta:g})"
                     )
                     break
 

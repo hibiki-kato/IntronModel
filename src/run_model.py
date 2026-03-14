@@ -52,6 +52,7 @@ from util.transcript_eval import (
     write_site_scores,
     write_transcript_scores,
 )
+from util.unique_intron import UNIQUE_MAP_TSV_NAME, UniqueMapMember, load_unique_map
 
 try:
     from util.losses import LOSS_NAME_CHOICES
@@ -782,7 +783,10 @@ def _resolve_pipeline_paths(
     name_fields = parse_name_fields(args.name_fields)
     name_params = dict(vars(args))
 
-    test_tsv = resolve_test_tsv(args.species, args.test_tsv)
+    if bool(getattr(args, "train_only", False)):
+        test_tsv = str(args.test_tsv) if args.test_tsv is not None else ""
+    else:
+        test_tsv = resolve_test_tsv(args.species, args.test_tsv)
     class_file = args.class_file or os.path.join(dirs["raw"], "transcript_class.txt")
     site_output_tsv = args.site_output_tsv or default_site_output_path(
         species=args.species,
@@ -833,7 +837,7 @@ def _resolve_pipeline_paths(
 
 def _load_optional_intron_labels(
     species: str,
-    labeled_name: str = "intron_eval_flank10.tsv",
+    labeled_name: str = "intron_eval_flank10.unique.tsv",
 ) -> dict[tuple[str, int], int]:
     """Load optional intron labels from ``data/<species>/processed``."""
     _set_csv_field_limit_max()
@@ -861,6 +865,90 @@ def _load_optional_intron_labels(
                 continue
             labels[(transcript_id, intron_index)] = label
     return labels
+
+
+def _load_required_unique_intron_map(
+    *,
+    species: str,
+    map_name: str = UNIQUE_MAP_TSV_NAME,
+) -> dict[tuple[str, int], list[UniqueMapMember]]:
+    """Load required unique->original transcript intron mapping.
+
+    Parameters
+    ----------
+    species : str
+        Species folder name under ``data``.
+    map_name : str, default=UNIQUE_MAP_TSV_NAME
+        Unique map TSV filename under ``data/<species>/processed``.
+
+    Returns
+    -------
+    dict[tuple[str, int], list[object]]
+        Unique map keyed by ``(unique_transcript_id, unique_intron_index)``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the unique map TSV does not exist.
+    ValueError
+        If the map TSV is malformed.
+    """
+    species_dirs = species_data_dirs(species)
+    map_path = Path(species_dirs["base"]) / "processed" / map_name
+    return load_unique_map(map_path)
+
+
+def _expand_unique_site_rows(
+    *,
+    site_score_rows: list[dict[str, object]],
+    unique_map: dict[tuple[str, int], list[UniqueMapMember]],
+) -> list[dict[str, object]]:
+    """Expand unique-intron site rows back to original transcript introns.
+
+    Parameters
+    ----------
+    site_score_rows : list[dict[str, object]]
+        Site-level rows keyed by unique transcript id.
+    unique_map : dict[tuple[str, int], list[object]]
+        Unique map loaded from ``transcripts.unique.map.tsv``.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Expanded rows keyed by original ``(transcript_id, intron_index)``.
+
+    Raises
+    ------
+    ValueError
+        If some site rows cannot be mapped back to original transcript introns.
+    """
+    expanded_rows: list[dict[str, object]] = []
+    missing_keys: set[tuple[str, int]] = set()
+    for row in site_score_rows:
+        unique_transcript_id = str(row["transcript_id"]).strip()
+        unique_intron_index = int(row["intron_index"])
+        unique_key = (unique_transcript_id, unique_intron_index)
+        mapped_members = unique_map.get(unique_key)
+        if mapped_members is None:
+            missing_keys.add(unique_key)
+            continue
+        for member in mapped_members:
+            copied = dict(row)
+            copied["transcript_id"] = member.transcript_id
+            copied["intron_index"] = member.intron_index
+            expanded_rows.append(copied)
+    if missing_keys:
+        examples = ", ".join(
+            f"{transcript_id}:{intron_index}"
+            for transcript_id, intron_index in sorted(missing_keys)[:5]
+        )
+        raise ValueError(
+            "Unique site-score rows contain unmapped introns. "
+            "Ensure processed unique assets are generated and aligned with "
+            "--site_score_tsv. "
+            f"examples={examples}"
+        )
+    return expanded_rows
 
 
 def _resolve_ref_gff_file(
@@ -1121,6 +1209,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         print("[pipeline] --train_only requested. Stop after training stage.")
         return
 
+    unique_map = _load_required_unique_intron_map(species=args.species)
+
     if args.site_score_tsv:
         site_score_tsv = args.site_score_tsv
         site_rows = read_site_scores(site_score_tsv)
@@ -1152,15 +1242,20 @@ def run_pipeline(args: argparse.Namespace) -> None:
     print(f"Saved intron scores: {intron_output_tsv}")
     print(f"Total introns: {len(intron_rows)}")
 
+    mapped_site_rows = _expand_unique_site_rows(
+        site_score_rows=site_rows,
+        unique_map=unique_map,
+    )
+
     if model_tasks == ("pair",):
         transcript_rows = aggregate_pair_transcript_scores(
-            site_score_rows=site_rows,
+            site_score_rows=mapped_site_rows,
             transcript_score_agg=args.transcript_score_agg,
             softmin_tau=args.softmin_tau,
         )
     else:
         transcript_rows = aggregate_transcript_scores(
-            site_score_rows=site_rows,
+            site_score_rows=mapped_site_rows,
             intron_score_op=args.intron_score_op,
             transcript_score_agg=args.transcript_score_agg,
             softmin_tau=args.softmin_tau,

@@ -1044,7 +1044,9 @@ def _compute_test_pr_auc_objective(
         labeled_intron_tsv = Path(str(labeled_intron_raw))
     else:
         data_root = _resolve_hparam_data_root(config.project_root)
-        labeled_intron_tsv = data_root / species / "processed" / "intron_eval_flank10.tsv"
+        labeled_intron_tsv = (
+            data_root / species / "processed" / "intron_eval_flank10.unique.tsv"
+        )
 
     intron_score_op_raw = merged_args.get("intron_score_op", "*")
     intron_score_op = str(intron_score_op_raw).strip() or "*"

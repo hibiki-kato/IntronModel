@@ -21,7 +21,7 @@ PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
     "Athal": (10.0, 52.0, 48.0, 75.0),
     "Dmel": (40.0, 52.0, 40.0, 55.0),
     "Mmus": (10.0, 18.0, 40.0, 46.0),
-    "Hsap": (10.0, 19.0, 26.0, 35.0),
+    "Hsap": (10.0, 19.0, 27.0, 38.0),
 }
 FALLBACK_PLOT_BOUNDS: tuple[float, float, float, float] = (40.0, 50.0, 40.0, 50.0)
 
@@ -120,8 +120,7 @@ def count_reference_transcripts(ref_gff: str | Path) -> int:
 
     if reference_count <= 0:
         raise ValueError(
-            "Failed to derive positive reference count from ref_gff: "
-            f"{ref_gff}"
+            f"Failed to derive positive reference count from ref_gff: {ref_gff}"
         )
     return reference_count
 
@@ -206,8 +205,7 @@ def evaluate_score_file(
         if sensitivity + precision > 0.0:
             f1 = 2.0 * (sensitivity * precision) / (sensitivity + precision)
         output_lines.append(
-            f"{transcript_id} {score} {class_code} "
-            f"{sensitivity} {precision} {f1}"
+            f"{transcript_id} {score} {class_code} {sensitivity} {precision} {f1}"
         )
 
     return output_lines
@@ -285,10 +283,7 @@ def resolve_plot_bounds(
     default_bounds = PLOT_BOUNDS_BY_SPECIES.get(species)
     if default_bounds is None:
         missing_all_bounds = (
-            x_min is None
-            and x_max is None
-            and y_min is None
-            and y_max is None
+            x_min is None and x_max is None and y_min is None and y_max is None
         )
         if missing_all_bounds:
             supported = ", ".join(sorted(PLOT_BOUNDS_BY_SPECIES))
@@ -355,9 +350,7 @@ def _connect_interactive_legend_toggle(
         label = legend_text.get_text()
         plotted_artist = labeled_artists.get(label)
         if plotted_artist is None:
-            raise ValueError(
-                f"Legend label '{label}' does not match a plotted artist."
-            )
+            raise ValueError(f"Legend label '{label}' does not match a plotted artist.")
         legend_handle.set_picker(True)
         legend_text.set_picker(True)
         _sync_legend_entry_visibility(
@@ -540,8 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate transcript scores and/or visualize "
-            "sensitivity-precision curves"
+            "Evaluate transcript scores and/or visualize sensitivity-precision curves"
         )
     )
     subparsers = parser.add_subparsers(dest="command")

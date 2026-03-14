@@ -24,7 +24,7 @@ def test_resolve_plot_bounds_for_hsap_defaults() -> None:
         y_min=None,
         y_max=None,
     )
-    assert bounds == (10.0, 19.0, 26.0, 35.0)
+    assert bounds == (10.0, 19.0, 27.0, 38.0)
 
 
 def test_resolve_plot_bounds_unknown_species_requires_explicit_bounds() -> None:

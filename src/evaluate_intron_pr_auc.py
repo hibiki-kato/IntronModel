@@ -62,6 +62,12 @@ class IntronEvalRow:
         Acceptor site score when available.
     pair_score : float | None
         Pair-model score when available.
+    seen_train_pos_coord : int
+        1 when the coordinate appears in train-positive introns.
+    seen_train_neg_seq : int
+        1 when donor/acceptor sequence pair appears in train negatives.
+    seen_train_any : int
+        OR of ``seen_train_pos_coord`` and ``seen_train_neg_seq``.
     """
 
     transcript_id: str
@@ -71,6 +77,19 @@ class IntronEvalRow:
     donor_score: float | None
     acceptor_score: float | None
     pair_score: float | None
+    seen_train_pos_coord: int
+    seen_train_neg_seq: int
+    seen_train_any: int
+
+
+@dataclass(frozen=True)
+class LabeledIntronRecord:
+    """One labeled intron record keyed by ``(transcript_id, intron_index)``."""
+
+    label: int
+    seen_train_pos_coord: int
+    seen_train_neg_seq: int
+    seen_train_any: int
 
 
 @dataclass(frozen=True)
@@ -82,6 +101,10 @@ class IntronEvalSummary:
     used_introns: int
     skipped_missing_score_introns: int
     unlabeled_site_score_introns: int
+    seen_train_any_introns: int
+    unseen_train_any_introns: int
+    seen_train_pos_coord_introns: int
+    seen_train_neg_seq_introns: int
     positive_count: int
     negative_count: int
     positive_fraction: float
@@ -216,14 +239,32 @@ def compute_roc_auc(labels: np.ndarray, scores: np.ndarray) -> float:
     return _fallback_roc_auc(labels, scores)
 
 
-def _read_labeled_introns(path: Path) -> dict[tuple[str, int], int]:
+def _parse_optional_seen_flag(
+    *,
+    raw_value: str,
+    column_name: str,
+    path: Path,
+    line_no: int,
+) -> int:
+    """Parse one optional seen flag to ``0`` or ``1``."""
+    value = raw_value.strip().lower()
+    if value in {"", "0", "false", "f", "no", "n"}:
+        return 0
+    if value in {"1", "true", "t", "yes", "y"}:
+        return 1
+    raise ValueError(
+        f"Invalid {column_name} at {path}:{line_no}: expected 0/1, got {raw_value}"
+    )
+
+
+def _read_labeled_introns(path: Path) -> dict[tuple[str, int], LabeledIntronRecord]:
     """Read labeled intron TSV keyed by ``(transcript_id, intron_index)``."""
     if not path.exists():
         raise FileNotFoundError(f"Labeled intron TSV not found: {path}")
     _set_csv_field_limit_max()
 
     required = {"transcript_id", "intron_index", "label"}
-    labels: dict[tuple[str, int], int] = {}
+    labels: dict[tuple[str, int], LabeledIntronRecord] = {}
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -252,14 +293,44 @@ def _read_labeled_introns(path: Path) -> dict[tuple[str, int], int]:
                     f"Label must be 0/1 at {path}:{line_no}; got {label}"
                 )
 
+            seen_train_pos_coord = _parse_optional_seen_flag(
+                raw_value=str(raw.get("seen_train_pos_coord", "")),
+                column_name="seen_train_pos_coord",
+                path=path,
+                line_no=line_no,
+            )
+            seen_train_neg_seq = _parse_optional_seen_flag(
+                raw_value=str(raw.get("seen_train_neg_seq", "")),
+                column_name="seen_train_neg_seq",
+                path=path,
+                line_no=line_no,
+            )
+            seen_train_any = _parse_optional_seen_flag(
+                raw_value=str(raw.get("seen_train_any", "")),
+                column_name="seen_train_any",
+                path=path,
+                line_no=line_no,
+            )
+            expected_seen_any = int(
+                seen_train_pos_coord == 1 or seen_train_neg_seq == 1
+            )
+            if seen_train_any != expected_seen_any:
+                seen_train_any = expected_seen_any
+
             key = (transcript_id, intron_index)
+            record = LabeledIntronRecord(
+                label=label,
+                seen_train_pos_coord=seen_train_pos_coord,
+                seen_train_neg_seq=seen_train_neg_seq,
+                seen_train_any=seen_train_any,
+            )
             previous = labels.get(key)
-            if previous is not None and previous != label:
+            if previous is not None and previous != record:
                 raise ValueError(
                     "Conflicting labels for key "
                     f"{transcript_id}:{intron_index} in {path}"
                 )
-            labels[key] = label
+            labels[key] = record
 
     if not labels:
         raise ValueError(f"No valid labeled introns found: {path}")
@@ -357,7 +428,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                     intron_index = int(parts[1].strip())
                 except ValueError as exc:
                     raise ValueError(
-                        f"Invalid intron_index in Transcript number at "
+                        "Invalid intron_index in Transcript number at "
                         f"{path}:{line_no}"
                     ) from exc
                 combined_raw = parts[2].strip()
@@ -367,7 +438,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                     )
                 except ValueError as exc:
                     raise ValueError(
-                        f"Invalid combined score in Transcript number at "
+                        "Invalid combined score in Transcript number at "
                         f"{path}:{line_no}"
                     ) from exc
 
@@ -523,7 +594,7 @@ def evaluate_labeled_introns(
     skipped_missing_score_introns = 0
 
     for key in sorted(labels_by_key.keys()):
-        label = labels_by_key[key]
+        label_record = labels_by_key[key]
         site_scores = site_scores_by_key.get(key)
         if site_scores is None:
             skipped_missing_score_introns += 1
@@ -547,11 +618,14 @@ def evaluate_labeled_introns(
             IntronEvalRow(
                 transcript_id=key[0],
                 intron_index=key[1],
-                label=label,
+                label=label_record.label,
                 intron_score=float(intron_score),
                 donor_score=donor_score,
                 acceptor_score=acceptor_score,
                 pair_score=pair_score,
+                seen_train_pos_coord=label_record.seen_train_pos_coord,
+                seen_train_neg_seq=label_record.seen_train_neg_seq,
+                seen_train_any=label_record.seen_train_any,
             )
         )
 
@@ -573,6 +647,13 @@ def evaluate_labeled_introns(
             "Both positive and negative labels are required for PR-AUC/ROC-AUC."
         )
 
+    seen_train_any_introns = int(sum(row.seen_train_any for row in rows))
+    seen_train_pos_coord_introns = int(
+        sum(row.seen_train_pos_coord for row in rows)
+    )
+    seen_train_neg_seq_introns = int(sum(row.seen_train_neg_seq for row in rows))
+    unseen_train_any_introns = int(len(rows) - seen_train_any_introns)
+
     pr_auc = compute_average_precision(labels, scores)
     roc_auc = compute_roc_auc(labels, scores)
 
@@ -585,6 +666,10 @@ def evaluate_labeled_introns(
         used_introns=len(rows),
         skipped_missing_score_introns=skipped_missing_score_introns,
         unlabeled_site_score_introns=unlabeled_site_score_introns,
+        seen_train_any_introns=seen_train_any_introns,
+        unseen_train_any_introns=unseen_train_any_introns,
+        seen_train_pos_coord_introns=seen_train_pos_coord_introns,
+        seen_train_neg_seq_introns=seen_train_neg_seq_introns,
         positive_count=positive_count,
         negative_count=negative_count,
         positive_fraction=float(positive_count / len(rows)),
@@ -608,6 +693,9 @@ def _write_eval_rows_tsv(path: Path, rows: list[IntronEvalRow]) -> None:
         "donor_score",
         "acceptor_score",
         "pair_score",
+        "seen_train_pos_coord",
+        "seen_train_neg_seq",
+        "seen_train_any",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -631,6 +719,9 @@ def _write_eval_rows_tsv(path: Path, rows: list[IntronEvalRow]) -> None:
                     "pair_score": (
                         "" if row.pair_score is None else f"{row.pair_score:.8f}"
                     ),
+                    "seen_train_pos_coord": row.seen_train_pos_coord,
+                    "seen_train_neg_seq": row.seen_train_neg_seq,
+                    "seen_train_any": row.seen_train_any,
                 }
             )
 
@@ -699,6 +790,8 @@ def main(argv: list[str] | None = None) -> int:
         f"used={summary.used_introns} "
         f"pos={summary.positive_count} "
         f"neg={summary.negative_count} "
+        f"seen_any={summary.seen_train_any_introns} "
+        f"unseen_any={summary.unseen_train_any_introns} "
         f"missing={summary.skipped_missing_score_introns} "
         f"unlabeled_site_only={summary.unlabeled_site_score_introns} "
         f"pr_auc={summary.pr_auc:.6f} "

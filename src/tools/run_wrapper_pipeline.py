@@ -751,8 +751,8 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
 def _validate_dnabert_specific(env: Mapping[str, str]) -> None:
     """Validate DNABERT-specific wrapper controls."""
 
-    variant = _require_env(env, "DNABERT_VARIANT")
-    _check_choice(variant, ("2", "6"), "DNABERT_VARIANT")
+    variant = _require_env(env, "DNABERT_VARIANT").strip().lower()
+    _check_choice(variant, ("2", "6", "s"), "DNABERT_VARIANT")
     _check_choice(
         _require_env(env, "TRUST_REMOTE_CODE"),
         ("0", "1"),
@@ -763,8 +763,11 @@ def _validate_dnabert_specific(env: Mapping[str, str]) -> None:
 def _resolve_dnabert_model(env: dict[str, str], model_root: Path) -> None:
     """Populate MODEL and default pretrained path for DNABERT wrappers."""
 
-    variant = _require_env(env, "DNABERT_VARIANT")
-    env["MODEL"] = f"dnabert{variant}"
+    variant = _require_env(env, "DNABERT_VARIANT").strip().lower()
+    if variant == "s":
+        env["MODEL"] = "dnaberts"
+    else:
+        env["MODEL"] = f"dnabert{variant}"
 
     if env.get("PRETRAINED_MODEL_NAME", "").strip() == "":
         relative = _require_env(env, "PRETRAINED_MODEL_RELATIVE_PATH")
@@ -1051,7 +1054,7 @@ def _apply_mask_mode_defaults(
 
     print(
         f"[{species}] mask-mode test_tsv not found/generated; "
-        "fallback to default transcript TSV search order.",
+        "falling back to processed/transcripts.unique.tsv default.",
         file=sys.stderr,
     )
 
@@ -1182,11 +1185,17 @@ def _run_single_species(
     if raw_test_tsv_path != "":
         test_tsv = Path(raw_test_tsv_path)
     else:
-        processed_test_tsv = data_root / species / "processed" / "transcripts.tsv"
-        if processed_test_tsv.is_file():
-            test_tsv = processed_test_tsv
-        else:
-            test_tsv = data_root / species / "raw" / "transcripts.tsv"
+        processed_test_tsv = (
+            data_root / species / "processed" / "transcripts.unique.tsv"
+        )
+        if not processed_test_tsv.is_file():
+            raise FileNotFoundError(
+                "Missing required processed unique transcript TSV. "
+                f"species={species} path={processed_test_tsv}. "
+                "Generate it with run/make_unique_intron_assets.sh "
+                "or set TEST_TSV_PATH."
+            )
+        test_tsv = processed_test_tsv
     raw_class_file_path = env.get("CLASS_FILE_PATH", "").strip()
     if raw_class_file_path != "":
         class_file = Path(raw_class_file_path)

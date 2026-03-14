@@ -10,7 +10,7 @@ Options:
   --data-root <path>           Data root (default: <repo>/data)
   --labeled-tsv <path>         Override labeled intron TSV path
   --labeled-name <filename>    Labeled TSV under data/<species>/processed
-                               (default: intron_eval_flank10.tsv)
+                               (default: intron_eval_flank10.unique.tsv)
   --site-score-tsv <path>      Evaluate only this site_score TSV
   --site-score-pattern <glob>  Pattern under data/<species>/site_score
                                (default: *.tsv)
@@ -32,7 +32,7 @@ CONDA_ENV="intronmodel"
 SPECIES="Dmel,Mmus,Athal,Hsap"
 DATA_ROOT=""
 LABELED_TSV=""
-LABELED_NAME="intron_eval_flank10.tsv"
+LABELED_NAME="intron_eval_flank10.unique.tsv"
 SITE_SCORE_TSV=""
 SITE_SCORE_PATTERN="*.tsv"
 INTRON_SCORE_OP="*"
@@ -167,7 +167,7 @@ for raw_species in "${species_tokens[@]}"; do
 	summary_tsv="${summary_dir}/${SUMMARY_NAME}"
 
 	printf '%s\n' \
-		"species	site_score_tsv	summary_json	used_introns	positive_count	negative_count	positive_fraction	pr_auc	roc_auc	skipped_missing_score_introns	unlabeled_site_score_introns	intron_score_op	score_source" \
+		"species	site_score_tsv	summary_json	used_introns	positive_count	negative_count	positive_fraction	pr_auc	roc_auc	skipped_missing_score_introns	unlabeled_site_score_introns	seen_train_any_introns	unseen_train_any_introns	seen_train_pos_coord_introns	seen_train_neg_seq_introns	intron_score_op	score_source" \
 		> "${summary_tsv}"
 
 	site_files=()
@@ -242,6 +242,10 @@ row = [
     str(payload["roc_auc"]),
     str(payload["skipped_missing_score_introns"]),
     str(payload["unlabeled_site_score_introns"]),
+    str(payload["seen_train_any_introns"]),
+    str(payload["unseen_train_any_introns"]),
+    str(payload["seen_train_pos_coord_introns"]),
+    str(payload["seen_train_neg_seq_introns"]),
     str(payload["intron_score_op"]),
     str(payload["score_source"]),
 ]

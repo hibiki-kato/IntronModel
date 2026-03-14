@@ -267,3 +267,42 @@ def test_evaluate_labeled_introns_supports_donor_only_score_source(
     assert summary.pr_auc == pytest.approx(1.0)
     assert summary.roc_auc == pytest.approx(1.0)
     assert len(rows) == 4
+
+
+def test_evaluate_labeled_introns_counts_seen_flags(tmp_path: Path) -> None:
+    """Aggregate seen/unseen counts from optional labeled seen-flag columns."""
+    labeled_tsv = tmp_path / "labeled.tsv"
+    site_score_tsv = tmp_path / "site_score.tsv"
+    _write_text(
+        labeled_tsv,
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tlabel\tseen_train_pos_coord\tseen_train_neg_seq\tseen_train_any",
+                "tx1\t1\t1\t1\t0\t1",
+                "tx2\t1\t0\t0\t1\t1",
+                "tx3\t1\t1\t0\t0\t0",
+            ]
+        )
+        + "\n",
+    )
+    _write_site_score_tsv(
+        site_score_tsv,
+        rows=[
+            ("tx1", 1, "pair", 0.9),
+            ("tx2", 1, "pair", 0.2),
+            ("tx3", 1, "pair", 0.8),
+        ],
+    )
+
+    summary, rows = evaluate_labeled_introns(
+        labeled_tsv=labeled_tsv,
+        site_score_tsv=site_score_tsv,
+        intron_score_op="*",
+        score_source="pair",
+    )
+
+    assert len(rows) == 3
+    assert summary.seen_train_any_introns == 2
+    assert summary.unseen_train_any_introns == 1
+    assert summary.seen_train_pos_coord_introns == 1
+    assert summary.seen_train_neg_seq_introns == 1

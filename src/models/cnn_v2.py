@@ -404,7 +404,7 @@ def main():
         device,
     )
 
-    test_tsv = f"../data/{species}/raw/transcripts.tsv"
+    test_tsv = f"../data/{species}/processed/transcripts.tsv"
     output_tsv = f"../data/{species}/trans_score/cnn{bp}bp.tsv"
 
     score_test_sites(
