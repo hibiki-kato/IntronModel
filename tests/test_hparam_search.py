@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from queue import Queue
 from typing import Optional, cast
 
 import pytest
@@ -288,6 +290,124 @@ def test_prewarm_persistent_trial_worker_calls_model_hook(
 
     assert captured["assigned_gpu_id"] == "1"
     assert cast(dict[str, object], captured["base_args"])["model"] == "dnabert"
+
+
+def test_persistent_worker_sets_visible_gpu_before_prewarm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1337,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=2,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "dnabert",
+            "species": "Dmel",
+            "batch_size": 16,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space={
+            "batch_size": {"type": "categorical", "values": [16]},
+        },
+    )
+    captured_env: dict[str, str] = {}
+
+    def _fake_prewarm(
+        *,
+        config: hparam_search.SearchConfig,
+        assigned_gpu_id: str | None,
+    ) -> None:
+        del config, assigned_gpu_id
+        captured_env["prewarm"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+    def _fake_run_trial_inprocess(
+        *,
+        config: hparam_search.SearchConfig,
+        phase: str,
+        trial_id: int,
+        sampled_params: dict[str, hparam_search.Scalar],
+        overrides: dict[str, hparam_search.ArgValue],
+        assigned_gpu_id: str | None,
+        metrics_json: Path,
+        log_file: Path,
+    ) -> hparam_search.TrialResult:
+        del overrides
+        captured_env["trial"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        return hparam_search.TrialResult(
+            phase=phase,
+            trial_id=trial_id,
+            status="success",
+            gpu_id=assigned_gpu_id,
+            sampled_params=sampled_params,
+            effective_batch_size=16,
+            oom_retries=0,
+            donor_pr_auc=0.6,
+            acceptor_pr_auc=0.7,
+            mean_pr_auc=0.65,
+            objective_metric=config.objective_metric,
+            objective_score=0.65,
+            error_message=None,
+            return_code=0,
+            duration_sec=0.01,
+            metrics_json=str(metrics_json),
+            log_file=str(log_file),
+        )
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(
+        hparam_search,
+        "_prewarm_persistent_trial_worker",
+        _fake_prewarm,
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "run_trial_inprocess",
+        _fake_run_trial_inprocess,
+    )
+
+    task_queue: Queue[object] = Queue()
+    result_queue: Queue[object] = Queue()
+    task_queue.put(
+        hparam_search.PersistentTrialTask(
+            trial_id=0,
+            sampled_params={"batch_size": 16},
+            metrics_json=str(tmp_path / "metrics.json"),
+            log_file=str(tmp_path / "trial.log"),
+        )
+    )
+    task_queue.put(None)
+
+    hparam_search._persistent_trial_worker_main(
+        slot_index=0,
+        assigned_gpu_id="6",
+        config=config,
+        phase="quick",
+        overrides={},
+        stream_mode="silent",
+        max_parallel_trials=1,
+        task_queue=task_queue,
+        result_queue=result_queue,
+    )
+
+    outcome = result_queue.get_nowait()
+    assert isinstance(outcome, hparam_search.PersistentTrialOutcome)
+    assert captured_env["prewarm"] == "6"
+    assert captured_env["trial"] == "6"
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") == "0"
 
 
 @pytest.mark.parametrize(

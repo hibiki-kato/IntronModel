@@ -70,14 +70,14 @@ TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
 PROCESS_TITLE="${PROCESS_TITLE:-tune_dnabert}"
 
-# Practical search space for consumer GPUs (~12GB) and smaller DNABERT runs.
+# Practical search space with optional larger batches for high-VRAM GPUs.
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [8, 12, 16, 24, 32]
+    "values": [8, 12, 16, 24, 32, 48, 64, 96, 128]
   },
   "loss": {
     "type": "categorical",
@@ -114,7 +114,7 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [8, 12, 16, 24, 32]
+    "values": [8, 12, 16, 24, 32, 48, 64, 96, 128]
   },
   "loss": {
     "type": "categorical",

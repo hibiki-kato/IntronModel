@@ -4088,6 +4088,11 @@ def _persistent_trial_worker_main(
     """Persistent worker loop that executes multiple trials in one process."""
     previous_stream_mode = _set_active_trial_stream_mode(stream_mode)
     previous_parallel = _set_active_max_parallel_trials(max_parallel_trials)
+    previous_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if assigned_gpu_id is not None:
+        # CUDA_VISIBLE_DEVICES must be fixed before prewarm/training so CUDA
+        # runtime initialization cannot bind this worker to an unintended GPU.
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(assigned_gpu_id)
     try:
         _prewarm_persistent_trial_worker(
             config=config,
@@ -4128,6 +4133,11 @@ def _persistent_trial_worker_main(
                 )
             )
     finally:
+        if assigned_gpu_id is not None:
+            if previous_cuda_visible is None:
+                _ = os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = previous_cuda_visible
         _set_active_max_parallel_trials(previous_parallel)
         _set_active_trial_stream_mode(previous_stream_mode)
 

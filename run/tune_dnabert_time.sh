@@ -90,7 +90,7 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [8, 12, 16, 24, 32]
+    "values": [8, 12, 16, 24, 32, 48, 64, 96, 128]
   },
   "loss": {
     "type": "categorical",
@@ -127,7 +127,7 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [8, 12, 16, 24, 32]
+    "values": [8, 12, 16, 24, 32, 48, 64, 96, 128]
   },
   "loss": {
     "type": "categorical",

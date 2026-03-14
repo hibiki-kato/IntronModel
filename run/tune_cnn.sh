@@ -81,7 +81,7 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096]
+    "values": [128, 256, 512, 1024, 2048, 4096, 6144, 8192]
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.7, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-6, "max": 1e-2, "scale": "log"},
@@ -132,7 +132,7 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096, 8192]
+    "values": [128, 256, 512, 1024, 2048, 4096, 6144, 8192, 12288]
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
