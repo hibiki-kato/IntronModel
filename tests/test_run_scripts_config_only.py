@@ -104,6 +104,18 @@ def test_dnabert_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_dnabert_pair_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_dnabert_pair.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_reservoir_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "reservoir.sh"
     run = subprocess.run(
@@ -321,6 +333,12 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
+    dnabert_pair = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_dnabert_pair.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     reservoir = subprocess.run(
         ["bash", "-n", str(root / "run" / "reservoir.sh")],
         capture_output=True,
@@ -433,6 +451,7 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert tcn.returncode == 0, tcn.stderr
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr
+    assert dnabert_pair.returncode == 0, dnabert_pair.stderr
     assert reservoir.returncode == 0, reservoir.stderr
     assert markov_xgb.returncode == 0, markov_xgb.stderr
     assert tune_resdil.returncode == 0, tune_resdil.stderr

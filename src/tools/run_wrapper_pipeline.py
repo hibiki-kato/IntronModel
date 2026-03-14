@@ -426,7 +426,7 @@ def _resolve_tuned_model_name(
         tuned_hparams_mode,
         "TUNED_HPARAMS_MODE",
     )
-    if spec.script_name == "dnabert.sh":
+    if spec.script_name in {"dnabert.sh", "dnabert_pair.sh"}:
         resolved = model_name
         if normalized_mode == "on":
             resolved = f"{model_name}_trunc"
@@ -581,7 +581,7 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         "seed": _as_int(_require_env(env, "SEED"), "SEED"),
         "train_target": _require_env(env, "TRAIN_TARGET"),
     }
-    if builder != "cnn_pair":
+    if builder not in {"cnn_pair", "dnabert_pair"}:
         base["intron_score_op"] = _require_env(env, "INTRON_SCORE_OP")
     tag_value = env.get("TAG", "").strip()
     if tag_value != "":
@@ -629,7 +629,7 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         base["tcn_causal"] = _as_int(_require_env(env, "TCN_CAUSAL"), "TCN_CAUSAL")
         base["head_type"] = _require_env(env, "HEAD_TYPE")
 
-    if builder in {"bert", "dnabert"}:
+    if builder in {"bert", "dnabert", "dnabert_pair"}:
         base["dropout"] = _as_float(_require_env(env, "DROPOUT"), "DROPOUT")
 
     return base
@@ -760,14 +760,23 @@ def _validate_dnabert_specific(env: Mapping[str, str]) -> None:
     )
 
 
-def _resolve_dnabert_model(env: dict[str, str], model_root: Path) -> None:
+def _resolve_dnabert_model(
+    env: dict[str, str],
+    model_root: Path,
+    *,
+    pair_mode: bool = False,
+) -> None:
     """Populate MODEL and default pretrained path for DNABERT wrappers."""
 
     variant = _require_env(env, "DNABERT_VARIANT").strip().lower()
+    resolved_model: str
     if variant == "s":
-        env["MODEL"] = "dnaberts"
+        resolved_model = "dnaberts"
     else:
-        env["MODEL"] = f"dnabert{variant}"
+        resolved_model = f"dnabert{variant}"
+    if pair_mode:
+        resolved_model = f"{resolved_model}_pair"
+    env["MODEL"] = resolved_model
 
     if env.get("PRETRAINED_MODEL_NAME", "").strip() == "":
         relative = _require_env(env, "PRETRAINED_MODEL_RELATIVE_PATH")
@@ -1249,7 +1258,7 @@ def _run_single_species(
         ]
     )
 
-    if spec.script_name == "dnabert.sh":
+    if spec.script_name in {"dnabert.sh", "dnabert_pair.sh"}:
         is_skip = env.get("SKIP_TRAINING", "0") == "1"
         has_precomputed = env.get("PRECOMPUTED_SITE_SCORE_TSV", "") != ""
         if is_skip and not has_precomputed:
@@ -1799,9 +1808,13 @@ def _run(spec: WrapperSpec) -> int:
 
     env = dict(os.environ)
 
-    if spec.script_name == "dnabert.sh":
+    if spec.script_name in {"dnabert.sh", "dnabert_pair.sh"}:
         _validate_dnabert_specific(env)
-        _resolve_dnabert_model(env, model_root)
+        _resolve_dnabert_model(
+            env,
+            model_root,
+            pair_mode=(spec.script_name == "dnabert_pair.sh"),
+        )
 
     _apply_wrapper_defaults(spec, env)
     _validate_common(spec, env)
@@ -2505,6 +2518,72 @@ SPECS: dict[str, WrapperSpec] = {
             "ASYM_GAMMA_NEG",
             "ASYM_ALPHA_POS",
         ),
+    ),
+    "dnabert_pair.sh": WrapperSpec(
+        script_name="dnabert_pair.sh",
+        model_env_name="dnabert_pair",
+        supports_tuned_hparams=True,
+        tuned_key_map={
+            "batch_size": "BATCH_SIZE",
+            "lr": "LR",
+            "loss": "LOSS",
+            "max_tokens": "MAX_TOKENS",
+            "dropout": "DROPOUT",
+            "weight_decay": "WEIGHT_DECAY",
+            "eta_min_ratio": "ETA_MIN_RATIO",
+            "val_frac": "VAL_FRAC",
+            "grad_clip": "GRAD_CLIP",
+            "pos_weight_cap": "POS_WEIGHT_CAP",
+            "focal_gamma": "FOCAL_GAMMA",
+            "focal_alpha_pos": "FOCAL_ALPHA_POS",
+            "asym_gamma_pos": "ASYM_GAMMA_POS",
+            "asym_gamma_neg": "ASYM_GAMMA_NEG",
+            "asym_alpha_pos": "ASYM_ALPHA_POS",
+        },
+        stem_param_builder="dnabert_pair",
+        required_arg_keys=(
+            "SPECIES",
+            "DONOR_LEN",
+            "ACCEPTOR_LEN",
+            "PRETRAINED_MODEL_NAME",
+            "PRETRAINED_REVISION",
+            "TRUST_REMOTE_CODE",
+            "EPOCHS",
+            "MAX_EPOCHS",
+            "EARLY_STOP_PATIENCE",
+            "EARLY_STOP_MIN_DELTA",
+            "TRAIN_TARGET",
+            "BATCH_SIZE",
+            "LR",
+            "LOSS",
+            "MAX_TOKENS",
+            "DROPOUT",
+            "WEIGHT_DECAY",
+            "ETA_MIN_RATIO",
+            "GRAD_CLIP",
+            "VAL_FRAC",
+            "POS_WEIGHT_CAP",
+            "FOCAL_GAMMA",
+            "NAME_FIELDS",
+            "TRANSCRIPT_SCORE_AGG",
+            "SOFTMIN_TAU",
+            "SEED",
+            "DEVICE",
+            "VISUALIZE",
+            "USE_AMP",
+            "AMP_DTYPE",
+            "COMPILE_MODE",
+            "ALLOW_TF32",
+            "CUDNN_BENCHMARK",
+            "DETERMINISTIC",
+            "NUM_WORKERS",
+            "PREFETCH_FACTOR",
+            "PERSISTENT_WORKERS",
+            "PIN_MEMORY",
+            "MIN_BATCH_SIZE",
+            "MAX_OOM_RETRIES",
+        ),
+        per_task_override_keys=(),
     ),
     "markov_xgboost.sh": WrapperSpec(
         script_name="markov_xgboost.sh",

@@ -194,6 +194,15 @@ def test_resolve_tuned_model_name_combines_mask_and_cheat_suffixes() -> None:
     assert resolved == "cnn_mask_cheat"
 
 
+def test_resolve_tuned_model_name_appends_trunc_suffix_for_dnabert_pair() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["dnabert_pair.sh"],
+        model_name="dnabert2_pair",
+        mask_mode="on",
+    )
+    assert resolved == "dnabert2_pair_trunc"
+
+
 def test_apply_cheat_mode_defaults_appends_cheat_to_tag_and_name_fields() -> None:
     env: dict[str, str] = {
         "TUNED_HPARAMS_MODE": "cheat",

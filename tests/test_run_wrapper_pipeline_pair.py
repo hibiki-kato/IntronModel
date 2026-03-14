@@ -192,6 +192,15 @@ def test_markov_xgboost_spec_single_task_pair() -> None:
     assert "XGB_N_ESTIMATORS" in spec.required_arg_keys
 
 
+def test_dnabert_pair_spec_single_task_pair() -> None:
+    spec = SPECS["dnabert_pair.sh"]
+
+    assert spec.model_env_name == "dnabert_pair"
+    assert spec.stem_param_builder == "dnabert_pair"
+    assert "TRAIN_TARGET" in spec.required_arg_keys
+    assert "INTRON_SCORE_OP" not in spec.required_arg_keys
+
+
 def test_stem_params_for_markov_xgboost_builder() -> None:
     params = _stem_params(
         "markov_xgboost",
@@ -215,6 +224,33 @@ def test_stem_params_for_markov_xgboost_builder() -> None:
     assert params["markov_feature_mode"] == "per_base"
     assert params["train_target"] == "pair"
     assert params["tag"] == "mxgb"
+
+
+def test_stem_params_for_dnabert_pair_excludes_intron_score_op() -> None:
+    params = _stem_params(
+        "dnabert_pair",
+        {
+            "DONOR_LEN": "100",
+            "ACCEPTOR_LEN": "100",
+            "EPOCHS": "6",
+            "BATCH_SIZE": "32",
+            "LR": "2e-5",
+            "LOSS": "weighted_bce",
+            "WEIGHT_DECAY": "0.01",
+            "ETA_MIN_RATIO": "0.01",
+            "GRAD_CLIP": "1.0",
+            "VAL_FRAC": "0.1",
+            "TRANSCRIPT_SCORE_AGG": "min",
+            "SOFTMIN_TAU": "1.0",
+            "SEED": "1337",
+            "TRAIN_TARGET": "pair",
+            "MAX_TOKENS": "auto",
+            "DROPOUT": "0.1",
+        },
+    )
+
+    assert params["train_target"] == "pair"
+    assert "intron_score_op" not in params
 
 
 def test_resolve_species_path_template_replaces_all_tokens() -> None:

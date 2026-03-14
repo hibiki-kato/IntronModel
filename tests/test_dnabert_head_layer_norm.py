@@ -120,3 +120,10 @@ def test_add_train_args_includes_head_layer_norm_options() -> None:
     assert args.head_layer_norm == 0
     assert args.donor_head_layer_norm == 1
     assert args.acceptor_head_layer_norm == 0
+
+
+def test_add_train_args_accepts_pair_train_target() -> None:
+    parser = argparse.ArgumentParser()
+    dnabert.add_train_args(parser)
+    args = parser.parse_args(["--train_target", "pair"])
+    assert args.train_target == "pair"

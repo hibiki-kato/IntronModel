@@ -9,6 +9,10 @@ DEFAULT_TASKS: tuple[str, ...] = ("donor", "acceptor")
 _MODEL_TASK_OVERRIDES: dict[str, tuple[str, ...]] = {
     "cnn_pair": ("pair",),
     "markov_xgboost": ("pair",),
+    "dnabert_pair": ("pair",),
+    "dnabert2_pair": ("pair",),
+    "dnabert6_pair": ("pair",),
+    "dnaberts_pair": ("pair",),
 }
 
 

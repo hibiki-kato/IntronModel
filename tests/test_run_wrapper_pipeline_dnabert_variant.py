@@ -33,3 +33,20 @@ def test_resolve_dnabert_model_uses_dnaberts_for_variant_s(tmp_path: Path) -> No
     run_wrapper_pipeline._resolve_dnabert_model(env, tmp_path)
     assert env["MODEL"] == "dnaberts"
     assert env["PRETRAINED_MODEL_NAME"] == str(tmp_path / "pretrained/dnabert-s")
+
+
+def test_resolve_dnabert_model_uses_pair_suffix_for_pair_wrapper(
+    tmp_path: Path,
+) -> None:
+    env = {
+        "DNABERT_VARIANT": "2",
+        "PRETRAINED_MODEL_RELATIVE_PATH": "pretrained/dnabert2",
+        "PRETRAINED_MODEL_NAME": "",
+    }
+    run_wrapper_pipeline._resolve_dnabert_model(
+        env,
+        tmp_path,
+        pair_mode=True,
+    )
+    assert env["MODEL"] == "dnabert2_pair"
+    assert env["PRETRAINED_MODEL_NAME"] == str(tmp_path / "pretrained/dnabert2")

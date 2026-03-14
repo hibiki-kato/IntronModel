@@ -16,6 +16,28 @@ class _TokenizerStub:
         return dict(self._vocab)
 
 
+class _TokenizerEncodeStub:
+    """Tokenizer stub that returns deterministic pair-encoding tensors."""
+
+    def __call__(
+        self,
+        first: object,
+        second: object | None = None,
+        **_: object,
+    ) -> dict[str, object]:
+        if not isinstance(first, list):
+            raise TypeError("first must be a list")
+        batch_size = len(first)
+        if second is not None and (
+            not isinstance(second, list) or len(second) != batch_size
+        ):
+            raise TypeError("second must be a list matching first length")
+        return {
+            "input_ids": [[1, 2, 3] for _ in range(batch_size)],
+            "attention_mask": [[1, 1, 1] for _ in range(batch_size)],
+        }
+
+
 def _build_fixed_kmer_vocab(kmer_k: int) -> dict[str, int]:
     """Build a complete fixed k-mer vocabulary with special tokens."""
     vocab_tokens = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
@@ -73,3 +95,16 @@ def test_resolve_max_tokens_auto_for_raw_sequence() -> None:
         input_kmer=None,
     )
     assert resolved == 52
+
+
+def test_tokenize_sequence_pairs_returns_expected_tensor_shapes() -> None:
+    tokenizer = _TokenizerEncodeStub()
+    input_ids, attention_mask = dnabert._tokenize_sequence_pairs(
+        tokenizer=tokenizer,
+        donor_sequences=["ACGT", "TGCA"],
+        acceptor_sequences=["GGGG", "CCCC"],
+        max_tokens=16,
+        input_kmer=None,
+    )
+    assert tuple(input_ids.shape) == (2, 3)
+    assert tuple(attention_mask.shape) == (2, 3)

@@ -25,6 +25,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    TypeVar,
     Tuple,
     Union,
 )
@@ -38,7 +39,9 @@ from torch.utils.data import DataLoader, Dataset
 from util.data_proc import (
     build_run_name,
     infer_default_train_paths,
+    read_examples_pair_task,
     read_examples_single_task,
+    read_test_pair_rows,
     read_test_site_rows,
     resolve_effective_window_lengths,
     resolve_test_tsv,
@@ -48,6 +51,7 @@ from util.data_proc import (
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
+    checkpoint_tasks_for_model,
     resolve_required_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
@@ -146,6 +150,7 @@ class _CachedBackboneTemplate:
 
 _TOKENIZER_CACHE: dict[_TokenizerCacheKey, object] = {}
 _BACKBONE_TEMPLATE_CACHE: dict[_BackboneCacheKey, _CachedBackboneTemplate] = {}
+SequenceT = TypeVar("SequenceT")
 
 
 def _clear_pretrained_resource_caches() -> None:
@@ -449,6 +454,58 @@ def _tokenize_sequences(
     return input_ids, attention_mask
 
 
+def _tokenize_sequence_pairs(
+    tokenizer: object,
+    donor_sequences: Sequence[str],
+    acceptor_sequences: Sequence[str],
+    max_tokens: int,
+    input_kmer: Optional[int] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Tokenize donor/acceptor sequence pairs for one DNABERT forward pass."""
+    if len(donor_sequences) != len(acceptor_sequences):
+        raise ValueError(
+            "donor_sequences and acceptor_sequences must have the same length."
+        )
+    call_fn = getattr(tokenizer, "__call__", None)
+    if not callable(call_fn):
+        raise TypeError("Tokenizer object is not callable.")
+
+    prepared_donor_sequences = _prepare_sequences_for_tokenizer(
+        sequences=donor_sequences,
+        input_kmer=input_kmer,
+    )
+    prepared_acceptor_sequences = _prepare_sequences_for_tokenizer(
+        sequences=acceptor_sequences,
+        input_kmer=input_kmer,
+    )
+    encoded_obj = call_fn(
+        prepared_donor_sequences,
+        prepared_acceptor_sequences,
+        padding="max_length",
+        truncation=True,
+        max_length=max_tokens,
+        return_tensors="pt",
+    )
+    if not isinstance(encoded_obj, Mapping):
+        raise TypeError("Tokenizer output must be a mapping.")
+
+    input_ids_obj = encoded_obj.get("input_ids")
+    attention_mask_obj = encoded_obj.get("attention_mask")
+
+    if isinstance(input_ids_obj, torch.Tensor):
+        input_ids = input_ids_obj.long()
+    else:
+        input_ids = torch.as_tensor(input_ids_obj, dtype=torch.long)
+
+    if attention_mask_obj is None:
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+    elif isinstance(attention_mask_obj, torch.Tensor):
+        attention_mask = attention_mask_obj.long()
+    else:
+        attention_mask = torch.as_tensor(attention_mask_obj, dtype=torch.long)
+    return input_ids, attention_mask
+
+
 def _build_tokenizer_cache_key(
     pretrained_model_name: str,
     pretrained_revision: Optional[str],
@@ -620,6 +677,78 @@ class DnaBertTokenDataset(Dataset):
         input_ids, attention_mask = _tokenize_sequences(
             tokenizer=self.tokenizer,
             sequences=[sequence],
+            max_tokens=self.max_tokens,
+            input_kmer=self.input_kmer,
+        )
+        return (
+            input_ids.squeeze(0),
+            attention_mask.squeeze(0),
+            torch.tensor(float(label), dtype=torch.float32),
+        )
+
+
+class DnaBertPairTokenDataset(Dataset):
+    """Dataset returning pair-tokenized DNABERT inputs and labels."""
+
+    def __init__(
+        self,
+        examples: Sequence[Tuple[Tuple[str, str], int]],
+        tokenizer: object,
+        max_tokens: int,
+        input_kmer: Optional[int],
+        pretokenize: bool = False,
+    ) -> None:
+        self.examples: list[Tuple[Tuple[str, str], int]] = list(examples)
+        self.tokenizer: object = tokenizer
+        self.max_tokens: int = max_tokens
+        self.input_kmer: Optional[int] = input_kmer
+        self.pretokenize: bool = pretokenize
+        self._cached_ids: Optional[torch.Tensor]
+        self._cached_masks: Optional[torch.Tensor]
+        self._cached_labels: Optional[torch.Tensor]
+
+        if pretokenize:
+            donor_sequences = [pair[0] for pair, _ in self.examples]
+            acceptor_sequences = [pair[1] for pair, _ in self.examples]
+            labels = [float(label) for _, label in self.examples]
+            input_ids, attention_masks = _tokenize_sequence_pairs(
+                tokenizer=self.tokenizer,
+                donor_sequences=donor_sequences,
+                acceptor_sequences=acceptor_sequences,
+                max_tokens=self.max_tokens,
+                input_kmer=self.input_kmer,
+            )
+            self._cached_ids = input_ids
+            self._cached_masks = attention_masks
+            self._cached_labels = torch.as_tensor(labels, dtype=torch.float32)
+        else:
+            self._cached_ids = None
+            self._cached_masks = None
+            self._cached_labels = None
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(
+        self,
+        idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if (
+            self._cached_ids is not None
+            and self._cached_masks is not None
+            and self._cached_labels is not None
+        ):
+            return (
+                self._cached_ids[idx],
+                self._cached_masks[idx],
+                self._cached_labels[idx],
+            )
+
+        (donor_sequence, acceptor_sequence), label = self.examples[idx]
+        input_ids, attention_mask = _tokenize_sequence_pairs(
+            tokenizer=self.tokenizer,
+            donor_sequences=[donor_sequence],
+            acceptor_sequences=[acceptor_sequence],
             max_tokens=self.max_tokens,
             input_kmer=self.input_kmer,
         )
@@ -986,13 +1115,14 @@ def _resolve_task_train_params(
     model_args: argparse.Namespace,
 ) -> TaskTrainParams:
     """Resolve task-specific train parameters with fallback to shared values."""
-    if task not in {"donor", "acceptor"}:
+    if task not in {"donor", "acceptor", "pair"}:
         raise ValueError(f"Unsupported task: {task}")
 
-    prefix = f"{task}_"
+    prefix = "" if task == "pair" else f"{task}_"
 
     def _override_or_default(name: str, default: object) -> object:
-        override = getattr(model_args, f"{prefix}{name}", None)
+        override_name = f"{prefix}{name}" if prefix != "" else name
+        override = getattr(model_args, override_name, None)
         return default if override is None else override
 
     return TaskTrainParams(
@@ -1032,10 +1162,10 @@ def _resolve_task_train_params(
 
 
 def stratified_split(
-    examples: Sequence[Tuple[str, int]],
+    examples: Sequence[Tuple[SequenceT, int]],
     val_frac: float = 0.1,
     seed: int = 1337,
-) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
+) -> Tuple[List[Tuple[SequenceT, int]], List[Tuple[SequenceT, int]]]:
     """Split examples into train/validation subsets preserving labels."""
     rng = random.Random(seed)
     positives = [(seq, label) for seq, label in examples if label == 1]
@@ -1188,7 +1318,7 @@ def train_task_model(
     Parameters
     ----------
     task : str
-        Task name (``donor`` or ``acceptor``).
+        Task name (``donor``, ``acceptor``, or ``pair``).
     pos_path : str
         Positive training examples path.
     neg_path : str
@@ -1354,13 +1484,22 @@ def train_task_model(
     if checkpoint_dir:
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-    examples = read_examples_single_task(
-        pos_path,
-        neg_path,
-        task,
-        donor_len=donor_len,
-        acceptor_len=acceptor_len,
-    )
+    if task == "pair":
+        examples = read_examples_pair_task(
+            pos_path,
+            neg_path,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+            negative_pair_only=True,
+        )
+    else:
+        examples = read_examples_single_task(
+            pos_path,
+            neg_path,
+            task,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+        )
 
     n_pos = sum(label for _, label in examples)
     n_neg = len(examples) - n_pos
@@ -1394,20 +1533,36 @@ def train_task_model(
     )
 
     pretokenize_dataset = True
-    train_ds = DnaBertTokenDataset(
-        examples=train_ex,
-        tokenizer=tokenizer,
-        max_tokens=max_tokens_effective,
-        input_kmer=resolved_input_kmer,
-        pretokenize=pretokenize_dataset,
-    )
-    val_ds = DnaBertTokenDataset(
-        examples=val_ex,
-        tokenizer=tokenizer,
-        max_tokens=max_tokens_effective,
-        input_kmer=resolved_input_kmer,
-        pretokenize=pretokenize_dataset,
-    )
+    if task == "pair":
+        train_ds = DnaBertPairTokenDataset(
+            examples=train_ex,
+            tokenizer=tokenizer,
+            max_tokens=max_tokens_effective,
+            input_kmer=resolved_input_kmer,
+            pretokenize=pretokenize_dataset,
+        )
+        val_ds = DnaBertPairTokenDataset(
+            examples=val_ex,
+            tokenizer=tokenizer,
+            max_tokens=max_tokens_effective,
+            input_kmer=resolved_input_kmer,
+            pretokenize=pretokenize_dataset,
+        )
+    else:
+        train_ds = DnaBertTokenDataset(
+            examples=train_ex,
+            tokenizer=tokenizer,
+            max_tokens=max_tokens_effective,
+            input_kmer=resolved_input_kmer,
+            pretokenize=pretokenize_dataset,
+        )
+        val_ds = DnaBertTokenDataset(
+            examples=val_ex,
+            tokenizer=tokenizer,
+            max_tokens=max_tokens_effective,
+            input_kmer=resolved_input_kmer,
+            pretokenize=pretokenize_dataset,
+        )
 
     train_pos = sum(label for _, label in train_ex)
     train_neg = len(train_ex) - train_pos
@@ -2075,6 +2230,65 @@ def score_sequences(
     return np.concatenate(all_probs)
 
 
+@torch.no_grad()
+def score_sequence_pairs(
+    model: nn.Module,
+    donor_sequences: Sequence[str],
+    acceptor_sequences: Sequence[str],
+    tokenizer: object,
+    max_tokens: int,
+    device: str,
+    batch_size: int = 256,
+    task_name: str = "pair",
+    input_kmer: Optional[int] = None,
+) -> np.ndarray:
+    """Score donor/acceptor pairs with one DNABERT pair model."""
+    if len(donor_sequences) != len(acceptor_sequences):
+        raise ValueError(
+            "donor_sequences and acceptor_sequences must have the same length."
+        )
+    if not donor_sequences:
+        return np.array([])
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
+    model.eval()
+    all_probs: list[np.ndarray] = []
+    total = len(donor_sequences)
+    log_every_batches = 200
+
+    for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
+        batch_donor_sequences = donor_sequences[start : start + batch_size]
+        batch_acceptor_sequences = acceptor_sequences[start : start + batch_size]
+        ids_tensor, mask_tensor = _tokenize_sequence_pairs(
+            tokenizer=tokenizer,
+            donor_sequences=batch_donor_sequences,
+            acceptor_sequences=batch_acceptor_sequences,
+            max_tokens=max_tokens,
+            input_kmer=input_kmer,
+        )
+        ids_tensor = ids_tensor.to(device)
+        mask_tensor = mask_tensor.to(device)
+
+        logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
+        probs = torch.sigmoid(logits).cpu().numpy()
+        all_probs.append(probs)
+        should_log = (
+            batch_idx == 1
+            or (batch_idx % log_every_batches == 0)
+            or (start + len(batch_donor_sequences) >= total)
+        )
+        if should_log:
+            done = start + len(batch_donor_sequences)
+            pct = (100.0 * float(done)) / float(total)
+            print(
+                f"[{task_name}] infer progress: {done}/{total} "
+                f"({pct:.1f}%) batches={batch_idx}"
+            )
+
+    return np.concatenate(all_probs)
+
+
 def infer_site_scores(
     site_rows: List[Dict[str, object]],
     donor_model_path: str,
@@ -2166,6 +2380,55 @@ def infer_site_scores(
     return out_rows
 
 
+def infer_pair_site_scores(
+    pair_rows: List[Dict[str, object]],
+    pair_model_path: str,
+    device: str = "auto",
+    batch_size: int = 256,
+) -> List[Dict[str, object]]:
+    """Run pair inference and return normalized site rows."""
+    device = pick_device(device)
+
+    pair_model, pair_config, pair_tokenizer = load_task_model(
+        pair_model_path,
+        device,
+    )
+    pair_max_tokens = _int_from_checkpoint(pair_config, "max_tokens", 128)
+    pair_input_kmer_obj = pair_config.get("input_kmer")
+    pair_input_kmer = (
+        int(pair_input_kmer_obj)
+        if isinstance(pair_input_kmer_obj, int) and pair_input_kmer_obj > 0
+        else None
+    )
+
+    donor_sequences = [str(row["donor_seq"]) for row in pair_rows]
+    acceptor_sequences = [str(row["acceptor_seq"]) for row in pair_rows]
+    pair_scores = score_sequence_pairs(
+        model=pair_model,
+        donor_sequences=donor_sequences,
+        acceptor_sequences=acceptor_sequences,
+        tokenizer=pair_tokenizer,
+        max_tokens=pair_max_tokens,
+        device=device,
+        batch_size=batch_size,
+        task_name="pair",
+        input_kmer=pair_input_kmer,
+    )
+
+    out_rows: List[Dict[str, object]] = []
+    for index, row in enumerate(pair_rows):
+        score = float(pair_scores[index]) if index < len(pair_scores) else 0.0
+        out_rows.append(
+            {
+                "transcript_id": row["transcript_id"],
+                "intron_index": int(row["intron_index"]),
+                "site_type": "pair",
+                "score": score,
+            }
+        )
+    return out_rows
+
+
 def add_train_args(parser: argparse.ArgumentParser) -> None:
     """Register DNABERT-specific training arguments."""
     parser.add_argument(
@@ -2194,11 +2457,12 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--train_target",
-        choices=["both", "donor", "acceptor"],
+        choices=["both", "donor", "acceptor", "pair"],
         default="both",
         help=(
             "Training target. 'both' trains donor and acceptor. "
-            "'donor'/'acceptor' train one task only (for tuning)."
+            "'donor'/'acceptor' train one task only (for tuning). "
+            "'pair' trains one pair-model readout."
         ),
     )
     parser.add_argument(
@@ -2375,7 +2639,7 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         "--loss",
         choices=list(LOSS_NAME_CHOICES),
         default="weighted_bce",
-        help="Training loss type for donor/acceptor models.",
+        help="Training loss type for donor/acceptor/pair models.",
     )
     parser.add_argument(
         "--pos_weight_cap",
@@ -2447,7 +2711,7 @@ def train(
     common_args: argparse.Namespace,
     model_args: argparse.Namespace,
 ) -> Dict[str, object]:
-    """Train donor/acceptor DNABERT models with unified argument interface."""
+    """Train DNABERT donor/acceptor or pair models via one unified interface."""
     train_pos_path, train_neg_path, inferred_train_len = resolve_train_paths(
         species=common_args.species,
         train_pos_path=common_args.train_pos_path,
@@ -2468,14 +2732,22 @@ def train(
 
     donor_window_len = donor_len if donor_len is not None else 50
     acceptor_window_len = acceptor_len if acceptor_len is not None else 50
+    pair_window_len = donor_window_len + acceptor_window_len + 1
+    model_name = str(getattr(common_args, "model", "dnabert"))
+    model_tasks = checkpoint_tasks_for_model(model_name)
 
     task_checkpoint_paths = resolve_required_checkpoint_paths(
         common_args,
         require_exists=False,
+        tasks=model_tasks,
     )
-    donor_checkpoint_path = task_checkpoint_paths["donor"]
-    acceptor_checkpoint_path = task_checkpoint_paths["acceptor"]
-    train_target = resolve_train_target(model_args)
+    allowed_train_targets = (
+        ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
+    )
+    train_target = resolve_train_target(
+        model_args,
+        allowed_targets=allowed_train_targets,
+    )
 
     resolved_epochs, epochs_auto = resolve_training_epoch_budget(
         epochs_arg=model_args.epochs,
@@ -2487,20 +2759,20 @@ def train(
     )
     effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
-    tasks_to_train = resolve_tasks_to_train(train_target)
-    donor_init_checkpoint_path = str(
-        getattr(common_args, "donor_init_checkpoint_path", "")
-    ).strip()
-    acceptor_init_checkpoint_path = str(
-        getattr(common_args, "acceptor_init_checkpoint_path", "")
-    ).strip()
-    task_init_checkpoint_paths = {
-        "donor": donor_init_checkpoint_path or None,
-        "acceptor": acceptor_init_checkpoint_path or None,
-    }
+    tasks_to_train = resolve_tasks_to_train(
+        train_target,
+        both_tasks=model_tasks,
+    )
+    task_init_checkpoint_paths: dict[str, Optional[str]] = {}
+    for task in model_tasks:
+        raw_init_path = str(
+            getattr(common_args, f"{task}_init_checkpoint_path", "")
+        ).strip()
+        task_init_checkpoint_paths[task] = raw_init_path or None
     task_window_len = {
         "donor": donor_window_len,
         "acceptor": acceptor_window_len,
+        "pair": pair_window_len,
     }
 
     task_hparams: dict[str, TaskTrainParams] = {}
@@ -2560,7 +2832,6 @@ def train(
 
     run_name_lr = model_args.lr
     run_name_batch_size = model_args.batch_size
-    model_name = str(getattr(common_args, "model", "dnabert"))
     if train_target != "both":
         selected_params = task_hparams[tasks_to_train[0]]
         run_name_lr = selected_params.lr
@@ -2597,6 +2868,9 @@ def train(
             "asym_alpha_pos": params.asym_alpha_pos,
         }
 
+    primary_task = model_tasks[0]
+    primary_checkpoint_path = task_checkpoint_paths[primary_task]
+
     summary: Dict[str, object] = {
         "model": model_name,
         "species": common_args.species,
@@ -2615,11 +2889,7 @@ def train(
         "train_target": train_target,
         "seed": common_args.seed,
         "device": common_args.device,
-        "checkpoint_name": os.path.basename(donor_checkpoint_path),
-        "donor_checkpoint_path": donor_checkpoint_path,
-        "acceptor_checkpoint_path": acceptor_checkpoint_path,
-        "donor_init_checkpoint_path": donor_init_checkpoint_path,
-        "acceptor_init_checkpoint_path": acceptor_init_checkpoint_path,
+        "checkpoint_name": os.path.basename(primary_checkpoint_path),
         "pretrained_model_name": model_args.pretrained_model_name,
         "pretrained_revision": model_args.pretrained_revision,
         "trust_remote_code": bool(model_args.trust_remote_code),
@@ -2653,6 +2923,11 @@ def train(
         "inferred_train_len": inferred_train_len,
         "task_hyperparameters": task_hparams_summary,
     }
+    for task in model_tasks:
+        summary[f"{task}_checkpoint_path"] = task_checkpoint_paths[task]
+        summary[f"{task}_init_checkpoint_path"] = (
+            task_init_checkpoint_paths[task] or ""
+        )
     summary.update(task_metrics)
     return summary
 
@@ -2662,6 +2937,8 @@ def infer_site(
     model_args: argparse.Namespace,
 ) -> List[Dict[str, object]]:
     """Run site-level inference and return rows with fixed schema."""
+    model_name = str(getattr(common_args, "model", "dnabert"))
+    model_tasks = checkpoint_tasks_for_model(model_name)
     dirs = species_data_dirs(common_args.species)
     inferred_train_len: Optional[int] = None
     if common_args.donor_len is None and common_args.acceptor_len is None:
@@ -2688,10 +2965,29 @@ def infer_site(
     task_checkpoint_paths = resolve_required_checkpoint_paths(
         common_args,
         require_exists=True,
+        tasks=model_tasks,
     )
+    if model_tasks == ("pair",):
+        pair_model_path = task_checkpoint_paths["pair"]
+        pair_rows, skipped_short, skipped_unpaired = read_test_pair_rows(
+            test_tsv=test_tsv,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+        )
+        print(f"Loaded test pairs: {len(pair_rows)}")
+        if skipped_short:
+            print(f"Skipped short sites: {skipped_short}")
+        if skipped_unpaired:
+            print(f"Skipped unpaired introns: {skipped_unpaired}")
+        return infer_pair_site_scores(
+            pair_rows=pair_rows,
+            pair_model_path=pair_model_path,
+            device=common_args.device,
+            batch_size=model_args.batch_size,
+        )
+
     donor_model_path = task_checkpoint_paths["donor"]
     acceptor_model_path = task_checkpoint_paths["acceptor"]
-
     site_rows, skipped_short = read_test_site_rows(
         test_tsv=test_tsv,
         donor_len=donor_len,
@@ -2700,7 +2996,6 @@ def infer_site(
     print(f"Loaded test sites: {len(site_rows)}")
     if skipped_short:
         print(f"Skipped short sites: {skipped_short}")
-
     return infer_site_scores(
         site_rows=site_rows,
         donor_model_path=donor_model_path,
