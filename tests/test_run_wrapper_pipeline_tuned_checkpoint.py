@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.run_wrapper_pipeline import (
     SPECS,
     _apply_cheat_mode_defaults,
+    _harmonize_min_batch_size,
     _apply_tuned_overrides,
     _resolve_tuned_model_name,
     _resolve_tuned_checkpoint_path,
@@ -363,3 +366,65 @@ def test_apply_tuned_overrides_loads_both_window_lens_for_pair_target(
     assert env["DONOR_LEN"] == "90"
     assert env["ACCEPTOR_LEN"] == "70"
     assert env["LR"] == "0.001"
+
+
+def test_harmonize_min_batch_size_clamps_to_task_override(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env: dict[str, str] = {
+        "MODEL": "dnabert2",
+        "BATCH_SIZE": "64",
+        "DONOR_BATCH_SIZE": "64",
+        "ACCEPTOR_BATCH_SIZE": "24",
+        "MIN_BATCH_SIZE": "64",
+    }
+
+    _harmonize_min_batch_size(env, script_name="dnabert.sh")
+
+    assert env["MIN_BATCH_SIZE"] == "24"
+    captured = capsys.readouterr()
+    assert "MIN_BATCH_SIZE adjusted: 64 -> 24" in captured.err
+
+
+def test_harmonize_min_batch_size_keeps_valid_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env: dict[str, str] = {
+        "MODEL": "dnabert2",
+        "BATCH_SIZE": "64",
+        "DONOR_BATCH_SIZE": "64",
+        "ACCEPTOR_BATCH_SIZE": "24",
+        "MIN_BATCH_SIZE": "16",
+    }
+
+    _harmonize_min_batch_size(env, script_name="dnabert.sh")
+
+    assert env["MIN_BATCH_SIZE"] == "16"
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_harmonize_min_batch_size_clamps_single_task_model(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env: dict[str, str] = {
+        "MODEL": "cnn_pair",
+        "BATCH_SIZE": "32",
+        "MIN_BATCH_SIZE": "64",
+    }
+
+    _harmonize_min_batch_size(env, script_name="cnn_pair.sh")
+
+    assert env["MIN_BATCH_SIZE"] == "32"
+    captured = capsys.readouterr()
+    assert "MIN_BATCH_SIZE adjusted: 64 -> 32" in captured.err
+
+
+def test_harmonize_min_batch_size_ignores_missing_min_batch_size() -> None:
+    env: dict[str, str] = {
+        "MODEL": "markov_xgboost",
+    }
+
+    _harmonize_min_batch_size(env, script_name="markov_xgboost.sh")
+
+    assert "MIN_BATCH_SIZE" not in env

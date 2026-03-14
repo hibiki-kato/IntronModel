@@ -55,6 +55,11 @@ def test_classifier_head_uses_layer_norm_when_enabled() -> None:
     assert logits.shape == (2,)
     assert "head_norm.weight" in model.state_dict()
     assert "head_norm.bias" in model.state_dict()
+    trainable_names = {
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    }
+    assert "classifier.weight" not in trainable_names
+    assert "classifier.bias" not in trainable_names
 
 
 def test_classifier_head_uses_identity_when_disabled() -> None:
@@ -73,6 +78,11 @@ def test_classifier_head_uses_identity_when_disabled() -> None:
     state = model.state_dict()
     assert "head_norm.weight" not in state
     assert "head_norm.bias" not in state
+    trainable_names = {
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    }
+    assert "classifier.weight" not in trainable_names
+    assert "classifier.bias" not in trainable_names
 
 
 def test_add_train_args_includes_head_layer_norm_options() -> None:

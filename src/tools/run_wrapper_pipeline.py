@@ -1073,6 +1073,56 @@ def _apply_cheat_mode_defaults(env: dict[str, str]) -> None:
     _ensure_tag_name_field(env)
 
 
+def _harmonize_min_batch_size(
+    env: dict[str, str],
+    *,
+    script_name: str,
+) -> None:
+    """Clamp MIN_BATCH_SIZE to active task batch sizes when needed.
+
+    Parameters
+    ----------
+    env : dict[str, str]
+        Mutable wrapper environment map.
+    script_name : str
+        Wrapper script label used in log messages.
+
+    Raises
+    ------
+    ValueError
+        If MIN_BATCH_SIZE or active batch-size fields are not integers.
+    """
+    raw_min_batch_size = env.get("MIN_BATCH_SIZE")
+    if raw_min_batch_size is None or raw_min_batch_size.strip() == "":
+        return
+    min_batch_size = _as_int(raw_min_batch_size, "MIN_BATCH_SIZE")
+    model_name = _require_env(env, "MODEL")
+    model_tasks = checkpoint_tasks_for_model(model_name)
+    batch_keys = ["BATCH_SIZE"]
+    if len(model_tasks) > 1:
+        batch_keys.extend([f"{task.upper()}_BATCH_SIZE" for task in model_tasks])
+
+    candidate_batch_sizes: list[int] = []
+    for key in batch_keys:
+        raw = env.get(key, "").strip()
+        if raw == "":
+            continue
+        candidate_batch_sizes.append(_as_int(raw, key))
+
+    if not candidate_batch_sizes:
+        return
+    effective_max_min_batch_size = min(candidate_batch_sizes)
+    if min_batch_size <= effective_max_min_batch_size:
+        return
+
+    env["MIN_BATCH_SIZE"] = str(effective_max_min_batch_size)
+    print(
+        f"[{script_name}] MIN_BATCH_SIZE adjusted: {min_batch_size} -> "
+        f"{effective_max_min_batch_size}",
+        file=sys.stderr,
+    )
+
+
 def _run_single_species(
     spec: WrapperSpec,
     *,
@@ -1110,6 +1160,7 @@ def _run_single_species(
     tuned_config_paths: dict[TaskName, Path] = {}
     if spec.supports_tuned_hparams:
         tuned_config_paths = _apply_tuned_overrides(spec, env, data_root)
+    _harmonize_min_batch_size(env, script_name=spec.script_name)
 
     model_name = _require_env(env, "MODEL")
     model_tasks = checkpoint_tasks_for_model(model_name)

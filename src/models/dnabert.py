@@ -31,6 +31,7 @@ from typing import (
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from util.data_proc import (
@@ -629,7 +630,7 @@ class DnaBertTokenDataset(Dataset):
 
 
 class DnaBertBinaryClassifier(nn.Module):
-    """Binary classifier head on top of a pretrained DNABERT backbone."""
+    """Binary classifier with a frozen CNN readout on top of DNABERT."""
 
     def __init__(
         self,
@@ -637,16 +638,62 @@ class DnaBertBinaryClassifier(nn.Module):
         hidden_size: int,
         dropout: float,
         head_layer_norm: bool,
+        frozen_head_kernel_size: int = 3,
     ) -> None:
         super().__init__()
         if hidden_size <= 0:
             raise ValueError("hidden_size must be positive.")
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
+        if frozen_head_kernel_size <= 0:
+            raise ValueError("frozen_head_kernel_size must be positive.")
+        if frozen_head_kernel_size % 2 == 0:
+            raise ValueError("frozen_head_kernel_size must be odd.")
         self.backbone = backbone
         self.head_norm = nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
         self.dropout = nn.Dropout(dropout)
+        self.frozen_head_kernel_size = int(frozen_head_kernel_size)
+        self.frozen_head_padding = self.frozen_head_kernel_size // 2
+
+        # Keep the legacy linear module for checkpoint compatibility, and freeze it
+        # explicitly so the final readout remains non-trainable.
         self.classifier = nn.Linear(hidden_size, 1)
+        for parameter in self.classifier.parameters():
+            parameter.requires_grad_(False)
+
+        temporal_kernel = torch.arange(
+            1,
+            self.frozen_head_kernel_size + 1,
+            dtype=torch.float32,
+        )
+        center = float(self.frozen_head_padding + 1)
+        temporal_kernel = center - torch.abs(temporal_kernel - center)
+        temporal_kernel = temporal_kernel / temporal_kernel.sum()
+        channel_kernel = torch.full(
+            (hidden_size,),
+            fill_value=1.0 / float(hidden_size),
+            dtype=torch.float32,
+        )
+        self.register_buffer(
+            "_frozen_temporal_kernel",
+            temporal_kernel,
+            persistent=False,
+        )
+        self.register_buffer(
+            "_frozen_channel_kernel",
+            channel_kernel,
+            persistent=False,
+        )
+        self.register_buffer(
+            "_frozen_head_bias",
+            torch.zeros((1,), dtype=torch.float32),
+            persistent=False,
+        )
+
+    def assert_frozen_final_head(self) -> None:
+        """Raise when the final readout layer unexpectedly becomes trainable."""
+        if any(parameter.requires_grad for parameter in self.classifier.parameters()):
+            raise RuntimeError("DNABERT final CNN head must remain non-trainable.")
 
     def forward(
         self,
@@ -672,10 +719,30 @@ class DnaBertBinaryClassifier(nn.Module):
         else:
             raise RuntimeError("Unsupported backbone output format.")
 
-        cls_hidden = hidden[:, 0, :]
-        head_input = self.head_norm(cls_hidden)
-        logits = self.classifier(self.dropout(head_input)).squeeze(-1)
-        return logits
+        if attention_mask.dim() != 2:
+            raise RuntimeError("attention_mask must have shape (batch, tokens).")
+        if hidden.shape[:2] != attention_mask.shape:
+            raise RuntimeError(
+                "backbone hidden and attention_mask token lengths must match."
+            )
+
+        token_hidden = self.dropout(self.head_norm(hidden))
+        token_features = token_hidden.transpose(1, 2).contiguous()
+        frozen_kernel = (
+            self._frozen_channel_kernel.view(1, -1, 1)
+            * self._frozen_temporal_kernel.view(1, 1, -1)
+        )
+        logits_map = F.conv1d(
+            token_features,
+            weight=frozen_kernel,
+            bias=self._frozen_head_bias,
+            padding=self.frozen_head_padding,
+        )
+        mask = attention_mask.to(dtype=logits_map.dtype).unsqueeze(1)
+        masked_sum = (logits_map * mask).sum(dim=2)
+        mask_denom = mask.sum(dim=2).clamp_min(1.0)
+        logits = masked_sum / mask_denom
+        return logits.squeeze(1)
 
 
 def _resolve_hidden_size(backbone: nn.Module) -> int:
@@ -1424,6 +1491,7 @@ def train_task_model(
                 dropout=dropout,
                 head_layer_norm=head_layer_norm_bool,
             ).to(device)
+            model.assert_frozen_final_head()
             initialized_from_checkpoint = False
             if init_checkpoint_path is not None:
                 ckpt = torch.load(
@@ -1442,6 +1510,7 @@ def train_task_model(
                     )
                 normalized_state = _normalize_checkpoint_state_dict(model_state_obj)
                 model.load_state_dict(normalized_state)
+                model.assert_frozen_final_head()
                 initialized_from_checkpoint = True
                 print(f"[{task}] initialized from checkpoint: {init_checkpoint_path}")
 
@@ -1465,9 +1534,18 @@ def train_task_model(
                         f"({exc.__class__.__name__}). Continue without compile."
                     )
 
+            trainable_params = [
+                parameter for parameter in model.parameters() if parameter.requires_grad
+            ]
+            if not trainable_params:
+                raise RuntimeError(
+                    "No trainable parameters remain. "
+                    "Check frozen-head configuration."
+                )
+
             optimizer_impl = "adamw"
             adamw_kwargs: dict[str, object] = {
-                "params": model.parameters(),
+                "params": trainable_params,
                 "lr": lr,
                 "weight_decay": weight_decay,
             }
@@ -1552,7 +1630,7 @@ def train_task_model(
                         if grad_clip > 0.0:
                             scaler.unscale_(optimizer)
                             torch.nn.utils.clip_grad_norm_(
-                                model.parameters(),
+                                trainable_params,
                                 grad_clip,
                             )
                         scaler.step(optimizer)
@@ -1561,7 +1639,7 @@ def train_task_model(
                         loss.backward()
                         if grad_clip > 0.0:
                             torch.nn.utils.clip_grad_norm_(
-                                model.parameters(),
+                                trainable_params,
                                 grad_clip,
                             )
                         optimizer.step()
