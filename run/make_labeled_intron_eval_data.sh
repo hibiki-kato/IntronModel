@@ -51,7 +51,8 @@ intronmodel_activate_conda "${CONDA_ENV}"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
 
 # Auto-run inside tmux on SSH so jobs survive disconnects.
-# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: off).
+: "${INTRONMODEL_AUTO_TMUX:=off}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 while [[ $# -gt 0 ]]; do
