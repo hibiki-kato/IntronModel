@@ -105,4 +105,5 @@ if [[ "${OVERWRITE}" == "1" ]]; then
 fi
 
 echo "[make_unique_intron_assets] species=${SPECIES} data_root=${DATA_ROOT}"
-"${args[@]}"
+PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+	"${args[@]}"
