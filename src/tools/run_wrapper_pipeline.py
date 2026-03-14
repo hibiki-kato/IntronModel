@@ -718,7 +718,6 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
     )
     model_name = _require_env(env, "MODEL")
     model_tasks = checkpoint_tasks_for_model(model_name)
-    model_tasks = checkpoint_tasks_for_model(model_name)
     train_target = _require_env(env, "TRAIN_TARGET")
     allowed_targets = (
         ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
@@ -1113,6 +1112,7 @@ def _run_single_species(
         tuned_config_paths = _apply_tuned_overrides(spec, env, data_root)
 
     model_name = _require_env(env, "MODEL")
+    model_tasks = checkpoint_tasks_for_model(model_name)
     donor_len = _as_int(_require_env(env, "DONOR_LEN"), "DONOR_LEN")
     acceptor_len = _as_int(_require_env(env, "ACCEPTOR_LEN"), "ACCEPTOR_LEN")
     name_fields = parse_name_fields(env.get("NAME_FIELDS", ""))

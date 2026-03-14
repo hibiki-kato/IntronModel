@@ -12,14 +12,14 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="300"
 
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="on"
-CHEAT_MODE="on"
+CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.2"

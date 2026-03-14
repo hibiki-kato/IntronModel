@@ -16,6 +16,8 @@ DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.2"
 BASE_SEED="1337"
+# Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
+SEED_LIST=""
 
 QUICK_TRIALS="8"
 QUICK_EPOCHS="3"
@@ -34,6 +36,7 @@ GUIDED_MUTATION_RATE="0.25"
 
 GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="auto"
+TRIAL_PROCESS_MODE="persistent_all"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -65,6 +68,9 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_MODE="off"
+CHEAT_MODE="off"
+MAX_POOL_SIZE="2"
+HEAD_TYPE="gap"
 PROCESS_TITLE="${PROCESS_TITLE:-tune_cnn_resdil}"
 
 DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
@@ -100,6 +106,14 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
       "5,7,9,11,13,15,17",
       "7,9,11,13,15,17,19"
     ]
+  },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
+  },
+  "head_type": {
+    "type": "categorical",
+    "values": ["gap", "center"]
   },
   "fc_hidden": {
     "type": "categorical",
@@ -143,6 +157,14 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
       "7,9,11,13,15,17,19"
     ]
   },
+  "max_pool_size": {
+    "type": "categorical",
+    "values": [1, 2, 3, 4]
+  },
+  "head_type": {
+    "type": "categorical",
+    "values": ["gap", "center"]
+  },
   "fc_hidden": {
     "type": "categorical",
     "values": [128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144]
@@ -185,6 +207,14 @@ resolve_tune_targets() {
 
 resolve_python_bin() {
 	intronmodel_resolve_python_bin "tune_cnn_resdil.sh"
+}
+
+resolve_seed_list() {
+	intronmodel_resolve_seed_list \
+		"tune_cnn_resdil.sh" \
+		"${BASE_SEED}" \
+		"${SEED_LIST}" \
+		"${PYTHON_BIN}"
 }
 
 resolve_search_space_file() {
@@ -360,6 +390,7 @@ PY
 SPECIES="$(resolve_species_case "${SPECIES}" "${DATA_ROOT}")"
 mapfile -t TARGET_LIST < <(resolve_tune_targets "${TUNE_TARGETS}")
 PYTHON_BIN="$(resolve_python_bin)"
+mapfile -t SEED_VALUES < <(resolve_seed_list)
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
 		"tune_cnn_resdil.sh" \
@@ -379,6 +410,13 @@ if [[ "${QUICK_TRIALS_MODE}" != "fixed" && "${QUICK_TRIALS_MODE}" != "budget" ]]
 fi
 if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; then
 	echo "[tune_cnn_resdil.sh] SEARCH_ALGO must be random|history_guided." >&2
+	exit 1
+fi
+if [[ "${TRIAL_PROCESS_MODE}" != "subprocess" && \
+	"${TRIAL_PROCESS_MODE}" != "persistent_quick" && \
+	"${TRIAL_PROCESS_MODE}" != "persistent_all" ]]; then
+	echo "[tune_cnn_resdil.sh] TRIAL_PROCESS_MODE must be "\
+		"subprocess|persistent_quick|persistent_all." >&2
 	exit 1
 fi
 if ! [[ "${QUICK_TRIALS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_TRIALS}" -le 0 ]]; then
@@ -432,6 +470,10 @@ if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
 	echo "[tune_cnn_resdil.sh] MASK_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[tune_cnn_resdil.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
 if [[ "${MASK_MODE}" == "on" ]]; then
 	mask_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -452,19 +494,37 @@ if [[ "${MASK_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 
 TUNING_MODEL_NAME="cnn_resdil"
 if [[ "${MASK_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="cnn_resdil_mask"
 fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
+fi
 
 RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 echo "[tune_cnn_resdil.sh] species=${SPECIES}"
 echo "[tune_cnn_resdil.sh] targets=${TARGET_LIST[*]}"
+echo "[tune_cnn_resdil.sh] seeds=${SEED_VALUES[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
-	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		OBJECTIVE_METRIC="test_pr_auc"
+	fi
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
@@ -479,21 +539,18 @@ for TARGET in "${TARGET_LIST[@]}"; do
 			"${CROSS_SPECIES_BEST_MODE}" \
 			"${CROSS_SPECIES_BEST_OVERRIDE}" \
 			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
-	)"; then
+		)"; then
 		exit 1
 	fi
 	SEED_BEST_CONFIG_JSON="null"
 	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
-	mkdir -p "${OUTPUT_DIR}"
-	TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	TARGET_START_SECONDS="${SECONDS}"
 	QUICK_TRIALS_TARGET="${QUICK_TRIALS}"
-		TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
-		if [[ "${TARGET}" == "acceptor" ]]; then
-			TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
-		fi
+	TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
+	if [[ "${TARGET}" == "acceptor" ]]; then
+		TARGET_SEARCH_SPACE_JSON="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
+	fi
 
 	if [[ "${QUICK_TRIALS_MODE}" == "budget" ]]; then
 		TARGET_BUDGET_MINUTES="${TARGET_TIME_BUDGET_MINUTES}"
@@ -559,27 +616,41 @@ for TARGET in "${TARGET_LIST[@]}"; do
 		fi
 		TARGET_SEARCH_SPACE_JSON="${target_space_json}"
 		echo "[tune_cnn_resdil.sh] target=${TARGET} search_space_file=${search_space_path}"
-		else
-			search_space_status=$?
-			if [[ "${search_space_status}" -eq 2 ]]; then
-				exit 1
-			fi
-				echo "[tune_cnn_resdil.sh] target=${TARGET} search_space_file=<embedded_${TARGET}>"
-			fi
+	else
+		search_space_status=$?
+		if [[ "${search_space_status}" -eq 2 ]]; then
+			exit 1
+		fi
+		echo "[tune_cnn_resdil.sh] target=${TARGET} search_space_file=<embedded_${TARGET}>"
+	fi
 
-	CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
-	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
-	TRAIN_POS_PATH_JSON="$(
-		intronmodel_json_string_or_null \
-			"${PYTHON_BIN}" \
-			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${SPECIES}")"
-	)"
-	TRAIN_NEG_PATH_JSON="$(
-		intronmodel_json_string_or_null \
-			"${PYTHON_BIN}" \
-			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${SPECIES}")"
-	)"
-	cat > "${CONFIG_PATH}" <<JSON
+	for base_seed in "${SEED_VALUES[@]}"; do
+		OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}_seed${base_seed}"
+		mkdir -p "${OUTPUT_DIR}"
+		TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		TARGET_START_SECONDS="${SECONDS}"
+		CONFIG_PATH="${OUTPUT_DIR}/hparam_search_config.json"
+		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+		resolved_train_paths="$(
+			intronmodel_resolve_and_validate_train_paths \
+				"tune_cnn_resdil.sh" \
+				"${SPECIES}" \
+				"${TRAIN_POS_PATH}" \
+				"${TRAIN_NEG_PATH}"
+		)" || exit 1
+		IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+			"${resolved_train_paths}"
+		TRAIN_POS_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"${TRAIN_POS_PATH_RESOLVED}"
+		)"
+		TRAIN_NEG_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"${TRAIN_NEG_PATH_RESOLVED}"
+		)"
+		cat > "${CONFIG_PATH}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
   "species": "${SPECIES}",
@@ -588,9 +659,10 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
   "full_epochs": ${FULL_EPOCHS},
-  "base_seed": ${BASE_SEED},
+  "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
+  "trial_process_mode": "${TRIAL_PROCESS_MODE}",
   "objective_metric": "${OBJECTIVE_METRIC}",
   "global_best_config_path": "${GLOBAL_BEST_CONFIG_PATH}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
@@ -605,13 +677,15 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "model": "cnn_resdil",
     "species": "${SPECIES}",
     "train_target": "${TARGET}",
-    "seed": ${BASE_SEED},
+    "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
     "conv_depth": 3,
     "channel_candidates": "64,96,128,192,256,384,512",
     "kernel_candidates": "3,5,7,9,11,13,15",
+    "max_pool_size": ${MAX_POOL_SIZE},
+    "head_type": "${HEAD_TYPE}",
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
@@ -642,23 +716,25 @@ for TARGET in "${TARGET_LIST[@]}"; do
 }
 JSON
 
-	echo "[tune_cnn_resdil.sh] target=${TARGET}"
-	echo "[tune_cnn_resdil.sh] output_dir=${OUTPUT_DIR}"
-	if ! intronmodel_run_with_process_title \
-		"${PROCESS_TITLE}" \
-		"${PYTHON_BIN}" \
-		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${CONFIG_PATH}"; then
+		echo "[tune_cnn_resdil.sh] target=${TARGET} seed=${base_seed}"
+		echo "[tune_cnn_resdil.sh] output_dir=${OUTPUT_DIR}"
+		if ! intronmodel_run_with_process_title \
+			"${PROCESS_TITLE}" \
+			"${PYTHON_BIN}" \
+			"${PROJECT_ROOT}/src/tools/hparam_search.py" \
+			--config "${CONFIG_PATH}"; then
+			target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
+			target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
+			echo "[tune_cnn_resdil.sh] target=${TARGET} seed=${base_seed} "\
+				"failed start=${TARGET_START_EPOCH} "\
+				"elapsed=${target_elapsed_hms} (${target_elapsed_seconds}s)" >&2
+			exit 1
+		fi
+		target_end_epoch="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
 		target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
-		echo "[tune_cnn_resdil.sh] target=${TARGET} failed start=${TARGET_START_EPOCH} "\
-			"elapsed=${target_elapsed_hms} (${target_elapsed_seconds}s)" >&2
-		exit 1
-	fi
-	target_end_epoch="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	target_elapsed_seconds=$((SECONDS - TARGET_START_SECONDS))
-	target_elapsed_hms="$(format_elapsed "${target_elapsed_seconds}")"
-	echo "[tune_cnn_resdil.sh] target=${TARGET} done start=${TARGET_START_EPOCH} "\
-		"end=${target_end_epoch} elapsed=${target_elapsed_hms} "\
-		"(${target_elapsed_seconds}s)"
+		echo "[tune_cnn_resdil.sh] target=${TARGET} seed=${base_seed} "\
+			"done start=${TARGET_START_EPOCH} end=${target_end_epoch} "\
+			"elapsed=${target_elapsed_hms} (${target_elapsed_seconds}s)"
+	done
 done

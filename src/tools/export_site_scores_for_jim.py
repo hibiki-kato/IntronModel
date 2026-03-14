@@ -9,8 +9,26 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 from typing import Optional
+
+IntronKey = tuple[str, str]
+
+
+def _configure_csv_field_size_limit() -> None:
+    """Set CSV field size limit to a large safe value.
+
+    This avoids ``csv.Error: field larger than field limit`` when reading
+    processed tables that contain long sequence fields.
+    """
+    max_size = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(max_size)
+            return
+        except OverflowError:
+            max_size = max_size // 10
 
 
 def _parse_species_csv(raw_species: Optional[str]) -> list[str]:
@@ -42,7 +60,81 @@ def _is_canonical_site_score_file(path: Path) -> bool:
     )
 
 
-def _convert_one_file(input_path: Path, output_path: Path) -> int:
+def _read_label_lookup(site_score_paths: list[Path]) -> dict[IntronKey, str]:
+    """Build one label lookup table from available site_score TSV files.
+
+    Parameters
+    ----------
+    site_score_paths : list[Path]
+        Candidate site_score TSV files from one species.
+
+    Returns
+    -------
+    dict[IntronKey, str]
+        Mapping from ``(transcript_id, intron_index)`` to non-empty ``label``.
+    """
+    label_lookup: dict[IntronKey, str] = {}
+    for site_path in site_score_paths:
+        with site_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            if reader.fieldnames is None:
+                continue
+            if not {"transcript_id", "intron_index", "label"}.issubset(
+                set(reader.fieldnames)
+            ):
+                continue
+            for row in reader:
+                transcript_id = str(row.get("transcript_id", ""))
+                intron_index = str(row.get("intron_index", ""))
+                label = str(row.get("label", ""))
+                if label == "":
+                    continue
+                label_lookup[(transcript_id, intron_index)] = label
+    return label_lookup
+
+
+def _read_processed_label_lookup(species_dir: Path) -> dict[IntronKey, str]:
+    """Build one label lookup table from processed evaluation data.
+
+    Parameters
+    ----------
+    species_dir : Path
+        One species directory under ``data``.
+
+    Returns
+    -------
+    dict[IntronKey, str]
+        Mapping from ``(transcript_id, intron_index)`` to non-empty ``label``.
+        Returns one empty mapping when the processed file is unavailable.
+    """
+    processed_path = species_dir / "processed" / "intron_eval_flank10.tsv"
+    if not processed_path.is_file():
+        return {}
+
+    label_lookup: dict[IntronKey, str] = {}
+    with processed_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None:
+            return {}
+        if not {"transcript_id", "intron_index", "label"}.issubset(
+            set(reader.fieldnames)
+        ):
+            return {}
+        for row in reader:
+            transcript_id = str(row.get("transcript_id", ""))
+            intron_index = str(row.get("intron_index", ""))
+            label = str(row.get("label", ""))
+            if label == "":
+                continue
+            label_lookup[(transcript_id, intron_index)] = label
+    return label_lookup
+
+
+def _convert_one_file(
+    input_path: Path,
+    output_path: Path,
+    label_lookup: Optional[dict[IntronKey, str]] = None,
+) -> int:
     """Convert one site_score TSV into one Jim TSV.
 
     Parameters
@@ -51,6 +143,10 @@ def _convert_one_file(input_path: Path, output_path: Path) -> int:
         Input site-score TSV path.
     output_path : Path
         Output Jim TSV path.
+    label_lookup : dict[IntronKey, str] | None, optional
+        Optional fallback label lookup keyed by
+        ``(transcript_id, intron_index)``. Used when one input row has an
+        empty ``label`` value.
 
     Returns
     -------
@@ -74,11 +170,12 @@ def _convert_one_file(input_path: Path, output_path: Path) -> int:
                 "Input must contain transcript_id and intron_index: "
                 f"{input_path}"
             )
-        output_columns = [
+        non_label_columns = [
             column
             for column in fieldnames
-            if column not in {"transcript_id", "intron_index"}
+            if column not in {"transcript_id", "intron_index", "label"}
         ]
+        output_columns = [*non_label_columns, "label"]
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf-8", newline="") as output_handle:
@@ -86,8 +183,16 @@ def _convert_one_file(input_path: Path, output_path: Path) -> int:
             writer.writerow(["ID", *output_columns])
             written_rows = 0
             for row_index, row in enumerate(reader, start=1):
+                transcript_id = str(row["transcript_id"])
+                intron_index = str(row["intron_index"])
+                row_label = str(row.get("label", ""))
+                if row_label == "" and label_lookup is not None:
+                    row_label = label_lookup.get(
+                        (transcript_id, intron_index), ""
+                    )
+                row["label"] = row_label
                 output_row = [str(row_index)]
-                output_row.extend(str(row[col]) for col in output_columns)
+                output_row.extend(str(row.get(col, "")) for col in output_columns)
                 writer.writerow(output_row)
                 written_rows += 1
     return written_rows
@@ -128,6 +233,7 @@ def main() -> int:
         If the provided data root directory does not exist.
     """
     args = build_arg_parser().parse_args()
+    _configure_csv_field_size_limit()
     data_root = args.data_root.resolve()
     if not data_root.is_dir():
         raise FileNotFoundError(f"Data root not found: {data_root}")
@@ -145,11 +251,16 @@ def main() -> int:
         if not site_score_dir.is_dir():
             continue
 
-        for site_path in sorted(site_score_dir.glob(str(args.pattern))):
-            if not site_path.is_file():
-                continue
-            if not _is_canonical_site_score_file(site_path):
-                continue
+        site_paths = [
+            site_path
+            for site_path in sorted(site_score_dir.glob(str(args.pattern)))
+            if site_path.is_file() and _is_canonical_site_score_file(site_path)
+        ]
+        label_lookup = _read_label_lookup(site_paths)
+        if not label_lookup:
+            label_lookup = _read_processed_label_lookup(species_dir)
+
+        for site_path in site_paths:
             scanned += 1
             output_path = jim_dir / site_path.name
             try:
@@ -160,7 +271,11 @@ def main() -> int:
                     )
                     written += 1
                     continue
-                row_count = _convert_one_file(site_path, output_path)
+                row_count = _convert_one_file(
+                    site_path,
+                    output_path,
+                    label_lookup=label_lookup,
+                )
                 print(
                     "[export_site_scores_for_jim] wrote: "
                     f"{output_path} rows={row_count} species={species}"

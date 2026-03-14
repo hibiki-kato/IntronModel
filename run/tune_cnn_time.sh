@@ -12,8 +12,8 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
-MASK_MODE="off"
+TIME_BUDGET_MINUTES="300"
+MASK_MODE="on"
 CHEAT_MODE="off"
 QUICK_TRIALS="32"
 QUICK_EPOCHS="3"

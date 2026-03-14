@@ -12,17 +12,17 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="420"
+TIME_BUDGET_MINUTES="60"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.2"
 BASE_SEED="1337"
 
-QUICK_TRIALS="8"
+QUICK_TRIALS="32"
 QUICK_EPOCHS="2"
 TOP_K="3"
-FULL_EPOCHS="10"
+FULL_EPOCHS="8"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 
