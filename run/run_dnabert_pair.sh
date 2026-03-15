@@ -13,7 +13,7 @@ fi
 # Advanced runtime controls are kept below.
 set -a
 DNABERT_VARIANT="2"
-SPECIES="Athal, Dmel, Mmus, Hsap"
+SPECIES="Athal"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRUNC_MODE="on"
