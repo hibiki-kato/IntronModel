@@ -77,6 +77,10 @@ from util.model_runtime import (
     set_seed,
     sigmoid_np,
 )
+from util.process_title import (
+    apply_eta_process_title_from_epoch_progress,
+    apply_eta_process_title_placeholder,
+)
 from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
@@ -993,6 +997,8 @@ def train_task_model(
             epochs_completed = 0
             epochs_since_improvement = 0
             stopped_early = False
+            _ = apply_eta_process_title_placeholder()
+            task_started_at = time.perf_counter()
 
             for epoch in range(1, epochs + 1):
                 epochs_completed = epoch
@@ -1138,6 +1144,11 @@ def train_task_model(
                         "best_score": float(best_score),
                         "best_epoch": best_epoch,
                     }
+                )
+                _ = apply_eta_process_title_from_epoch_progress(
+                    task_started_at=task_started_at,
+                    completed_epochs=epoch,
+                    total_epochs=epochs,
                 )
 
                 should_log = (

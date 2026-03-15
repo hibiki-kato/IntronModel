@@ -10,6 +10,7 @@ import argparse
 import copy
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
@@ -76,6 +77,10 @@ from util.model_runtime import (
     seed_worker as _seed_worker,
     set_seed,
     sigmoid_np,
+)
+from util.process_title import (
+    apply_eta_process_title_from_epoch_progress,
+    apply_eta_process_title_placeholder,
 )
 from util.training_control import (
     resolve_early_stopping_params,
@@ -190,6 +195,22 @@ def _normalize_revision(revision: str) -> Optional[str]:
 def _without_none_kwargs(kwargs: Mapping[str, object]) -> dict[str, object]:
     """Return a shallow kwargs copy with ``None`` values removed."""
     return {key: value for key, value in kwargs.items() if value is not None}
+
+
+def _format_duration_hms(total_seconds: float) -> str:
+    """Format duration seconds as ``HH:MM:SS`` text."""
+    clamped_seconds = max(0, int(total_seconds))
+    hours, rem = divmod(clamped_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _format_eta_utc_from_now(remaining_seconds: float) -> str:
+    """Return UTC ETA timestamp ``YYYY-mm-ddTHH:MM:SSZ`` from now."""
+    eta_utc = datetime.now(timezone.utc) + timedelta(
+        seconds=max(0.0, float(remaining_seconds))
+    )
+    return eta_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _resolve_pad_token_id_from_config(config: object) -> int:
@@ -1509,6 +1530,7 @@ def train_task_model(
         )
 
     train_ex, val_ex = stratified_split(examples, val_frac=val_frac, seed=seed)
+    _ = apply_eta_process_title_placeholder()
     print(
         f"[{task}] device={device} total={len(examples)} "
         f"(pos={n_pos}, neg={n_neg}) train={len(train_ex)} val={len(val_ex)}"
@@ -1748,6 +1770,7 @@ def train_task_model(
             epochs_completed = 0
             epochs_since_improvement = 0
             stopped_early = False
+            task_started_at = time.perf_counter()
 
             for epoch in range(1, epochs + 1):
                 epochs_completed = epoch
@@ -1909,11 +1932,24 @@ def train_task_model(
                 objective_text = (
                     "" if score_name == "pr_auc" else f"{score_name}={score:.4f} "
                 )
+                task_elapsed_sec = time.perf_counter() - task_started_at
+                avg_epoch_sec = task_elapsed_sec / max(1, epoch)
+                epochs_remaining = max(0, epochs - epoch)
+                eta_remaining_sec = avg_epoch_sec * epochs_remaining
+                eta_remaining_text = _format_duration_hms(eta_remaining_sec)
+                eta_utc_text = _format_eta_utc_from_now(eta_remaining_sec)
+                _ = apply_eta_process_title_from_epoch_progress(
+                    task_started_at=task_started_at,
+                    completed_epochs=epoch,
+                    total_epochs=epochs,
+                )
                 print(
                     f"[{task}] {mark} epoch {epoch}/{epochs} "
                     f"loss={train_loss:.4f} train_pr_auc={train_pr_auc_text} "
                     f"test_pr_auc={test_pr_auc_text} "
                     f"elapsed={epoch_elapsed_sec:.2f}s "
+                    f"eta_to_max={eta_remaining_text} "
+                    f"eta_max_utc={eta_utc_text} "
                     f"{objective_text}best={best_score:.4f} "
                     f"(ep {best_epoch})"
                 )

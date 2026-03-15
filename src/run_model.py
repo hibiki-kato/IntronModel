@@ -35,7 +35,10 @@ from util.data_proc import (
     species_data_dirs,
 )
 from util.model_task_paths import checkpoint_tasks_for_model
-from util.process_title import apply_process_title_from_env
+from util.process_title import (
+    apply_eta_process_title_placeholder,
+    apply_process_title_from_env,
+)
 from util.sequence_transform import SEQUENCE_TRANSFORM_CHOICES
 from util.validation_protocol import (
     build_validation_protocol,
@@ -1156,6 +1159,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if args.skip_train:
         print("[pipeline] Skip training (--skip_train).")
     else:
+        _ = apply_eta_process_title_placeholder()
         if args.continue_train:
             _assert_checkpoint_paths_exist(
                 checkpoint_paths,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import os
 import sys
+import time
 
 PROCESS_TITLE_ENV: str = "INTRONMODEL_PROCESS_TITLE"
 _LINUX_PR_SET_NAME: int = 15
@@ -124,3 +126,130 @@ def apply_process_title_from_env(env_name: str = PROCESS_TITLE_ENV) -> bool:
     """
 
     return apply_process_title(os.environ.get(env_name, ""))
+
+
+def format_eta_process_title(remaining_seconds: float) -> str:
+    """Format one process title as an ETA wall-clock timestamp.
+
+    Parameters
+    ----------
+    remaining_seconds : float
+        Estimated remaining time in seconds.
+
+    Returns
+    -------
+    str
+        ETA title text in ``ETA:mm/dd HH:MM`` format.
+
+    Raises
+    ------
+    None
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    safe_seconds = max(0.0, float(remaining_seconds))
+    eta_local = datetime.now().astimezone() + timedelta(seconds=safe_seconds)
+    return eta_local.strftime("ETA:%m/%d %H:%M")
+
+
+def apply_eta_process_title_placeholder() -> bool:
+    """Apply one placeholder ETA process title.
+
+    Returns
+    -------
+    bool
+        ``True`` when title application succeeded.
+
+    Raises
+    ------
+    None
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    return apply_process_title("ETA:--/-- --:--")
+
+
+def estimate_eta_remaining_seconds(
+    *,
+    elapsed_seconds: float,
+    completed_epochs: int,
+    total_epochs: int,
+) -> float:
+    """Estimate remaining seconds from epoch progress.
+
+    Parameters
+    ----------
+    elapsed_seconds : float
+        Elapsed training time since task start.
+    completed_epochs : int
+        Number of completed epochs.
+    total_epochs : int
+        Planned maximum epochs.
+
+    Returns
+    -------
+    float
+        Non-negative remaining-seconds estimate.
+
+    Raises
+    ------
+    None
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    safe_elapsed = max(0.0, float(elapsed_seconds))
+    safe_total_epochs = max(1, int(total_epochs))
+    safe_completed_epochs = max(1, int(completed_epochs))
+    capped_completed = min(safe_completed_epochs, safe_total_epochs)
+    avg_epoch_seconds = safe_elapsed / float(capped_completed)
+    remaining_epochs = max(0, safe_total_epochs - capped_completed)
+    return avg_epoch_seconds * float(remaining_epochs)
+
+
+def apply_eta_process_title_from_epoch_progress(
+    *,
+    task_started_at: float,
+    completed_epochs: int,
+    total_epochs: int,
+) -> bool:
+    """Estimate and apply ETA process title from epoch progress.
+
+    Parameters
+    ----------
+    task_started_at : float
+        Monotonic timestamp captured when task training started.
+    completed_epochs : int
+        Number of completed epochs.
+    total_epochs : int
+        Planned maximum epochs.
+
+    Returns
+    -------
+    bool
+        ``True`` when title application succeeded.
+
+    Raises
+    ------
+    None
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    elapsed_seconds = max(0.0, time.perf_counter() - float(task_started_at))
+    remaining_seconds = estimate_eta_remaining_seconds(
+        elapsed_seconds=elapsed_seconds,
+        completed_epochs=completed_epochs,
+        total_epochs=total_epochs,
+    )
+    return apply_process_title(format_eta_process_title(remaining_seconds))

@@ -23,6 +23,7 @@ import json
 import os
 import pickle
 import random
+import time
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple, cast
 
 import numpy as np
@@ -46,6 +47,10 @@ from util.model_task_paths import (
     resolve_required_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
+)
+from util.process_title import (
+    apply_eta_process_title_from_epoch_progress,
+    apply_eta_process_title_placeholder,
 )
 from util.sequence_transform import (
     SEQUENCE_TRANSFORM_CHOICES,
@@ -1305,6 +1310,8 @@ def train(
     model_args: argparse.Namespace,
 ) -> Dict[str, object]:
     """Train Markov+XGBoost pair model and save one pair checkpoint."""
+    _ = apply_eta_process_title_placeholder()
+    task_started_at = time.perf_counter()
     markov_feature_mode = _normalize_markov_feature_mode(
         getattr(model_args, "markov_feature_mode", "per_base")
     )
@@ -1369,6 +1376,11 @@ def train(
         seed=int(common_args.seed),
         model_args=model_args,
         sequence_transform=str(model_args.sequence_transform),
+    )
+    _ = apply_eta_process_title_from_epoch_progress(
+        task_started_at=task_started_at,
+        completed_epochs=1,
+        total_epochs=1,
     )
 
     return {

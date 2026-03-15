@@ -1135,6 +1135,56 @@ def _harmonize_min_batch_size(
     )
 
 
+def _run_subprocess_with_species_log_prefix(
+    *,
+    cmd: Sequence[str],
+    process_env: Mapping[str, str],
+    script_name: str,
+    species: str,
+) -> int:
+    """Run one subprocess and prefix each output line with species context.
+
+    Parameters
+    ----------
+    cmd : Sequence[str]
+        Command and arguments.
+    process_env : Mapping[str, str]
+        Environment mapping used for subprocess execution.
+    script_name : str
+        Wrapper script label (for example, ``dnabert.sh``).
+    species : str
+        Active species name.
+
+    Returns
+    -------
+    int
+        Subprocess return code.
+    """
+
+    prefixed_env = dict(process_env)
+    prefixed_env.setdefault("PYTHONUNBUFFERED", "1")
+    prefix = f"[{script_name}][species={species}]"
+    process = subprocess.Popen(
+        list(cmd),
+        env=prefixed_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is None:
+        return process.wait()
+
+    with process.stdout:
+        for raw_line in process.stdout:
+            line = raw_line.rstrip("\n")
+            if line == "":
+                print(prefix)
+            else:
+                print(f"{prefix} {line}")
+    return process.wait()
+
+
 def _run_single_species(
     spec: WrapperSpec,
     *,
@@ -1277,32 +1327,40 @@ def _run_single_species(
         )
 
     species_run_start = time.monotonic()
-    process = subprocess.run(
-        [sys.executable, str(project_root / "src" / "run_model.py"), *run_args],
-        check=False,
-        env=dict(process_env),
+    run_model_code = _run_subprocess_with_species_log_prefix(
+        cmd=[
+            sys.executable,
+            "-u",
+            str(project_root / "src" / "run_model.py"),
+            *run_args,
+        ],
+        process_env=dict(process_env),
+        script_name=spec.script_name,
+        species=species,
     )
-    if process.returncode != 0:
-        return process.returncode
+    if run_model_code != 0:
+        return run_model_code
 
     learning_curve_mode = env.get("PLOT_LEARNING_CURVE", "1").strip().lower()
     if learning_curve_mode not in {"0", "1"}:
         raise ValueError("PLOT_LEARNING_CURVE must be 0 or 1.")
     if learning_curve_mode == "1":
         if metrics_json_path.exists():
-            curve_proc = subprocess.run(
-                [
+            curve_code = _run_subprocess_with_species_log_prefix(
+                cmd=[
                     sys.executable,
+                    "-u",
                     str(project_root / "src" / "tools" / "plot_learning_curve.py"),
                     "--metrics-json",
                     str(metrics_json_path),
                     "--output",
                     str(learning_curve_png),
                 ],
-                check=False,
-                env=dict(process_env),
+                process_env=dict(process_env),
+                script_name=spec.script_name,
+                species=species,
             )
-            if curve_proc.returncode != 0:
+            if curve_code != 0:
                 print(
                     f"[{spec.script_name}] learning-curve plot failed "
                     f"(metrics={metrics_json_path}).",

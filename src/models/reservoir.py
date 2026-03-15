@@ -41,6 +41,10 @@ from util.model_task_paths import (
     resolve_tasks_to_train,
     resolve_train_target,
 )
+from util.process_title import (
+    apply_eta_process_title_from_epoch_progress,
+    apply_eta_process_title_placeholder,
+)
 from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
@@ -2138,6 +2142,8 @@ def train_task_model(
         )
 
     train_ex, val_ex = stratified_split(examples, val_frac=val_frac, seed=seed)
+    _ = apply_eta_process_title_placeholder()
+    task_started_at = time.perf_counter()
     print(
         f"[{task}] backend=torch-reservoir device={runtime_device} "
         f"total={len(examples)} (pos={n_pos}, neg={n_neg}) "
@@ -2271,6 +2277,11 @@ def train_task_model(
             "tuned hparams, or reduce RESERVOIR_SIZE / MAX_TOKENS."
         ) from exc
     val_metrics = _evaluate_binary_predictions(labels=val_labels, probs=val_probs)
+    _ = apply_eta_process_title_from_epoch_progress(
+        task_started_at=task_started_at,
+        completed_epochs=1,
+        total_epochs=1,
+    )
 
     pr_auc = val_metrics.get("pr_auc")
     roc_auc = val_metrics.get("roc_auc")
