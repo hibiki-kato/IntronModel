@@ -59,7 +59,8 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
-PROCESS_TITLE="${PROCESS_TITLE:-tune_dnabert_time}"
+# Optional override. Leave empty to use static ETA title from TIME_BUDGET_MINUTES.
+PROCESS_TITLE=""
 UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
@@ -176,8 +177,19 @@ intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
+# Keep process title fixed during tune_time runs.
+export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
+
 format_elapsed() {
 	intronmodel_format_elapsed "$1"
+}
+
+format_eta() {
+	intronmodel_format_eta_epoch "$1"
+}
+
+build_eta_process_title() {
+	intronmodel_build_eta_process_title "$1"
 }
 
 resolve_species_case() {
@@ -411,8 +423,14 @@ if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	exit 1
 fi
 START_SECONDS="${SECONDS}"
+START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
-RUNTIME_PROCESS_TITLE="${PROCESS_TITLE}"
+ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
+ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
+RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
+if [[ -n "${PROCESS_TITLE}" ]]; then
+	RUNTIME_PROCESS_TITLE="${PROCESS_TITLE}"
+fi
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0

@@ -6,7 +6,21 @@ import sys
 import time
 
 PROCESS_TITLE_ENV: str = "INTRONMODEL_PROCESS_TITLE"
+DISABLE_ETA_PROCESS_TITLE_ENV: str = "INTRONMODEL_DISABLE_ETA_PROCESS_TITLE"
 _LINUX_PR_SET_NAME: int = 15
+
+
+def _eta_process_title_updates_enabled() -> bool:
+    """Return whether ETA-driven process-title updates are enabled.
+
+    The check is controlled by one environment variable:
+    ``INTRONMODEL_DISABLE_ETA_PROCESS_TITLE``.
+    ``1|true|yes|on`` disables ETA updates.
+    """
+
+    raw_value = os.environ.get(DISABLE_ETA_PROCESS_TITLE_ENV, "")
+    normalized = raw_value.strip().lower()
+    return normalized not in {"1", "true", "yes", "on"}
 
 
 def _apply_linux_process_name(title: str) -> bool:
@@ -172,6 +186,8 @@ def apply_eta_process_title_placeholder() -> bool:
     O(1) time and O(1) memory.
     """
 
+    if not _eta_process_title_updates_enabled():
+        return False
     return apply_process_title("ETA:--/-- --:--")
 
 
@@ -245,6 +261,9 @@ def apply_eta_process_title_from_epoch_progress(
     ----------
     O(1) time and O(1) memory.
     """
+
+    if not _eta_process_title_updates_enabled():
+        return False
 
     elapsed_seconds = max(0.0, time.perf_counter() - float(task_started_at))
     remaining_seconds = estimate_eta_remaining_seconds(
