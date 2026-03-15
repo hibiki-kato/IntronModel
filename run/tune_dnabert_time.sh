@@ -59,6 +59,7 @@ TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
+PROCESS_TITLE="${PROCESS_TITLE:-tune_dnabert_time}"
 UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
@@ -177,14 +178,6 @@ source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
 	intronmodel_format_elapsed "$1"
-}
-
-format_eta() {
-	intronmodel_format_eta_epoch "$1"
-}
-
-build_eta_process_title() {
-	intronmodel_build_eta_process_title "$1"
 }
 
 resolve_species_case() {
@@ -418,11 +411,8 @@ if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	exit 1
 fi
 START_SECONDS="${SECONDS}"
-START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
-ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
-ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
-RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
+RUNTIME_PROCESS_TITLE="${PROCESS_TITLE}"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
