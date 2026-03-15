@@ -10,7 +10,8 @@ This module provides reusable components for CNN-based models:
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from contextlib import nullcontext
+from typing import ContextManager, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -380,6 +381,8 @@ def score_sequences(
     window_len: int,
     device: str,
     batch_size: int = 512,
+    use_amp: bool = False,
+    amp_dtype: Optional[torch.dtype] = None,
 ) -> np.ndarray:
     """Score sequences using a binary model.
 
@@ -395,6 +398,10 @@ def score_sequences(
         Torch device name.
     batch_size : int, default=512
         Batch size for inference.
+    use_amp : bool, default=False
+        Whether to run CUDA autocast during inference.
+    amp_dtype : torch.dtype | None, default=None
+        Autocast dtype used when ``use_amp`` is enabled.
 
     Returns
     -------
@@ -411,7 +418,16 @@ def score_sequences(
     all_probs: list[np.ndarray] = []
     for index in range(0, len(x), batch_size):
         batch_x = x[index : index + batch_size]
-        logits = model(batch_x)
+        if use_amp and device == "cuda" and amp_dtype is not None:
+            amp_context: ContextManager[object] = torch.autocast(
+                device_type="cuda",
+                dtype=amp_dtype,
+                enabled=True,
+            )
+        else:
+            amp_context = nullcontext()
+        with amp_context:
+            logits = model(batch_x)
         probs = torch.sigmoid(logits).detach().cpu().numpy()
         all_probs.append(probs)
 

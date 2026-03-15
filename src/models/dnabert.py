@@ -1132,6 +1132,16 @@ class TaskTrainParams:
     asym_alpha_pos: Optional[float]
 
 
+@dataclass(frozen=True)
+class InferRuntimeConfig:
+    """Resolved runtime controls for DNABERT inference."""
+
+    batch_size: int
+    use_amp: bool
+    amp_dtype: Optional[torch.dtype]
+    compile_enabled: bool
+
+
 def _resolve_task_train_params(
     *,
     task: str,
@@ -1182,6 +1192,81 @@ def _resolve_task_train_params(
             "asym_alpha_pos", model_args.asym_alpha_pos
         ),
     )
+
+
+def _resolve_infer_runtime_config(
+    *,
+    device: str,
+    batch_size: int,
+    infer_use_amp: Union[bool, int],
+    infer_amp_dtype: str,
+    infer_compile: Union[bool, int],
+    infer_compile_mode: str,
+) -> InferRuntimeConfig:
+    """Resolve inference runtime configuration from user-facing flags."""
+    if batch_size <= 0:
+        raise ValueError("inference batch_size must be positive.")
+
+    effective_batch_size = batch_size
+    if device == "mps":
+        mps_max_batch_size = _resolve_mps_max_batch_size()
+        if effective_batch_size > mps_max_batch_size:
+            print(
+                "[infer] mps batch clamp: "
+                f"{effective_batch_size} -> {mps_max_batch_size} "
+                "(set INTRONMODEL_MPS_MAX_BATCH_SIZE to change)."
+            )
+            effective_batch_size = mps_max_batch_size
+
+    use_amp = _bool_from_flag(infer_use_amp) and device == "cuda"
+    amp_dtype = _resolve_amp_dtype(infer_amp_dtype, device)
+    compile_enabled = _resolve_compile_enabled(
+        compile_mode=infer_compile_mode,
+        compile_flag=_bool_from_flag(infer_compile),
+        quick_phase=False,
+        device=device,
+        epochs=2,
+    )
+    return InferRuntimeConfig(
+        batch_size=effective_batch_size,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+        compile_enabled=compile_enabled,
+    )
+
+
+def _prepare_infer_model(
+    *,
+    model: nn.Module,
+    task_name: str,
+    compile_enabled: bool,
+) -> nn.Module:
+    """Compile one inference model when requested and supported."""
+    compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
+    if not compile_enabled_attempt:
+        return model
+
+    _configure_triton_tool_paths()
+    _configure_torch_compile_runtime()
+    ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
+    ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
+    print(
+        f"[{task_name}] infer torch.compile requested "
+        f"(ptxas={ptxas_path}, ptxas_blackwell={ptxas_blackwell_path})."
+    )
+    (
+        compiled_model,
+        compile_enabled_attempt,
+        _compile_selected_mode,
+        compile_setup_error,
+    ) = _compile_model_with_fallback(model)
+    if (not compile_enabled_attempt) and compile_setup_error is not None:
+        print(
+            f"[{task_name}] infer torch.compile setup failed "
+            f"({compile_setup_error.__class__.__name__}). Continue without compile."
+        )
+        return model
+    return compiled_model
 
 
 def stratified_split(
@@ -2232,6 +2317,8 @@ def score_sequences(
     batch_size: int = 256,
     task_name: str = "task",
     input_kmer: Optional[int] = None,
+    use_amp: bool = False,
+    amp_dtype: Optional[torch.dtype] = None,
 ) -> np.ndarray:
     """Score input sequences with one trained task model."""
     if not sequences:
@@ -2243,6 +2330,7 @@ def score_sequences(
     all_probs: list[np.ndarray] = []
     total = len(sequences)
     log_every_batches = 200
+    use_non_blocking = device == "cuda"
 
     for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
         batch_sequences = sequences[start : start + batch_size]
@@ -2252,10 +2340,19 @@ def score_sequences(
             max_tokens=max_tokens,
             input_kmer=input_kmer,
         )
-        ids_tensor = ids_tensor.to(device)
-        mask_tensor = mask_tensor.to(device)
+        ids_tensor = ids_tensor.to(device, non_blocking=use_non_blocking)
+        mask_tensor = mask_tensor.to(device, non_blocking=use_non_blocking)
 
-        logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
+        if use_amp and device == "cuda" and amp_dtype is not None:
+            amp_context: ContextManager[object] = torch.autocast(
+                device_type="cuda",
+                dtype=amp_dtype,
+                enabled=True,
+            )
+        else:
+            amp_context = nullcontext()
+        with amp_context:
+            logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
         probs = torch.sigmoid(logits).cpu().numpy()
         all_probs.append(probs)
         should_log = (
@@ -2285,6 +2382,8 @@ def score_sequence_pairs(
     batch_size: int = 256,
     task_name: str = "pair",
     input_kmer: Optional[int] = None,
+    use_amp: bool = False,
+    amp_dtype: Optional[torch.dtype] = None,
 ) -> np.ndarray:
     """Score donor/acceptor pairs with one DNABERT pair model."""
     if len(donor_sequences) != len(acceptor_sequences):
@@ -2300,6 +2399,7 @@ def score_sequence_pairs(
     all_probs: list[np.ndarray] = []
     total = len(donor_sequences)
     log_every_batches = 200
+    use_non_blocking = device == "cuda"
 
     for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
         batch_donor_sequences = donor_sequences[start : start + batch_size]
@@ -2311,10 +2411,19 @@ def score_sequence_pairs(
             max_tokens=max_tokens,
             input_kmer=input_kmer,
         )
-        ids_tensor = ids_tensor.to(device)
-        mask_tensor = mask_tensor.to(device)
+        ids_tensor = ids_tensor.to(device, non_blocking=use_non_blocking)
+        mask_tensor = mask_tensor.to(device, non_blocking=use_non_blocking)
 
-        logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
+        if use_amp and device == "cuda" and amp_dtype is not None:
+            amp_context: ContextManager[object] = torch.autocast(
+                device_type="cuda",
+                dtype=amp_dtype,
+                enabled=True,
+            )
+        else:
+            amp_context = nullcontext()
+        with amp_context:
+            logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
         probs = torch.sigmoid(logits).cpu().numpy()
         all_probs.append(probs)
         should_log = (
@@ -2339,9 +2448,21 @@ def infer_site_scores(
     acceptor_model_path: str,
     device: str = "auto",
     batch_size: int = 256,
+    infer_use_amp: Union[bool, int] = 0,
+    infer_amp_dtype: str = "auto",
+    infer_compile: Union[bool, int] = 0,
+    infer_compile_mode: str = "off",
 ) -> List[Dict[str, object]]:
     """Run donor/acceptor inference and return normalized site rows."""
     device = pick_device(device)
+    infer_runtime = _resolve_infer_runtime_config(
+        device=device,
+        batch_size=batch_size,
+        infer_use_amp=infer_use_amp,
+        infer_amp_dtype=infer_amp_dtype,
+        infer_compile=infer_compile,
+        infer_compile_mode=infer_compile_mode,
+    )
 
     donor_model, donor_config, donor_tokenizer = load_task_model(
         donor_model_path,
@@ -2350,6 +2471,16 @@ def infer_site_scores(
     acceptor_model, acceptor_config, acceptor_tokenizer = load_task_model(
         acceptor_model_path,
         device,
+    )
+    donor_model = _prepare_infer_model(
+        model=donor_model,
+        task_name="donor",
+        compile_enabled=infer_runtime.compile_enabled,
+    )
+    acceptor_model = _prepare_infer_model(
+        model=acceptor_model,
+        task_name="acceptor",
+        compile_enabled=infer_runtime.compile_enabled,
     )
 
     donor_max_tokens = _int_from_checkpoint(donor_config, "max_tokens", 128)
@@ -2378,9 +2509,11 @@ def infer_site_scores(
         tokenizer=donor_tokenizer,
         max_tokens=donor_max_tokens,
         device=device,
-        batch_size=batch_size,
+        batch_size=infer_runtime.batch_size,
         task_name="donor",
         input_kmer=donor_input_kmer,
+        use_amp=infer_runtime.use_amp,
+        amp_dtype=infer_runtime.amp_dtype,
     )
     acceptor_scores = score_sequences(
         model=acceptor_model,
@@ -2388,9 +2521,11 @@ def infer_site_scores(
         tokenizer=acceptor_tokenizer,
         max_tokens=acceptor_max_tokens,
         device=device,
-        batch_size=batch_size,
+        batch_size=infer_runtime.batch_size,
         task_name="acceptor",
         input_kmer=acceptor_input_kmer,
+        use_amp=infer_runtime.use_amp,
+        amp_dtype=infer_runtime.amp_dtype,
     )
 
     out_rows: List[Dict[str, object]] = []
@@ -2429,13 +2564,30 @@ def infer_pair_site_scores(
     pair_model_path: str,
     device: str = "auto",
     batch_size: int = 256,
+    infer_use_amp: Union[bool, int] = 0,
+    infer_amp_dtype: str = "auto",
+    infer_compile: Union[bool, int] = 0,
+    infer_compile_mode: str = "off",
 ) -> List[Dict[str, object]]:
     """Run pair inference and return normalized site rows."""
     device = pick_device(device)
+    infer_runtime = _resolve_infer_runtime_config(
+        device=device,
+        batch_size=batch_size,
+        infer_use_amp=infer_use_amp,
+        infer_amp_dtype=infer_amp_dtype,
+        infer_compile=infer_compile,
+        infer_compile_mode=infer_compile_mode,
+    )
 
     pair_model, pair_config, pair_tokenizer = load_task_model(
         pair_model_path,
         device,
+    )
+    pair_model = _prepare_infer_model(
+        model=pair_model,
+        task_name="pair",
+        compile_enabled=infer_runtime.compile_enabled,
     )
     pair_max_tokens = _int_from_checkpoint(pair_config, "max_tokens", 128)
     pair_input_kmer_obj = pair_config.get("input_kmer")
@@ -2454,9 +2606,11 @@ def infer_pair_site_scores(
         tokenizer=pair_tokenizer,
         max_tokens=pair_max_tokens,
         device=device,
-        batch_size=batch_size,
+        batch_size=infer_runtime.batch_size,
         task_name="pair",
         input_kmer=pair_input_kmer,
+        use_amp=infer_runtime.use_amp,
+        amp_dtype=infer_runtime.amp_dtype,
     )
 
     out_rows: List[Dict[str, object]] = []
@@ -2749,6 +2903,41 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 def add_infer_args(parser: argparse.ArgumentParser) -> None:
     """Register DNABERT-specific inference arguments."""
     parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument(
+        "--infer_batch_size",
+        type=int,
+        default=None,
+        help="Inference-only override for --batch_size.",
+    )
+    parser.add_argument(
+        "--infer_use_amp",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Inference-only AMP override. Default follows --use_amp.",
+    )
+    parser.add_argument(
+        "--infer_amp_dtype",
+        choices=["auto", "bf16", "fp16"],
+        default=None,
+        help="Inference-only AMP dtype override. Default follows --amp_dtype.",
+    )
+    parser.add_argument(
+        "--infer_compile",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Inference-only compile override. Default follows --compile.",
+    )
+    parser.add_argument(
+        "--infer_compile_mode",
+        choices=["off", "on", "auto"],
+        default=None,
+        help=(
+            "Inference-only compile mode override. "
+            "Default follows --compile_mode."
+        ),
+    )
 
 
 def train(
@@ -3011,6 +3200,31 @@ def infer_site(
         require_exists=True,
         tasks=model_tasks,
     )
+    infer_batch_size = (
+        int(model_args.infer_batch_size)
+        if model_args.infer_batch_size is not None
+        else int(model_args.batch_size)
+    )
+    infer_use_amp = (
+        int(model_args.infer_use_amp)
+        if model_args.infer_use_amp is not None
+        else int(model_args.use_amp)
+    )
+    infer_amp_dtype = (
+        str(model_args.infer_amp_dtype)
+        if model_args.infer_amp_dtype is not None
+        else str(model_args.amp_dtype)
+    )
+    infer_compile = (
+        int(model_args.infer_compile)
+        if model_args.infer_compile is not None
+        else int(bool(model_args.compile))
+    )
+    infer_compile_mode = (
+        str(model_args.infer_compile_mode)
+        if model_args.infer_compile_mode is not None
+        else str(model_args.compile_mode)
+    )
     if model_tasks == ("pair",):
         pair_model_path = task_checkpoint_paths["pair"]
         pair_rows, skipped_short, skipped_unpaired = read_test_pair_rows(
@@ -3027,7 +3241,11 @@ def infer_site(
             pair_rows=pair_rows,
             pair_model_path=pair_model_path,
             device=common_args.device,
-            batch_size=model_args.batch_size,
+            batch_size=infer_batch_size,
+            infer_use_amp=infer_use_amp,
+            infer_amp_dtype=infer_amp_dtype,
+            infer_compile=infer_compile,
+            infer_compile_mode=infer_compile_mode,
         )
 
     donor_model_path = task_checkpoint_paths["donor"]
@@ -3045,5 +3263,9 @@ def infer_site(
         donor_model_path=donor_model_path,
         acceptor_model_path=acceptor_model_path,
         device=common_args.device,
-        batch_size=model_args.batch_size,
+        batch_size=infer_batch_size,
+        infer_use_amp=infer_use_amp,
+        infer_amp_dtype=infer_amp_dtype,
+        infer_compile=infer_compile,
+        infer_compile_mode=infer_compile_mode,
     )

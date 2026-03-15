@@ -121,6 +121,40 @@ def test_build_run_args_forwards_pair_max_pool_flag() -> None:
     assert args[args.index("--head_type") + 1] == "center"
 
 
+def test_build_run_args_forwards_dnabert_infer_runtime_overrides() -> None:
+    spec = WrapperSpec(
+        script_name="unit.sh",
+        model_env_name="dnabert_pair",
+        supports_tuned_hparams=False,
+        tuned_key_map={},
+        stem_param_builder="dnabert_pair",
+        required_arg_keys=(),
+        per_task_override_keys=(),
+    )
+    args = _build_run_args(
+        spec,
+        {
+            "MODEL": "dnabert_pair",
+            "INFER_BATCH_SIZE": "384",
+            "INFER_USE_AMP": "1",
+            "INFER_AMP_DTYPE": "fp16",
+            "INFER_COMPILE": "1",
+            "INFER_COMPILE_MODE": "on",
+        },
+    )
+
+    assert "--infer_batch_size" in args
+    assert args[args.index("--infer_batch_size") + 1] == "384"
+    assert "--infer_use_amp" in args
+    assert args[args.index("--infer_use_amp") + 1] == "1"
+    assert "--infer_amp_dtype" in args
+    assert args[args.index("--infer_amp_dtype") + 1] == "fp16"
+    assert "--infer_compile" in args
+    assert args[args.index("--infer_compile") + 1] == "1"
+    assert "--infer_compile_mode" in args
+    assert args[args.index("--infer_compile_mode") + 1] == "on"
+
+
 def test_stem_params_include_pair_max_pool_flag() -> None:
     params = _stem_params(
         "cnn_pair",

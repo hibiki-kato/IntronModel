@@ -195,6 +195,91 @@ class TaskTrainParams:
     asym_alpha_pos: Optional[float]
 
 
+@dataclass(frozen=True)
+class InferRuntimeConfig:
+    """Resolved runtime controls for residual-CNN inference."""
+
+    batch_size: int
+    use_amp: bool
+    amp_dtype: Optional[torch.dtype]
+    compile_enabled: bool
+
+
+def _resolve_infer_runtime_config(
+    *,
+    device: str,
+    batch_size: int,
+    infer_use_amp: Union[bool, int],
+    infer_amp_dtype: str,
+    infer_compile: Union[bool, int],
+    infer_compile_mode: str,
+) -> InferRuntimeConfig:
+    """Resolve inference runtime configuration from user-facing flags."""
+    if batch_size <= 0:
+        raise ValueError("inference batch_size must be positive.")
+
+    effective_batch_size = batch_size
+    if device == "mps":
+        mps_max_batch_size = _resolve_mps_max_batch_size()
+        if effective_batch_size > mps_max_batch_size:
+            print(
+                "[infer] mps batch clamp: "
+                f"{effective_batch_size} -> {mps_max_batch_size} "
+                "(set INTRONMODEL_MPS_MAX_BATCH_SIZE to change)."
+            )
+            effective_batch_size = mps_max_batch_size
+
+    use_amp = _bool_from_flag(infer_use_amp) and device == "cuda"
+    amp_dtype = _resolve_amp_dtype(infer_amp_dtype, device)
+    compile_enabled = _resolve_compile_enabled(
+        compile_mode=infer_compile_mode,
+        compile_flag=_bool_from_flag(infer_compile),
+        quick_phase=False,
+        device=device,
+        epochs=2,
+    )
+    return InferRuntimeConfig(
+        batch_size=effective_batch_size,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+        compile_enabled=compile_enabled,
+    )
+
+
+def _prepare_infer_model(
+    *,
+    model: nn.Module,
+    task_name: str,
+    compile_enabled: bool,
+) -> nn.Module:
+    """Compile one inference model when requested and supported."""
+    compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
+    if not compile_enabled_attempt:
+        return model
+
+    _configure_triton_tool_paths()
+    _configure_torch_compile_runtime()
+    ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
+    ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
+    print(
+        f"[{task_name}] infer torch.compile requested "
+        f"(ptxas={ptxas_path}, ptxas_blackwell={ptxas_blackwell_path})."
+    )
+    (
+        compiled_model,
+        compile_enabled_attempt,
+        _compile_selected_mode,
+        compile_setup_error,
+    ) = _compile_model_with_fallback(model)
+    if (not compile_enabled_attempt) and compile_setup_error is not None:
+        print(
+            f"[{task_name}] infer torch.compile setup failed "
+            f"({compile_setup_error.__class__.__name__}). Continue without compile."
+        )
+        return model
+    return compiled_model
+
+
 def _resolve_task_train_params(
     *,
     task: str,
@@ -1368,18 +1453,32 @@ def score_sequences(
     window_len: int,
     device: str,
     batch_size: int = 512,
+    use_amp: bool = False,
+    amp_dtype: Optional[torch.dtype] = None,
 ) -> np.ndarray:
     if not sequences:
         return np.array([])
 
     model.eval()
     encoded = [one_hot_encode_dna(seq.upper(), window_len) for seq in sequences]
-    x = torch.from_numpy(np.stack(encoded)).to(device)
+    x = torch.from_numpy(np.stack(encoded)).to(
+        device=device,
+        non_blocking=device == "cuda",
+    )
 
     all_probs = []
     for i in range(0, len(x), batch_size):
         batch_x = x[i : i + batch_size]
-        logits = model(batch_x)
+        if use_amp and device == "cuda" and amp_dtype is not None:
+            amp_context: ContextManager[object] = torch.autocast(
+                device_type="cuda",
+                dtype=amp_dtype,
+                enabled=True,
+            )
+        else:
+            amp_context = nullcontext()
+        with amp_context:
+            logits = model(batch_x)
         probs = torch.sigmoid(logits).cpu().numpy()
         all_probs.append(probs)
 
@@ -1392,11 +1491,33 @@ def infer_site_scores(
     acceptor_model_path: str,
     device: str = "auto",
     batch_size: int = 512,
+    infer_use_amp: Union[bool, int] = 0,
+    infer_amp_dtype: str = "auto",
+    infer_compile: Union[bool, int] = 0,
+    infer_compile_mode: str = "off",
 ) -> List[Dict[str, object]]:
     device = pick_device(device)
+    infer_runtime = _resolve_infer_runtime_config(
+        device=device,
+        batch_size=batch_size,
+        infer_use_amp=infer_use_amp,
+        infer_amp_dtype=infer_amp_dtype,
+        infer_compile=infer_compile,
+        infer_compile_mode=infer_compile_mode,
+    )
 
     donor_model, donor_ckpt = load_task_model(donor_model_path, device)
     acceptor_model, acceptor_ckpt = load_task_model(acceptor_model_path, device)
+    donor_model = _prepare_infer_model(
+        model=donor_model,
+        task_name="donor",
+        compile_enabled=infer_runtime.compile_enabled,
+    )
+    acceptor_model = _prepare_infer_model(
+        model=acceptor_model,
+        task_name="acceptor",
+        compile_enabled=infer_runtime.compile_enabled,
+    )
 
     donor_window_len = int(donor_ckpt.get("window_len", 50))
     acceptor_window_len = int(acceptor_ckpt.get("window_len", 50))
@@ -1409,14 +1530,18 @@ def infer_site_scores(
         donor_seqs,
         donor_window_len,
         device,
-        batch_size=batch_size,
+        batch_size=infer_runtime.batch_size,
+        use_amp=infer_runtime.use_amp,
+        amp_dtype=infer_runtime.amp_dtype,
     )
     acceptor_scores = score_sequences(
         acceptor_model,
         acceptor_seqs,
         acceptor_window_len,
         device,
-        batch_size=batch_size,
+        batch_size=infer_runtime.batch_size,
+        use_amp=infer_runtime.use_amp,
+        amp_dtype=infer_runtime.amp_dtype,
     )
 
     out_rows: List[Dict[str, object]] = []
@@ -1917,6 +2042,41 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
 def add_infer_args(parser: argparse.ArgumentParser) -> None:
     """Register CNN-specific inference arguments."""
     parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument(
+        "--infer_batch_size",
+        type=int,
+        default=None,
+        help="Inference-only override for --batch_size.",
+    )
+    parser.add_argument(
+        "--infer_use_amp",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Inference-only AMP override. Default follows --use_amp.",
+    )
+    parser.add_argument(
+        "--infer_amp_dtype",
+        choices=["auto", "bf16", "fp16"],
+        default=None,
+        help="Inference-only AMP dtype override. Default follows --amp_dtype.",
+    )
+    parser.add_argument(
+        "--infer_compile",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Inference-only compile override. Default follows --compile.",
+    )
+    parser.add_argument(
+        "--infer_compile_mode",
+        choices=["off", "on", "auto"],
+        default=None,
+        help=(
+            "Inference-only compile mode override. "
+            "Default follows --compile_mode."
+        ),
+    )
 
 
 def train(
@@ -2214,6 +2374,31 @@ def infer_site(
     )
     donor_model_path = task_checkpoint_paths["donor"]
     acceptor_model_path = task_checkpoint_paths["acceptor"]
+    infer_batch_size = (
+        int(model_args.infer_batch_size)
+        if model_args.infer_batch_size is not None
+        else int(model_args.batch_size)
+    )
+    infer_use_amp = (
+        int(model_args.infer_use_amp)
+        if model_args.infer_use_amp is not None
+        else int(model_args.use_amp)
+    )
+    infer_amp_dtype = (
+        str(model_args.infer_amp_dtype)
+        if model_args.infer_amp_dtype is not None
+        else str(model_args.amp_dtype)
+    )
+    infer_compile = (
+        int(model_args.infer_compile)
+        if model_args.infer_compile is not None
+        else int(bool(model_args.compile))
+    )
+    infer_compile_mode = (
+        str(model_args.infer_compile_mode)
+        if model_args.infer_compile_mode is not None
+        else str(model_args.compile_mode)
+    )
 
     site_rows, skipped_short = read_test_site_rows(
         test_tsv=test_tsv,
@@ -2229,5 +2414,9 @@ def infer_site(
         donor_model_path=donor_model_path,
         acceptor_model_path=acceptor_model_path,
         device=common_args.device,
-        batch_size=model_args.batch_size,
+        batch_size=infer_batch_size,
+        infer_use_amp=infer_use_amp,
+        infer_amp_dtype=infer_amp_dtype,
+        infer_compile=infer_compile,
+        infer_compile_mode=infer_compile_mode,
     )

@@ -92,3 +92,37 @@ def test_build_run_args_includes_cnn_max_pool_flag_when_required() -> None:
     assert args[args.index("--conv_stride") + 1] == "2"
     assert "--head_type" in args
     assert args[args.index("--head_type") + 1] == "center"
+
+
+def test_build_run_args_forwards_infer_runtime_overrides() -> None:
+    spec = WrapperSpec(
+        script_name="unit.sh",
+        model_env_name="cnn",
+        supports_tuned_hparams=False,
+        tuned_key_map={},
+        stem_param_builder="cnn",
+        required_arg_keys=(),
+        per_task_override_keys=(),
+    )
+    args = _build_run_args(
+        spec,
+        {
+            "MODEL": "cnn",
+            "INFER_BATCH_SIZE": "1536",
+            "INFER_USE_AMP": "1",
+            "INFER_AMP_DTYPE": "bf16",
+            "INFER_COMPILE": "0",
+            "INFER_COMPILE_MODE": "auto",
+        },
+    )
+
+    assert "--infer_batch_size" in args
+    assert args[args.index("--infer_batch_size") + 1] == "1536"
+    assert "--infer_use_amp" in args
+    assert args[args.index("--infer_use_amp") + 1] == "1"
+    assert "--infer_amp_dtype" in args
+    assert args[args.index("--infer_amp_dtype") + 1] == "bf16"
+    assert "--infer_compile" in args
+    assert args[args.index("--infer_compile") + 1] == "0"
+    assert "--infer_compile_mode" in args
+    assert args[args.index("--infer_compile_mode") + 1] == "auto"
