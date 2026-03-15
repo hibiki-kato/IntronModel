@@ -58,6 +58,7 @@ from util.model_task_paths import (
 )
 from util.model_runtime import (
     bool_from_flag as _bool_from_flag,
+    compile_model_with_fallback as _compile_model_with_fallback,
     configure_torch_compile_runtime as _configure_torch_compile_runtime,
     configure_triton_tool_paths as _configure_triton_tool_paths,
     empty_device_cache as _empty_device_cache,
@@ -73,6 +74,7 @@ from util.model_runtime import (
     resolve_compile_enabled as _resolve_compile_enabled,
     resolve_mps_max_batch_size,
     resolve_num_workers as _resolve_num_workers,
+    record_compile_runtime_failure as _record_compile_runtime_failure,
     seed_worker as _seed_worker,
     set_seed,
     sigmoid_np,
@@ -879,6 +881,7 @@ def train_task_model(
     while True:
         saw_training_batch = False
         compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
+        compile_selected_mode: str | None = None
         loader_started_at = time.perf_counter()
         loader_generator = torch.Generator()
         loader_generator.manual_seed(seed)
@@ -938,14 +941,18 @@ def train_task_model(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, ptxas_blackwell={ptxas_blackwell_path})."
                 )
-                try:
-                    model = torch.compile(model)
-                except Exception as exc:
-                    compile_enabled_attempt = False
-                    compile_enabled = False
+                (
+                    model,
+                    compile_enabled_attempt,
+                    compile_selected_mode,
+                    compile_setup_error,
+                ) = _compile_model_with_fallback(model)
+                compile_enabled = compile_enabled_attempt
+                if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
                         f"[{task}] torch.compile setup failed "
-                        f"({exc.__class__.__name__}). Continue without compile."
+                        f"({compile_setup_error.__class__.__name__}). "
+                        "Continue without compile."
                     )
 
             optimizer_impl = "adamw"
@@ -1265,6 +1272,7 @@ def train_task_model(
             )
             if is_compile_failure:
                 compile_enabled = False
+                _record_compile_runtime_failure(compile_selected_mode)
                 print(
                     f"[{task}] torch.compile runtime failed "
                     f"({exc.__class__.__name__}). Retry without compile."

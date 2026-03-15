@@ -8,18 +8,32 @@ import numpy as np
 import pytest
 import torch
 
+import util.model_runtime as model_runtime
 from util.model_runtime import (
     bool_from_flag,
+    compile_model_with_fallback,
     configure_triton_tool_paths,
     fallback_average_precision,
     fallback_max_f1,
     fallback_roc_auc,
     is_compile_runtime_error,
     normalize_checkpoint_state_dict,
+    resolve_compile_enabled,
     resolve_mps_max_batch_size,
     resolve_num_workers,
     sigmoid_np,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_compile_runtime_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INTRONMODEL_TORCH_COMPILE_STRATEGY", raising=False)
+    monkeypatch.delenv("INTRONMODEL_TORCH_COMPILE_STICKY_MODE", raising=False)
+    monkeypatch.delenv("INTRONMODEL_TORCH_COMPILE_DISABLED_MODES", raising=False)
+    monkeypatch.delenv("TORCHINDUCTOR_MAX_AUTOTUNE_GEMM", raising=False)
+    model_runtime._COMPILE_RUNTIME_CACHE_LOADED = False
+    model_runtime._COMPILE_STICKY_MODE_CACHE = None
+    model_runtime._COMPILE_DISABLED_MODES_CACHE.clear()
 
 
 def test_bool_from_flag_supports_int_and_bool() -> None:
@@ -49,6 +63,113 @@ def test_resolve_mps_max_batch_size_invalid_env_returns_default(
 def test_is_compile_runtime_error_matches_known_keyword() -> None:
     exc = RuntimeError("backend_hash failed in torch._inductor")
     assert is_compile_runtime_error(exc) is True
+
+
+def test_resolve_compile_enabled_auto_no_epoch_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRITON_PTXAS_PATH", "/tmp/ptxas")
+    enabled = resolve_compile_enabled(
+        compile_mode="auto",
+        compile_flag=False,
+        quick_phase=False,
+        device="cuda",
+        epochs=1,
+    )
+    assert enabled is True
+
+
+def test_compile_model_with_fallback_uses_default_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mode_calls: list[str | None] = []
+    model = torch.nn.Linear(4, 2)
+
+    def _fake_compile(
+        module: torch.nn.Module,
+        mode: str | None = None,
+    ) -> torch.nn.Module:
+        mode_calls.append(mode)
+        return module
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    compiled, enabled, selected_mode, setup_error = compile_model_with_fallback(model)
+    assert compiled is model
+    assert enabled is True
+    assert selected_mode == "default"
+    assert setup_error is None
+    assert mode_calls == [None]
+
+
+def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Props:
+        multi_processor_count = 20
+
+    mode_calls: list[str | None] = []
+    model = torch.nn.Linear(3, 1)
+
+    def _fake_compile(
+        module: torch.nn.Module,
+        mode: str | None = None,
+    ) -> torch.nn.Module:
+        mode_calls.append(mode)
+        return module
+
+    monkeypatch.setenv(
+        "INTRONMODEL_TORCH_COMPILE_STRATEGY",
+        "max-then-default-then-off",
+    )
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: _Props())
+
+    _, enabled, selected_mode, setup_error = compile_model_with_fallback(model)
+    assert enabled is True
+    assert selected_mode == "default"
+    assert setup_error is None
+    assert mode_calls == [None]
+
+
+def test_compile_model_with_fallback_caches_failed_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Props:
+        multi_processor_count = 80
+
+    mode_calls: list[str | None] = []
+    model = torch.nn.Linear(2, 1)
+
+    def _fake_compile(
+        module: torch.nn.Module,
+        mode: str | None = None,
+    ) -> torch.nn.Module:
+        mode_calls.append(mode)
+        if mode == "max-autotune":
+            raise RuntimeError("max mode unsupported")
+        return module
+
+    monkeypatch.setenv(
+        "INTRONMODEL_TORCH_COMPILE_STRATEGY",
+        "max-then-default-then-off",
+    )
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: _Props())
+
+    first = compile_model_with_fallback(model)
+    second = compile_model_with_fallback(model)
+
+    assert first[1] is True
+    assert first[2] == "default"
+    assert first[3] is None
+    assert second[1] is True
+    assert second[2] == "default"
+    assert second[3] is None
+    assert mode_calls == ["max-autotune", None, None]
 
 
 def test_configure_triton_tool_paths_sets_cuda_env_for_conda_targets(

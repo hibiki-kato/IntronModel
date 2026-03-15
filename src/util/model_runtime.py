@@ -2,15 +2,43 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import random
 import shutil
 from pathlib import Path
-from typing import Mapping
+from typing import Iterator, Mapping
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+_COMPILE_MODE_OFF: str = "off"
+_COMPILE_MODE_DEFAULT: str = "default"
+_COMPILE_MODE_MAX_AUTOTUNE: str = "max-autotune"
+
+_COMPILE_MODE_CHOICES: tuple[str, ...] = (
+    _COMPILE_MODE_DEFAULT,
+    _COMPILE_MODE_MAX_AUTOTUNE,
+)
+_COMPILE_STRATEGY_CHOICES: tuple[str, ...] = (
+    "off",
+    "default-only",
+    "default-then-off",
+    "max-only",
+    "max-then-default-then-off",
+)
+
+_COMPILE_STRATEGY_ENV: str = "INTRONMODEL_TORCH_COMPILE_STRATEGY"
+_COMPILE_STICKY_MODE_ENV: str = "INTRONMODEL_TORCH_COMPILE_STICKY_MODE"
+_COMPILE_DISABLED_MODES_ENV: str = "INTRONMODEL_TORCH_COMPILE_DISABLED_MODES"
+_TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV: str = "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"
+
+_MAX_AUTOTUNE_MIN_SM_COUNT_CUDA: int = 68
+
+_COMPILE_RUNTIME_CACHE_LOADED: bool = False
+_COMPILE_STICKY_MODE_CACHE: str | None = None
+_COMPILE_DISABLED_MODES_CACHE: set[str] = set()
 
 
 def binary_clf_curve(
@@ -159,6 +187,7 @@ def resolve_compile_enabled(
     epochs: int,
 ) -> bool:
     """Resolve final ``torch.compile`` usage policy."""
+    del epochs
     if device != "cuda":
         return False
     if compile_flag:
@@ -172,13 +201,225 @@ def resolve_compile_enabled(
         raise ValueError("--compile_mode must be one of: off, on, auto.")
     if quick_phase:
         return False
-    if epochs < 10:
-        return False
     ptxas_env = os.environ.get("TRITON_PTXAS_PATH")
     ptxas_blackwell_env = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
     if ptxas_env or ptxas_blackwell_env:
         return True
     return shutil.which("ptxas") is not None
+
+
+def _normalize_compile_mode_token(raw: str) -> str | None:
+    token = raw.strip().lower().replace("_", "-")
+    aliases = {
+        "default": _COMPILE_MODE_DEFAULT,
+        "normal": _COMPILE_MODE_DEFAULT,
+        "max": _COMPILE_MODE_MAX_AUTOTUNE,
+        "max-autotune": _COMPILE_MODE_MAX_AUTOTUNE,
+        "max-autotune-gemm": _COMPILE_MODE_MAX_AUTOTUNE,
+        "off": _COMPILE_MODE_OFF,
+        "none": _COMPILE_MODE_OFF,
+        "false": _COMPILE_MODE_OFF,
+    }
+    resolved = aliases.get(token)
+    return resolved
+
+
+def _normalize_compile_strategy(raw: str) -> str:
+    token = raw.strip().lower().replace("_", "-")
+    aliases = {
+        "off": "off",
+        "none": "off",
+        "false": "off",
+        "default": "default-then-off",
+        "auto": "default-then-off",
+        "default-only": "default-only",
+        "default-then-off": "default-then-off",
+        "max": "max-only",
+        "max-only": "max-only",
+        "max-then-default": "max-then-default-then-off",
+        "max-then-default-then-off": "max-then-default-then-off",
+    }
+    resolved = aliases.get(token)
+    if resolved is None:
+        choices = ", ".join(_COMPILE_STRATEGY_CHOICES)
+        raise ValueError(
+            f"{_COMPILE_STRATEGY_ENV} must be one of: {choices}."
+        )
+    return resolved
+
+
+def _compile_modes_for_strategy(strategy: str) -> tuple[str, ...]:
+    if strategy == "off":
+        return ()
+    if strategy in {"default-only", "default-then-off"}:
+        return (_COMPILE_MODE_DEFAULT,)
+    if strategy == "max-only":
+        return (_COMPILE_MODE_MAX_AUTOTUNE,)
+    if strategy == "max-then-default-then-off":
+        return (_COMPILE_MODE_MAX_AUTOTUNE, _COMPILE_MODE_DEFAULT)
+    raise ValueError(
+        f"Unrecognized compile strategy '{strategy}'. "
+        f"Expected one of: {', '.join(_COMPILE_STRATEGY_CHOICES)}."
+    )
+
+
+def _load_compile_runtime_cache_from_env() -> None:
+    global _COMPILE_RUNTIME_CACHE_LOADED
+    global _COMPILE_STICKY_MODE_CACHE
+    if _COMPILE_RUNTIME_CACHE_LOADED:
+        return
+    sticky_raw = os.environ.get(_COMPILE_STICKY_MODE_ENV)
+    if sticky_raw is not None and sticky_raw.strip():
+        sticky_mode = _normalize_compile_mode_token(sticky_raw)
+        if sticky_mode is not None:
+            _COMPILE_STICKY_MODE_CACHE = sticky_mode
+    disabled_raw = os.environ.get(_COMPILE_DISABLED_MODES_ENV)
+    if disabled_raw is not None and disabled_raw.strip():
+        for item in disabled_raw.split(","):
+            disabled_mode = _normalize_compile_mode_token(item)
+            if disabled_mode in _COMPILE_MODE_CHOICES:
+                _COMPILE_DISABLED_MODES_CACHE.add(disabled_mode)
+    _COMPILE_RUNTIME_CACHE_LOADED = True
+
+
+def _persist_compile_runtime_cache_to_env() -> None:
+    sticky_mode = _COMPILE_STICKY_MODE_CACHE
+    if sticky_mode is None:
+        os.environ.pop(_COMPILE_STICKY_MODE_ENV, None)
+    else:
+        os.environ[_COMPILE_STICKY_MODE_ENV] = sticky_mode
+    if _COMPILE_DISABLED_MODES_CACHE:
+        os.environ[_COMPILE_DISABLED_MODES_ENV] = ",".join(
+            sorted(_COMPILE_DISABLED_MODES_CACHE)
+        )
+    else:
+        os.environ.pop(_COMPILE_DISABLED_MODES_ENV, None)
+
+
+def _set_compile_sticky_mode(mode: str | None) -> None:
+    global _COMPILE_STICKY_MODE_CACHE
+    _COMPILE_STICKY_MODE_CACHE = mode
+    _persist_compile_runtime_cache_to_env()
+
+
+def _disable_compile_mode(mode: str) -> None:
+    _COMPILE_DISABLED_MODES_CACHE.add(mode)
+    if _COMPILE_STICKY_MODE_CACHE == mode:
+        _set_compile_sticky_mode(None)
+    _persist_compile_runtime_cache_to_env()
+
+
+def _can_use_max_autotune_mode() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        current_index = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(current_index)
+    except Exception:
+        return False
+    avail_sms = int(getattr(props, "multi_processor_count", 0))
+    return avail_sms >= _MAX_AUTOTUNE_MIN_SM_COUNT_CUDA
+
+
+@contextmanager
+def _temporary_max_autotune_setting(enabled: bool) -> Iterator[None]:
+    key = _TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV
+    previous = os.environ.get(key)
+    os.environ[key] = "1" if enabled else "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
+def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
+    compile_fn = getattr(torch, "compile", None)
+    if not callable(compile_fn):
+        raise RuntimeError("torch.compile is unavailable in this torch build.")
+    if mode not in _COMPILE_MODE_CHOICES:
+        raise ValueError(
+            f"Unsupported compile mode '{mode}'. "
+            f"Expected one of: {', '.join(_COMPILE_MODE_CHOICES)}."
+        )
+    with _temporary_max_autotune_setting(mode == _COMPILE_MODE_MAX_AUTOTUNE):
+        if mode == _COMPILE_MODE_DEFAULT:
+            return compile_fn(model)
+        return compile_fn(model, mode=mode)
+
+
+def compile_model_with_fallback(
+    model: nn.Module,
+) -> tuple[nn.Module, bool, str | None, Exception | None]:
+    """Compile one model with strategy-based fallback and process-local caching.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model to compile with ``torch.compile``.
+
+    Returns
+    -------
+    tuple[nn.Module, bool, str | None, Exception | None]
+        ``(effective_model, compile_enabled, selected_mode, last_error)``.
+        ``selected_mode`` is ``None`` when compile is disabled.
+    """
+    compile_fn = getattr(torch, "compile", None)
+    if not callable(compile_fn):
+        return model, False, None, None
+
+    _load_compile_runtime_cache_from_env()
+    strategy_raw = os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
+    strategy = _normalize_compile_strategy(strategy_raw)
+    if strategy == "off":
+        _set_compile_sticky_mode(_COMPILE_MODE_OFF)
+        return model, False, None, None
+
+    if _COMPILE_STICKY_MODE_CACHE == _COMPILE_MODE_OFF:
+        return model, False, None, None
+
+    if _COMPILE_STICKY_MODE_CACHE in _COMPILE_MODE_CHOICES:
+        candidate_modes = [_COMPILE_STICKY_MODE_CACHE]
+    else:
+        candidate_modes = list(_compile_modes_for_strategy(strategy))
+
+    last_error: Exception | None = None
+    for mode in candidate_modes:
+        if mode in _COMPILE_DISABLED_MODES_CACHE:
+            continue
+        if mode == _COMPILE_MODE_MAX_AUTOTUNE and not _can_use_max_autotune_mode():
+            _disable_compile_mode(mode)
+            continue
+        try:
+            compiled_model = _compile_model_once_with_mode(model, mode)
+        except Exception as exc:
+            last_error = exc
+            _disable_compile_mode(mode)
+            continue
+        _set_compile_sticky_mode(mode)
+        return compiled_model, True, mode, None
+
+    _set_compile_sticky_mode(_COMPILE_MODE_OFF)
+    return model, False, None, last_error
+
+
+def record_compile_runtime_failure(selected_mode: str | None) -> None:
+    """Record one runtime compile failure and adjust future compile attempts."""
+    _load_compile_runtime_cache_from_env()
+    if selected_mode is None:
+        _set_compile_sticky_mode(_COMPILE_MODE_OFF)
+        return
+    normalized_mode = _normalize_compile_mode_token(selected_mode)
+    if normalized_mode not in _COMPILE_MODE_CHOICES:
+        _set_compile_sticky_mode(_COMPILE_MODE_OFF)
+        return
+    _disable_compile_mode(normalized_mode)
+    if normalized_mode == _COMPILE_MODE_MAX_AUTOTUNE:
+        _set_compile_sticky_mode(None)
+        return
+    _set_compile_sticky_mode(_COMPILE_MODE_OFF)
 
 
 def _iter_cuda_root_candidates() -> list[Path]:
