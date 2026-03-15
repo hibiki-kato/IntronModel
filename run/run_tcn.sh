@@ -111,6 +111,8 @@ CHECKPOINT_PRUNE_DRY_RUN="0"
 
 PERF_MODE="max_throughput"
 DEVICE="auto"
+GPU_IDS="auto"
+MAX_PARALLEL_TRIALS="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
 COMPILE_MODE="auto"

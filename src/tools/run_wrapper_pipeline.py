@@ -1536,13 +1536,56 @@ def _detect_visible_gpu_ids() -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _resolve_species_gpu_slots(device: str) -> list[str]:
+def _parse_gpu_ids_setting(gpu_ids_setting: str) -> list[str] | None:
+    """Parse ``GPU_IDS`` configuration from wrapper environment.
+
+    Parameters
+    ----------
+    gpu_ids_setting : str
+        Raw GPU slot setting (``auto`` or comma-separated integer ids).
+
+    Returns
+    -------
+    list[str] | None
+        Parsed GPU id list when explicitly configured, otherwise ``None`` for
+        ``auto`` resolution.
+
+    Raises
+    ------
+    ValueError
+        If the setting is not ``auto`` or a valid integer id list.
+
+    Complexity
+    ----------
+    O(g) time and O(g) memory, where ``g`` is the number of configured ids.
+    """
+
+    text = gpu_ids_setting.strip()
+    if text == "" or text.lower() == "auto":
+        return None
+
+    parsed: list[str] = []
+    for token in gpu_ids_setting.split(","):
+        item = token.strip()
+        if item == "":
+            continue
+        if re.fullmatch(r"\d+", item) is None:
+            raise ValueError("GPU_IDS must be auto or comma-separated integers.")
+        parsed.append(str(int(item)))
+    if not parsed:
+        raise ValueError("GPU_IDS resolved to an empty set.")
+    return parsed
+
+
+def _resolve_species_gpu_slots(device: str, gpu_ids_setting: str) -> list[str]:
     """Resolve GPU slots usable for species-level parallel wrapper runs.
 
     Parameters
     ----------
     device : str
         Wrapper ``DEVICE`` setting.
+    gpu_ids_setting : str
+        Wrapper ``GPU_IDS`` setting.
 
     Returns
     -------
@@ -1562,9 +1605,55 @@ def _resolve_species_gpu_slots(device: str) -> list[str]:
     normalized = device.strip().lower()
     if normalized not in {"auto", "cuda", "cpu", "mps"}:
         raise ValueError("DEVICE must be auto|cuda|cpu|mps.")
+    explicit_gpu_ids = _parse_gpu_ids_setting(gpu_ids_setting)
     if normalized in {"cpu", "mps"}:
         return []
+    if explicit_gpu_ids is not None:
+        return explicit_gpu_ids
     return _detect_visible_gpu_ids()
+
+
+def _resolve_max_parallel_species(
+    max_parallel_trials: str,
+    gpu_slot_count: int,
+) -> int:
+    """Resolve effective parallel species slots from ``MAX_PARALLEL_TRIALS``.
+
+    Parameters
+    ----------
+    max_parallel_trials : str
+        Wrapper ``MAX_PARALLEL_TRIALS`` setting (``auto`` or positive int).
+    gpu_slot_count : int
+        Number of available GPU slots.
+
+    Returns
+    -------
+    int
+        Effective parallel species slot count in ``[0, gpu_slot_count]``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_parallel_trials`` is invalid.
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    if gpu_slot_count <= 0:
+        return 0
+
+    text = max_parallel_trials.strip().lower()
+    if text == "" or text == "auto":
+        return gpu_slot_count
+    if re.fullmatch(r"\d+", text) is None:
+        raise ValueError("MAX_PARALLEL_TRIALS must be auto or a positive integer.")
+
+    resolved = int(text)
+    if resolved <= 0:
+        raise ValueError("MAX_PARALLEL_TRIALS must be > 0 when not auto.")
+    return min(resolved, gpu_slot_count)
 
 
 def _build_species_process_env(
@@ -1678,6 +1767,7 @@ def _run_species_serial(
     base_env: Mapping[str, str],
     base_process_env: Mapping[str, str],
     species_list: list[str],
+    assigned_gpu_id: str | None,
 ) -> int:
     """Run species sequentially with one shared process environment template."""
 
@@ -1695,7 +1785,7 @@ def _run_species_serial(
             species=species,
             process_env=_build_species_process_env(
                 base_process_env=base_process_env,
-                assigned_gpu_id=None,
+                assigned_gpu_id=assigned_gpu_id,
             ),
         )
         if code != 0:
@@ -1833,8 +1923,30 @@ def _run_species_batch(
 ) -> int:
     """Run one normalized species list using serial or GPU-parallel scheduling."""
 
-    gpu_ids = _resolve_species_gpu_slots(_require_env(base_env, "DEVICE"))
-    if len(species_list) <= 1 or len(gpu_ids) <= 1:
+    gpu_ids = _resolve_species_gpu_slots(
+        _require_env(base_env, "DEVICE"),
+        base_env.get("GPU_IDS", "auto"),
+    )
+    max_parallel_trials = base_env.get("MAX_PARALLEL_TRIALS", "auto")
+    parallel_slot_count = _resolve_max_parallel_species(
+        max_parallel_trials,
+        len(gpu_ids),
+    )
+    selected_gpu_ids = gpu_ids[:parallel_slot_count]
+
+    if (
+        len(selected_gpu_ids) < len(gpu_ids)
+        and len(species_list) > 1
+        and len(gpu_ids) > 1
+    ):
+        print(
+            f"[{spec.script_name}] species parallel slots capped: "
+            f"{len(selected_gpu_ids)}/{len(gpu_ids)} "
+            f"(MAX_PARALLEL_TRIALS={max_parallel_trials})"
+        )
+
+    if len(species_list) <= 1 or len(selected_gpu_ids) <= 1:
+        serial_gpu_id = selected_gpu_ids[0] if selected_gpu_ids else None
         return _run_species_serial(
             spec,
             project_root=project_root,
@@ -1842,6 +1954,7 @@ def _run_species_batch(
             base_env=base_env,
             base_process_env=base_process_env,
             species_list=species_list,
+            assigned_gpu_id=serial_gpu_id,
         )
     return _run_species_parallel(
         spec,
@@ -1850,7 +1963,7 @@ def _run_species_batch(
         base_env=base_env,
         base_process_env=base_process_env,
         species_list=species_list,
-        gpu_ids=gpu_ids,
+        gpu_ids=selected_gpu_ids,
     )
 
 
