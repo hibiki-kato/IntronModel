@@ -884,10 +884,7 @@ def train_pair_model(
                         concat_lengths,
                     )
                 except RuntimeError as exc:
-                    if (
-                        compile_enabled_effective
-                        and _is_compile_runtime_error(exc)
-                    ):
+                    if compile_enabled_effective and _is_compile_runtime_error(exc):
                         print(
                             "[pair] torch.compile runtime failed; fallback to "
                             f"eager. reason={exc}"

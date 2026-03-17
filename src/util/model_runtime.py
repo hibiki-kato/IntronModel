@@ -244,9 +244,7 @@ def _normalize_compile_strategy(raw: str) -> str:
     resolved = aliases.get(token)
     if resolved is None:
         choices = ", ".join(_COMPILE_STRATEGY_CHOICES)
-        raise ValueError(
-            f"{_COMPILE_STRATEGY_ENV} must be one of: {choices}."
-        )
+        raise ValueError(f"{_COMPILE_STRATEGY_ENV} must be one of: {choices}.")
     return resolved
 
 
