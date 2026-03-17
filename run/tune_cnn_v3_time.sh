@@ -180,6 +180,68 @@ resolve_seed_list() {
 		"${PYTHON_BIN}"
 }
 
+resolve_base_pair_checkpoints() {
+	local python_bin="$1"
+	local project_root="$2"
+	local species="$3"
+	local explicit_value="$4"
+	"${python_bin}" - "$project_root" "$species" "$explicit_value" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+	seen: set[str] = set()
+	out: list[str] = []
+	for value in values:
+		if value in seen:
+			continue
+		seen.add(value)
+		out.append(value)
+	return out
+
+
+project_root = Path(sys.argv[1])
+species = sys.argv[2]
+explicit_value = sys.argv[3].strip()
+if explicit_value:
+	print(explicit_value)
+	raise SystemExit(0)
+
+learning_metric_dir = project_root / "data" / species / "learning_metric"
+if not learning_metric_dir.is_dir():
+	raise SystemExit(1)
+
+pair_models = {"cnn_pair", "cnn_v2", "bilstm_pair", "markov_xgboost", "dnabert_pair", "dnabert2_pair", "dnabert6_pair", "dnaberts_pair"}
+latest_by_model: dict[str, tuple[float, str]] = {}
+for path in learning_metric_dir.glob("*.train.json"):
+	try:
+		payload = json.loads(path.read_text(encoding="utf-8"))
+	except Exception:
+		continue
+	model_name = str(payload.get("model", "")).strip()
+	checkpoint_path = str(payload.get("pair_checkpoint_path", "")).strip()
+	if model_name not in pair_models or checkpoint_path == "":
+		continue
+	if not Path(checkpoint_path).exists():
+		continue
+	mtime = path.stat().st_mtime
+	previous = latest_by_model.get(model_name)
+	if previous is None or mtime > previous[0]:
+		latest_by_model[model_name] = (mtime, checkpoint_path)
+
+resolved = _dedupe_keep_order(
+	[checkpoint for _mtime, checkpoint in sorted(latest_by_model.values(), reverse=True)]
+)
+if not resolved:
+	raise SystemExit(1)
+print(",".join(resolved))
+PY
+}
+
 resolve_search_space_file() {
 	local explicit_file="$1"
 	local species="$2"
@@ -327,10 +389,6 @@ if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
 	echo "[tune_cnn_v3_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
-if [[ -z "${BASE_PAIR_CHECKPOINTS}" ]]; then
-	echo "[tune_cnn_v3_time.sh] BASE_PAIR_CHECKPOINTS must be set." >&2
-	exit 1
-fi
 TUNING_MODEL_NAME="cnn_v3"
 
 PYTHON_BIN="$(resolve_python_bin)"
@@ -388,6 +446,10 @@ while true; do
 	seed_index=$((schedule_index / ${#JOB_ORDER[@]}))
 	raw_species="${JOB_ORDER[${species_index}]}"
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
+	if ! resolved_base_pair_checkpoints="$(resolve_base_pair_checkpoints "${PYTHON_BIN}" "${PROJECT_ROOT}" "${species}" "${BASE_PAIR_CHECKPOINTS}")"; then
+		echo "[tune_cnn_v3_time.sh] Failed to resolve BASE_PAIR_CHECKPOINTS for species=${species}. Set BASE_PAIR_CHECKPOINTS explicitly." >&2
+		exit 1
+	fi
 	base_seed="${SEED_VALUES[${seed_index}]}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
@@ -495,7 +557,7 @@ while true; do
 	"model": "cnn_v3",
     "species": "${species}",
 	"train_target": "pair",
-	"base_pair_checkpoints": "${BASE_PAIR_CHECKPOINTS}",
+	"base_pair_checkpoints": "${resolved_base_pair_checkpoints}",
 	"meta_hidden_dim": 256,
 	"meta_dropout": 0.2,
     "seed": ${base_seed},
@@ -545,6 +607,7 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
+	echo "[tune_cnn_v3_time.sh] base_pair_checkpoints=${resolved_base_pair_checkpoints}"
 	if ! intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \

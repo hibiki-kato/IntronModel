@@ -79,15 +79,72 @@ source "${SCRIPT_DIR}/lib/common.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
 
+resolve_base_pair_checkpoints() {
+	local species="$1"
+	local explicit_value="$2"
+	local python_bin
+	python_bin="$(intronmodel_resolve_python_bin "run_cnn_v3.sh")"
+	"${python_bin}" - "$PROJECT_ROOT" "$species" "$explicit_value" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+	seen: set[str] = set()
+	out: list[str] = []
+	for value in values:
+		if value in seen:
+			continue
+		seen.add(value)
+		out.append(value)
+	return out
+
+
+project_root = Path(sys.argv[1])
+species = sys.argv[2]
+explicit_value = sys.argv[3].strip()
+if explicit_value:
+	print(explicit_value)
+	raise SystemExit(0)
+
+learning_metric_dir = project_root / "data" / species / "learning_metric"
+if not learning_metric_dir.is_dir():
+	raise SystemExit(1)
+
+pair_models = {"cnn_pair", "cnn_v2", "bilstm_pair", "markov_xgboost", "dnabert_pair", "dnabert2_pair", "dnabert6_pair", "dnaberts_pair"}
+latest_by_model: dict[str, tuple[float, str]] = {}
+for path in learning_metric_dir.glob("*.train.json"):
+	try:
+		payload = json.loads(path.read_text(encoding="utf-8"))
+	except Exception:
+		continue
+	model_name = str(payload.get("model", "")).strip()
+	checkpoint_path = str(payload.get("pair_checkpoint_path", "")).strip()
+	if model_name not in pair_models or checkpoint_path == "":
+		continue
+	if not Path(checkpoint_path).exists():
+		continue
+	mtime = path.stat().st_mtime
+	previous = latest_by_model.get(model_name)
+	if previous is None or mtime > previous[0]:
+		latest_by_model[model_name] = (mtime, checkpoint_path)
+
+resolved = _dedupe_keep_order(
+	[checkpoint for _mtime, checkpoint in sorted(latest_by_model.values(), reverse=True)]
+)
+if not resolved:
+	raise SystemExit(1)
+print(",".join(resolved))
+PY
+}
+
 IFS=',' read -r -a INFER_SPECIES_LIST <<<"${SPECIES}"
 
 if [[ ${#INFER_SPECIES_LIST[@]} -eq 0 ]]; then
 	echo "[cnn_v3.sh] INFER_SPECIES is empty." >&2
-	exit 1
-fi
-
-if [[ -z "${BASE_PAIR_CHECKPOINTS}" ]]; then
-	echo "[cnn_v3.sh] BASE_PAIR_CHECKPOINTS must be set." >&2
 	exit 1
 fi
 
@@ -97,11 +154,16 @@ for species_raw in "${INFER_SPECIES_LIST[@]}"; do
 	if [[ -z "${species}" ]]; then
 		continue
 	fi
+	resolved_base_pair_checkpoints="${BASE_PAIR_CHECKPOINTS}"
+	if ! resolved_base_pair_checkpoints="$(resolve_base_pair_checkpoints "${species}" "${BASE_PAIR_CHECKPOINTS}")"; then
+		echo "[cnn_v3.sh] Failed to resolve BASE_PAIR_CHECKPOINTS for species=${species}. Set BASE_PAIR_CHECKPOINTS explicitly." >&2
+		exit 1
+	fi
 
 	args=(
 		--model cnn_v3
 		--species "${species}"
-		--base_pair_checkpoints "${BASE_PAIR_CHECKPOINTS}"
+		--base_pair_checkpoints "${resolved_base_pair_checkpoints}"
 		--meta_hidden_dim "${META_HIDDEN_DIM}"
 		--meta_dropout "${META_DROPOUT}"
 		--donor_len "${DONOR_LEN}"
@@ -175,7 +237,7 @@ for species_raw in "${INFER_SPECIES_LIST[@]}"; do
 		args+=(--skip_train)
 	fi
 
-	echo "[cnn_v3.sh] species=${species} skip_train=$(( run_index > 0 ))"
+	echo "[cnn_v3.sh] species=${species} base_pair_checkpoints=${resolved_base_pair_checkpoints} skip_train=$(( run_index > 0 ))"
 	PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
 		python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 
