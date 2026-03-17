@@ -3524,3 +3524,117 @@ def test_build_trial_params_respects_max_model_params(
         )
         assert complexity is not None
         assert complexity <= 1_000_000
+
+
+def test_run_phase_subprocess_interrupt_triggers_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [512]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1337,
+        gpu_ids_setting=["0"],
+        max_parallel_trials_setting=1,
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+    cleanup_calls: dict[str, int] = {"count": 0}
+
+    def _fake_interrupt_active_trial_processes(
+        wait_timeout_sec: float = 3.0,
+    ) -> None:
+        del wait_timeout_sec
+        cleanup_calls["count"] += 1
+
+    def _fake_run_trial(
+        *,
+        config: hparam_search.SearchConfig,
+        phase: str,
+        trial_id: int,
+        sampled_params: dict[str, hparam_search.Scalar],
+        overrides: dict[str, hparam_search.ArgValue],
+        assigned_gpu_id: str | None,
+        metrics_json: Path,
+        log_file: Path,
+    ) -> hparam_search.TrialResult:
+        del (
+            config,
+            phase,
+            trial_id,
+            sampled_params,
+            overrides,
+            assigned_gpu_id,
+            metrics_json,
+            log_file,
+        )
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_interrupt_active_trial_processes",
+        _fake_interrupt_active_trial_processes,
+    )
+    monkeypatch.setattr(hparam_search, "run_trial", _fake_run_trial)
+
+    with pytest.raises(KeyboardInterrupt):
+        _ = hparam_search.run_phase(
+            phase="quick",
+            config=config,
+            trial_count=1,
+            trial_params=[{"batch_size": 512}],
+            overrides={"epochs": 1},
+            gpu_ids=["0"],
+            max_parallel_trials=1,
+            out_dir=tmp_path / "out",
+        )
+    assert cleanup_calls["count"] == 1
+
+
+def test_main_returns_130_on_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _base_config_dict(tmp_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    cleanup_calls: dict[str, int] = {"count": 0}
+
+    def _fake_run_search(_config: hparam_search.SearchConfig) -> int:
+        raise KeyboardInterrupt()
+
+    def _fake_interrupt_active_trial_processes(
+        wait_timeout_sec: float = 3.0,
+    ) -> None:
+        del wait_timeout_sec
+        cleanup_calls["count"] += 1
+
+    monkeypatch.setattr(hparam_search, "run_search", _fake_run_search)
+    monkeypatch.setattr(
+        hparam_search,
+        "_interrupt_active_trial_processes",
+        _fake_interrupt_active_trial_processes,
+    )
+
+    exit_code = hparam_search.main(["--config", str(config_path)])
+
+    assert exit_code == 130
+    assert cleanup_calls["count"] == 1

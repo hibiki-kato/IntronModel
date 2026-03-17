@@ -113,7 +113,70 @@ def _parse_checkpoint_csv(raw_value: str, *, arg_name: str) -> list[str]:
 def _resolve_base_pair_checkpoints(model_args: argparse.Namespace) -> list[str]:
     """Resolve required base pair checkpoint paths from args."""
     raw = str(getattr(model_args, "base_pair_checkpoints", "")).strip()
-    return _parse_checkpoint_csv(raw, arg_name="--base_pair_checkpoints")
+    checkpoints = _parse_checkpoint_csv(raw, arg_name="--base_pair_checkpoints")
+    incompatible: list[str] = []
+    for checkpoint_path in checkpoints:
+        if not _is_compatible_cnn_v2_pair_checkpoint(checkpoint_path):
+            incompatible.append(checkpoint_path)
+    if incompatible:
+        incompatible_text = ", ".join(incompatible)
+        raise ValueError(
+            "--base_pair_checkpoints must reference cnn_v2-compatible pair "
+            f"checkpoints. Incompatible paths: {incompatible_text}"
+        )
+    return checkpoints
+
+
+def _normalize_model_state_key(key: str) -> str:
+    """Normalize checkpoint model-state key prefixes."""
+    if key.startswith("_orig_mod."):
+        return key.removeprefix("_orig_mod.")
+    return key
+
+
+def _is_cnn_v2_pair_checkpoint_payload(payload: object) -> bool:
+    """Return whether a checkpoint payload matches cnn_v2 pair format."""
+    if not isinstance(payload, dict):
+        return False
+    model_config_obj = payload.get("model_config")
+    model_state_obj = payload.get("model_state")
+    if not isinstance(model_config_obj, dict):
+        return False
+    if not isinstance(model_state_obj, dict):
+        return False
+
+    input_mode = str(model_config_obj.get("input_mode", "")).strip().lower()
+    pair_mode = str(model_config_obj.get("pair_mode", "")).strip().lower()
+    if input_mode not in cnn_v2.INPUT_MODE_CHOICES:
+        return False
+    if pair_mode not in {"pair", "independent"}:
+        return False
+
+    normalized_keys = [
+        _normalize_model_state_key(str(key)) for key in model_state_obj.keys()
+    ]
+    has_donor_encoder = any(key.startswith("donor_encoder.") for key in normalized_keys)
+    has_acceptor_encoder = any(
+        key.startswith("acceptor_encoder.") for key in normalized_keys
+    )
+    has_fc_head = any(key.startswith("fc.") for key in normalized_keys)
+    return has_donor_encoder and has_acceptor_encoder and has_fc_head
+
+
+def _is_compatible_cnn_v2_pair_checkpoint(checkpoint_path: str) -> bool:
+    """Return whether one checkpoint path is cnn_v2-compatible for cnn_v3."""
+    try:
+        try:
+            payload = torch.load(
+                checkpoint_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+        except TypeError:
+            payload = torch.load(checkpoint_path, map_location="cpu")
+    except Exception:
+        return False
+    return _is_cnn_v2_pair_checkpoint_payload(payload)
 
 
 def _stratified_split_indices(

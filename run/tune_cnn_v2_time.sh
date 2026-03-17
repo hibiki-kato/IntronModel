@@ -102,11 +102,11 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
 	"pair_mode": {
 		"type": "categorical",
-		"values": ["pair", "independent"]
+		"values": ["pair"]
 	},
 	"sequence_transform": {
 		"type": "categorical",
-		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
+		"values": ["none"]
 	},
 	"embedding_dim": {
 		"type": "categorical",
@@ -350,11 +350,8 @@ echo "[tune_cnn_v2_time.sh] schedule=${JOB_ORDER[*]}"
 echo "[tune_cnn_v2_time.sh] seeds=${SEED_VALUES[*]}"
 
 job_index=0
-while true; do
+while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	elapsed_seconds=$((SECONDS - START_SECONDS))
-	if [[ "${elapsed_seconds}" -ge "${BUDGET_SECONDS}" ]]; then
-		break
-	fi
 	remaining_seconds=$((BUDGET_SECONDS - elapsed_seconds))
 	if [[ "${COMPLETED_CYCLES}" -gt 0 ]]; then
 		avg_cycle_seconds_guard=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
@@ -527,13 +524,20 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
-	if ! intronmodel_run_with_process_title \
+	run_status=0
+	intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \
 		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${config_path}"; then
+		--config "${config_path}" || run_status=$?
+	if [[ "${run_status}" -eq 130 ]]; then
+		echo "[tune_cnn_v2_time.sh] interrupted by user; stopping." >&2
+		exit 130
+	fi
+	if [[ "${run_status}" -ne 0 ]]; then
 		echo "[tune_cnn_v2_time.sh] cycle=${job_index} failed "\
-			"species=${species} target=pair seed=${base_seed}" >&2
+			"species=${species} target=pair seed=${base_seed} "\
+			"(exit=${run_status})" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 		run_double_descent_plot \

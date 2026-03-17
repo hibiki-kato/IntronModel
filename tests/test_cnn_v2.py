@@ -195,3 +195,81 @@ def test_train_independent_fills_cnn_defaults(
     assert summary["pair_mode"] == "independent"
     assert summary["train_target"] == "both"
     assert summary["delegated_backend"] == "cnn"
+
+
+def test_train_independent_tolerates_duplicate_parser_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeCnnModule:
+        @staticmethod
+        def add_train_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument("--batch_size", type=int, default=256)
+
+        @staticmethod
+        def add_infer_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument("--batch_size", type=int, default=512)
+            parser.add_argument("--infer_batch_size", type=int, default=None)
+
+        @staticmethod
+        def train(
+            common_args: argparse.Namespace,
+            model_args: argparse.Namespace,
+        ) -> dict[str, object]:
+            _ = common_args
+            assert hasattr(model_args, "batch_size")
+            assert hasattr(model_args, "infer_batch_size")
+            assert model_args.train_target == "both"
+            return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
+
+    monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
+    common_args = argparse.Namespace(species="Hsap")
+    model_args = argparse.Namespace(pair_mode="independent", train_target="both")
+
+    summary = cnn_v2.train(common_args, model_args)
+
+    assert summary["model"] == "cnn_v2"
+    assert summary["pair_mode"] == "independent"
+    assert summary["train_target"] == "both"
+
+
+def test_train_independent_forces_sequence_transform_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeCnnModule:
+        @staticmethod
+        def add_train_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument(
+                "--sequence_transform",
+                choices=list(cnn_v2.SEQUENCE_TRANSFORM_CHOICES),
+                default="none",
+            )
+
+        @staticmethod
+        def add_infer_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument(
+                "--sequence_transform",
+                choices=list(cnn_v2.SEQUENCE_TRANSFORM_CHOICES),
+                default="none",
+            )
+
+        @staticmethod
+        def train(
+            common_args: argparse.Namespace,
+            model_args: argparse.Namespace,
+        ) -> dict[str, object]:
+            _ = common_args
+            assert model_args.sequence_transform == "none"
+            return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
+
+    monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
+    common_args = argparse.Namespace(species="Hsap")
+    model_args = argparse.Namespace(
+        pair_mode="independent",
+        train_target="both",
+        sequence_transform="mask_outside_intron_n",
+    )
+
+    summary = cnn_v2.train(common_args, model_args)
+
+    assert summary["model"] == "cnn_v2"
+    assert summary["pair_mode"] == "independent"

@@ -871,6 +871,19 @@ def train_pair_model(
         acceptor_len=acceptor_len,
         negative_pair_only=True,
     )
+    resolved_sequence_transform = sequence_transform
+    if sequence_transform != "none":
+        missing_metadata_count = sum(
+            item.intron_half_length is None for item in raw_examples
+        )
+        if missing_metadata_count > 0:
+            print(
+                "[cnn_v2] sequence_transform="
+                f"{sequence_transform} requires intron_half_length metadata; "
+                f"missing={missing_metadata_count}/{len(raw_examples)}. "
+                "Falling back to sequence_transform=none."
+            )
+            resolved_sequence_transform = "none"
     examples: List[Tuple[str, str, int]] = []
     for item in raw_examples:
         transformed_pair = apply_pair_sequence_transform(
@@ -878,7 +891,7 @@ def train_pair_model(
                 donor_seq=item.donor_sequence,
                 acceptor_seq=item.acceptor_sequence,
             ),
-            transform_mode=sequence_transform,
+            transform_mode=resolved_sequence_transform,
             intron_half_length=item.intron_half_length,
         )
         examples.append(
@@ -1564,13 +1577,26 @@ def infer_pair_site_scores(
     bpe_trust_remote_code = bool(model_config.get("bpe_trust_remote_code", False))
 
     transformed_pairs: list[Tuple[str, str]] = []
+    resolved_sequence_transform = sequence_transform
+    if sequence_transform != "none":
+        missing_metadata_count = sum(
+            row.get("intron_half_length") is None for row in pair_rows
+        )
+        if missing_metadata_count > 0:
+            print(
+                "[cnn_v2] infer sequence_transform="
+                f"{sequence_transform} requires intron_half_length metadata; "
+                f"missing={missing_metadata_count}/{len(pair_rows)}. "
+                "Falling back to sequence_transform=none."
+            )
+            resolved_sequence_transform = "none"
     for row in pair_rows:
         transformed = apply_pair_sequence_transform(
             PairSequenceRecord(
                 donor_seq=str(row["donor_seq"]),
                 acceptor_seq=str(row["acceptor_seq"]),
             ),
-            transform_mode=sequence_transform,
+            transform_mode=resolved_sequence_transform,
             intron_half_length=(
                 int(row["intron_half_length"])
                 if row.get("intron_half_length") is not None
@@ -1825,13 +1851,27 @@ def train(
             print("[cnn_v2] pair_mode=independent forces --train_target=both.")
 
         site_model_args = argparse.Namespace(**vars(model_args))
-        site_arg_parser = argparse.ArgumentParser(add_help=False)
-        cnn_site_module.add_train_args(site_arg_parser)
-        cnn_site_module.add_infer_args(site_arg_parser)
-        site_default_args = site_arg_parser.parse_args([])
-        for key, value in vars(site_default_args).items():
+        site_train_arg_parser = argparse.ArgumentParser(add_help=False)
+        cnn_site_module.add_train_args(site_train_arg_parser)
+        site_train_default_args = site_train_arg_parser.parse_args([])
+        site_infer_arg_parser = argparse.ArgumentParser(add_help=False)
+        cnn_site_module.add_infer_args(site_infer_arg_parser)
+        site_infer_default_args = site_infer_arg_parser.parse_args([])
+        site_default_values: dict[str, object] = vars(site_train_default_args)
+        for key, value in vars(site_infer_default_args).items():
+            site_default_values.setdefault(key, value)
+        for key, value in site_default_values.items():
             if not hasattr(site_model_args, key):
                 setattr(site_model_args, key, value)
+        sequence_transform_value = str(
+            getattr(site_model_args, "sequence_transform", "none")
+        )
+        if sequence_transform_value != "none":
+            print(
+                "[cnn_v2] pair_mode=independent uses site-level training; "
+                f"overriding sequence_transform={sequence_transform_value} -> none."
+            )
+            site_model_args.sequence_transform = "none"
         site_model_args.train_target = effective_train_target
         summary = cnn_site_module.train(common_args, site_model_args)
         summary["model"] = "cnn_v2"

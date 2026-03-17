@@ -26,6 +26,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Iterator
@@ -58,6 +59,8 @@ TRIAL_PROCESS_MODE_CHOICES: set[str] = {
 }
 _ACTIVE_TRIAL_STREAM_MODE: str = "full"
 _ACTIVE_MAX_PARALLEL_TRIALS: int = 1
+_ACTIVE_TRIAL_PROCESSES: set[subprocess.Popen[str]] = set()
+_ACTIVE_TRIAL_PROCESSES_LOCK = threading.Lock()
 _DEFAULT_PHASE_EXECUTION_MODE: str = "subprocess"
 _PERSISTENT_PHASE_EXECUTION_MODE: str = "persistent"
 SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
@@ -2069,6 +2072,44 @@ def _set_active_trial_stream_mode(mode: str) -> str:
     return previous_mode
 
 
+def _register_active_trial_process(process: subprocess.Popen[str]) -> None:
+    """Register one running trial subprocess for interrupt cleanup."""
+    with _ACTIVE_TRIAL_PROCESSES_LOCK:
+        _ACTIVE_TRIAL_PROCESSES.add(process)
+
+
+def _deregister_active_trial_process(process: subprocess.Popen[str]) -> None:
+    """Deregister one trial subprocess after it exits."""
+    with _ACTIVE_TRIAL_PROCESSES_LOCK:
+        _ACTIVE_TRIAL_PROCESSES.discard(process)
+
+
+def _interrupt_active_trial_processes(wait_timeout_sec: float = 3.0) -> None:
+    """Terminate all tracked trial subprocesses after a user interrupt."""
+    with _ACTIVE_TRIAL_PROCESSES_LOCK:
+        active_processes = [proc for proc in _ACTIVE_TRIAL_PROCESSES]
+
+    for process in active_processes:
+        if process.poll() is not None:
+            continue
+        try:
+            process.terminate()
+        except OSError:
+            continue
+
+    for process in active_processes:
+        if process.poll() is not None:
+            continue
+        try:
+            process.wait(timeout=wait_timeout_sec)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+
+
 def _resolve_trial_stream_mode(setting: str, max_parallel_trials: int) -> str:
     """Resolve effective trial stream mode from setting and runtime parallelism."""
     parsed = _validate_trial_stream_mode(setting, "trial_stream_mode")
@@ -2211,20 +2252,24 @@ def _run_command_with_streaming(
         bufsize=1,
     )
     assert proc.stdout is not None
+    _register_active_trial_process(proc)
 
-    collected: list[str] = []
-    stream_mode = _ACTIVE_TRIAL_STREAM_MODE
-    prefix = f"[hparam_search][{phase} {trial_id:04d}] "
-    for line in _iter_stream_lines(proc.stdout):
-        collected.append(line)
-        stripped = line.rstrip("\n")
-        if not stripped:
-            continue
-        if _should_stream_trial_line(stripped, stream_mode):
-            print(f"{prefix}{stripped}", flush=True)
+    try:
+        collected: list[str] = []
+        stream_mode = _ACTIVE_TRIAL_STREAM_MODE
+        prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+        for line in _iter_stream_lines(proc.stdout):
+            collected.append(line)
+            stripped = line.rstrip("\n")
+            if not stripped:
+                continue
+            if _should_stream_trial_line(stripped, stream_mode):
+                print(f"{prefix}{stripped}", flush=True)
 
-    return_code = int(proc.wait())
-    return return_code, "".join(collected)
+        return_code = int(proc.wait())
+        return return_code, "".join(collected)
+    finally:
+        _deregister_active_trial_process(proc)
 
 
 def _run_command_inprocess(
@@ -4091,7 +4136,8 @@ def _run_phase_subprocess(
     pending_indices = list(range(trial_count))
     running: dict[Future[TrialResult], Optional[str]] = {}
     collected: list[TrialResult] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(slots))) as executor:
+    executor = ThreadPoolExecutor(max_workers=max(1, len(slots)))
+    try:
         while pending_indices or running:
             while pending_indices and slots:
                 trial_id = pending_indices.pop(0)
@@ -4128,6 +4174,17 @@ def _run_phase_subprocess(
                     completed_count=len(collected),
                     result=result,
                 )
+    except KeyboardInterrupt:
+        print(
+            "[hparam_search] Interrupt received. Terminating active trials...",
+            flush=True,
+        )
+        for future in running:
+            future.cancel()
+        _interrupt_active_trial_processes()
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     return collected
 
 
@@ -5087,7 +5144,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     actual_argv = argv if argv is not None else sys.argv[1:]
     args = parse_args(actual_argv)
     config = load_config(Path(args.config))
-    return run_search(config)
+    try:
+        return run_search(config)
+    except KeyboardInterrupt:
+        _interrupt_active_trial_processes()
+        print("[hparam_search] Interrupted by user.", flush=True)
+        return 130
 
 
 if __name__ == "__main__":

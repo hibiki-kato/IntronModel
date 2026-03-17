@@ -12,9 +12,9 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="300"
+TIME_BUDGET_MINUTES="100"
 
-INTRONMODEL_AUTO_TMUX=off
+INTRONMODEL_AUTO_TMUX="off"
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
@@ -117,7 +117,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
 	"sequence_transform": {
 		"type": "categorical",
-		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
+		"values": ["none"]
 	},
 	"embedding_dim": {
 		"type": "categorical",
@@ -208,14 +208,42 @@ project_root = Path(sys.argv[1])
 species = sys.argv[2]
 explicit_value = sys.argv[3].strip()
 if explicit_value:
-	print(explicit_value)
+	explicit_paths = _dedupe_keep_order(
+		[token.strip() for token in explicit_value.split(",") if token.strip()]
+	)
+	if not explicit_paths:
+		raise SystemExit(1)
+	for path_text in explicit_paths:
+		if not Path(path_text).exists():
+			raise SystemExit(1)
+	print(",".join(explicit_paths))
 	raise SystemExit(0)
+
+# Preferred source: model-separated tuning artifact for cnn_v2 pair.
+best_config_path = (
+	project_root
+	/ "data"
+	/ species
+	/ "tuning"
+	/ "cnn_v2"
+	/ "pair"
+	/ "best_config.json"
+)
+if best_config_path.is_file():
+	try:
+		payload = json.loads(best_config_path.read_text(encoding="utf-8"))
+	except Exception:
+		payload = None
+	if isinstance(payload, dict):
+		checkpoint_path = str(payload.get("pair_checkpoint_path", "")).strip()
+		if checkpoint_path and Path(checkpoint_path).exists():
+			print(checkpoint_path)
+			raise SystemExit(0)
 
 learning_metric_dir = project_root / "data" / species / "learning_metric"
 if not learning_metric_dir.is_dir():
 	raise SystemExit(1)
 
-pair_models = {"cnn_pair", "cnn_v2", "bilstm_pair", "markov_xgboost", "dnabert_pair", "dnabert2_pair", "dnabert6_pair", "dnaberts_pair"}
 latest_by_model: dict[str, tuple[float, str]] = {}
 for path in learning_metric_dir.glob("*.train.json"):
 	try:
@@ -224,7 +252,7 @@ for path in learning_metric_dir.glob("*.train.json"):
 		continue
 	model_name = str(payload.get("model", "")).strip()
 	checkpoint_path = str(payload.get("pair_checkpoint_path", "")).strip()
-	if model_name not in pair_models or checkpoint_path == "":
+	if model_name != "cnn_v2" or checkpoint_path == "":
 		continue
 	if not Path(checkpoint_path).exists():
 		continue
@@ -423,11 +451,8 @@ echo "[tune_cnn_v3_time.sh] schedule=${JOB_ORDER[*]}"
 echo "[tune_cnn_v3_time.sh] seeds=${SEED_VALUES[*]}"
 
 job_index=0
-while true; do
+while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	elapsed_seconds=$((SECONDS - START_SECONDS))
-	if [[ "${elapsed_seconds}" -ge "${BUDGET_SECONDS}" ]]; then
-		break
-	fi
 	remaining_seconds=$((BUDGET_SECONDS - elapsed_seconds))
 	if [[ "${COMPLETED_CYCLES}" -gt 0 ]]; then
 		avg_cycle_seconds_guard=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
@@ -608,13 +633,20 @@ JSON
 	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
 	echo "[tune_cnn_v3_time.sh] base_pair_checkpoints=${resolved_base_pair_checkpoints}"
-	if ! intronmodel_run_with_process_title \
+	run_status=0
+	intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \
 		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${config_path}"; then
+		--config "${config_path}" || run_status=$?
+	if [[ "${run_status}" -eq 130 ]]; then
+		echo "[tune_cnn_v3_time.sh] interrupted by user; stopping." >&2
+		exit 130
+	fi
+	if [[ "${run_status}" -ne 0 ]]; then
 		echo "[tune_cnn_v3_time.sh] cycle=${job_index} failed "\
-			"species=${species} target=pair seed=${base_seed}" >&2
+			"species=${species} target=pair seed=${base_seed} "\
+			"(exit=${run_status})" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 		run_double_descent_plot \
