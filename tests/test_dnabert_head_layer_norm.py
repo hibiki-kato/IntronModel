@@ -104,6 +104,40 @@ def test_freeze_backbone_disables_backbone_gradients() -> None:
     assert all(not name.startswith("backbone.") for name in trainable_names)
 
 
+def test_classifier_supports_linear_readout() -> None:
+    model = dnabert.DnaBertBinaryClassifier(
+        backbone=_DummyBackbone(hidden_size=8),
+        hidden_size=8,
+        dropout=0.1,
+        head_layer_norm=True,
+        readout_type="linear",
+    )
+    logits = model(
+        input_ids=torch.ones((2, 4), dtype=torch.long),
+        attention_mask=torch.ones((2, 4), dtype=torch.long),
+    )
+    assert logits.shape == (2,)
+    assert model.readout_type == "linear"
+
+
+def test_classifier_supports_mlp_readout() -> None:
+    model = dnabert.DnaBertBinaryClassifier(
+        backbone=_DummyBackbone(hidden_size=8),
+        hidden_size=8,
+        dropout=0.1,
+        head_layer_norm=True,
+        readout_type="mlp",
+        readout_mlp_hidden_dim=16,
+        readout_mlp_layers=2,
+    )
+    logits = model(
+        input_ids=torch.ones((2, 4), dtype=torch.long),
+        attention_mask=torch.ones((2, 4), dtype=torch.long),
+    )
+    assert logits.shape == (2,)
+    assert model.readout_type == "mlp"
+
+
 def test_add_train_args_includes_head_layer_norm_options() -> None:
     parser = argparse.ArgumentParser()
     dnabert.add_train_args(parser)
@@ -122,8 +156,101 @@ def test_add_train_args_includes_head_layer_norm_options() -> None:
     assert args.acceptor_head_layer_norm == 0
 
 
+def test_add_train_args_includes_readout_options() -> None:
+    parser = argparse.ArgumentParser()
+    dnabert.add_train_args(parser)
+    args = parser.parse_args(
+        [
+            "--readout_type",
+            "mlp",
+            "--readout_cnn_kernel_size",
+            "5",
+            "--readout_mlp_hidden_dim",
+            "384",
+            "--readout_mlp_layers",
+            "2",
+            "--donor_readout_type",
+            "linear",
+            "--acceptor_readout_type",
+            "cnn",
+        ]
+    )
+    assert args.readout_type == "mlp"
+    assert args.readout_cnn_kernel_size == 5
+    assert args.readout_mlp_hidden_dim == 384
+    assert args.readout_mlp_layers == 2
+    assert args.donor_readout_type == "linear"
+    assert args.acceptor_readout_type == "cnn"
+
+
 def test_add_train_args_accepts_pair_train_target() -> None:
     parser = argparse.ArgumentParser()
     dnabert.add_train_args(parser)
     args = parser.parse_args(["--train_target", "pair"])
     assert args.train_target == "pair"
+
+
+def test_add_train_args_includes_optimizer_schedule_options() -> None:
+    parser = argparse.ArgumentParser()
+    dnabert.add_train_args(parser)
+    args = parser.parse_args(
+        [
+            "--lr_schedule",
+            "linear",
+            "--warmup_ratio",
+            "0.02",
+            "--adam_beta1",
+            "0.9",
+            "--adam_beta2",
+            "0.97",
+            "--adam_eps",
+            "1e-8",
+            "--donor_lr_schedule",
+            "cosine",
+            "--acceptor_warmup_ratio",
+            "0.01",
+        ]
+    )
+    assert args.lr_schedule == "linear"
+    assert args.warmup_ratio == pytest.approx(0.02)
+    assert args.adam_beta1 == pytest.approx(0.9)
+    assert args.adam_beta2 == pytest.approx(0.97)
+    assert args.adam_eps == pytest.approx(1e-8)
+    assert args.donor_lr_schedule == "cosine"
+    assert args.acceptor_warmup_ratio == pytest.approx(0.01)
+
+
+def test_lr_schedule_multiplier_with_warmup_and_linear_decay() -> None:
+    values = [
+        dnabert._lr_schedule_multiplier(
+            step_index=step_index,
+            total_steps=10,
+            warmup_steps=2,
+            eta_min_ratio=0.1,
+            lr_schedule="linear",
+        )
+        for step_index in range(10)
+    ]
+    assert values[0] == pytest.approx(0.5)
+    assert values[1] == pytest.approx(1.0)
+    assert values[-1] == pytest.approx(0.1)
+    assert all(values[idx] >= values[idx + 1] for idx in range(1, len(values) - 1))
+
+
+def test_lr_schedule_multiplier_rejects_invalid_ranges() -> None:
+    with pytest.raises(ValueError, match="eta_min_ratio"):
+        dnabert._lr_schedule_multiplier(
+            step_index=0,
+            total_steps=10,
+            warmup_steps=1,
+            eta_min_ratio=1.5,
+            lr_schedule="cosine",
+        )
+    with pytest.raises(ValueError, match="warmup_steps"):
+        dnabert._lr_schedule_multiplier(
+            step_index=0,
+            total_steps=10,
+            warmup_steps=11,
+            eta_min_ratio=0.1,
+            lr_schedule="cosine",
+        )

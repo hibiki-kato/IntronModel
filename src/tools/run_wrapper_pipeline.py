@@ -430,9 +430,17 @@ def _resolve_tuned_model_name(
         resolved = model_name
         if normalized_mode == "on":
             resolved = f"{model_name}_trunc"
+        if normalized_tuned_mode == "cheat":
+            resolved = f"{resolved}_cheat"
         return resolved
 
-    mask_enabled_models = {"cnn", "cnn_pair", "cnn_resdil", "tcn"}
+    mask_enabled_models = {
+        "cnn",
+        "cnn_pair",
+        "bilstm_pair",
+        "cnn_resdil",
+        "tcn",
+    }
     resolved = model_name
     if normalized_mode == "on" and model_name in mask_enabled_models:
         resolved = f"{model_name}_mask"
@@ -465,9 +473,9 @@ def _resolve_expected_checkpoint_paths_for_run(
         tasks=model_tasks,
     )
     default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
-    train_target = str(
-        getattr(args, "train_target", default_train_target)
-    ).strip().lower()
+    train_target = (
+        str(getattr(args, "train_target", default_train_target)).strip().lower()
+    )
     required_tasks = _resolve_tasks_for_target(
         train_target=train_target,
         model_tasks=model_tasks,
@@ -568,12 +576,8 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         "batch_size": _as_int(_require_env(env, "BATCH_SIZE"), "BATCH_SIZE"),
         "lr": _as_float(_require_env(env, "LR"), "LR"),
         "loss": _require_env(env, "LOSS"),
-        "weight_decay": _as_float(
-            _require_env(env, "WEIGHT_DECAY"), "WEIGHT_DECAY"
-        ),
-        "eta_min_ratio": _as_float(
-            _require_env(env, "ETA_MIN_RATIO"), "ETA_MIN_RATIO"
-        ),
+        "weight_decay": _as_float(_require_env(env, "WEIGHT_DECAY"), "WEIGHT_DECAY"),
+        "eta_min_ratio": _as_float(_require_env(env, "ETA_MIN_RATIO"), "ETA_MIN_RATIO"),
         "grad_clip": _as_float(_require_env(env, "GRAD_CLIP"), "GRAD_CLIP"),
         "val_frac": _as_float(_require_env(env, "VAL_FRAC"), "VAL_FRAC"),
         "transcript_score_agg": _require_env(env, "TRANSCRIPT_SCORE_AGG"),
@@ -581,7 +585,7 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         "seed": _as_int(_require_env(env, "SEED"), "SEED"),
         "train_target": _require_env(env, "TRAIN_TARGET"),
     }
-    if builder not in {"cnn_pair", "dnabert_pair"}:
+    if builder not in {"cnn_pair", "bilstm_pair", "dnabert_pair"}:
         base["intron_score_op"] = _require_env(env, "INTRON_SCORE_OP")
     tag_value = env.get("TAG", "").strip()
     if tag_value != "":
@@ -631,6 +635,24 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
 
     if builder in {"bert", "dnabert", "dnabert_pair"}:
         base["dropout"] = _as_float(_require_env(env, "DROPOUT"), "DROPOUT")
+    if builder in {"dnabert", "dnabert_pair"}:
+        base["head_layer_norm"] = _as_int(
+            _require_env(env, "HEAD_LAYER_NORM"),
+            "HEAD_LAYER_NORM",
+        )
+        base["readout_type"] = _require_env(env, "READOUT_TYPE")
+        base["readout_cnn_kernel_size"] = _as_int(
+            _require_env(env, "READOUT_CNN_KERNEL_SIZE"),
+            "READOUT_CNN_KERNEL_SIZE",
+        )
+        base["readout_mlp_hidden_dim"] = _as_int(
+            _require_env(env, "READOUT_MLP_HIDDEN_DIM"),
+            "READOUT_MLP_HIDDEN_DIM",
+        )
+        base["readout_mlp_layers"] = _as_int(
+            _require_env(env, "READOUT_MLP_LAYERS"),
+            "READOUT_MLP_LAYERS",
+        )
 
     return base
 
@@ -652,6 +674,11 @@ def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
         "ASYM_ALPHA_POS",
         "ASYM_GAMMA_POS",
         "ASYM_GAMMA_NEG",
+        "LR_SCHEDULE",
+        "WARMUP_RATIO",
+        "ADAM_BETA1",
+        "ADAM_BETA2",
+        "ADAM_EPS",
         "INFER_BATCH_SIZE",
         "INFER_USE_AMP",
         "INFER_AMP_DTYPE",
@@ -699,9 +726,7 @@ def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
         args.extend(["--checkpoint_top_k", checkpoint_top_k])
     checkpoint_prune_dry_run = env.get("CHECKPOINT_PRUNE_DRY_RUN", "")
     if checkpoint_prune_dry_run != "":
-        args.extend(
-            ["--checkpoint_prune_dry_run", checkpoint_prune_dry_run]
-        )
+        args.extend(["--checkpoint_prune_dry_run", checkpoint_prune_dry_run])
 
     return args
 
@@ -724,9 +749,7 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
     model_name = _require_env(env, "MODEL")
     model_tasks = checkpoint_tasks_for_model(model_name)
     train_target = _require_env(env, "TRAIN_TARGET")
-    allowed_targets = (
-        ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
-    )
+    allowed_targets = ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
     _check_choice(train_target, tuple(allowed_targets), "TRAIN_TARGET")
 
     if env["SKIP_TRAINING"] == "1" and env["CONTINUE_TRAINING"] == "1":
@@ -811,9 +834,9 @@ def _check_dnabert_skip_training_preconditions(run_args: list[str]) -> None:
         tasks=model_tasks,
     )
     default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
-    train_target = str(
-        getattr(args, "train_target", default_train_target)
-    ).strip().lower()
+    train_target = (
+        str(getattr(args, "train_target", default_train_target)).strip().lower()
+    )
     required_tasks = _resolve_tasks_for_target(
         train_target=train_target,
         model_tasks=model_tasks,
@@ -1285,10 +1308,7 @@ def _run_single_species(
     env["OUTPUT_EVAL_SCORE_TXT"] = str(output_eval_score_txt)
 
     run_args = _build_run_args(spec, env)
-    if (
-        env.get("SKIP_TRAINING", "0") == "1"
-        or env.get("CONTINUE_TRAINING", "0") == "1"
-    ):
+    if env.get("SKIP_TRAINING", "0") == "1" or env.get("CONTINUE_TRAINING", "0") == "1":
         _ensure_tuned_checkpoint_aliases(
             spec=spec,
             run_args=run_args,
@@ -1326,10 +1346,7 @@ def _run_single_species(
             f"perf_mode={env['PERF_MODE']} train_only={env['TRAIN_ONLY']}"
         )
     else:
-        print(
-            f"[{spec.script_name}] species={species} "
-            f"train_only={env['TRAIN_ONLY']}"
-        )
+        print(f"[{spec.script_name}] species={species} train_only={env['TRAIN_ONLY']}")
 
     species_run_start = time.monotonic()
     run_model_code = _run_subprocess_with_species_log_prefix(
@@ -1436,7 +1453,9 @@ def _summarize_training_best_scores(
     return summary_parts
 
 
-def _summarize_eval_best_metrics(eval_score_path: Path) -> tuple[float, float, float] | None:
+def _summarize_eval_best_metrics(
+    eval_score_path: Path,
+) -> tuple[float, float, float] | None:
     """Pick the best F1 snapshot from a transcript evaluation output."""
 
     if not eval_score_path.is_file():
@@ -1853,10 +1872,7 @@ def _run_species_parallel(
         script_name=spec.script_name,
     )
 
-    print(
-        f"[{spec.script_name}] species-parallel run across GPUs: "
-        f"{','.join(slots)}"
-    )
+    print(f"[{spec.script_name}] species-parallel run across GPUs: {','.join(slots)}")
     pending_species = list(species_list)
     available_gpu_ids = list(slots)
     stop_submitting = False
@@ -2200,6 +2216,78 @@ SPECS: dict[str, WrapperSpec] = {
             "MAX_OOM_RETRIES",
         ),
         per_task_override_keys=("CONV_CHANNELS", "KERNEL_SIZES"),
+    ),
+    "bilstm_pair.sh": WrapperSpec(
+        script_name="bilstm_pair.sh",
+        model_env_name="bilstm_pair",
+        supports_tuned_hparams=True,
+        tuned_key_map={
+            "batch_size": "BATCH_SIZE",
+            "lr": "LR",
+            "loss": "LOSS",
+            "pair_arch": "PAIR_ARCH",
+            "use_sep_token": "USE_SEP_TOKEN",
+            "embedding_dim": "EMBEDDING_DIM",
+            "hidden_size": "HIDDEN_SIZE",
+            "num_layers": "NUM_LAYERS",
+            "dropout": "DROPOUT",
+            "fc_hidden": "FC_HIDDEN",
+            "weight_decay": "WEIGHT_DECAY",
+            "eta_min_ratio": "ETA_MIN_RATIO",
+            "val_frac": "VAL_FRAC",
+            "grad_clip": "GRAD_CLIP",
+            "pos_weight_cap": "POS_WEIGHT_CAP",
+            "focal_gamma": "FOCAL_GAMMA",
+            "focal_alpha_pos": "FOCAL_ALPHA_POS",
+            "f1_lambda": "F1_LAMBDA",
+            "asym_gamma_pos": "ASYM_GAMMA_POS",
+            "asym_gamma_neg": "ASYM_GAMMA_NEG",
+            "asym_alpha_pos": "ASYM_ALPHA_POS",
+        },
+        stem_param_builder="bilstm_pair",
+        required_arg_keys=(
+            "SPECIES",
+            "DONOR_LEN",
+            "ACCEPTOR_LEN",
+            "EPOCHS",
+            "MAX_EPOCHS",
+            "EARLY_STOP_PATIENCE",
+            "EARLY_STOP_MIN_DELTA",
+            "SEQUENCE_TRANSFORM",
+            "BATCH_SIZE",
+            "LR",
+            "LOSS",
+            "PAIR_ARCH",
+            "USE_SEP_TOKEN",
+            "EMBEDDING_DIM",
+            "HIDDEN_SIZE",
+            "NUM_LAYERS",
+            "DROPOUT",
+            "FC_HIDDEN",
+            "WEIGHT_DECAY",
+            "ETA_MIN_RATIO",
+            "GRAD_CLIP",
+            "VAL_FRAC",
+            "POS_WEIGHT_CAP",
+            "FOCAL_GAMMA",
+            "F1_LAMBDA",
+            "NAME_FIELDS",
+            "TRANSCRIPT_SCORE_AGG",
+            "SOFTMIN_TAU",
+            "SEED",
+            "DEVICE",
+            "VISUALIZE",
+            "USE_AMP",
+            "AMP_DTYPE",
+            "ALLOW_TF32",
+            "CUDNN_BENCHMARK",
+            "DETERMINISTIC",
+            "NUM_WORKERS",
+            "PREFETCH_FACTOR",
+            "PERSISTENT_WORKERS",
+            "PIN_MEMORY",
+        ),
+        per_task_override_keys=(),
     ),
     "cnn_resdil.sh": WrapperSpec(
         script_name="cnn_resdil.sh",
@@ -2622,8 +2710,18 @@ SPECS: dict[str, WrapperSpec] = {
             "loss": "LOSS",
             "max_tokens": "MAX_TOKENS",
             "dropout": "DROPOUT",
+            "head_layer_norm": "HEAD_LAYER_NORM",
+            "readout_type": "READOUT_TYPE",
+            "readout_cnn_kernel_size": "READOUT_CNN_KERNEL_SIZE",
+            "readout_mlp_hidden_dim": "READOUT_MLP_HIDDEN_DIM",
+            "readout_mlp_layers": "READOUT_MLP_LAYERS",
             "weight_decay": "WEIGHT_DECAY",
             "eta_min_ratio": "ETA_MIN_RATIO",
+            "lr_schedule": "LR_SCHEDULE",
+            "warmup_ratio": "WARMUP_RATIO",
+            "adam_beta1": "ADAM_BETA1",
+            "adam_beta2": "ADAM_BETA2",
+            "adam_eps": "ADAM_EPS",
             "val_frac": "VAL_FRAC",
             "grad_clip": "GRAD_CLIP",
             "pos_weight_cap": "POS_WEIGHT_CAP",
@@ -2651,6 +2749,11 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "MAX_TOKENS",
             "DROPOUT",
+            "HEAD_LAYER_NORM",
+            "READOUT_TYPE",
+            "READOUT_CNN_KERNEL_SIZE",
+            "READOUT_MLP_HIDDEN_DIM",
+            "READOUT_MLP_LAYERS",
             "WEIGHT_DECAY",
             "ETA_MIN_RATIO",
             "GRAD_CLIP",
@@ -2683,8 +2786,18 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "MAX_TOKENS",
             "DROPOUT",
+            "HEAD_LAYER_NORM",
+            "READOUT_TYPE",
+            "READOUT_CNN_KERNEL_SIZE",
+            "READOUT_MLP_HIDDEN_DIM",
+            "READOUT_MLP_LAYERS",
             "WEIGHT_DECAY",
             "ETA_MIN_RATIO",
+            "LR_SCHEDULE",
+            "WARMUP_RATIO",
+            "ADAM_BETA1",
+            "ADAM_BETA2",
+            "ADAM_EPS",
             "VAL_FRAC",
             "GRAD_CLIP",
             "POS_WEIGHT_CAP",
@@ -2705,8 +2818,18 @@ SPECS: dict[str, WrapperSpec] = {
             "loss": "LOSS",
             "max_tokens": "MAX_TOKENS",
             "dropout": "DROPOUT",
+            "head_layer_norm": "HEAD_LAYER_NORM",
+            "readout_type": "READOUT_TYPE",
+            "readout_cnn_kernel_size": "READOUT_CNN_KERNEL_SIZE",
+            "readout_mlp_hidden_dim": "READOUT_MLP_HIDDEN_DIM",
+            "readout_mlp_layers": "READOUT_MLP_LAYERS",
             "weight_decay": "WEIGHT_DECAY",
             "eta_min_ratio": "ETA_MIN_RATIO",
+            "lr_schedule": "LR_SCHEDULE",
+            "warmup_ratio": "WARMUP_RATIO",
+            "adam_beta1": "ADAM_BETA1",
+            "adam_beta2": "ADAM_BETA2",
+            "adam_eps": "ADAM_EPS",
             "val_frac": "VAL_FRAC",
             "grad_clip": "GRAD_CLIP",
             "pos_weight_cap": "POS_WEIGHT_CAP",
@@ -2734,6 +2857,11 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "MAX_TOKENS",
             "DROPOUT",
+            "HEAD_LAYER_NORM",
+            "READOUT_TYPE",
+            "READOUT_CNN_KERNEL_SIZE",
+            "READOUT_MLP_HIDDEN_DIM",
+            "READOUT_MLP_LAYERS",
             "WEIGHT_DECAY",
             "ETA_MIN_RATIO",
             "GRAD_CLIP",

@@ -59,6 +59,30 @@ class _DummyPairModelModule:
         ]
 
 
+class _DummyPairModelModuleDuplicateMembers(_DummyPairModelModule):
+    def infer_site(
+        self,
+        common_args: argparse.Namespace,
+        model_args: argparse.Namespace,
+    ) -> list[dict[str, object]]:
+        del model_args
+        assert str(common_args.pair_checkpoint_path).endswith(".pt")
+        return [
+            {
+                "transcript_id": "txA",
+                "intron_index": 1,
+                "site_type": "pair",
+                "score": 0.25,
+            },
+            {
+                "transcript_id": "txB",
+                "intron_index": 3,
+                "site_type": "pair",
+                "score": 0.25,
+            },
+        ]
+
+
 def test_expand_unique_site_rows_maps_back_members() -> None:
     """Expand one unique site row into multiple original transcript introns."""
     unique_rows: list[dict[str, object]] = [
@@ -128,9 +152,153 @@ def test_expand_unique_site_rows_allows_original_keyed_rows() -> None:
     assert mapped == site_rows
 
 
+def test_collapse_site_rows_to_unique_maps_original_members() -> None:
+    """Collapse original-member rows to one unique intron key per site type."""
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "txA",
+            "intron_index": 3,
+            "site_type": "donor",
+            "score": 0.85,
+        },
+        {
+            "transcript_id": "txA",
+            "intron_index": 3,
+            "site_type": "acceptor",
+            "score": 0.45,
+        },
+        {
+            "transcript_id": "txB",
+            "intron_index": 7,
+            "site_type": "donor",
+            "score": 0.85,
+        },
+        {
+            "transcript_id": "txB",
+            "intron_index": 7,
+            "site_type": "acceptor",
+            "score": 0.45,
+        },
+    ]
+    unique_map = {
+        ("uintron_00000002", 1): [
+            UniqueMapMember(transcript_id="txA", intron_index=3),
+            UniqueMapMember(transcript_id="txB", intron_index=7),
+        ]
+    }
+
+    collapsed = run_model._collapse_site_rows_to_unique(
+        site_score_rows=site_rows,
+        unique_map=unique_map,
+    )
+
+    assert len(collapsed) == 2
+    assert {
+        (
+            str(row["transcript_id"]),
+            int(row["intron_index"]),
+            str(row["site_type"]),
+            float(row["score"]),
+        )
+        for row in collapsed
+    } == {
+        ("uintron_00000002", 1, "acceptor", 0.45),
+        ("uintron_00000002", 1, "donor", 0.85),
+    }
+
+
+def test_collapse_site_rows_to_unique_raises_on_conflicting_scores() -> None:
+    """Raise when one unique key receives conflicting collapsed site scores."""
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "txA",
+            "intron_index": 3,
+            "site_type": "donor",
+            "score": 0.85,
+        },
+        {
+            "transcript_id": "txB",
+            "intron_index": 7,
+            "site_type": "donor",
+            "score": 0.32,
+        },
+    ]
+    unique_map = {
+        ("uintron_00000002", 1): [
+            UniqueMapMember(transcript_id="txA", intron_index=3),
+            UniqueMapMember(transcript_id="txB", intron_index=7),
+        ]
+    }
+
+    with pytest.raises(ValueError, match="Conflicting scores"):
+        _ = run_model._collapse_site_rows_to_unique(
+            site_score_rows=site_rows,
+            unique_map=unique_map,
+        )
+
+
+def test_uses_default_unique_test_tsv_true_for_processed_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return true when test_tsv points to processed/transcripts.unique.tsv."""
+    base_dir = tmp_path / "data" / "Dmel"
+    processed_dir = base_dir / "processed"
+    processed_dir.mkdir(parents=True)
+    unique_path = processed_dir / "transcripts.unique.tsv"
+    unique_path.write_text("header\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        run_model,
+        "species_data_dirs",
+        lambda species: {
+            "base": str(base_dir),
+            "raw": str(base_dir / "raw"),
+            "learning_metric": str(base_dir / "learning_metric"),
+            "eval_score": str(base_dir / "eval_score"),
+        },
+    )
+
+    assert run_model._uses_default_unique_test_tsv(
+        species="Dmel",
+        test_tsv=str(unique_path),
+    )
+
+
+def test_uses_default_unique_test_tsv_false_for_non_default_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return false when test_tsv points to a non-default TSV path."""
+    base_dir = tmp_path / "data" / "Dmel"
+    processed_dir = base_dir / "processed"
+    processed_dir.mkdir(parents=True)
+    default_unique_path = processed_dir / "transcripts.unique.tsv"
+    default_unique_path.write_text("header\n", encoding="utf-8")
+    non_default_path = tmp_path / "custom.tsv"
+    non_default_path.write_text("header\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        run_model,
+        "species_data_dirs",
+        lambda species: {
+            "base": str(base_dir),
+            "raw": str(base_dir / "raw"),
+            "learning_metric": str(base_dir / "learning_metric"),
+            "eval_score": str(base_dir / "eval_score"),
+        },
+    )
+
+    assert not run_model._uses_default_unique_test_tsv(
+        species="Dmel",
+        test_tsv=str(non_default_path),
+    )
+
+
 def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     metrics_json = tmp_path / "train_summary.json"
     site_output_tsv = tmp_path / "site.tsv"
@@ -223,6 +391,8 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
     )
 
     run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+    assert "[pipeline] inference stage elapsed:" in captured.out
 
     summary = json.loads(metrics_json.read_text(encoding="utf-8"))
     assert summary["pair"]["best_metric"] == "pr_auc"
@@ -246,3 +416,108 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
         "min_donor_plus_acceptor",
     ]
     assert len(lines[1].split("\t")) == 5
+
+
+def test_run_pipeline_pair_model_uses_unique_intron_scores_and_maps_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics_json = tmp_path / "train_summary.json"
+    site_output_tsv = tmp_path / "site.tsv"
+    intron_output_tsv = tmp_path / "intron.tsv"
+    transcript_output_tsv = tmp_path / "transcript.tsv"
+    eval_output_txt = tmp_path / "eval.txt"
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("txA\t1\ntxB\t0\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    parser = run_model._build_parser(
+        selected_model="cnn_pair",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_pair",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--train_target",
+            "pair",
+            "--epochs",
+            "1",
+            "--metrics_json",
+            str(metrics_json),
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--site_output_tsv",
+            str(site_output_tsv),
+            "--intron_output_tsv",
+            str(intron_output_tsv),
+            "--transcript_output_tsv",
+            str(transcript_output_tsv),
+            "--eval_output_txt",
+            str(eval_output_txt),
+            "--ref_gff",
+            str(ref_gff),
+        ]
+    )
+
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: _DummyPairModelModuleDuplicateMembers(),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("uintron_00000001", 1): [
+                UniqueMapMember(transcript_id="txA", intron_index=1),
+                UniqueMapMember(transcript_id="txB", intron_index=3),
+            ],
+        },
+    )
+
+    run_model.run_pipeline(args)
+
+    intron_lines = intron_output_tsv.read_text(encoding="utf-8").strip().splitlines()
+    assert len(intron_lines) == 2
+    assert intron_lines[1].split("\t")[0:2] == ["uintron_00000001", "1"]
+
+    transcript_lines = (
+        transcript_output_tsv.read_text(encoding="utf-8").strip().splitlines()
+    )
+    assert len(transcript_lines) == 3
+    assert {line.split("\t")[0] for line in transcript_lines[1:]} == {"txA", "txB"}

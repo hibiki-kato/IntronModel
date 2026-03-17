@@ -32,6 +32,29 @@ def test_cnn_pair_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_bilstm_pair_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_bilstm_pair.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_run_bilstm_pair_sh_includes_tuned_auto_and_common_runtime_keys() -> None:
+    content = (_project_root() / "run" / "run_bilstm_pair.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'USE_TUNED_HPARAMS="auto"' in content
+    assert 'COMPILE_MODE="auto"' in content
+    assert 'MPS_MAX_BATCH_SIZE="2048"' in content
+    assert "INFER_COMPILE=" not in content
+    assert "INFER_COMPILE_MODE=" not in content
+
+
 def test_tune_cnn_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "tune_cnn.sh"
     run = subprocess.run(
@@ -46,6 +69,18 @@ def test_tune_cnn_sh_rejects_cli_arguments() -> None:
 
 def test_tune_cnn_pair_time_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "tune_cnn_pair_time.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_tune_bilstm_pair_time_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "tune_bilstm_pair_time.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -291,6 +326,12 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
+    tune_bilstm_pair_time = subprocess.run(
+        ["bash", "-n", str(root / "run" / "tune_bilstm_pair_time.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     tune_time = subprocess.run(
         ["bash", "-n", str(root / "run" / "tune_cnn_time.sh")],
         capture_output=True,
@@ -311,6 +352,12 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     )
     cnn_pair = subprocess.run(
         ["bash", "-n", str(root / "run" / "run_cnn_pair.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    bilstm_pair = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_bilstm_pair.sh")],
         capture_output=True,
         text=True,
         check=False,
@@ -444,10 +491,12 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert cnn.returncode == 0, cnn.stderr
     assert tune.returncode == 0, tune.stderr
     assert tune_pair_time.returncode == 0, tune_pair_time.stderr
+    assert tune_bilstm_pair_time.returncode == 0, tune_bilstm_pair_time.stderr
     assert tune_time.returncode == 0, tune_time.stderr
     assert tune_resdil_time.returncode == 0, tune_resdil_time.stderr
     assert cnn_resdil.returncode == 0, cnn_resdil.stderr
     assert cnn_pair.returncode == 0, cnn_pair.stderr
+    assert bilstm_pair.returncode == 0, bilstm_pair.stderr
     assert tcn.returncode == 0, tcn.stderr
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr

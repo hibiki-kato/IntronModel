@@ -32,6 +32,11 @@ TOP_K="2"
 FULL_EPOCHS="6"
 QUICK_COMPILE_MODE="on"
 FULL_COMPILE_MODE="auto"
+LR_SCHEDULE="cosine"
+WARMUP_RATIO="0.01"
+ADAM_BETA1="0.9"
+ADAM_BETA2="0.98"
+ADAM_EPS="1e-8"
 
 GPU_IDS="auto"
 # Keep the default to one concurrent trial for stable single-GPU throughput.
@@ -54,11 +59,13 @@ MAX_OOM_RETRIES="5"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
-# Optional output/data overrides for trunc-data tuning runs.
+# Optional output/data overrides for trunc/cheat-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
+CHEAT_MODE="off"
+OBJECTIVE_METRIC="pr_auc"
 # Optional override. Leave empty to use static ETA title from TIME_BUDGET_MINUTES.
 PROCESS_TITLE=""
 UPDATE_DOUBLE_DESCENT_PLOT="0"
@@ -112,6 +119,11 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
     "type": "categorical",
     "values": [1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 5e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 5e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.0, "scale": "linear"},
@@ -149,6 +161,11 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
     "type": "categorical",
     "values": [1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 6e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 7e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.5, "scale": "linear"},
@@ -383,6 +400,15 @@ if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
 	echo "[tune_dnabert_time.sh] TRUNC_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[tune_dnabert_time.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
+	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
+	echo "[tune_dnabert_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
+	exit 1
+fi
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	trunc_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -396,6 +422,18 @@ if [[ "${TRUNC_MODE}" == "on" ]]; then
 	fi
 	if [[ -z "${TAG}" ]]; then
 		TAG="trunc"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
 	fi
 	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
 		NAME_FIELDS="tag"
@@ -417,6 +455,9 @@ resolve_dnabert_model \
 TUNING_MODEL_NAME="${MODEL_NAME}"
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="${MODEL_NAME}_trunc"
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
 fi
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert_time.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
@@ -494,7 +535,10 @@ while true; do
 	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
-		objective_metric="${target}_pr_auc"
+		resolved_objective_metric="${target}_${OBJECTIVE_METRIC}"
+		if [[ "${CHEAT_MODE}" == "on" ]]; then
+			resolved_objective_metric="test_${OBJECTIVE_METRIC}"
+		fi
 		config_path="${output_dir}/hparam_search_config.json"
 		mkdir -p "${output_dir}"
 		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
@@ -564,7 +608,7 @@ while true; do
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
-  "objective_metric": "${objective_metric}",
+  "objective_metric": "${resolved_objective_metric}",
   "global_best_config_path": "${global_best_path}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
   "search_algo": "${SEARCH_ALGO}",
@@ -582,6 +626,11 @@ while true; do
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
+    "lr_schedule": "${LR_SCHEDULE}",
+    "warmup_ratio": ${WARMUP_RATIO},
+    "adam_beta1": ${ADAM_BETA1},
+    "adam_beta2": ${ADAM_BETA2},
+    "adam_eps": ${ADAM_EPS},
     "pretrained_model_name": "${PRETRAINED_MODEL_NAME_RESOLVED}",
     "pretrained_revision": "${PRETRAINED_REVISION}",
     "trust_remote_code": ${TRUST_REMOTE_CODE},

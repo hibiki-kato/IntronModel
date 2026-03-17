@@ -118,13 +118,28 @@ intronmodel_auto_tmux() {
         "${script_q}" \
         "${arg_q}"
     local session_name="${INTRONMODEL_TMUX_SESSION_NAME:-0}"
+    local has_explicit_session_name="0"
+    if [[ -n "${INTRONMODEL_TMUX_SESSION_NAME:-}" ]]; then
+        has_explicit_session_name="1"
+    fi
 
     _intronmodel_tmux_sync_env
 
-    if tmux has-session -t "${session_name}" >/dev/null 2>&1; then
-        echo "[${script_name}] tmux session already exists: ${session_name}"
-        echo "[${script_name}] attach: tmux attach -t ${session_name}"
-        _intronmodel_tmux_attach_or_exit "${session_name}" "${script_name}"
+    if [[ "${has_explicit_session_name}" == "1" ]]; then
+        if tmux has-session -t "${session_name}" >/dev/null 2>&1; then
+            echo "[${script_name}] tmux session already exists: ${session_name}"
+            echo "[${script_name}] attach: tmux attach -t ${session_name}"
+            _intronmodel_tmux_attach_or_exit "${session_name}" "${script_name}"
+        fi
+    else
+        while tmux has-session -t "${session_name}" >/dev/null 2>&1; do
+            if [[ "${session_name}" =~ ^[0-9]+$ ]]; then
+                session_name="$((session_name + 1))"
+            else
+                echo "[${script_name}] default tmux session name must be numeric." >&2
+                return 1
+            fi
+        done
     fi
 
     if ! tmux new-session -d -s "${session_name}" -c "${cwd}" "${start_cmd}"; then

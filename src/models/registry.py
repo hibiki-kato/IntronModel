@@ -40,6 +40,7 @@ class ModelModuleProtocol(Protocol):
 _MODEL_TO_MODULE: dict[str, str] = {
     "cnn": "models.cnn",
     "cnn_pair": "models.cnn_pair",
+    "bilstm_pair": "models.bilstm_pair",
     "markov_xgboost": "models.markov_xgboost",
     "tcn": "models.tcn",
     "bert": "models.bert",
@@ -86,9 +87,7 @@ def _validate_model_contract(module: ModuleType, model_name: str) -> None:
     missing = [name for name in required if not hasattr(module, name)]
     if missing:
         missing_text = ", ".join(missing)
-        raise TypeError(
-            f"Model '{model_name}' is missing required API: {missing_text}"
-        )
+        raise TypeError(f"Model '{model_name}' is missing required API: {missing_text}")
 
     non_callable = [name for name in required if not callable(getattr(module, name))]
     if non_callable:

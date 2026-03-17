@@ -419,12 +419,16 @@ def plot_eval_scores(
     markers = ["o", "s", "^", "D", "v", "p", "*", "h", "x", "+"]
     labeled_artists: dict[str, Artist] = {}
 
+    best_model_label: str = ""
+    best_model_f1: float = -1.0
+
     for index, filename in enumerate(files):
-        data = np.loadtxt(os.path.join(eval_dir, filename), usecols=(3, 4))
+        data = np.loadtxt(os.path.join(eval_dir, filename), usecols=(3, 4, 5))
         if data.ndim == 1:
             data = np.expand_dims(data, axis=0)
         sensitivity = data[:, 0]
         precision = data[:, 1]
+        f1_scores = data[:, 2]
         label = filename[:-4]
         scatter_artist = ax.scatter(
             sensitivity,
@@ -436,6 +440,19 @@ def plot_eval_scores(
         if label in labeled_artists:
             raise ValueError(f"Duplicate legend label detected: {label}")
         labeled_artists[label] = scatter_artist
+
+        max_f1_idx = int(np.argmax(f1_scores))
+        model_max_f1 = float(f1_scores[max_f1_idx])
+        ax.scatter(
+            sensitivity[max_f1_idx],
+            precision[max_f1_idx],
+            s=20,
+            color="black",
+            zorder=5,
+        )
+        if model_max_f1 > best_model_f1:
+            best_model_f1 = model_max_f1
+            best_model_label = label
 
     (
         x_min_resolved,
@@ -460,10 +477,44 @@ def plot_eval_scores(
     ax.set_ylabel("Precision", fontsize=AXIS_LABEL_FONT_SIZE)
     ax.set_xlim(x_min_resolved, x_max_resolved)
     ax.set_ylim(y_min_resolved, y_max_resolved)
-    ax.set_title(species, fontsize=TITLE_FONT_SIZE)
+    ax.set_title(
+        species,
+        fontsize=TITLE_FONT_SIZE,
+        loc="left",
+    )
+    ax.text(
+        1.0,
+        1.0,
+        f"best: {best_model_label}",
+        transform=ax.transAxes,
+        fontsize=TITLE_FONT_SIZE,
+        ha="right",
+        va="bottom",
+    )
     ax.tick_params(axis="both", labelsize=AXIS_TICK_FONT_SIZE)
     ax.set_aspect("equal")
-    ax.grid(True, linestyle="--", alpha=0.5)
+
+    # Draw F1-score iso-curves behind scatter points.
+    _x = np.linspace(x_min_resolved, x_max_resolved, 400)
+    _y = np.linspace(y_min_resolved, y_max_resolved, 400)
+    _sn, _pr = np.meshgrid(_x, _y)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        _f1 = np.where(
+            (_sn + _pr) > 0,
+            2.0 * _sn * _pr / (_sn + _pr),
+            0.0,
+        )
+    _cs = ax.contour(
+        _sn,
+        _pr,
+        _f1,
+        levels=10,
+        colors="lightgray",
+        linewidths=0.5,
+        alpha=0.8,
+        zorder=0,
+    )
+    ax.clabel(_cs, fmt="F1=%.1f", fontsize=9, inline=True)
     legend = ax.legend(markerscale=7, fontsize=LEGEND_FONT_SIZE, loc="lower left")
     if interactive:
         _connect_interactive_legend_toggle(

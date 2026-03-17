@@ -15,6 +15,11 @@ SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.1"
+HEAD_LAYER_NORM="1"
+READOUT_TYPE="cnn"
+READOUT_CNN_KERNEL_SIZE="3"
+READOUT_MLP_HIDDEN_DIM="256"
+READOUT_MLP_LAYERS="1"
 BASE_SEED="1337"
 DNABERT_VARIANT="2"
 PRETRAINED_MODEL_NAME=""
@@ -60,14 +65,21 @@ CROSS_SPECIES_BEST_OVERRIDE=""
 CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="auto"
+LR_SCHEDULE="cosine"
+WARMUP_RATIO="0.01"
+ADAM_BETA1="0.9"
+ADAM_BETA2="0.98"
+ADAM_EPS="1e-8"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
-# Optional output/data overrides for trunc-data tuning runs.
+# Optional output/data overrides for trunc/cheat-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
+CHEAT_MODE="off"
+OBJECTIVE_METRIC="pr_auc"
 PROCESS_TITLE="${PROCESS_TITLE:-tune_dnabert_pair}"
 
 # Practical search space with optional larger batches for high-VRAM GPUs.
@@ -93,10 +105,28 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
     "max": 0.40,
     "scale": "linear"
   },
+  "readout_type": {
+    "type": "categorical",
+    "values": ["cnn", "linear", "mlp"]
+  },
+  "readout_cnn_kernel_size": {
+    "type": "categorical",
+    "values": [3, 5, 7]
+  },
+  "readout_mlp_hidden_dim": {
+    "type": "categorical",
+    "values": [128, 256, 384, 512]
+  },
+  "readout_mlp_layers": {"type": "int", "min": 1, "max": 3, "step": 1},
   "head_layer_norm": {
     "type": "categorical",
-    "values": [1]
+    "values": [0, 1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 5e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 5e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.0, "scale": "linear"},
@@ -130,10 +160,28 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
     "max": 0.45,
     "scale": "linear"
   },
+  "readout_type": {
+    "type": "categorical",
+    "values": ["cnn", "linear", "mlp"]
+  },
+  "readout_cnn_kernel_size": {
+    "type": "categorical",
+    "values": [3, 5, 7]
+  },
+  "readout_mlp_hidden_dim": {
+    "type": "categorical",
+    "values": [128, 256, 384, 512]
+  },
+  "readout_mlp_layers": {"type": "int", "min": 1, "max": 3, "step": 1},
   "head_layer_norm": {
     "type": "categorical",
-    "values": [1]
+    "values": [0, 1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 6e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 7e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.5, "scale": "linear"},
@@ -168,10 +216,28 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
     "max": 0.45,
     "scale": "linear"
   },
+  "readout_type": {
+    "type": "categorical",
+    "values": ["cnn", "linear", "mlp"]
+  },
+  "readout_cnn_kernel_size": {
+    "type": "categorical",
+    "values": [3, 5, 7]
+  },
+  "readout_mlp_hidden_dim": {
+    "type": "categorical",
+    "values": [128, 256, 384, 512]
+  },
+  "readout_mlp_layers": {"type": "int", "min": 1, "max": 3, "step": 1},
   "head_layer_norm": {
     "type": "categorical",
-    "values": [1]
+    "values": [0, 1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 6e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 7e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.5, "scale": "linear"},
@@ -556,6 +622,41 @@ if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
 	echo "[tune_dnabert_pair.sh] TRUNC_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[tune_dnabert_pair.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
+	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
+	echo "[tune_dnabert_pair.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
+	exit 1
+fi
+if [[ "${HEAD_LAYER_NORM}" != "0" && "${HEAD_LAYER_NORM}" != "1" ]]; then
+	echo "[tune_dnabert_pair.sh] HEAD_LAYER_NORM must be 0 or 1." >&2
+	exit 1
+fi
+if [[ "${READOUT_TYPE}" != "cnn" \
+	&& "${READOUT_TYPE}" != "linear" \
+	&& "${READOUT_TYPE}" != "mlp" ]]; then
+	echo "[tune_dnabert_pair.sh] READOUT_TYPE must be cnn|linear|mlp." >&2
+	exit 1
+fi
+if ! [[ "${READOUT_CNN_KERNEL_SIZE}" =~ ^[0-9]+$ ]] \
+	|| [[ "${READOUT_CNN_KERNEL_SIZE}" -le 0 ]] \
+	|| (( READOUT_CNN_KERNEL_SIZE % 2 == 0 )); then
+	echo "[tune_dnabert_pair.sh] READOUT_CNN_KERNEL_SIZE must be a positive odd integer." >&2
+	exit 1
+fi
+if ! [[ "${READOUT_MLP_HIDDEN_DIM}" =~ ^[0-9]+$ ]] \
+	|| [[ "${READOUT_MLP_HIDDEN_DIM}" -le 0 ]]; then
+	echo "[tune_dnabert_pair.sh] READOUT_MLP_HIDDEN_DIM must be a positive integer." >&2
+	exit 1
+fi
+if ! [[ "${READOUT_MLP_LAYERS}" =~ ^[0-9]+$ ]] \
+	|| [[ "${READOUT_MLP_LAYERS}" -le 0 ]]; then
+	echo "[tune_dnabert_pair.sh] READOUT_MLP_LAYERS must be a positive integer." >&2
+	exit 1
+fi
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	trunc_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -569,6 +670,18 @@ if [[ "${TRUNC_MODE}" == "on" ]]; then
 	fi
 	if [[ -z "${TAG}" ]]; then
 		TAG="trunc"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
 	fi
 	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
 		NAME_FIELDS="tag"
@@ -594,8 +707,14 @@ for TARGET in "${TARGET_LIST[@]}"; do
 	if [[ "${TRUNC_MODE}" == "on" ]]; then
 		TARGET_TUNING_MODEL_NAME="${TARGET_MODEL_NAME}_trunc"
 	fi
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		TARGET_TUNING_MODEL_NAME="${TARGET_TUNING_MODEL_NAME}_cheat"
+	fi
 
-	OBJECTIVE_METRIC="${TARGET}_pr_auc"
+	RESOLVED_OBJECTIVE_METRIC="${TARGET}_${OBJECTIVE_METRIC}"
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		RESOLVED_OBJECTIVE_METRIC="test_${OBJECTIVE_METRIC}"
+	fi
 	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TARGET_TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TARGET_TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
@@ -722,7 +841,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
-  "objective_metric": "${OBJECTIVE_METRIC}",
+  "objective_metric": "${RESOLVED_OBJECTIVE_METRIC}",
   "global_best_config_path": "${GLOBAL_BEST_CONFIG_PATH}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
   "search_algo": "${SEARCH_ALGO}",
@@ -740,6 +859,16 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
+    "lr_schedule": "${LR_SCHEDULE}",
+    "warmup_ratio": ${WARMUP_RATIO},
+    "adam_beta1": ${ADAM_BETA1},
+    "adam_beta2": ${ADAM_BETA2},
+    "adam_eps": ${ADAM_EPS},
+    "head_layer_norm": ${HEAD_LAYER_NORM},
+    "readout_type": "${READOUT_TYPE}",
+    "readout_cnn_kernel_size": ${READOUT_CNN_KERNEL_SIZE},
+    "readout_mlp_hidden_dim": ${READOUT_MLP_HIDDEN_DIM},
+    "readout_mlp_layers": ${READOUT_MLP_LAYERS},
     "pretrained_model_name": "${PRETRAINED_MODEL_NAME_RESOLVED}",
     "pretrained_revision": "${PRETRAINED_REVISION}",
     "trust_remote_code": ${TRUST_REMOTE_CODE},

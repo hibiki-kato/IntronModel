@@ -2865,6 +2865,137 @@ def test_build_trial_params_history_guided_is_reproducible(
         assert params in anchors
 
 
+def test_build_trial_params_dnabert_linear_drops_inactive_readout_keys(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "readout_type": {"type": "categorical", "values": ["linear"]},
+            "readout_cnn_kernel_size": {"type": "categorical", "values": [3, 5, 7]},
+            "readout_mlp_hidden_dim": {
+                "type": "categorical",
+                "values": [128, 256, 512],
+            },
+            "readout_mlp_layers": {"type": "int", "min": 1, "max": 3, "step": 1},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=13,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=4,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "dnabert_pair",
+            "species": "Dmel",
+            "batch_size": 16,
+            "readout_type": "linear",
+            "readout_cnn_kernel_size": 3,
+            "readout_mlp_hidden_dim": 256,
+            "readout_mlp_layers": 1,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )[0]
+
+    assert params["readout_type"] == "linear"
+    assert "readout_cnn_kernel_size" not in params
+    assert "readout_mlp_hidden_dim" not in params
+    assert "readout_mlp_layers" not in params
+
+
+def test_build_trial_params_history_guided_normalizes_dnabert_readout_keys(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "readout_type": {"type": "categorical", "values": ["linear", "mlp"]},
+            "readout_cnn_kernel_size": {"type": "categorical", "values": [3, 5, 7]},
+            "readout_mlp_hidden_dim": {
+                "type": "categorical",
+                "values": [128, 256, 512],
+            },
+            "readout_mlp_layers": {"type": "int", "min": 1, "max": 3, "step": 1},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=17,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=4,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "dnabert_pair",
+            "species": "Dmel",
+            "batch_size": 16,
+            "readout_type": "linear",
+            "readout_cnn_kernel_size": 3,
+            "readout_mlp_hidden_dim": 256,
+            "readout_mlp_layers": 1,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+        search_algo="history_guided",
+        guided_random_fraction=0.0,
+        guided_mutation_rate=0.0,
+    )
+    history_trials = [
+        (
+            0.8,
+            {
+                "readout_type": "linear",
+                "readout_cnn_kernel_size": 7,
+                "readout_mlp_hidden_dim": 512,
+                "readout_mlp_layers": 3,
+            },
+        ),
+    ]
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+        history_trials=history_trials,
+    )[0]
+
+    assert params["readout_type"] == "linear"
+    assert "readout_cnn_kernel_size" not in params
+    assert "readout_mlp_hidden_dim" not in params
+    assert "readout_mlp_layers" not in params
+
+
 def test_build_trial_params_materializes_independent_cnn_architecture(
     tmp_path: Path,
 ) -> None:

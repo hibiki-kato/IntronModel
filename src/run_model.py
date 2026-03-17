@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -57,6 +58,7 @@ from util.transcript_eval import (
 )
 from util.unique_intron import (
     UNIQUE_MAP_TSV_NAME,
+    UNIQUE_TRANSCRIPTS_TSV_NAME,
     UniqueMapMember,
     invert_unique_map,
     load_unique_map,
@@ -911,6 +913,99 @@ def _load_required_unique_intron_map(
     return load_unique_map(map_path)
 
 
+def _uses_default_unique_test_tsv(*, species: str, test_tsv: str) -> bool:
+    """Return True when ``test_tsv`` is the canonical unique transcript TSV."""
+    if test_tsv.strip() == "":
+        return False
+
+    species_dirs = species_data_dirs(species)
+    default_unique_path = (
+        Path(species_dirs["base"]) / "processed" / UNIQUE_TRANSCRIPTS_TSV_NAME
+    )
+    try:
+        return Path(test_tsv).resolve(strict=False) == default_unique_path.resolve(
+            strict=False
+        )
+    except OSError:
+        return False
+
+
+def _collapse_site_rows_to_unique(
+    *,
+    site_score_rows: list[dict[str, object]],
+    unique_map: dict[tuple[str, int], list[UniqueMapMember]],
+    score_tolerance: float = 1e-6,
+) -> list[dict[str, object]]:
+    """Collapse site-score rows to unique intron keys.
+
+    Parameters
+    ----------
+    site_score_rows : list[dict[str, object]]
+        Site-score rows keyed by either original or unique intron IDs.
+    unique_map : dict[tuple[str, int], list[UniqueMapMember]]
+        Unique intron map loaded from ``transcripts.unique.map.tsv``.
+    score_tolerance : float, default=1e-6
+        Allowed absolute score difference when duplicate rows collapse to one
+        unique key and site type.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Site-score rows keyed by unique intron IDs only.
+
+    Raises
+    ------
+    ValueError
+        If rows contain unsupported site types, unmapped intron keys, or
+        conflicting scores for one collapsed unique key.
+    """
+    if score_tolerance < 0.0:
+        raise ValueError("score_tolerance must be >= 0.")
+
+    reverse_unique_map = invert_unique_map(unique_map)
+    collapsed_rows: dict[tuple[str, int, str], dict[str, object]] = {}
+    for row in site_score_rows:
+        transcript_id = str(row["transcript_id"]).strip()
+        if transcript_id == "":
+            raise ValueError("Site-score row has empty transcript_id.")
+        intron_index = int(row["intron_index"])
+        site_type = str(row["site_type"]).strip().lower()
+        if site_type not in {"donor", "acceptor", "pair"}:
+            raise ValueError(f"Unsupported site_type in site-score row: {site_type}")
+        score = float(row["score"])
+
+        source_key = (transcript_id, intron_index)
+        unique_key = reverse_unique_map.get(source_key, source_key)
+        if unique_key not in unique_map:
+            raise ValueError(
+                "Site-score row key is not present in unique intron map. "
+                "Ensure inference/evaluation uses processed unique assets. "
+                f"key={source_key[0]}:{source_key[1]}"
+            )
+
+        collapse_key = (unique_key[0], unique_key[1], site_type)
+        previous = collapsed_rows.get(collapse_key)
+        if previous is not None:
+            previous_score = float(previous["score"])
+            if abs(previous_score - score) > score_tolerance:
+                raise ValueError(
+                    "Conflicting scores among rows collapsed to one unique "
+                    f"intron/site key={collapse_key} "
+                    f"score_a={previous_score:.8g} score_b={score:.8g}"
+                )
+            continue
+
+        copied = dict(row)
+        copied["transcript_id"] = unique_key[0]
+        copied["intron_index"] = unique_key[1]
+        copied["site_type"] = site_type
+        copied["score"] = score
+        collapsed_rows[collapse_key] = copied
+
+    sorted_keys = sorted(collapsed_rows.keys(), key=lambda item: item)
+    return [collapsed_rows[key] for key in sorted_keys]
+
+
 def _expand_unique_site_rows(
     *,
     site_score_rows: list[dict[str, object]],
@@ -1234,6 +1329,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     unique_map = _load_required_unique_intron_map(species=args.species)
 
+    infer_stage_started_at = time.perf_counter()
     if args.site_score_tsv:
         site_score_tsv = args.site_score_tsv
         site_rows = read_site_scores(site_score_tsv)
@@ -1248,12 +1344,40 @@ def run_pipeline(args: argparse.Namespace) -> None:
             setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
         _assert_checkpoint_paths_exist(checkpoint_paths, required_tasks=model_tasks)
         site_rows = model_module.infer_site(common_args=args, model_args=args)
-        write_site_scores(site_output_tsv, site_rows)
+
+    if (not args.site_score_tsv) and _uses_default_unique_test_tsv(
+        species=args.species,
+        test_tsv=args.test_tsv,
+    ):
+        unique_site_rows = site_rows
+        print(
+            "[pipeline] site-score unique collapse skipped: "
+            "inference used processed/transcripts.unique.tsv"
+        )
+    else:
+        unique_site_rows = _collapse_site_rows_to_unique(
+            site_score_rows=site_rows,
+            unique_map=unique_map,
+        )
+        if len(unique_site_rows) != len(site_rows):
+            print(
+                "[pipeline] site-score unique collapse: "
+                f"input_rows={len(site_rows)} unique_rows={len(unique_site_rows)}"
+            )
+    if args.site_score_tsv:
+        print(
+            "[pipeline] intron evaluation uses unique-collapsed site rows from "
+            f"--site_score_tsv: {site_score_tsv}"
+        )
+    else:
+        write_site_scores(site_output_tsv, unique_site_rows)
         site_score_tsv = site_output_tsv
         print(f"Saved site scores: {site_output_tsv}")
+    infer_stage_elapsed_sec = time.perf_counter() - infer_stage_started_at
+    print(f"[pipeline] inference stage elapsed: {infer_stage_elapsed_sec:.3f}s")
 
     intron_rows = build_intron_scores(
-        site_score_rows=site_rows,
+        site_score_rows=unique_site_rows,
         intron_score_op=args.intron_score_op,
     )
     intron_labels = _load_optional_intron_labels(args.species)
@@ -1266,7 +1390,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     print(f"Total introns: {len(intron_rows)}")
 
     mapped_site_rows = _expand_unique_site_rows(
-        site_score_rows=site_rows,
+        site_score_rows=unique_site_rows,
         unique_map=unique_map,
     )
 

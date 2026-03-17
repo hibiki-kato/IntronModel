@@ -235,6 +235,21 @@ def test_dnabert_pair_spec_single_task_pair() -> None:
     assert "INTRON_SCORE_OP" not in spec.required_arg_keys
 
 
+def test_bilstm_pair_spec_supports_tuned_hparams() -> None:
+    spec = SPECS["bilstm_pair.sh"]
+
+    assert spec.model_env_name == "bilstm_pair"
+    assert spec.supports_tuned_hparams is True
+    assert spec.tuned_key_map["hidden_size"] == "HIDDEN_SIZE"
+
+
+def test_bilstm_pair_spec_excludes_intron_score_op() -> None:
+    spec = SPECS["bilstm_pair.sh"]
+
+    assert "TRAIN_TARGET" not in spec.required_arg_keys
+    assert "INTRON_SCORE_OP" not in spec.required_arg_keys
+
+
 def test_stem_params_for_markov_xgboost_builder() -> None:
     params = _stem_params(
         "markov_xgboost",
@@ -280,11 +295,18 @@ def test_stem_params_for_dnabert_pair_excludes_intron_score_op() -> None:
             "TRAIN_TARGET": "pair",
             "MAX_TOKENS": "auto",
             "DROPOUT": "0.1",
+            "HEAD_LAYER_NORM": "1",
+            "READOUT_TYPE": "cnn",
+            "READOUT_CNN_KERNEL_SIZE": "3",
+            "READOUT_MLP_HIDDEN_DIM": "256",
+            "READOUT_MLP_LAYERS": "1",
         },
     )
 
     assert params["train_target"] == "pair"
     assert "intron_score_op" not in params
+    assert params["readout_type"] == "cnn"
+    assert params["readout_cnn_kernel_size"] == 3
 
 
 def test_resolve_species_path_template_replaces_all_tokens() -> None:

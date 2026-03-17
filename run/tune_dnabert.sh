@@ -44,6 +44,11 @@ TRIAL_PROCESS_MODE="persistent_all"
 DEVICE="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
+INFER_BATCH_SIZE="256"
+INFER_USE_AMP="1"
+INFER_AMP_DTYPE="auto"
+INFER_COMPILE="0"
+INFER_COMPILE_MODE="auto"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -60,14 +65,21 @@ CROSS_SPECIES_BEST_OVERRIDE=""
 CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="auto"
+LR_SCHEDULE="cosine"
+WARMUP_RATIO="0.01"
+ADAM_BETA1="0.9"
+ADAM_BETA2="0.98"
+ADAM_EPS="1e-8"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
-# Optional output/data overrides for trunc-data tuning runs.
+# Optional output/data overrides for trunc/cheat-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TRUNC_MODE="off"
+CHEAT_MODE="off"
+OBJECTIVE_METRIC="pr_auc"
 PROCESS_TITLE="${PROCESS_TITLE:-tune_dnabert}"
 
 # Practical search space with optional larger batches for high-VRAM GPUs.
@@ -97,6 +109,11 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
     "type": "categorical",
     "values": [1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 5e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 5e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.0, "scale": "linear"},
@@ -134,6 +151,11 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
     "type": "categorical",
     "values": [1]
   },
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
+  "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 6e-2, "scale": "log"},
   "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 7e-2, "scale": "log"},
   "grad_clip": {"type": "float", "min": 0.5, "max": 2.5, "scale": "linear"},
@@ -421,10 +443,6 @@ resolve_dnabert_model \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_2}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_6}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_S}"
-TUNING_MODEL_NAME="${MODEL_NAME}"
-if [[ "${TRUNC_MODE}" == "on" ]]; then
-	TUNING_MODEL_NAME="${MODEL_NAME}_trunc"
-fi
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
 	exit 1
@@ -499,6 +517,40 @@ if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
 	echo "[tune_dnabert.sh] TRUNC_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
+	echo "[tune_dnabert.sh] CHEAT_MODE must be off|on." >&2
+	exit 1
+fi
+if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
+	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
+	echo "[tune_dnabert.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
+	exit 1
+fi
+if ! [[ "${INFER_BATCH_SIZE}" =~ ^[0-9]+$ ]] \
+	|| [[ "${INFER_BATCH_SIZE}" -le 0 ]]; then
+	echo "[tune_dnabert.sh] INFER_BATCH_SIZE must be a positive integer." >&2
+	exit 1
+fi
+if [[ "${INFER_USE_AMP}" != "0" && "${INFER_USE_AMP}" != "1" ]]; then
+	echo "[tune_dnabert.sh] INFER_USE_AMP must be 0 or 1." >&2
+	exit 1
+fi
+if [[ "${INFER_AMP_DTYPE}" != "auto" \
+	&& "${INFER_AMP_DTYPE}" != "bf16" \
+	&& "${INFER_AMP_DTYPE}" != "fp16" ]]; then
+	echo "[tune_dnabert.sh] INFER_AMP_DTYPE must be auto|bf16|fp16." >&2
+	exit 1
+fi
+if [[ "${INFER_COMPILE}" != "0" && "${INFER_COMPILE}" != "1" ]]; then
+	echo "[tune_dnabert.sh] INFER_COMPILE must be 0 or 1." >&2
+	exit 1
+fi
+if [[ "${INFER_COMPILE_MODE}" != "off" \
+	&& "${INFER_COMPILE_MODE}" != "on" \
+	&& "${INFER_COMPILE_MODE}" != "auto" ]]; then
+	echo "[tune_dnabert.sh] INFER_COMPILE_MODE must be off|on|auto." >&2
+	exit 1
+fi
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	trunc_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -519,6 +571,25 @@ if [[ "${TRUNC_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	if [[ -z "${TAG}" ]]; then
+		TAG="cheat"
+	elif [[ "${TAG}" != *"cheat"* ]]; then
+		TAG="${TAG}_cheat"
+	fi
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
+TUNING_MODEL_NAME="${MODEL_NAME}"
+if [[ "${TRUNC_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${MODEL_NAME}_trunc"
+fi
+if [[ "${CHEAT_MODE}" == "on" ]]; then
+	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
+fi
 if [[ "${QUICK_TRIALS_MODE}" == "budget" ]]; then
 	if [[ "${TARGET_TIME_BUDGET_MINUTES}" -le 0 && "${TOTAL_TIME_BUDGET_MINUTES}" -le 0 ]]; then
 		echo "[tune_dnabert.sh] budget mode requires TARGET_TIME_BUDGET_MINUTES>0 "\
@@ -532,7 +603,10 @@ echo "[tune_dnabert.sh] species=${SPECIES}"
 echo "[tune_dnabert.sh] targets=${TARGET_LIST[*]}"
 
 for TARGET in "${TARGET_LIST[@]}"; do
-	OBJECTIVE_METRIC="${TARGET}_pr_auc"
+	RESOLVED_OBJECTIVE_METRIC="${TARGET}_${OBJECTIVE_METRIC}"
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		RESOLVED_OBJECTIVE_METRIC="test_${OBJECTIVE_METRIC}"
+	fi
 	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
@@ -662,7 +736,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
-  "objective_metric": "${OBJECTIVE_METRIC}",
+  "objective_metric": "${RESOLVED_OBJECTIVE_METRIC}",
   "global_best_config_path": "${GLOBAL_BEST_CONFIG_PATH}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
   "search_algo": "${SEARCH_ALGO}",
@@ -680,6 +754,11 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
+    "lr_schedule": "${LR_SCHEDULE}",
+    "warmup_ratio": ${WARMUP_RATIO},
+    "adam_beta1": ${ADAM_BETA1},
+    "adam_beta2": ${ADAM_BETA2},
+    "adam_eps": ${ADAM_EPS},
     "pretrained_model_name": "${PRETRAINED_MODEL_NAME_RESOLVED}",
     "pretrained_revision": "${PRETRAINED_REVISION}",
     "trust_remote_code": ${TRUST_REMOTE_CODE},
@@ -688,6 +767,11 @@ for TARGET in "${TARGET_LIST[@]}"; do
     "name_fields": "${NAME_FIELDS}",
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
+    "infer_batch_size": ${INFER_BATCH_SIZE},
+    "infer_use_amp": ${INFER_USE_AMP},
+    "infer_amp_dtype": "${INFER_AMP_DTYPE}",
+    "infer_compile": ${INFER_COMPILE},
+    "infer_compile_mode": "${INFER_COMPILE_MODE}",
     "allow_tf32": ${ALLOW_TF32},
     "cudnn_benchmark": ${CUDNN_BENCHMARK},
     "deterministic": ${DETERMINISTIC},

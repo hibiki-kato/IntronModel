@@ -14,6 +14,7 @@ import argparse
 import csv
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+import inspect
 import io
 import json
 import math
@@ -81,6 +82,12 @@ _SITE_WINDOW_LEN_DEFAULT: int = 100
 _SITE_WINDOW_LEN_MIN: int = 40
 _SITE_WINDOW_LEN_MAX: int = 100
 _SITE_WINDOW_LEN_STEP: int = 10
+_DNABERT_READOUT_CHOICES: tuple[str, ...] = ("cnn", "linear", "mlp")
+_DNABERT_MODEL_PREFIX: str = "dnabert"
+_DNABERT_CNN_ONLY_KEYS: frozenset[str] = frozenset({"readout_cnn_kernel_size"})
+_DNABERT_MLP_ONLY_KEYS: frozenset[str] = frozenset(
+    {"readout_mlp_hidden_dim", "readout_mlp_layers"}
+)
 _CONTEXT_ARG_IGNORE_KEYS: set[str] = {
     "allow_tf32",
     "amp_dtype",
@@ -1272,6 +1279,56 @@ def _parse_history_param_value(
     return None
 
 
+def _is_dnabert_model_name(model_name: str) -> bool:
+    """Return whether model name maps to one DNABERT variant."""
+    return model_name.strip().lower().startswith(_DNABERT_MODEL_PREFIX)
+
+
+def _normalize_dnabert_readout_type(raw_value: object) -> str:
+    """Normalize DNABERT readout type with strict value validation."""
+    normalized = str(raw_value).strip().lower()
+    if normalized not in _DNABERT_READOUT_CHOICES:
+        choices_text = ", ".join(_DNABERT_READOUT_CHOICES)
+        raise ValueError(f"readout_type must be one of: {choices_text}.")
+    return normalized
+
+
+def _materialize_dnabert_readout_params(
+    *,
+    model_name: str,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> dict[str, Scalar]:
+    """Drop inactive DNABERT readout params and fill active defaults."""
+    out = dict(sampled_params)
+    if not _is_dnabert_model_name(model_name):
+        return out
+
+    readout_raw = out.get("readout_type", base_args.get("readout_type", "cnn"))
+    readout_type = _normalize_dnabert_readout_type(readout_raw)
+    out["readout_type"] = readout_type
+
+    active_keys: frozenset[str]
+    if readout_type == "cnn":
+        active_keys = _DNABERT_CNN_ONLY_KEYS
+    elif readout_type == "mlp":
+        active_keys = _DNABERT_MLP_ONLY_KEYS
+    else:
+        active_keys = frozenset()
+
+    for key in active_keys:
+        if key in out:
+            continue
+        candidate = base_args.get(key)
+        if isinstance(candidate, (int, float, str, bool)):
+            out[key] = candidate
+
+    inactive_keys = (_DNABERT_CNN_ONLY_KEYS | _DNABERT_MLP_ONLY_KEYS) - active_keys
+    for inactive_key in inactive_keys:
+        out.pop(inactive_key, None)
+    return out
+
+
 def load_historical_trials(
     *,
     output_dir: Path,
@@ -1281,6 +1338,15 @@ def load_historical_trials(
     base_args: Optional[dict[str, ArgValue]] = None,
 ) -> list[tuple[float, dict[str, Scalar]]]:
     """Load successful historical trials from sibling run directories."""
+    model_name = ""
+    resolved_base_args: dict[str, ArgValue]
+    if base_args is None:
+        resolved_base_args = {}
+    else:
+        resolved_base_args = dict(base_args)
+        model_obj = resolved_base_args.get("model")
+        if isinstance(model_obj, str):
+            model_name = model_obj
     tuning_root = output_dir.parent
     if not tuning_root.exists():
         return []
@@ -1333,7 +1399,12 @@ def load_historical_trials(
                                 break
                             params[key] = parsed
                         if valid:
-                            collected.append((score, params))
+                            normalized = _materialize_dnabert_readout_params(
+                                model_name=model_name,
+                                sampled_params=params,
+                                base_args=resolved_base_args,
+                            )
+                            collected.append((score, normalized))
             except OSError:
                 continue
     if not collected:
@@ -2214,6 +2285,13 @@ def _run_trial_with_command_runner(
     command_runner: TrialCommandRunner,
 ) -> TrialResult:
     """Run one trial with the provided command runner backend."""
+    base_model_name_obj = config.base_args.get("model", "")
+    base_model_name = str(base_model_name_obj)
+    sampled_params = _materialize_dnabert_readout_params(
+        model_name=base_model_name,
+        sampled_params=sampled_params,
+        base_args=config.base_args,
+    )
     merged_args: dict[str, ArgValue] = dict(config.base_args)
     for key, value in sampled_params.items():
         merged_args[key] = value
@@ -4344,6 +4422,11 @@ def build_trial_params(
                 sampled_params=params,
                 base_args=config.base_args,
                 rng=rng,
+            )
+            params = _materialize_dnabert_readout_params(
+                model_name=model_name,
+                sampled_params=params,
+                base_args=config.base_args,
             )
             if not _is_valid_cnn_architecture(
                 model_name=model_name,

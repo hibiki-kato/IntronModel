@@ -8,6 +8,7 @@ from typing import Sequence
 DEFAULT_TASKS: tuple[str, ...] = ("donor", "acceptor")
 _MODEL_TASK_OVERRIDES: dict[str, tuple[str, ...]] = {
     "cnn_pair": ("pair",),
+    "bilstm_pair": ("pair",),
     "markov_xgboost": ("pair",),
     "dnabert_pair": ("pair",),
     "dnabert2_pair": ("pair",),
@@ -103,10 +104,14 @@ def resolve_train_target(
     ValueError
         If the value is outside the supported set.
     """
-    allowed = tuple(allowed_targets) if allowed_targets is not None else (
-        "both",
-        "donor",
-        "acceptor",
+    allowed = (
+        tuple(allowed_targets)
+        if allowed_targets is not None
+        else (
+            "both",
+            "donor",
+            "acceptor",
+        )
     )
     train_target = str(getattr(model_args, "train_target", "both")).strip().lower()
     if train_target not in allowed:

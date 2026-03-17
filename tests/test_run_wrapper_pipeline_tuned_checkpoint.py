@@ -203,6 +203,26 @@ def test_resolve_tuned_model_name_appends_trunc_suffix_for_dnabert_pair() -> Non
     assert resolved == "dnabert2_pair_trunc"
 
 
+def test_resolve_tuned_model_name_appends_cheat_suffix_for_dnabert_pair() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["dnabert_pair.sh"],
+        model_name="dnabert2_pair",
+        mask_mode="off",
+        tuned_hparams_mode="cheat",
+    )
+    assert resolved == "dnabert2_pair_cheat"
+
+
+def test_resolve_tuned_model_name_combines_trunc_and_cheat_for_dnabert() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["dnabert.sh"],
+        model_name="dnabert2",
+        mask_mode="on",
+        tuned_hparams_mode="cheat",
+    )
+    assert resolved == "dnabert2_trunc_cheat"
+
+
 def test_apply_cheat_mode_defaults_appends_cheat_to_tag_and_name_fields() -> None:
     env: dict[str, str] = {
         "TUNED_HPARAMS_MODE": "cheat",
@@ -296,6 +316,112 @@ def test_apply_tuned_overrides_reads_cheat_tuning_dir_for_cnn_pair(
     assert resolved["pair"] == tuned_config.resolve()
     assert env["LR"] == "0.0006"
     assert env["BATCH_SIZE"] == "768"
+
+
+def test_apply_tuned_overrides_reads_cheat_tuning_dir_for_dnabert(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    tuned_config = (
+        tmp_path
+        / species
+        / "tuning"
+        / "dnabert2_cheat"
+        / "donor"
+        / "best_config.json"
+    )
+    tuned_config.parent.mkdir(parents=True, exist_ok=True)
+    tuned_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "lr": 1.7e-5,
+                    "batch_size": 16,
+                    "head_layer_norm": 0,
+                    "readout_type": "mlp",
+                    "readout_mlp_hidden_dim": 384,
+                    "readout_mlp_layers": 2,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "dnabert2",
+        "SPECIES": species,
+        "TRAIN_TARGET": "donor",
+        "USE_TUNED_HPARAMS": "required",
+        "TUNED_HPARAMS_MODE": "cheat",
+        "DONOR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "DONOR_LR": "",
+        "DONOR_BATCH_SIZE": "",
+        "DONOR_HEAD_LAYER_NORM": "",
+        "DONOR_READOUT_TYPE": "",
+        "DONOR_READOUT_MLP_HIDDEN_DIM": "",
+        "DONOR_READOUT_MLP_LAYERS": "",
+    }
+    resolved = _apply_tuned_overrides(SPECS["dnabert.sh"], env, tmp_path)
+
+    assert resolved["donor"] == tuned_config.resolve()
+    assert env["DONOR_LR"] == "1.7e-05"
+    assert env["DONOR_BATCH_SIZE"] == "16"
+    assert env["DONOR_HEAD_LAYER_NORM"] == "0"
+    assert env["DONOR_READOUT_TYPE"] == "mlp"
+    assert env["DONOR_READOUT_MLP_HIDDEN_DIM"] == "384"
+    assert env["DONOR_READOUT_MLP_LAYERS"] == "2"
+
+
+def test_apply_tuned_overrides_reads_trunc_tuning_dir_for_dnabert_pair(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    tuned_config = (
+        tmp_path
+        / species
+        / "tuning"
+        / "dnabert2_pair_trunc"
+        / "pair"
+        / "best_config.json"
+    )
+    tuned_config.parent.mkdir(parents=True, exist_ok=True)
+    tuned_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "lr": 1.3e-5,
+                    "batch_size": 24,
+                    "head_layer_norm": 1,
+                    "readout_type": "linear",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "dnabert2_pair",
+        "SPECIES": species,
+        "TRAIN_TARGET": "pair",
+        "USE_TUNED_HPARAMS": "required",
+        "MASK_MODE": "on",
+        "PAIR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "LR": "",
+        "BATCH_SIZE": "",
+        "HEAD_LAYER_NORM": "",
+        "READOUT_TYPE": "",
+    }
+    resolved = _apply_tuned_overrides(SPECS["dnabert_pair.sh"], env, tmp_path)
+
+    assert resolved["pair"] == tuned_config.resolve()
+    assert env["LR"] == "1.3e-05"
+    assert env["BATCH_SIZE"] == "24"
+    assert env["HEAD_LAYER_NORM"] == "1"
+    assert env["READOUT_TYPE"] == "linear"
 
 
 def test_apply_tuned_overrides_loads_target_specific_window_len(
