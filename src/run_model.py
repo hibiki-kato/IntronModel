@@ -238,8 +238,7 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=1.0,
         help=(
-            "Temperature used when --transcript_score_agg is "
-            "softmin or softmin_wavg."
+            "Temperature used when --transcript_score_agg is softmin or softmin_wavg."
         ),
     )
     parser.add_argument(
@@ -258,8 +257,7 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=3,
         help=(
-            "Keep top-k checkpoints per "
-            "species/model/task/validation_signature bucket."
+            "Keep top-k checkpoints per species/model/task/validation_signature bucket."
         ),
     )
     parser.add_argument(
@@ -483,9 +481,7 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
         "--f1_lambda",
         type=float,
         default=0.1,
-        help=(
-            "Mixing coefficient for --loss weighted_bce_f1 or focal_f1."
-        ),
+        help=("Mixing coefficient for --loss weighted_bce_f1 or focal_f1."),
     )
     parser.add_argument("--donor_f1_lambda", type=float, default=None)
     parser.add_argument("--acceptor_f1_lambda", type=float, default=None)
@@ -690,9 +686,7 @@ def _build_checkpoint_stem_from_params(
     if len(stem) <= MAX_CHECKPOINT_STEM_LENGTH:
         return stem
 
-    digest = hashlib.sha1(stem.encode("utf-8")).hexdigest()[
-        :CHECKPOINT_STEM_HASH_CHARS
-    ]
+    digest = hashlib.sha1(stem.encode("utf-8")).hexdigest()[:CHECKPOINT_STEM_HASH_CHARS]
     suffix = f"_h{digest}"
     max_prefix_len = MAX_CHECKPOINT_STEM_LENGTH - len(suffix)
     if max_prefix_len <= 0:
@@ -720,8 +714,8 @@ def _assert_checkpoint_paths_exist(
     required_tasks: Optional[Sequence[str]] = None,
 ) -> None:
     """Assert checkpoint files exist for required tasks."""
-    task_names = tuple(required_tasks) if required_tasks is not None else tuple(
-        paths.keys()
+    task_names = (
+        tuple(required_tasks) if required_tasks is not None else tuple(paths.keys())
     )
     for task in task_names:
         if task not in paths:
@@ -1111,8 +1105,7 @@ def _resolve_ref_gff_file(
 
     if not candidates:
         raise FileNotFoundError(
-            "Reference GFF not found under raw directory. "
-            "Set --ref_gff explicitly."
+            "Reference GFF not found under raw directory. Set --ref_gff explicitly."
         )
 
     preferred = [
@@ -1193,9 +1186,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     model_module = load_model_module(args.model)
     model_tasks = checkpoint_tasks_for_model(args.model)
     default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
-    train_target = str(
-        getattr(args, "train_target", default_train_target)
-    ).strip().lower()
+    train_target = (
+        str(getattr(args, "train_target", default_train_target)).strip().lower()
+    )
     allowed_targets = (
         ("both", *model_tasks) if len(model_tasks) > 1 else tuple(model_tasks)
     )
