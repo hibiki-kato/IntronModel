@@ -54,11 +54,11 @@ PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="5"
 MAX_MODEL_PARAMS="auto"
-MAX_MODEL_PARAMS_FALLBACK="30000000"
+MAX_MODEL_PARAMS_FALLBACK="300000000"
 MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
 MAX_MODEL_PARAMS_RESERVE_MIB="2048"
 MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
-MAX_MODEL_PARAMS_MODEL_FACTOR="0.75"
+MAX_MODEL_PARAMS_MODEL_FACTOR="0.90"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
@@ -97,6 +97,16 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
+	"meta_hidden_dim": {
+		"type": "categorical",
+		"values": [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+	},
+	"meta_dropout": {
+		"type": "float",
+		"min": 0.0,
+		"max": 0.6,
+		"scale": "linear"
+	},
 	"input_mode": {
 		"type": "categorical",
 		"values": ["onehot", "kmer3", "bpe"]
@@ -486,7 +496,7 @@ while true; do
     "species": "${species}",
 	"train_target": "pair",
 	"base_pair_checkpoints": "${BASE_PAIR_CHECKPOINTS}",
-	"meta_hidden_dim": 32,
+	"meta_hidden_dim": 256,
 	"meta_dropout": 0.2,
     "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},

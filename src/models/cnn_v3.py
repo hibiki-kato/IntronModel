@@ -14,7 +14,6 @@ import argparse
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import random
 from typing import Optional, Sequence
 
 import numpy as np
@@ -462,8 +461,8 @@ def train(
         model_name="cnn_v3",
         donor_len=donor_len,
         acceptor_len=acceptor_len,
-        lr=train_params.lr,
-        batch_size=train_params.batch_size,
+        lr=float(model_args.lr),
+        batch_size=int(model_args.batch_size),
         epochs=resolved_epochs,
         tag=model_args.tag,
     )
