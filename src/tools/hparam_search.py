@@ -251,14 +251,12 @@ def _validate_trial_process_mode(value: object, name: str) -> str:
     """Validate trial process mode for phase execution backend selection."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError(
-            f"{name} must be one of: "
-            f"{', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
+            f"{name} must be one of: {', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
         )
     parsed = value.strip().lower()
     if parsed not in TRIAL_PROCESS_MODE_CHOICES:
         raise ValueError(
-            f"{name} must be one of: "
-            f"{', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
+            f"{name} must be one of: {', '.join(sorted(TRIAL_PROCESS_MODE_CHOICES))}."
         )
     return parsed
 
@@ -302,13 +300,9 @@ def _validate_search_space(
                     f"search_space['{name}'] requires min < max for float."
                 )
             if scale not in {"linear", "log"}:
-                raise ValueError(
-                    f"search_space['{name}'].scale must be linear or log."
-                )
+                raise ValueError(f"search_space['{name}'].scale must be linear or log.")
             if scale == "log" and float(min_value) <= 0.0:
-                raise ValueError(
-                    f"search_space['{name}'] log scale requires min > 0."
-                )
+                raise ValueError(f"search_space['{name}'] log scale requires min > 0.")
             normalized[name] = {
                 "type": "float",
                 "min": float(min_value),
@@ -333,9 +327,7 @@ def _validate_search_space(
                 "step": step,
             }
             continue
-        raise ValueError(
-            f"search_space['{name}'].type must be categorical|float|int."
-        )
+        raise ValueError(f"search_space['{name}'].type must be categorical|float|int.")
     if not normalized:
         raise ValueError("search_space must define at least one parameter.")
     return normalized
@@ -862,6 +854,34 @@ def _resolve_test_pr_auc_score_source(train_target: str) -> str:
     return "donor_acceptor"
 
 
+def _multiply_donor_acceptor_rows(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Convert donor/acceptor rows into pair rows by score multiplication."""
+    donor_scores: dict[tuple[str, int], float] = {}
+    acceptor_scores: dict[tuple[str, int], float] = {}
+    for row in rows:
+        row_site_type = str(row.get("site_type", "")).strip().lower()
+        key = (str(row["transcript_id"]), int(row["intron_index"]))
+        score = float(row["score"])
+        if row_site_type == "donor":
+            donor_scores[key] = score
+        elif row_site_type == "acceptor":
+            acceptor_scores[key] = score
+
+    pair_rows: list[dict[str, object]] = []
+    for key in sorted(set(donor_scores) & set(acceptor_scores)):
+        pair_rows.append(
+            {
+                "transcript_id": key[0],
+                "intron_index": key[1],
+                "site_type": "pair",
+                "score": donor_scores[key] * acceptor_scores[key],
+            }
+        )
+    return pair_rows
+
+
 def _score_site_rows_single_task_model(
     *,
     model_name: str,
@@ -906,7 +926,9 @@ def _score_site_rows_single_task_model(
     if not transformed_rows:
         return []
 
-    model, checkpoint_payload = model_module.load_task_model(str(checkpoint_path), device)
+    model, checkpoint_payload = model_module.load_task_model(
+        str(checkpoint_path), device
+    )
     window_len = int(checkpoint_payload.get("window_len", 50))
     sequences = [str(row["seq"]) for row in transformed_rows]
     scores = model_module.score_sequences(
@@ -932,6 +954,7 @@ def _score_site_rows_single_task_model(
 
 def _score_site_rows_pair_model(
     *,
+    model_name: str,
     checkpoint_path: Path,
     pair_rows: list[dict[str, object]],
     device: str,
@@ -939,9 +962,14 @@ def _score_site_rows_pair_model(
     sequence_transform: str,
 ) -> list[dict[str, object]]:
     """Score pair-site rows for one pair-model checkpoint."""
-    from models import cnn_pair
+    if model_name == "cnn_pair":
+        from models import cnn_pair as pair_module
+    elif model_name == "cnn_v2":
+        from models import cnn_v2 as pair_module
+    else:
+        raise ValueError(f"Unsupported pair model for scoring: {model_name}")
 
-    return cnn_pair.infer_pair_site_scores(
+    return pair_module.infer_pair_site_scores(
         pair_rows=pair_rows,
         pair_model_path=str(checkpoint_path),
         device=device,
@@ -959,7 +987,11 @@ def _compute_test_pr_auc_objective(
 ) -> Optional[float]:
     """Compute external-test PR-AUC objective for one trial."""
     from evaluate_intron_pr_auc import evaluate_labeled_introns
-    from util.data_proc import read_test_pair_rows, read_test_site_rows, resolve_test_tsv
+    from util.data_proc import (
+        read_test_pair_rows,
+        read_test_site_rows,
+        resolve_test_tsv,
+    )
     from util.transcript_eval import write_site_scores
 
     model_name = str(merged_args.get("model", "")).strip()
@@ -971,6 +1003,9 @@ def _compute_test_pr_auc_objective(
     train_target = str(train_target_raw).strip().lower() or "both"
     if train_target not in {"both", "donor", "acceptor", "pair"}:
         return None
+    cnn_v2_pair_mode = str(merged_args.get("pair_mode", "pair")).strip().lower()
+    if model_name == "cnn_v2" and cnn_v2_pair_mode != "pair" and train_target == "pair":
+        train_target = "both"
 
     donor_len = _to_optional_int(merged_args.get("donor_len"))
     acceptor_len = _to_optional_int(merged_args.get("acceptor_len"))
@@ -984,15 +1019,16 @@ def _compute_test_pr_auc_objective(
 
     test_tsv_override = merged_args.get("test_tsv")
     test_tsv_arg = (
-        str(test_tsv_override)
-        if isinstance(test_tsv_override, (str, Path))
-        else None
+        str(test_tsv_override) if isinstance(test_tsv_override, (str, Path)) else None
     )
     test_tsv = Path(resolve_test_tsv(species, test_tsv_arg))
 
     checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
     scored_rows: list[dict[str, object]] = []
-    if model_name == "cnn_pair":
+    use_pair_model_scoring = model_name == "cnn_pair" or (
+        model_name == "cnn_v2" and cnn_v2_pair_mode == "pair"
+    )
+    if use_pair_model_scoring:
         pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
         if pair_checkpoint_raw is None:
             return None
@@ -1004,6 +1040,7 @@ def _compute_test_pr_auc_objective(
         if not pair_rows:
             return None
         scored_rows = _score_site_rows_pair_model(
+            model_name=model_name,
             checkpoint_path=Path(pair_checkpoint_raw),
             pair_rows=pair_rows,
             device=device,
@@ -1039,6 +1076,10 @@ def _compute_test_pr_auc_objective(
                 sequence_transform=sequence_transform,
             )
             scored_rows.extend(task_rows)
+
+    if model_name == "cnn_v2" and cnn_v2_pair_mode != "pair":
+        scored_rows = _multiply_donor_acceptor_rows(scored_rows)
+        train_target = "pair"
 
     if not scored_rows:
         return None
@@ -1509,9 +1550,7 @@ def resolve_max_parallel(setting: object, gpu_count: int) -> int:
         try:
             parsed = int(text)
         except ValueError as exc:
-            raise ValueError(
-                "max_parallel_trials must be auto or integer."
-            ) from exc
+            raise ValueError("max_parallel_trials must be auto or integer.") from exc
     elif isinstance(setting, int):
         parsed = setting
     else:
@@ -2767,14 +2806,10 @@ def _derive_validation_protocol_from_args(
         val_frac=val_frac,
         seed=seed,
         train_pos_path=(
-            str(train_pos_path)
-            if isinstance(train_pos_path, (str, Path))
-            else None
+            str(train_pos_path) if isinstance(train_pos_path, (str, Path)) else None
         ),
         train_neg_path=(
-            str(train_neg_path)
-            if isinstance(train_neg_path, (str, Path))
-            else None
+            str(train_neg_path) if isinstance(train_neg_path, (str, Path)) else None
         ),
         metric_primary=objective_metric,
         split_type=(
@@ -3133,7 +3168,11 @@ def _is_valid_cnn_architecture(
         acceptor_kernel_sizes = [7] * acceptor_depth
 
     if fusion_mode in {"early", "mid"}:
-        if donor_len is not None and acceptor_len is not None and donor_len != acceptor_len:
+        if (
+            donor_len is not None
+            and acceptor_len is not None
+            and donor_len != acceptor_len
+        ):
             return False
         if donor_conv_channels != acceptor_conv_channels:
             return False
@@ -3864,11 +3903,7 @@ def _rolling_mean_curve(
 def write_trials_tsv(path: Path, rows: list[TrialResult]) -> None:
     """Write trial table as TSV."""
     all_param_names: list[str] = sorted(
-        {
-            key
-            for row in rows
-            for key in row.sampled_params
-        }
+        {key for row in rows for key in row.sampled_params}
     )
     headers = [
         "phase",
@@ -3909,8 +3944,7 @@ def write_trials_tsv(path: Path, rows: list[TrialResult]) -> None:
             "" if row.error_message is None else row.error_message,
         ]
         param_values = [
-            str(row.sampled_params.get(name, ""))
-            for name in all_param_names
+            str(row.sampled_params.get(name, "")) for name in all_param_names
         ]
         lines.append("\t".join(fixed_values + param_values))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -3935,10 +3969,7 @@ def write_summary_markdown(
         f"- Species: `{config.species}`",
         f"- Objective: `{config.objective_metric}`",
         f"- GPU slots: `{', '.join(gpu_ids) if gpu_ids else 'cpu-fallback'}`",
-        (
-            f"- Quick phase: {config.quick_trials} trials, "
-            f"{quick_success} successful"
-        ),
+        (f"- Quick phase: {config.quick_trials} trials, {quick_success} successful"),
         f"- Full phase: {len(full_rows)} trials, {full_success} successful",
         "",
     ]
@@ -3967,8 +3998,7 @@ def write_summary_markdown(
         metric_lines: list[str] = []
         if best_row.objective_metric.startswith("pair_"):
             metric_lines.append(
-                "- Pair objective score: "
-                f"`{best_row.objective_score:.6f}`"
+                f"- Pair objective score: `{best_row.objective_score:.6f}`"
             )
         else:
             metric_lines.extend(
@@ -4037,9 +4067,7 @@ def _print_trial_result(
 ) -> None:
     """Print one standardized trial completion line."""
     metric_text = (
-        "-"
-        if result.objective_score is None
-        else f"{result.objective_score:.6f}"
+        "-" if result.objective_score is None else f"{result.objective_score:.6f}"
     )
     print(
         f"[hparam_search] {phase} trial {result.trial_id:04d} "
@@ -4340,9 +4368,7 @@ def run_phase(
         max_parallel_trials,
     )
     previous_stream_mode = _set_active_trial_stream_mode(resolved_stream_mode)
-    previous_max_parallel_trials = _set_active_max_parallel_trials(
-        max_parallel_trials
-    )
+    previous_max_parallel_trials = _set_active_max_parallel_trials(max_parallel_trials)
     if gpu_ids:
         slots: list[Optional[str]] = list(gpu_ids[:max_parallel_trials])
     else:
@@ -4518,11 +4544,7 @@ def maybe_update_global_best(
     hparam_context: Optional[dict[str, object]] = None,
 ) -> None:
     """Update global best config if current run improves the best score."""
-    if (
-        global_best_path is None
-        or best_row is None
-        or best_row.objective_score is None
-    ):
+    if global_best_path is None or best_row is None or best_row.objective_score is None:
         return
     previous_score = _read_best_objective_score(
         global_best_path,
@@ -4735,9 +4757,7 @@ def run_search(config: SearchConfig) -> int:
         )
     )
     if uses_auto_num_workers:
-        resolved_auto_workers = _resolve_hparam_auto_num_workers(
-            max_parallel_trials
-        )
+        resolved_auto_workers = _resolve_hparam_auto_num_workers(max_parallel_trials)
         cpu_count = os.cpu_count() or 4
         print(
             "[hparam_search] num_workers auto resolved to "
@@ -4790,8 +4810,7 @@ def run_search(config: SearchConfig) -> int:
             )
         except ValueError as exc:
             print(
-                "[hparam_search] Seed best config ignored due to parse "
-                f"error: {exc}",
+                f"[hparam_search] Seed best config ignored due to parse error: {exc}",
                 flush=True,
             )
         else:
@@ -4834,8 +4853,7 @@ def run_search(config: SearchConfig) -> int:
     if seed_best_params is not None and quick_params:
         quick_params[0] = dict(seed_best_params)
         print(
-            "[hparam_search] Quick trial 0000 replaced with seed best "
-            "sampled params.",
+            "[hparam_search] Quick trial 0000 replaced with seed best sampled params.",
             flush=True,
         )
     quick_overrides = dict(config.quick_overrides)
@@ -4864,13 +4882,14 @@ def run_search(config: SearchConfig) -> int:
     if config.skip_full_phase:
         full_rows = []
         print(
-            "[hparam_search] Full phase skipped by config "
-            "(skip_full_phase=true).",
+            "[hparam_search] Full phase skipped by config (skip_full_phase=true).",
             flush=True,
         )
     else:
         selected_for_full = ranked_quick[: config.top_k]
-        full_compile_mode = str(full_overrides.get("compile_mode", "auto")).strip().lower()
+        full_compile_mode = (
+            str(full_overrides.get("compile_mode", "auto")).strip().lower()
+        )
         if full_compile_mode == "auto" and gpu_ids:
             cuda_header_path = _find_cuda_header()
             if cuda_header_path is None:
@@ -5032,21 +5051,16 @@ def run_search(config: SearchConfig) -> int:
     if best_row is None:
         print("[hparam_search] No successful trial found.")
         return 1
-    if (
-        previous_global_best_score is not None
-        and best_row.objective_score is not None
-    ):
+    if previous_global_best_score is not None and best_row.objective_score is not None:
         delta = best_row.objective_score - previous_global_best_score
         if delta >= 0.0:
             print(
-                "[hparam_search] Comparison to previous global best: "
-                f"+{delta:.6f}.",
+                f"[hparam_search] Comparison to previous global best: +{delta:.6f}.",
                 flush=True,
             )
         else:
             print(
-                "[hparam_search] Comparison to previous global best: "
-                f"{delta:.6f}.",
+                f"[hparam_search] Comparison to previous global best: {delta:.6f}.",
                 flush=True,
             )
     print(

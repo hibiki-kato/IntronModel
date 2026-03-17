@@ -30,7 +30,7 @@ EOT
 CONDA_ENV="intronmodel"
 SPECIES="Mmus, Athal, Dmel, Hsap"
 OUTPUT_PNG=""
-INTERACTIVE="1"
+INTERACTIVE="0"
 X_MIN=""
 X_MAX=""
 Y_MIN=""

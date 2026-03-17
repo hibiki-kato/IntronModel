@@ -351,6 +351,46 @@ def test_apply_mask_mode_defaults_sets_tag_and_paths(tmp_path: Path) -> None:
     assert env["TEST_TSV_PATH"] == str(raw_dir / "transcripts_mask.tsv")
 
 
+def test_apply_mask_mode_defaults_prefers_unique_tsv_over_detected(
+    tmp_path: Path,
+) -> None:
+    """transcripts.unique.tsv must be used before falling back to detection."""
+    processed_dir = tmp_path / "Dmel" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    # Place both unique TSV and a legacy mask TSV; unique must win.
+    unique_tsv = processed_dir / "transcripts.unique.tsv"
+    unique_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    raw_dir = tmp_path / "Dmel" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "transcripts_mask.tsv").write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MASK_MODE": "on",
+        "DONOR_LEN": "80",
+        "ACCEPTOR_LEN": "100",
+        "NAME_FIELDS": "none",
+        "TAG": "",
+        "TRAIN_POS_PATH": "",
+        "TRAIN_NEG_PATH": "",
+        "TEST_TSV_PATH": "",
+    }
+
+    _apply_mask_mode_defaults(
+        env=env,
+        data_root=tmp_path,
+        species="Dmel",
+        process_env={},
+    )
+
+    assert env["TEST_TSV_PATH"] == str(unique_tsv)
+
+
 def test_apply_mask_mode_defaults_builds_mask_test_tsv_when_missing(
     tmp_path: Path,
     monkeypatch: object,

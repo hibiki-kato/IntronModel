@@ -328,9 +328,7 @@ def _resolve_task_train_params(
         conv_channels=resolved_conv_channels,
         kernel_size=int(_override_or_default("kernel_size", model_args.kernel_size)),
         tcn_block_repeats=int(
-            _override_or_default(
-                "tcn_block_repeats", model_args.tcn_block_repeats
-            )
+            _override_or_default("tcn_block_repeats", model_args.tcn_block_repeats)
         ),
         tcn_causal=int(_override_or_default("tcn_causal", model_args.tcn_causal)),
         head_type=_normalize_cnn_head_type(
@@ -393,10 +391,7 @@ class DNADataset(Dataset):
         self._cached_y: Optional[torch.Tensor]
         if preencode:
             encoded = np.stack(
-                [
-                    one_hot_encode_dna(seq, self.window_len)
-                    for seq, _ in self.examples
-                ]
+                [one_hot_encode_dna(seq, self.window_len) for seq, _ in self.examples]
             ).astype(np.float32, copy=False)
             labels = np.asarray(
                 [label for _, label in self.examples],
@@ -1019,9 +1014,7 @@ def train_task_model(
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, ptxas_blackwell={ptxas_blackwell_path})."
@@ -1031,7 +1024,7 @@ def train_task_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -1062,9 +1055,7 @@ def train_task_model(
                 T_max=epochs,
                 eta_min=lr * eta_min_ratio,
             )
-            timing_sec["model_setup"] += (
-                time.perf_counter() - model_setup_started_at
-            )
+            timing_sec["model_setup"] += time.perf_counter() - model_setup_started_at
             scaler_enabled = (
                 use_amp_bool
                 and device == "cuda"
@@ -1149,9 +1140,7 @@ def train_task_model(
                     if device == "mps" and batch_idx == 1:
                         print(f"[{task}] epoch {epoch}/{epochs} first batch done")
                     running_loss += float(loss.detach().item())
-                    timing_sec["train_step"] += (
-                        time.perf_counter() - step_started_at
-                    )
+                    timing_sec["train_step"] += time.perf_counter() - step_started_at
 
                 scheduler.step()
                 train_loss = float(running_loss / max(1, len(train_loader)))
@@ -1174,9 +1163,7 @@ def train_task_model(
                     )
                 if roc_auc is not None:
                     best_roc_auc = (
-                        roc_auc
-                        if best_roc_auc is None
-                        else max(best_roc_auc, roc_auc)
+                        roc_auc if best_roc_auc is None else max(best_roc_auc, roc_auc)
                     )
                 if acc_at_0_5 is not None:
                     best_acc_at_0_5 = (
@@ -1244,10 +1231,7 @@ def train_task_model(
                 )
 
                 should_log = (
-                    epoch == 1
-                    or epoch == epochs
-                    or epoch % log_every == 0
-                    or improved
+                    epoch == 1 or epoch == epochs or epoch % log_every == 0 or improved
                 )
                 if should_log:
                     mark = "*" if improved else "-"
@@ -1257,7 +1241,10 @@ def train_task_model(
                         f"best={best_score:.4f} (ep {best_epoch})"
                     )
 
-                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                if (
+                    early_stop_patience > 0
+                    and epochs_since_improvement >= early_stop_patience
+                ):
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
@@ -1352,8 +1339,8 @@ def train_task_model(
                 "timing_ratio": timing_ratio,
             }
         except RuntimeError as exc:
-            is_compile_failure = (
-                compile_enabled_attempt and _is_compile_runtime_error(exc)
+            is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
+                exc
             )
             if is_compile_failure:
                 compile_enabled = False
@@ -2076,10 +2063,7 @@ def add_infer_args(parser: argparse.ArgumentParser) -> None:
         "--infer_compile_mode",
         choices=["off", "on", "auto"],
         default=None,
-        help=(
-            "Inference-only compile mode override. "
-            "Default follows --compile_mode."
-        ),
+        help=("Inference-only compile mode override. Default follows --compile_mode."),
     )
 
 
@@ -2228,9 +2212,7 @@ def train(
             "lr": params.lr,
             "loss": params.loss_name,
             "conv_channels": (
-                None
-                if params.conv_channels is None
-                else list(params.conv_channels)
+                None if params.conv_channels is None else list(params.conv_channels)
             ),
             "kernel_size": params.kernel_size,
             "tcn_block_repeats": params.tcn_block_repeats,

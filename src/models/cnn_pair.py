@@ -385,19 +385,15 @@ class PairSpliceCNN(nn.Module):
         if self.fusion_mode == "late":
             self.donor_encoder = donor_probe
             self.acceptor_encoder = acceptor_probe
-            pair_dim = (
-                self.donor_encoder.output_dim + self.acceptor_encoder.output_dim
-            )
+            pair_dim = self.donor_encoder.output_dim + self.acceptor_encoder.output_dim
         elif self.fusion_mode == "early":
             if donor_layout_channels != acceptor_layout_channels:
                 raise ValueError(
-                    "fusion_mode=early requires matching donor/acceptor "
-                    "conv channels."
+                    "fusion_mode=early requires matching donor/acceptor conv channels."
                 )
             if donor_layout_kernels != acceptor_layout_kernels:
                 raise ValueError(
-                    "fusion_mode=early requires matching donor/acceptor "
-                    "kernel sizes."
+                    "fusion_mode=early requires matching donor/acceptor kernel sizes."
                 )
             self.fused_encoder = CnnGapEncoder(
                 in_channels=8,
@@ -412,13 +408,11 @@ class PairSpliceCNN(nn.Module):
         else:
             if donor_layout_channels != acceptor_layout_channels:
                 raise ValueError(
-                    "fusion_mode=mid requires matching donor/acceptor "
-                    "conv channels."
+                    "fusion_mode=mid requires matching donor/acceptor conv channels."
                 )
             if donor_layout_kernels != acceptor_layout_kernels:
                 raise ValueError(
-                    "fusion_mode=mid requires matching donor/acceptor "
-                    "kernel sizes."
+                    "fusion_mode=mid requires matching donor/acceptor kernel sizes."
                 )
             split_index = max(1, len(donor_layout_channels) // 2)
             prefix_channels = donor_layout_channels[:split_index]
@@ -998,7 +992,7 @@ def train_pair_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -1730,10 +1724,7 @@ def add_infer_args(parser: argparse.ArgumentParser) -> None:
         "--infer_compile_mode",
         choices=["off", "on", "auto"],
         default=None,
-        help=(
-            "Inference-only compile mode override. "
-            "Default follows --compile_mode."
-        ),
+        help=("Inference-only compile mode override. Default follows --compile_mode."),
     )
     parser.add_argument(
         "--sequence_transform",

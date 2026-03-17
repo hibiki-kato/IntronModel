@@ -335,7 +335,9 @@ def _resolve_task_train_params(
         donor_kernel_sizes if task == "donor" else acceptor_kernel_sizes
     )
     resolved_kernel_sizes = (
-        task_specific_kernel if task_specific_kernel is not None else shared_kernel_sizes
+        task_specific_kernel
+        if task_specific_kernel is not None
+        else shared_kernel_sizes
     )
     if resolved_kernel_sizes is None:
         fallback_kernel = int(
@@ -410,10 +412,7 @@ class DNADataset(Dataset):
         self._cached_y: Optional[torch.Tensor]
         if preencode:
             encoded = np.stack(
-                [
-                    one_hot_encode_dna(seq, self.window_len)
-                    for seq, _ in self.examples
-                ]
+                [one_hot_encode_dna(seq, self.window_len) for seq, _ in self.examples]
             ).astype(np.float32, copy=False)
             labels = np.asarray(
                 [label for _, label in self.examples],
@@ -1049,9 +1048,7 @@ def train_task_model(
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, ptxas_blackwell={ptxas_blackwell_path})."
@@ -1061,7 +1058,7 @@ def train_task_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -1200,9 +1197,7 @@ def train_task_model(
                     )
                 if roc_auc is not None:
                     best_roc_auc = (
-                        roc_auc
-                        if best_roc_auc is None
-                        else max(best_roc_auc, roc_auc)
+                        roc_auc if best_roc_auc is None else max(best_roc_auc, roc_auc)
                     )
                 if max_f1 is not None:
                     best_max_f1 = (
@@ -1293,7 +1288,10 @@ def train_task_model(
                     f"(ep {best_epoch})"
                 )
 
-                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                if (
+                    early_stop_patience > 0
+                    and epochs_since_improvement >= early_stop_patience
+                ):
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
@@ -1363,8 +1361,8 @@ def train_task_model(
                 "optimizer_impl": optimizer_impl,
             }
         except RuntimeError as exc:
-            is_compile_failure = (
-                compile_enabled_attempt and _is_compile_runtime_error(exc)
+            is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
+                exc
             )
             if is_compile_failure:
                 compile_enabled = False
@@ -1737,9 +1735,7 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         "--donor_kernel_size",
         type=int,
         default=None,
-        help=(
-            "Legacy donor-only scalar fallback when --donor_kernel_sizes is unset."
-        ),
+        help=("Legacy donor-only scalar fallback when --donor_kernel_sizes is unset."),
     )
     parser.add_argument(
         "--acceptor_kernel_size",
@@ -2072,10 +2068,7 @@ def add_infer_args(parser: argparse.ArgumentParser) -> None:
         "--infer_compile_mode",
         choices=["off", "on", "auto"],
         default=None,
-        help=(
-            "Inference-only compile mode override. "
-            "Default follows --compile_mode."
-        ),
+        help=("Inference-only compile mode override. Default follows --compile_mode."),
     )
 
 
@@ -2107,9 +2100,8 @@ def train(
     )
     if donor_kernel_sizes is None and getattr(model_args, "donor_kernel_size", None):
         donor_kernel_sizes = [int(getattr(model_args, "donor_kernel_size"))]
-    if (
-        acceptor_kernel_sizes is None
-        and getattr(model_args, "acceptor_kernel_size", None)
+    if acceptor_kernel_sizes is None and getattr(
+        model_args, "acceptor_kernel_size", None
     ):
         acceptor_kernel_sizes = [int(getattr(model_args, "acceptor_kernel_size"))]
     if shared_kernel_sizes is None and getattr(model_args, "kernel_size", None):
@@ -2247,9 +2239,7 @@ def train(
             "lr": params.lr,
             "loss": params.loss_name,
             "conv_channels": (
-                None
-                if params.conv_channels is None
-                else list(params.conv_channels)
+                None if params.conv_channels is None else list(params.conv_channels)
             ),
             "kernel_sizes": list(params.kernel_sizes),
             "max_pool_size": params.max_pool_size,

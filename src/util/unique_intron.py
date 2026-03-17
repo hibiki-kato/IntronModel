@@ -14,6 +14,8 @@ import sys
 from typing import Dict, Iterable, Mapping
 
 UNIQUE_TRANSCRIPTS_TSV_NAME: str = "transcripts.unique.tsv"
+UNIQUE_TRANSCRIPTS_MASK_TSV_NAME: str = "transcripts.unique.mask.tsv"
+UNIQUE_TRANSCRIPTS_TRUNC_TSV_NAME: str = "transcripts.unique.trunc.tsv"
 UNIQUE_MAP_TSV_NAME: str = "transcripts.unique.map.tsv"
 UNIQUE_LABELED_INTRON_TSV_NAME: str = "intron_eval_flank10.unique.tsv"
 UNIQUE_INTRON_CATALOG_TSV_NAME: str = "intron_unique_catalog.tsv"

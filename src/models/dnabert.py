@@ -1019,10 +1019,9 @@ class DnaBertBinaryClassifier(nn.Module):
         token_hidden = self.dropout(self.head_norm(hidden))
         if self.readout_type == "cnn":
             token_features = token_hidden.transpose(1, 2).contiguous()
-            frozen_kernel = (
-                self.classifier.weight.view(1, -1, 1)
-                * self._frozen_temporal_kernel.view(1, 1, -1)
-            )
+            frozen_kernel = self.classifier.weight.view(
+                1, -1, 1
+            ) * self._frozen_temporal_kernel.view(1, 1, -1)
             logits_map = F.conv1d(
                 token_features,
                 weight=frozen_kernel,
@@ -1339,9 +1338,7 @@ def _resolve_task_train_params(
         head_layer_norm=int(
             _override_or_default("head_layer_norm", model_args.head_layer_norm)
         ),
-        readout_type=str(
-            _override_or_default("readout_type", model_args.readout_type)
-        ),
+        readout_type=str(_override_or_default("readout_type", model_args.readout_type)),
         readout_cnn_kernel_size=int(
             _override_or_default(
                 "readout_cnn_kernel_size",
@@ -1997,9 +1994,7 @@ def train_task_model(
         }
         if resolved_num_workers > 0:
             train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-            train_eval_loader_kwargs["persistent_workers"] = (
-                eval_persistent_workers
-            )
+            train_eval_loader_kwargs["persistent_workers"] = eval_persistent_workers
         train_eval_loader = DataLoader(**train_eval_loader_kwargs)
 
         print(
@@ -2057,7 +2052,7 @@ def train_task_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -2071,8 +2066,7 @@ def train_task_model(
             ]
             if not trainable_params:
                 raise RuntimeError(
-                    "No trainable parameters remain. "
-                    "Check frozen-head configuration."
+                    "No trainable parameters remain. Check frozen-head configuration."
                 )
 
             optimizer_impl = "adamw"
@@ -3362,10 +3356,7 @@ def add_infer_args(parser: argparse.ArgumentParser) -> None:
         "--infer_compile_mode",
         choices=["off", "on", "auto"],
         default=None,
-        help=(
-            "Inference-only compile mode override. "
-            "Default follows --compile_mode."
-        ),
+        help=("Inference-only compile mode override. Default follows --compile_mode."),
     )
 
 
@@ -3614,9 +3605,7 @@ def train(
     }
     for task in model_tasks:
         summary[f"{task}_checkpoint_path"] = task_checkpoint_paths[task]
-        summary[f"{task}_init_checkpoint_path"] = (
-            task_init_checkpoint_paths[task] or ""
-        )
+        summary[f"{task}_init_checkpoint_path"] = task_init_checkpoint_paths[task] or ""
     summary.update(task_metrics)
     return summary
 

@@ -318,9 +318,7 @@ def _resolve_task_train_params(
         conv_channels=resolved_conv_channels,
         kernel_sizes=list(resolved_kernel_sizes),
         max_pool_size=int(model_args.max_pool_size),
-        conv_stride=int(
-            _override_or_default("conv_stride", model_args.conv_stride)
-        ),
+        conv_stride=int(_override_or_default("conv_stride", model_args.conv_stride)),
         head_type=_normalize_cnn_head_type(
             _override_or_default("head_type", model_args.head_type),
             arg_name=f"--{prefix}head_type",
@@ -908,9 +906,7 @@ def train_task_model(
             }
             if resolved_num_workers > 0:
                 train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-                train_eval_loader_kwargs["persistent_workers"] = (
-                    use_persistent_workers
-                )
+                train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
             train_eval_loader = DataLoader(**train_eval_loader_kwargs)
         print(
             f"[{task}] loader train_batches={len(train_loader)} "
@@ -945,7 +941,7 @@ def train_task_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -1923,9 +1919,7 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         "--f1_lambda",
         type=float,
         default=0.1,
-        help=(
-            "Mixing coefficient for --loss weighted_bce_f1 or focal_f1."
-        ),
+        help=("Mixing coefficient for --loss weighted_bce_f1 or focal_f1."),
     )
     parser.add_argument(
         "--donor_f1_lambda",
@@ -2048,10 +2042,7 @@ def add_infer_args(parser: argparse.ArgumentParser) -> None:
         "--infer_compile_mode",
         choices=["off", "on", "auto"],
         default=None,
-        help=(
-            "Inference-only compile mode override. "
-            "Default follows --compile_mode."
-        ),
+        help=("Inference-only compile mode override. Default follows --compile_mode."),
     )
     parser.add_argument(
         "--sequence_transform",

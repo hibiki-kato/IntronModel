@@ -91,6 +91,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "train_neg_path",
         "test_tsv",
         "site_score_tsv",
+        "site_collapse_score_tolerance",
         "site_output_tsv",
         "intron_output_tsv",
         "transcript_output_tsv",
@@ -140,6 +141,7 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
 
 MAX_CHECKPOINT_STEM_LENGTH: int = 200
 CHECKPOINT_STEM_HASH_CHARS: int = 12
+DEFAULT_SITE_COLLAPSE_SCORE_TOLERANCE: float = 1e-6
 
 
 def _set_csv_field_limit_max() -> None:
@@ -186,6 +188,15 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--train_neg_path", default=None)
     parser.add_argument("--test_tsv", default=None)
     parser.add_argument("--site_score_tsv", default=None)
+    parser.add_argument(
+        "--site_collapse_score_tolerance",
+        type=float,
+        default=DEFAULT_SITE_COLLAPSE_SCORE_TOLERANCE,
+        help=(
+            "Absolute score tolerance when collapsing duplicate site-score rows "
+            "to one unique intron/site key."
+        ),
+    )
     parser.add_argument("--site_output_tsv", default=None)
     parser.add_argument("--intron_output_tsv", default=None)
     parser.add_argument("--transcript_output_tsv", default=None)
@@ -540,6 +551,47 @@ def _add_cnn_pair_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_cnn_v2_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_v2 train args without importing torch-dependent modules."""
+    _add_cnn_pair_fallback_train_args(parser)
+    parser.add_argument(
+        "--pair_mode",
+        choices=["pair", "independent"],
+        default="pair",
+    )
+    parser.add_argument(
+        "--train_target",
+        choices=["both", "donor", "acceptor", "pair"],
+        default="pair",
+    )
+
+
+def _add_cnn_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_v3 train args without importing torch-dependent modules."""
+    _add_cnn_v2_fallback_train_args(parser)
+    parser.add_argument(
+        "--base_pair_checkpoints",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated pretrained pair checkpoint paths used as "
+            "meta-model inputs."
+        ),
+    )
+    parser.add_argument(
+        "--meta_hidden_dim",
+        type=int,
+        default=32,
+        help="Hidden dimension for meta MLP.",
+    )
+    parser.add_argument(
+        "--meta_dropout",
+        type=float,
+        default=0.2,
+        help="Dropout for meta MLP.",
+    )
+
+
 def _add_cnn_pair_fallback_infer_args(parser: argparse.ArgumentParser) -> None:
     """Add cnn_pair infer args without importing torch-dependent modules."""
     _add_cnn_fallback_infer_args(parser)
@@ -572,6 +624,12 @@ def _build_parser(
         _add_cnn_fallback_infer_args(parser)
     elif selected_model == "cnn_pair":
         _add_cnn_pair_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
+    elif selected_model == "cnn_v2":
+        _add_cnn_v2_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
+    elif selected_model == "cnn_v3":
+        _add_cnn_v3_fallback_train_args(parser)
         _add_cnn_pair_fallback_infer_args(parser)
 
     return parser
@@ -928,7 +986,7 @@ def _collapse_site_rows_to_unique(
     *,
     site_score_rows: list[dict[str, object]],
     unique_map: dict[tuple[str, int], list[UniqueMapMember]],
-    score_tolerance: float = 1e-6,
+    score_tolerance: float = DEFAULT_SITE_COLLAPSE_SCORE_TOLERANCE,
 ) -> list[dict[str, object]]:
     """Collapse site-score rows to unique intron keys.
 
@@ -1185,10 +1243,26 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     model_module = load_model_module(args.model)
     model_tasks = checkpoint_tasks_for_model(args.model)
+    if args.model == "cnn_v2":
+        pair_mode = str(getattr(args, "pair_mode", "pair")).strip().lower()
+        if pair_mode in {"pair", "on", "true", "1"}:
+            model_tasks = ("pair",)
+        else:
+            model_tasks = ("donor", "acceptor")
     default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
+    if args.model == "cnn_v2":
+        pair_mode = str(getattr(args, "pair_mode", "pair")).strip().lower()
+        if pair_mode in {"pair", "on", "true", "1"}:
+            if train_target == "both":
+                train_target = "pair"
+                args.train_target = "pair"
+        else:
+            if train_target != "both":
+                train_target = "both"
+                args.train_target = "both"
     allowed_targets = (
         ("both", *model_tasks) if len(model_tasks) > 1 else tuple(model_tasks)
     )
@@ -1351,6 +1425,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         unique_site_rows = _collapse_site_rows_to_unique(
             site_score_rows=site_rows,
             unique_map=unique_map,
+            score_tolerance=args.site_collapse_score_tolerance,
         )
         if len(unique_site_rows) != len(site_rows):
             print(

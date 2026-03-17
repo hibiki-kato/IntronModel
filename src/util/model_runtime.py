@@ -352,6 +352,8 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
 
 def compile_model_with_fallback(
     model: nn.Module,
+    *,
+    compile_mode: str = "auto",
 ) -> tuple[nn.Module, bool, str | None, Exception | None]:
     """Compile one model with strategy-based fallback and process-local caching.
 
@@ -359,6 +361,12 @@ def compile_model_with_fallback(
     ----------
     model : nn.Module
         Model to compile with ``torch.compile``.
+    compile_mode : str, default="auto"
+        High-level compile policy passed from the training or inference
+        function.  When ``"auto"``, the strategy is always capped to
+        ``"default-then-off"`` (i.e. ``reduce-overhead`` only), ignoring
+        ``INTRONMODEL_TORCH_COMPILE_STRATEGY``.  For any other value (e.g.
+        ``"on"``) the env-var strategy is respected as usual.
 
     Returns
     -------
@@ -371,8 +379,11 @@ def compile_model_with_fallback(
         return model, False, None, None
 
     _load_compile_runtime_cache_from_env()
-    strategy_raw = os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
-    strategy = _normalize_compile_strategy(strategy_raw)
+    if compile_mode.strip().lower() == "auto":
+        strategy = "default-then-off"
+    else:
+        strategy_raw = os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
+        strategy = _normalize_compile_strategy(strategy_raw)
     if strategy == "off":
         _set_compile_sticky_mode(_COMPILE_MODE_OFF)
         return model, False, None, None

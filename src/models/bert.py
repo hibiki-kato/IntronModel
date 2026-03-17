@@ -169,7 +169,9 @@ def _resolve_max_tokens(raw: Union[str, int], window_len: int, kmer_k: int) -> i
         try:
             resolved = int(text)
         except ValueError as exc:
-            raise ValueError("--max_tokens must be 'auto' or a positive integer.") from exc
+            raise ValueError(
+                "--max_tokens must be 'auto' or a positive integer."
+            ) from exc
     if resolved < 2:
         raise ValueError("--max_tokens must be >= 2.")
     return resolved
@@ -276,9 +278,7 @@ class SpliceTokenDataset(Dataset):
                 labels.append(float(label))
             self._cached_ids = torch.from_numpy(np.stack(all_ids))
             self._cached_masks = torch.from_numpy(np.stack(all_masks))
-            self._cached_labels = torch.from_numpy(
-                np.asarray(labels, dtype=np.float32)
-            )
+            self._cached_labels = torch.from_numpy(np.asarray(labels, dtype=np.float32))
         else:
             self._cached_ids = None
             self._cached_masks = None
@@ -381,10 +381,14 @@ class SmallBertEncoder(nn.Module):
             Hidden states with shape ``(batch, tokens, d_model)``.
         """
         batch_size, seq_len = input_ids.shape
-        pos_ids = torch.arange(
-            seq_len,
-            device=input_ids.device,
-        ).unsqueeze(0).expand(batch_size, seq_len)
+        pos_ids = (
+            torch.arange(
+                seq_len,
+                device=input_ids.device,
+            )
+            .unsqueeze(0)
+            .expand(batch_size, seq_len)
+        )
 
         hidden = self.token_embedding(input_ids) + self.position_embedding(pos_ids)
         hidden = self.dropout(hidden)
@@ -974,9 +978,7 @@ def train_task_model(
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, "
@@ -987,7 +989,7 @@ def train_task_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -1197,10 +1199,7 @@ def train_task_model(
                 )
 
                 should_log = (
-                    epoch == 1
-                    or epoch == epochs
-                    or epoch % log_every == 0
-                    or improved
+                    epoch == 1 or epoch == epochs or epoch % log_every == 0 or improved
                 )
                 if should_log:
                     mark = "*" if improved else "-"
@@ -1210,7 +1209,10 @@ def train_task_model(
                         f"best={best_score:.4f} (ep {best_epoch})"
                     )
 
-                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                if (
+                    early_stop_patience > 0
+                    and epochs_since_improvement >= early_stop_patience
+                ):
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
@@ -1280,8 +1282,8 @@ def train_task_model(
                 "optimizer_impl": optimizer_impl,
             }
         except RuntimeError as exc:
-            is_compile_failure = (
-                compile_enabled_attempt and _is_compile_runtime_error(exc)
+            is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
+                exc
             )
             if is_compile_failure:
                 compile_enabled = False
@@ -1532,9 +1534,7 @@ def infer_site_scores(
 
     donor_seqs = [str(row["seq"]) for row in site_rows if row["site_type"] == "donor"]
     acceptor_seqs = [
-        str(row["seq"])
-        for row in site_rows
-        if row["site_type"] == "acceptor"
+        str(row["seq"]) for row in site_rows if row["site_type"] == "acceptor"
     ]
 
     donor_scores = score_sequences(
@@ -1564,9 +1564,7 @@ def infer_site_scores(
         site_type = str(row["site_type"])
         if site_type == "donor":
             score = (
-                float(donor_scores[donor_idx])
-                if donor_idx < len(donor_scores)
-                else 0.0
+                float(donor_scores[donor_idx]) if donor_idx < len(donor_scores) else 0.0
             )
             donor_idx += 1
         else:

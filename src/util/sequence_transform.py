@@ -7,6 +7,7 @@ from dataclasses import dataclass
 SEQUENCE_TRANSFORM_CHOICES: tuple[str, ...] = (
     "none",
     "mask_outside_intron_n",
+    "truncate_outside_intron",
 )
 
 
@@ -85,8 +86,7 @@ def _mask_outside_boundary_window(
     """
     if intron_half_length < 0:
         raise ValueError(
-            "intron_half_length must be >= 0 for masking, "
-            f"got: {intron_half_length}"
+            f"intron_half_length must be >= 0 for masking, got: {intron_half_length}"
         )
     if exon_context_bp <= 0:
         raise ValueError("exon_context_bp must be > 0.")
@@ -98,6 +98,47 @@ def _mask_outside_boundary_window(
     if site_type == "acceptor":
         return ("N" * max(0, len(seq_upper) - keep)) + seq_upper[-keep:]
     raise ValueError(f"Unsupported site_type for masking: {site_type}")
+
+
+def _truncate_outside_boundary_window(
+    sequence: str,
+    *,
+    site_type: str,
+    intron_half_length: int,
+    exon_context_bp: int,
+) -> str:
+    """Truncate sequence to boundary-local span.
+
+    Parameters
+    ----------
+    sequence : str
+        Input sequence.
+    site_type : str
+        ``donor`` or ``acceptor``.
+    intron_half_length : int
+        Intron half length used to derive keep span.
+    exon_context_bp : int
+        Exonic context length near boundary.
+
+    Returns
+    -------
+    str
+        Truncated uppercase sequence.
+    """
+    if intron_half_length < 0:
+        raise ValueError(
+            f"intron_half_length must be >= 0 for truncation, got: {intron_half_length}"
+        )
+    if exon_context_bp <= 0:
+        raise ValueError("exon_context_bp must be > 0.")
+
+    keep = min(len(sequence), intron_half_length + exon_context_bp)
+    seq_upper = sequence.upper()
+    if site_type == "donor":
+        return seq_upper[:keep]
+    if site_type == "acceptor":
+        return seq_upper[-keep:]
+    raise ValueError(f"Unsupported site_type for truncation: {site_type}")
 
 
 def apply_site_sequence_transform(
@@ -141,6 +182,14 @@ def apply_site_sequence_transform(
         raise ValueError(
             "sequence_transform mask_outside_intron_n requires "
             "intron_half_length metadata."
+        )
+
+    if mode == "truncate_outside_intron":
+        return _truncate_outside_boundary_window(
+            sequence=sequence,
+            site_type=site_type,
+            intron_half_length=intron_half_length,
+            exon_context_bp=exon_context_bp,
         )
 
     return _mask_outside_boundary_window(

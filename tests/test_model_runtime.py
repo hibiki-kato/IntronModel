@@ -160,8 +160,8 @@ def test_compile_model_with_fallback_caches_failed_mode(
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: _Props())
 
-    first = compile_model_with_fallback(model)
-    second = compile_model_with_fallback(model)
+    first = compile_model_with_fallback(model, compile_mode="on")
+    second = compile_model_with_fallback(model, compile_mode="on")
 
     assert first[1] is True
     assert first[2] == "reduce-overhead"

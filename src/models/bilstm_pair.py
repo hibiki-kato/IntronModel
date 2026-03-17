@@ -791,7 +791,7 @@ def train_pair_model(
             compile_enabled_effective,
             compile_selected_mode,
             compile_setup_error,
-        ) = _compile_model_with_fallback(model)
+        ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
         if compile_setup_error is not None:
             print(
                 "[pair] torch.compile setup failed; fallback to eager. "

@@ -315,9 +315,7 @@ class SpliceTokenDataset(Dataset):
                 labels.append(float(label))
             self._cached_ids = torch.from_numpy(np.stack(all_ids))
             self._cached_masks = torch.from_numpy(np.stack(all_masks))
-            self._cached_labels = torch.from_numpy(
-                np.asarray(labels, dtype=np.float32)
-            )
+            self._cached_labels = torch.from_numpy(np.asarray(labels, dtype=np.float32))
         else:
             self._cached_ids = None
             self._cached_masks = None
@@ -424,7 +422,9 @@ class ReservoirReadout(nn.Module):
             1.0 / np.sqrt(float(input_dim)),
             size=(vocab_size, input_dim),
         ).astype(np.float32)
-        self.register_buffer("token_proj", torch.from_numpy(token_proj), persistent=True)
+        self.register_buffer(
+            "token_proj", torch.from_numpy(token_proj), persistent=True
+        )
 
         w_in = rng.normal(
             0.0,
@@ -476,7 +476,9 @@ class ReservoirReadout(nn.Module):
         rayleigh = (v.t() @ w @ v).item()
         return abs(rayleigh)
 
-    def _gather_last(self, states: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
+    def _gather_last(
+        self, states: torch.Tensor, keep_mask: torch.Tensor
+    ) -> torch.Tensor:
         """Gather last valid state for each sample."""
         valid = keep_mask > 0
         seq_len = states.shape[1]
@@ -630,7 +632,9 @@ class ReservoirReadout(nn.Module):
                 )
             if weighted_scores is not None and weighted_logits is not None:
                 if self.step_head is None or self.attn_proj is None:
-                    raise RuntimeError("weighted_logit_sum requires step_head and attn_proj.")
+                    raise RuntimeError(
+                        "weighted_logit_sum requires step_head and attn_proj."
+                    )
                 weighted_scores[:, step] = self.attn_proj(state).squeeze(-1)
                 weighted_logits[:, step] = self.step_head(state).squeeze(-1)
 
@@ -777,9 +781,7 @@ def _resolve_task_train_params(
         ),
         read_order=_resolve_read_order(
             task=task,
-            read_order=str(
-                _override_or_default("read_order", model_args.read_order)
-            ),
+            read_order=str(_override_or_default("read_order", model_args.read_order)),
             donor_read_order=getattr(model_args, "donor_read_order", None),
             acceptor_read_order=getattr(model_args, "acceptor_read_order", None),
         ),
@@ -1188,9 +1190,7 @@ def train_task_model(
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, "
@@ -1201,7 +1201,7 @@ def train_task_model(
                     compile_enabled_attempt,
                     compile_selected_mode,
                     compile_setup_error,
-                ) = _compile_model_with_fallback(model)
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -1416,10 +1416,7 @@ def train_task_model(
                 )
 
                 should_log = (
-                    epoch == 1
-                    or epoch == epochs
-                    or epoch % log_every == 0
-                    or improved
+                    epoch == 1 or epoch == epochs or epoch % log_every == 0 or improved
                 )
                 if should_log:
                     mark = "*" if improved else "-"
@@ -1429,7 +1426,10 @@ def train_task_model(
                         f"best={best_score:.4f} (ep {best_epoch})"
                     )
 
-                if early_stop_patience > 0 and epochs_since_improvement >= early_stop_patience:
+                if (
+                    early_stop_patience > 0
+                    and epochs_since_improvement >= early_stop_patience
+                ):
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
@@ -1508,8 +1508,8 @@ def train_task_model(
             }
 
         except RuntimeError as exc:
-            is_compile_failure = (
-                compile_enabled_attempt and _is_compile_runtime_error(exc)
+            is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
+                exc
             )
             if is_compile_failure:
                 compile_enabled = False
@@ -1766,9 +1766,7 @@ def infer_site_scores(
 
     donor_seqs = [str(row["seq"]) for row in site_rows if row["site_type"] == "donor"]
     acceptor_seqs = [
-        str(row["seq"])
-        for row in site_rows
-        if row["site_type"] == "acceptor"
+        str(row["seq"]) for row in site_rows if row["site_type"] == "acceptor"
     ]
 
     donor_scores = score_sequences(
@@ -1802,9 +1800,7 @@ def infer_site_scores(
         site_type = str(row["site_type"])
         if site_type == "donor":
             score = (
-                float(donor_scores[donor_idx])
-                if donor_idx < len(donor_scores)
-                else 0.0
+                float(donor_scores[donor_idx]) if donor_idx < len(donor_scores) else 0.0
             )
             donor_idx += 1
         else:

@@ -34,6 +34,11 @@ from util.checkpoint_io import (
 )
 from util.data_proc import build_output_stem, parse_name_fields
 from util.model_task_paths import checkpoint_tasks_for_model
+from util.unique_intron import (
+    UNIQUE_TRANSCRIPTS_MASK_TSV_NAME,
+    UNIQUE_TRANSCRIPTS_TRUNC_TSV_NAME,
+    UNIQUE_TRANSCRIPTS_TSV_NAME,
+)
 from util.process_title import apply_process_title_from_env
 
 _ = apply_process_title_from_env()
@@ -1069,6 +1074,31 @@ def _apply_mask_mode_defaults(
     explicit_mask_test_tsv = env.get("MASK_TEST_TSV_PATH", "").strip()
     if explicit_mask_test_tsv != "":
         env["TEST_TSV_PATH"] = explicit_mask_test_tsv
+        return
+
+    # Prefer precomputed sequence-variant files (built by
+    # src/tools/build_unique_sequence_variants.py).  These have the
+    # transform already applied offline, so inference sees the exact same
+    # sequence distribution as training without any per-run transform.
+    variant_name = (
+        UNIQUE_TRANSCRIPTS_TRUNC_TSV_NAME
+        if model_name.startswith("dnabert")
+        else UNIQUE_TRANSCRIPTS_MASK_TSV_NAME
+    )
+    precomputed_tsv = data_root / species / "processed" / variant_name
+    if precomputed_tsv.is_file() and _has_test_tsv_required_columns(precomputed_tsv):
+        env["TEST_TSV_PATH"] = str(precomputed_tsv)
+        print(
+            f"[{species}] mask-mode test_tsv: "
+            f"using precomputed variant: {precomputed_tsv.name}"
+        )
+        return
+
+    # Fall back to plain unique TSV (sequences unchanged, intron_half_length filled).
+    unique_tsv = data_root / species / "processed" / UNIQUE_TRANSCRIPTS_TSV_NAME
+    if unique_tsv.is_file() and _has_test_tsv_required_columns(unique_tsv):
+        env["TEST_TSV_PATH"] = str(unique_tsv)
+        print(f"[{species}] mask-mode test_tsv: using unique TSV: {unique_tsv.name}")
         return
 
     detected = _detect_mask_test_tsv(data_root, species)

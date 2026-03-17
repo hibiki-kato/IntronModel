@@ -71,6 +71,7 @@ def test_resolve_train_target_rejects_invalid_value() -> None:
 
 def test_checkpoint_tasks_for_model_supports_pair_override() -> None:
     assert checkpoint_tasks_for_model("cnn_pair") == ("pair",)
+    assert checkpoint_tasks_for_model("cnn_v3") == ("pair",)
     assert checkpoint_tasks_for_model("bilstm_pair") == ("pair",)
     assert checkpoint_tasks_for_model("markov_xgboost") == ("pair",)
     assert checkpoint_tasks_for_model("dnabert2_pair") == ("pair",)
