@@ -31,6 +31,15 @@ def test_add_train_args_accepts_pair_arch_and_hidden_size() -> None:
     assert args.use_sep_token == 1
 
 
+def test_add_train_args_accepts_compile_mode_flags() -> None:
+    parser = argparse.ArgumentParser()
+    bilstm_pair.add_train_args(parser)
+    args = parser.parse_args(["--compile", "--compile_mode", "auto"])
+
+    assert args.compile is True
+    assert args.compile_mode == "auto"
+
+
 def test_resolve_pair_train_params_validates_hidden_size() -> None:
     parser = argparse.ArgumentParser()
     bilstm_pair.add_train_args(parser)

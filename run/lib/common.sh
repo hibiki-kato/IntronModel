@@ -33,12 +33,62 @@ _intronmodel_conda_base_from_exec() {
 }
 
 
+_intronmodel_prepare_conda_config() {
+	local reason=""
+	local config_home=""
+	local conda_config_dir=""
+	local user_condarc=""
+
+	if [[ -n "${CONDARC:-}" ]]; then
+		if [[ -e "${CONDARC}" && ! -r "${CONDARC}" ]]; then
+			reason="unreadable CONDARC='${CONDARC}'"
+		else
+			return 0
+		fi
+	fi
+
+	if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+		config_home="${XDG_CONFIG_HOME}"
+	else
+		config_home="${HOME}/.config"
+	fi
+	conda_config_dir="${config_home}/conda"
+	user_condarc="${conda_config_dir}/.condarc"
+
+	if [[ -z "${reason}" ]]; then
+		if [[ -d "${config_home}" && ! -x "${config_home}" ]]; then
+			reason="unsearchable config home '${config_home}'"
+		elif [[ -d "${conda_config_dir}" && ! -x "${conda_config_dir}" ]]; then
+			reason="unsearchable conda config dir '${conda_config_dir}'"
+		elif [[ -e "${user_condarc}" && ! -r "${user_condarc}" ]]; then
+			reason="unreadable conda config '${user_condarc}'"
+		fi
+	fi
+
+	if [[ -z "${reason}" ]]; then
+		return 0
+	fi
+
+	local fallback_root
+	fallback_root="${TMPDIR:-/tmp}/intronmodel-conda-${USER:-$(id -un)}"
+	local fallback_condarc="${fallback_root}/.condarc"
+	mkdir -p "${fallback_root}"
+	if [[ ! -f "${fallback_condarc}" ]]; then
+		: >"${fallback_condarc}"
+	fi
+	export CONDARC="${fallback_condarc}"
+	echo "[common.sh] ${reason}; using CONDARC='${CONDARC}'." >&2
+}
+
+
 intronmodel_activate_conda() {
 	local env_name="${1:-intronmodel}"
 	local conda_base=""
 	local conda_exec_path=""
 	local candidate
 	local fallback_paths=()
+
+	_intronmodel_prepare_conda_config
 
 	if [[ -n "${INTRONMODEL_CONDA_SH:-}" ]]; then
 		fallback_paths+=("${INTRONMODEL_CONDA_SH}")

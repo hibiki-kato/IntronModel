@@ -96,9 +96,9 @@ def test_compile_model_with_fallback_uses_default_strategy(
     compiled, enabled, selected_mode, setup_error = compile_model_with_fallback(model)
     assert compiled is model
     assert enabled is True
-    assert selected_mode == "default"
+    assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [None]
+    assert mode_calls == ["reduce-overhead"]
 
 
 def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
@@ -128,9 +128,9 @@ def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
 
     _, enabled, selected_mode, setup_error = compile_model_with_fallback(model)
     assert enabled is True
-    assert selected_mode == "default"
+    assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [None]
+    assert mode_calls == ["reduce-overhead"]
 
 
 def test_compile_model_with_fallback_caches_failed_mode(
@@ -164,12 +164,12 @@ def test_compile_model_with_fallback_caches_failed_mode(
     second = compile_model_with_fallback(model)
 
     assert first[1] is True
-    assert first[2] == "default"
+    assert first[2] == "reduce-overhead"
     assert first[3] is None
     assert second[1] is True
-    assert second[2] == "default"
+    assert second[2] == "reduce-overhead"
     assert second[3] is None
-    assert mode_calls == ["max-autotune", None, None]
+    assert mode_calls == ["max-autotune", "reduce-overhead", "reduce-overhead"]
 
 
 def test_configure_triton_tool_paths_sets_cuda_env_for_conda_targets(

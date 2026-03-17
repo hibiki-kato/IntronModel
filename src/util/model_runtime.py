@@ -14,11 +14,11 @@ import torch
 import torch.nn as nn
 
 _COMPILE_MODE_OFF: str = "off"
-_COMPILE_MODE_DEFAULT: str = "default"
+_COMPILE_MODE_REDUCE_OVERHEAD: str = "reduce-overhead"
 _COMPILE_MODE_MAX_AUTOTUNE: str = "max-autotune"
 
 _COMPILE_MODE_CHOICES: tuple[str, ...] = (
-    _COMPILE_MODE_DEFAULT,
+    _COMPILE_MODE_REDUCE_OVERHEAD,
     _COMPILE_MODE_MAX_AUTOTUNE,
 )
 _COMPILE_STRATEGY_CHOICES: tuple[str, ...] = (
@@ -211,8 +211,10 @@ def resolve_compile_enabled(
 def _normalize_compile_mode_token(raw: str) -> str | None:
     token = raw.strip().lower().replace("_", "-")
     aliases = {
-        "default": _COMPILE_MODE_DEFAULT,
-        "normal": _COMPILE_MODE_DEFAULT,
+        "default": _COMPILE_MODE_REDUCE_OVERHEAD,
+        "normal": _COMPILE_MODE_REDUCE_OVERHEAD,
+        "reduce-overhead": _COMPILE_MODE_REDUCE_OVERHEAD,
+        "reduce": _COMPILE_MODE_REDUCE_OVERHEAD,
         "max": _COMPILE_MODE_MAX_AUTOTUNE,
         "max-autotune": _COMPILE_MODE_MAX_AUTOTUNE,
         "max-autotune-gemm": _COMPILE_MODE_MAX_AUTOTUNE,
@@ -252,11 +254,11 @@ def _compile_modes_for_strategy(strategy: str) -> tuple[str, ...]:
     if strategy == "off":
         return ()
     if strategy in {"default-only", "default-then-off"}:
-        return (_COMPILE_MODE_DEFAULT,)
+        return (_COMPILE_MODE_REDUCE_OVERHEAD,)
     if strategy == "max-only":
         return (_COMPILE_MODE_MAX_AUTOTUNE,)
     if strategy == "max-then-default-then-off":
-        return (_COMPILE_MODE_MAX_AUTOTUNE, _COMPILE_MODE_DEFAULT)
+        return (_COMPILE_MODE_MAX_AUTOTUNE, _COMPILE_MODE_REDUCE_OVERHEAD)
     raise ValueError(
         f"Unrecognized compile strategy '{strategy}'. "
         f"Expected one of: {', '.join(_COMPILE_STRATEGY_CHOICES)}."
@@ -345,8 +347,8 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
             f"Expected one of: {', '.join(_COMPILE_MODE_CHOICES)}."
         )
     with _temporary_max_autotune_setting(mode == _COMPILE_MODE_MAX_AUTOTUNE):
-        if mode == _COMPILE_MODE_DEFAULT:
-            return compile_fn(model)
+        if mode == _COMPILE_MODE_REDUCE_OVERHEAD:
+            return compile_fn(model, mode=mode)
         return compile_fn(model, mode=mode)
 
 

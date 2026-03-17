@@ -41,11 +41,15 @@ from util.model_task_paths import (
     resolve_train_target,
 )
 from util.model_runtime import (
+    compile_model_with_fallback as _compile_model_with_fallback,
     fallback_average_precision as _fallback_average_precision,
     fallback_max_f1 as _fallback_max_f1,
     fallback_roc_auc as _fallback_roc_auc,
+    is_compile_runtime_error as _is_compile_runtime_error,
     pick_device,
+    record_compile_runtime_failure as _record_compile_runtime_failure,
     resolve_amp_dtype as _resolve_amp_dtype,
+    resolve_compile_enabled as _resolve_compile_enabled,
     resolve_num_workers as _resolve_num_workers,
     seed_worker as _seed_worker,
     set_seed,
@@ -617,6 +621,9 @@ def train_pair_model(
     allow_tf32: int,
     cudnn_benchmark: int,
     deterministic: int,
+    compile_model: bool,
+    compile_mode: str,
+    quick_phase: bool,
     num_workers: str | int,
     prefetch_factor: int,
     persistent_workers: int,
@@ -652,6 +659,13 @@ def train_pair_model(
     use_persistent_workers = bool(persistent_workers) and resolved_num_workers > 0
     use_amp_bool = bool(use_amp) and device_name == "cuda"
     amp_dtype_resolved = _resolve_amp_dtype(amp_dtype, device_name)
+    compile_enabled = _resolve_compile_enabled(
+        compile_mode=compile_mode,
+        compile_flag=compile_model,
+        quick_phase=quick_phase,
+        device=device_name,
+        epochs=epochs,
+    )
 
     set_seed(
         seed=seed,
@@ -767,6 +781,25 @@ def train_pair_model(
         fc_hidden=train_params.fc_hidden,
     ).to(device_name)
 
+    compile_enabled_effective = False
+    compile_selected_mode: Optional[str] = None
+    compile_setup_error: Optional[Exception] = None
+    if compile_enabled:
+        print(f"[pair] torch.compile requested (mode={compile_mode}).")
+        (
+            model,
+            compile_enabled_effective,
+            compile_selected_mode,
+            compile_setup_error,
+        ) = _compile_model_with_fallback(model)
+        if compile_setup_error is not None:
+            print(
+                "[pair] torch.compile setup failed; fallback to eager. "
+                f"reason={compile_setup_error}"
+            )
+        elif compile_enabled_effective and compile_selected_mode is not None:
+            print(f"[pair] torch.compile enabled (mode={compile_selected_mode}).")
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_params.lr,
@@ -841,14 +874,40 @@ def train_pair_model(
                 amp_context = nullcontext()
 
             with amp_context:
-                logits = model(
-                    donor_ids,
-                    donor_lengths,
-                    acceptor_ids,
-                    acceptor_lengths,
-                    concat_ids,
-                    concat_lengths,
-                )
+                try:
+                    logits = model(
+                        donor_ids,
+                        donor_lengths,
+                        acceptor_ids,
+                        acceptor_lengths,
+                        concat_ids,
+                        concat_lengths,
+                    )
+                except RuntimeError as exc:
+                    if (
+                        compile_enabled_effective
+                        and _is_compile_runtime_error(exc)
+                    ):
+                        print(
+                            "[pair] torch.compile runtime failed; fallback to "
+                            f"eager. reason={exc}"
+                        )
+                        _record_compile_runtime_failure(compile_selected_mode)
+                        original_model = getattr(model, "_orig_mod", None)
+                        if isinstance(original_model, nn.Module):
+                            model = original_model
+                        compile_enabled_effective = False
+                        compile_selected_mode = None
+                        logits = model(
+                            donor_ids,
+                            donor_lengths,
+                            acceptor_ids,
+                            acceptor_lengths,
+                            concat_ids,
+                            concat_lengths,
+                        )
+                    else:
+                        raise
                 loss = criterion(logits, labels)
 
             if scaler_enabled:
@@ -1034,6 +1093,13 @@ def train_pair_model(
         "prefetch_factor": prefetch_factor if resolved_num_workers > 0 else None,
         "persistent_workers": use_persistent_workers,
         "pin_memory": use_pin_memory,
+        "compile_requested": bool(compile_enabled),
+        "compile_enabled": bool(compile_enabled_effective),
+        "compile_mode": compile_mode,
+        "compile_selected_mode": compile_selected_mode,
+        "compile_setup_error": (
+            str(compile_setup_error) if compile_setup_error is not None else None
+        ),
         "effective_batch_size": train_params.batch_size,
         "optimizer_impl": "adamw",
         "sequence_transform": sequence_transform,
@@ -1231,6 +1297,13 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--asym_alpha_pos", type=float, default=None)
     parser.add_argument("--use_amp", type=int, choices=[0, 1], default=1)
     parser.add_argument("--amp_dtype", choices=["auto", "bf16", "fp16"], default="auto")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--compile_mode",
+        choices=["off", "on", "auto"],
+        default="auto",
+        help="Compilation mode for torch.compile.",
+    )
     parser.add_argument("--allow_tf32", type=int, choices=[0, 1], default=1)
     parser.add_argument("--cudnn_benchmark", type=int, choices=[0, 1], default=1)
     parser.add_argument("--deterministic", type=int, choices=[0, 1], default=0)
@@ -1331,6 +1404,9 @@ def train(
         allow_tf32=model_args.allow_tf32,
         cudnn_benchmark=model_args.cudnn_benchmark,
         deterministic=model_args.deterministic,
+        compile_model=model_args.compile,
+        compile_mode=model_args.compile_mode,
+        quick_phase=bool(getattr(common_args, "quick_phase", False)),
         num_workers=model_args.num_workers,
         prefetch_factor=model_args.prefetch_factor,
         persistent_workers=model_args.persistent_workers,
@@ -1381,6 +1457,8 @@ def train(
         "grad_clip": train_params.grad_clip,
         "use_amp": bool(model_args.use_amp),
         "amp_dtype": model_args.amp_dtype,
+        "compile": bool(model_args.compile),
+        "compile_mode": model_args.compile_mode,
         "allow_tf32": bool(model_args.allow_tf32),
         "cudnn_benchmark": bool(model_args.cudnn_benchmark),
         "deterministic": bool(model_args.deterministic),
