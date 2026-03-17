@@ -11,6 +11,7 @@ wheels/
 
 # Virtual environments
 .venv
+.conda/
 
 # Model checkpoints
 *.pt
