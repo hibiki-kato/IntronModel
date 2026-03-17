@@ -20,6 +20,7 @@ QUICK_EPOCHS="3"
 TOP_K="8"
 FULL_EPOCHS="10"
 VAL_FRAC="0.2"
+INTRONMODEL_AUTO_TMUX=off
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -27,7 +28,7 @@ BASE_SEED="1337"
 PROCESS_TITLE="ETA"
 
 
-GPU_IDS="2, 6"
+GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="2"
 TRIAL_PROCESS_MODE="persistent_all"
 
@@ -202,6 +203,9 @@ intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
+
+# Keep process title fixed during tune_time runs.
+export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
 
 format_elapsed() {
 	intronmodel_format_elapsed "$1"

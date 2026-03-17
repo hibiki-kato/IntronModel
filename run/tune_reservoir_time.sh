@@ -234,6 +234,9 @@ intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
+# Keep process title fixed during tune_time runs.
+export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
+
 format_elapsed() {
 	intronmodel_format_elapsed "$1"
 }
