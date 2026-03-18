@@ -13,7 +13,7 @@ fi
 # Advanced runtime controls are kept below.
 set -a
 DNABERT_VARIANT="2"
-SPECIES="Athal"
+SPECIES="Athal, Dmel, Hsap, Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRUNC_MODE="on"
@@ -30,7 +30,7 @@ TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
 NAME_FIELDS=""
-PROCESS_TITLE="use? email me"
+PROCESS_TITLE="ETA"
 # Optional output/data overrides for trunc-data runs.
 TAG=""
 TRAIN_POS_PATH=""
