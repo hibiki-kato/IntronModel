@@ -1608,7 +1608,7 @@ def test_write_best_config_includes_hparam_context_and_objective_best_epoch(
         log_file="trial.log",
     )
     hparam_context = {
-        "version": 1,
+        "version": 2,
         "objective_metric": "donor_pr_auc",
         "full_epochs": 10,
         "validation_protocol": {"split_type": "stratified_site"},
@@ -2160,7 +2160,7 @@ def test_run_search_injects_seed_into_full_when_context_mismatch(
                 "objective_best_epoch": 9,
                 "sampled_params": seed_params,
                 "hparam_context": {
-                    "version": 1,
+                    "version": 2,
                     "objective_metric": "mean_pr_auc",
                     "full_epochs": 8,
                     "validation_protocol": {"split_type": "stratified_site"},

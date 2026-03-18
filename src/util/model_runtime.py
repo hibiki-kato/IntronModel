@@ -378,6 +378,10 @@ def compile_model_with_fallback(
     if not callable(compile_fn):
         return model, False, None, None
 
+    # Apply shared runtime guards once per compile attempt so models that call
+    # this helper directly also inherit the same stable inductor settings.
+    configure_torch_compile_runtime()
+
     _load_compile_runtime_cache_from_env()
     if compile_mode.strip().lower() == "auto":
         strategy = "default-then-off"
@@ -585,6 +589,23 @@ def configure_torch_compile_runtime() -> None:
     if "TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS" not in os.environ:
         os.environ["TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS"] = "1"
 
+    inductor_module = getattr(torch, "_inductor", None)
+    if inductor_module is None:
+        return
+    inductor_config_obj = getattr(inductor_module, "config", None)
+    if inductor_config_obj is None:
+        return
+    triton_config_obj = getattr(inductor_config_obj, "triton", None)
+    if triton_config_obj is None:
+        return
+    skip_dynamic_graphs = getattr(
+        triton_config_obj,
+        "cudagraph_skip_dynamic_graphs",
+        None,
+    )
+    if isinstance(skip_dynamic_graphs, bool) and not skip_dynamic_graphs:
+        setattr(triton_config_obj, "cudagraph_skip_dynamic_graphs", True)
+
 
 def is_cuda_oom_error(exc: RuntimeError) -> bool:
     """Return whether a runtime error is likely a CUDA OOM error."""
@@ -654,8 +675,13 @@ def is_compile_runtime_error(exc: Exception) -> bool:
         "torch._dynamo",
         "torchdynamo",
         "triton",
+        "cudagraph",
+        "cuda graph",
+        "cudagraph_trees",
         "ptxas",
         "backend_hash",
+        "cuda error: out of memory",
+        "out of memory",
         "cannot copy out of meta tensor",
         "meta tensor",
     )

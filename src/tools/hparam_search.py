@@ -588,7 +588,7 @@ def _build_hparam_context(
 ) -> dict[str, object]:
     """Build comparison context used for global-best compatibility checks."""
     context: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "objective_metric": objective_metric,
         "full_epochs": full_epochs,
         "validation_protocol": _normalize_context_object(validation_protocol),
@@ -2847,6 +2847,16 @@ def _derive_validation_protocol_from_args(
 
     train_pos_path = merged_args.get("train_pos_path")
     train_neg_path = merged_args.get("train_neg_path")
+    model_name = str(merged_args.get("model", "")).strip().lower()
+    train_target = str(merged_args.get("train_target", "")).strip().lower()
+    pair_mode = str(merged_args.get("pair_mode", "")).strip().lower()
+    include_pair_mixed_negatives = False
+    if train_target == "pair":
+        include_pair_mixed_negatives = True
+    elif model_name == "cnn_v2" and pair_mode in {"pair", "on", "true", "1"}:
+        include_pair_mixed_negatives = True
+    elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
+        include_pair_mixed_negatives = True
     return build_validation_protocol(
         val_frac=val_frac,
         seed=seed,
@@ -2862,6 +2872,7 @@ def _derive_validation_protocol_from_args(
             if _is_test_objective_metric(objective_metric)
             else "stratified_site"
         ),
+        include_pair_mixed_negatives=include_pair_mixed_negatives,
     )
 
 

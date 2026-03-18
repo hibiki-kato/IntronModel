@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Mapping
+from typing import Iterator, Mapping
 
 import numpy as np
 import pytest
@@ -12,6 +12,7 @@ import util.model_runtime as model_runtime
 from util.model_runtime import (
     bool_from_flag,
     compile_model_with_fallback,
+    configure_torch_compile_runtime,
     configure_triton_tool_paths,
     fallback_average_precision,
     fallback_max_f1,
@@ -26,7 +27,23 @@ from util.model_runtime import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_compile_runtime_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_compile_runtime_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    prior_skip_dynamic_graphs: bool | None = None
+    inductor_module = getattr(torch, "_inductor", None)
+    if inductor_module is not None:
+        config_obj = getattr(inductor_module, "config", None)
+        triton_config_obj = getattr(config_obj, "triton", None)
+        if triton_config_obj is not None:
+            value_obj = getattr(
+                triton_config_obj,
+                "cudagraph_skip_dynamic_graphs",
+                None,
+            )
+            if isinstance(value_obj, bool):
+                prior_skip_dynamic_graphs = value_obj
+
     monkeypatch.delenv("INTRONMODEL_TORCH_COMPILE_STRATEGY", raising=False)
     monkeypatch.delenv("INTRONMODEL_TORCH_COMPILE_STICKY_MODE", raising=False)
     monkeypatch.delenv("INTRONMODEL_TORCH_COMPILE_DISABLED_MODES", raising=False)
@@ -34,6 +51,18 @@ def _reset_compile_runtime_state(monkeypatch: pytest.MonkeyPatch) -> None:
     model_runtime._COMPILE_RUNTIME_CACHE_LOADED = False
     model_runtime._COMPILE_STICKY_MODE_CACHE = None
     model_runtime._COMPILE_DISABLED_MODES_CACHE.clear()
+    yield
+    if prior_skip_dynamic_graphs is not None:
+        inductor_module = getattr(torch, "_inductor", None)
+        if inductor_module is not None:
+            config_obj = getattr(inductor_module, "config", None)
+            triton_config_obj = getattr(config_obj, "triton", None)
+            if triton_config_obj is not None:
+                setattr(
+                    triton_config_obj,
+                    "cudagraph_skip_dynamic_graphs",
+                    prior_skip_dynamic_graphs,
+                )
 
 
 def test_bool_from_flag_supports_int_and_bool() -> None:
@@ -62,6 +91,11 @@ def test_resolve_mps_max_batch_size_invalid_env_returns_default(
 
 def test_is_compile_runtime_error_matches_known_keyword() -> None:
     exc = RuntimeError("backend_hash failed in torch._inductor")
+    assert is_compile_runtime_error(exc) is True
+
+
+def test_is_compile_runtime_error_matches_cuda_oom() -> None:
+    exc = RuntimeError("CUDA error: out of memory")
     assert is_compile_runtime_error(exc) is True
 
 
@@ -99,6 +133,50 @@ def test_compile_model_with_fallback_uses_default_strategy(
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
     assert mode_calls == ["reduce-overhead"]
+
+
+def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> None:
+    inductor_module = getattr(torch, "_inductor", None)
+    if inductor_module is None:
+        pytest.skip("torch._inductor is unavailable in this torch build.")
+    config_obj = getattr(inductor_module, "config", None)
+    triton_config_obj = getattr(config_obj, "triton", None)
+    if triton_config_obj is None:
+        pytest.skip("torch._inductor.config.triton is unavailable.")
+
+    value_obj = getattr(triton_config_obj, "cudagraph_skip_dynamic_graphs", None)
+    if not isinstance(value_obj, bool):
+        pytest.skip("cudagraph_skip_dynamic_graphs is unavailable.")
+
+    setattr(triton_config_obj, "cudagraph_skip_dynamic_graphs", False)
+    configure_torch_compile_runtime()
+    assert triton_config_obj.cudagraph_skip_dynamic_graphs is True
+
+
+def test_compile_model_with_fallback_applies_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    model = torch.nn.Linear(4, 2)
+
+    def _fake_configure() -> None:
+        calls.append("configured")
+
+    def _fake_compile(
+        module: torch.nn.Module,
+        mode: str | None = None,
+    ) -> torch.nn.Module:
+        del mode
+        return module
+
+    monkeypatch.setattr(
+        model_runtime,
+        "configure_torch_compile_runtime",
+        _fake_configure,
+    )
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    _ = compile_model_with_fallback(model)
+    assert calls == ["configured"]
 
 
 def test_compile_model_with_fallback_max_then_default_skips_small_gpu(

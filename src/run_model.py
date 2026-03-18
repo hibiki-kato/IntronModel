@@ -1202,6 +1202,17 @@ def _attach_validation_metadata(
         if isinstance(primary_metric, str) and primary_metric.strip():
             metric_primary = primary_metric.strip()
 
+    model_name = str(getattr(args, "model", "")).strip().lower()
+    train_target = str(getattr(args, "train_target", "")).strip().lower()
+    pair_mode = str(getattr(args, "pair_mode", "")).strip().lower()
+    include_pair_mixed_negatives = False
+    if train_target == "pair":
+        include_pair_mixed_negatives = True
+    elif model_name == "cnn_v2" and pair_mode in {"pair", "on", "true", "1"}:
+        include_pair_mixed_negatives = True
+    elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
+        include_pair_mixed_negatives = True
+
     protocol = build_validation_protocol(
         val_frac=getattr(args, "val_frac", None),
         seed=getattr(args, "seed", None),
@@ -1217,6 +1228,7 @@ def _attach_validation_metadata(
         ),
         metric_primary=metric_primary,
         split_type="stratified_site",
+        include_pair_mixed_negatives=include_pair_mixed_negatives,
     )
     signature = compute_validation_signature(protocol)
     summary["validation_protocol"] = protocol

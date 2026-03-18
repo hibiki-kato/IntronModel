@@ -144,7 +144,8 @@ resolve_cross_species_best_seed() {
 	fi
 
 	if [[ -f "${local_best_path}" ]]; then
-		echo ""
+		echo "[${script_tag}] selected local best as seed: ${local_best_path}" >&2
+		echo "${local_best_path}"
 		return 0
 	fi
 

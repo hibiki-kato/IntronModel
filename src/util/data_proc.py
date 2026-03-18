@@ -1123,7 +1123,7 @@ def read_examples_pair_task_with_metadata(
     """
     pos_signature = _resolve_training_file_signature(pos_path)
     neg_signature = _resolve_training_file_signature(neg_path)
-    extra_negative_paths = _discover_default_pair_extra_negative_paths(
+    extra_negative_paths = discover_default_pair_extra_negative_paths(
         pos_path=pos_signature[0],
         neg_path=neg_signature[0],
     )
@@ -1299,6 +1299,32 @@ def _discover_default_pair_extra_negative_paths(
             seen_paths.add(candidate)
             discovered_paths.append(candidate)
     return tuple(discovered_paths)
+
+
+def discover_default_pair_extra_negative_paths(
+    *,
+    pos_path: str,
+    neg_path: str,
+) -> tuple[str, ...]:
+    """Discover default mixed negative files for pair-task training.
+
+    Parameters
+    ----------
+    pos_path : str
+        Positive training file path.
+    neg_path : str
+        Primary negative training file path.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted unique extra negative file paths under the inferred processed
+        directory.
+    """
+    return _discover_default_pair_extra_negative_paths(
+        pos_path=pos_path,
+        neg_path=neg_path,
+    )
 
 
 def read_examples_pair_task(
