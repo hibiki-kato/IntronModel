@@ -6,6 +6,7 @@ dependencies:
   - pip
   - numpy
   - matplotlib
+  - ipympl
   - biopython
   - pytorch
   - cuda-cudart-dev

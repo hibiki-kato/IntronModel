@@ -36,6 +36,10 @@ from util.data_proc import (
     species_data_dirs,
 )
 from util.model_task_paths import checkpoint_tasks_for_model
+from util.model_runtime import (
+    is_compile_runtime_error as _is_compile_runtime_error,
+    record_compile_runtime_failure as _record_compile_runtime_failure,
+)
 from util.process_title import (
     apply_eta_process_title_placeholder,
     apply_process_title_from_env,
@@ -1249,6 +1253,47 @@ def _attach_validation_metadata(
             summary[f"selection_score_{task}"] = value
 
 
+def _bool_from_cli_flag(value: object) -> bool:
+    """Parse common CLI flag values into one strict boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "on", "yes"}:
+            return True
+        if normalized in {"0", "false", "off", "no", ""}:
+            return False
+    return False
+
+
+def _infer_compile_requested(args: argparse.Namespace) -> bool:
+    """Return whether inference may attempt ``torch.compile`` for this run."""
+    compile_flag = _bool_from_cli_flag(getattr(args, "compile", False))
+    compile_mode = str(getattr(args, "compile_mode", "off")).strip().lower()
+
+    infer_compile_raw = getattr(args, "infer_compile", None)
+    infer_mode_raw = getattr(args, "infer_compile_mode", None)
+    infer_compile_flag = (
+        compile_flag
+        if infer_compile_raw is None
+        else _bool_from_cli_flag(infer_compile_raw)
+    )
+    infer_mode = (
+        compile_mode if infer_mode_raw is None else str(infer_mode_raw).strip().lower()
+    )
+    return infer_compile_flag or infer_mode in {"on", "auto"}
+
+
+def _disable_infer_compile_flags(args: argparse.Namespace) -> None:
+    """Disable inference compile flags in-place for one retry."""
+    if hasattr(args, "infer_compile"):
+        setattr(args, "infer_compile", 0)
+    if hasattr(args, "infer_compile_mode"):
+        setattr(args, "infer_compile_mode", "off")
+
+
 def run_pipeline(args: argparse.Namespace) -> None:
     """Run the model pipeline with optional stage skipping."""
     from evaluate_scores import evaluate_score_file, plot_eval_scores
@@ -1422,7 +1467,23 @@ def run_pipeline(args: argparse.Namespace) -> None:
         for task in model_tasks:
             setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
         _assert_checkpoint_paths_exist(checkpoint_paths, required_tasks=model_tasks)
-        site_rows = model_module.infer_site(common_args=args, model_args=args)
+        try:
+            site_rows = model_module.infer_site(common_args=args, model_args=args)
+        except Exception as exc:
+            should_retry_without_compile = _infer_compile_requested(args) and (
+                isinstance(exc, NotImplementedError)
+                or _is_compile_runtime_error(exc)
+            )
+            if not should_retry_without_compile:
+                raise
+            print(
+                "[pipeline] inference torch.compile runtime failed "
+                f"({exc.__class__.__name__}). "
+                "Retry once with infer_compile=0 and infer_compile_mode=off."
+            )
+            _record_compile_runtime_failure(selected_mode=None)
+            _disable_infer_compile_flags(args)
+            site_rows = model_module.infer_site(common_args=args, model_args=args)
 
     if (not args.site_score_tsv) and _uses_default_unique_test_tsv(
         species=args.species,

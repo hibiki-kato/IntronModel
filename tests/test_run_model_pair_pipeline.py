@@ -83,6 +83,37 @@ class _DummyPairModelModuleDuplicateMembers(_DummyPairModelModule):
         ]
 
 
+class _DummyPairModelModuleCompileRetry(_DummyPairModelModule):
+    def __init__(self) -> None:
+        self.infer_calls: list[tuple[object, object]] = []
+
+    def infer_site(
+        self,
+        common_args: argparse.Namespace,
+        model_args: argparse.Namespace,
+    ) -> list[dict[str, object]]:
+        del model_args
+        self.infer_calls.append(
+            (
+                getattr(common_args, "infer_compile", None),
+                getattr(common_args, "infer_compile_mode", None),
+            )
+        )
+        if len(self.infer_calls) == 1:
+            raise RuntimeError(
+                "torch._inductor.exc.InductorError: PermissionError: "
+                "[Errno 13] Permission denied: '/afs/glue/.triton'"
+            )
+        return [
+            {
+                "transcript_id": "tx1",
+                "intron_index": 1,
+                "site_type": "pair",
+                "score": 0.25,
+            }
+        ]
+
+
 def test_expand_unique_site_rows_maps_back_members() -> None:
     """Expand one unique site row into multiple original transcript introns."""
     unique_rows: list[dict[str, object]] = [
@@ -434,6 +465,115 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
         "min_donor_plus_acceptor",
     ]
     assert len(lines[1].split("\t")) == 5
+
+
+def test_run_pipeline_pair_model_retries_infer_without_compile_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metrics_json = tmp_path / "train_summary.json"
+    site_output_tsv = tmp_path / "site.tsv"
+    intron_output_tsv = tmp_path / "intron.tsv"
+    transcript_output_tsv = tmp_path / "transcript.tsv"
+    eval_output_txt = tmp_path / "eval.txt"
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("tx1\t1\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    parser = run_model._build_parser(
+        selected_model="cnn_pair",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_pair",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--train_target",
+            "pair",
+            "--epochs",
+            "1",
+            "--infer_compile",
+            "1",
+            "--infer_compile_mode",
+            "on",
+            "--metrics_json",
+            str(metrics_json),
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--site_output_tsv",
+            str(site_output_tsv),
+            "--intron_output_tsv",
+            str(intron_output_tsv),
+            "--transcript_output_tsv",
+            str(transcript_output_tsv),
+            "--eval_output_txt",
+            str(eval_output_txt),
+            "--ref_gff",
+            str(ref_gff),
+        ]
+    )
+
+    retry_module = _DummyPairModelModuleCompileRetry()
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: retry_module,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 1},
+    )
+
+    run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+
+    assert "Retry once with infer_compile=0" in captured.out
+    assert retry_module.infer_calls == [(1, "on"), (0, "off")]
 
 
 def test_run_pipeline_pair_model_uses_unique_intron_scores_and_maps_back(
