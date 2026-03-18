@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="300"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional output/data overrides for tagged or mask-data tuning runs.
@@ -80,8 +80,6 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
 	"Hsap"
-	"Dmel"
-	"Athal"
 	"Mmus"
 )
 
