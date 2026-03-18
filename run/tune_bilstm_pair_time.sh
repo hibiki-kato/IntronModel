@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="120"
+TIME_BUDGET_MINUTES="360"
 
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
