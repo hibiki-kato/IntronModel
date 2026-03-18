@@ -158,6 +158,23 @@ def _fallback_roc_auc(labels: np.ndarray, probs: np.ndarray) -> float:
     return float(np.trapezoid(tpr, fpr))
 
 
+def _fallback_max_f1(labels: np.ndarray, probs: np.ndarray) -> float:
+    """Compute binary max-F1 over thresholds without scikit-learn."""
+    positives = float(np.sum(labels == 1))
+    if positives <= 0.0:
+        raise ValueError("At least one positive label is required.")
+
+    false_positives, true_positives = _binary_clf_curve(labels, probs)
+    false_negatives = positives - true_positives
+
+    precision = true_positives / np.maximum(true_positives + false_positives, 1.0)
+    recall = true_positives / np.maximum(true_positives + false_negatives, 1.0)
+    f1 = (2.0 * precision * recall) / np.maximum(precision + recall, 1e-12)
+    if f1.size == 0:
+        raise ValueError("At least one prediction is required.")
+    return float(np.max(f1))
+
+
 def _seed_everything(seed: int) -> None:
     """Seed Python, NumPy, and Torch RNGs for reproducibility."""
     random.seed(seed)
@@ -1578,7 +1595,8 @@ def _evaluate_binary_predictions(
     Returns
     -------
     dict[str, float]
-        Available metrics among ``acc@0.5``, ``roc_auc``, ``pr_auc``.
+        Available metrics among ``acc@0.5``, ``max_f1``, ``roc_auc``,
+        ``pr_auc``.
     """
     labels_i = labels.astype(np.int32)
     probs_f = np.clip(probs.astype(np.float64), 1e-7, 1.0 - 1e-7)
@@ -1588,6 +1606,13 @@ def _evaluate_binary_predictions(
         return metrics
 
     metrics["acc@0.5"] = float(np.mean((probs_f >= 0.5) == (labels_i == 1)))
+    max_f1_value: Optional[float] = None
+    try:
+        max_f1_value = _fallback_max_f1(labels_i, probs_f)
+    except ValueError:
+        max_f1_value = None
+    if max_f1_value is not None:
+        metrics["max_f1"] = max_f1_value
     if len(np.unique(labels_i)) <= 1:
         return metrics
 
@@ -2189,6 +2214,7 @@ def train_task_model(
 
     pr_auc = val_metrics.get("pr_auc")
     roc_auc = val_metrics.get("roc_auc")
+    max_f1 = val_metrics.get("max_f1")
     acc_at_0_5 = val_metrics.get("acc@0.5")
 
     if pr_auc is not None:
@@ -2252,6 +2278,7 @@ def train_task_model(
         "best_score": float(best_score),
         "best_pr_auc": pr_auc,
         "best_roc_auc": roc_auc,
+        "best_max_f1": max_f1,
         "best_acc_at_0_5": acc_at_0_5,
         "epoch_history": [
             {
@@ -2259,6 +2286,7 @@ def train_task_model(
                 "train_loss": None,
                 "pr_auc": pr_auc,
                 "roc_auc": roc_auc,
+                "max_f1": max_f1,
                 "acc@0.5": acc_at_0_5,
                 "objective_metric": best_metric_name,
                 "objective_score": float(best_score),

@@ -151,7 +151,21 @@ intronmodel_init_paths() {
 	MODEL_ROOT="${INTRONMODEL_MODEL_ROOT:-${PROJECT_ROOT}/model}"
 	export INTRONMODEL_MODEL_ROOT="${MODEL_ROOT}"
 	export INTRONMODEL_DATA_ROOT="${DATA_ROOT}"
+	intronmodel_configure_compile_defaults
 	intronmodel_configure_hf_cache
+}
+
+
+intronmodel_configure_compile_defaults() {
+	if [[ -z "${INTRONMODEL_TORCH_COMPILE_STRATEGY:-}" ]]; then
+		export INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"
+	fi
+	if [[ -z "${INTRONMODEL_TORCH_COMPILE_STICKY_MODE:-}" ]]; then
+		export INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
+	fi
+	if [[ -z "${INTRONMODEL_TORCH_COMPILE_DISABLED_MODES:-}" ]]; then
+		export INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
+	fi
 }
 
 

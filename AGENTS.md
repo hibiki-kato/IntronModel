@@ -105,5 +105,16 @@ Pytest is installed in conda intronmodel.
 
 ---
 
+## Cross-Model Change Policy
+
+- Treat runtime-default changes (for example compile/AMP/device behavior) as
+  cross-model changes by default.
+- Prefer implementing shared defaults in common infrastructure (for example
+  `run/lib/common.sh`) instead of patching only one model script.
+- If a requested change is first made in one model, explicitly ask whether to
+  apply it to all relevant models before finishing the task.
+
+---
+
 This file defines mandatory coding standards.  
 All generated code must comply strictly with these rules.

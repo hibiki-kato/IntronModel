@@ -59,6 +59,7 @@ from util.model_runtime import (
     empty_device_cache as _empty_device_cache,
     export_model_state_dict as _export_model_state_dict,
     fallback_average_precision as _fallback_average_precision,
+    fallback_max_f1 as _fallback_max_f1,
     fallback_roc_auc as _fallback_roc_auc,
     is_compile_runtime_error as _is_compile_runtime_error,
     is_cuda_oom_error as _is_cuda_oom_error,
@@ -572,6 +573,13 @@ def evaluate(
     metrics: Dict[str, float] = {}
     if labels.size:
         metrics["acc@0.5"] = float(np.mean((probs >= 0.5) == (labels >= 0.5)))
+        max_f1_value: Optional[float] = None
+        try:
+            max_f1_value = _fallback_max_f1(labels, probs)
+        except ValueError:
+            max_f1_value = None
+        if max_f1_value is not None:
+            metrics["max_f1"] = max_f1_value
 
         if len(np.unique(labels)) > 1:
             roc_auc_value: Optional[float] = None
@@ -1039,6 +1047,7 @@ def train_task_model(
             best_epoch = 0
             best_pr_auc: Optional[float] = None
             best_roc_auc: Optional[float] = None
+            best_max_f1: Optional[float] = None
             best_acc_at_0_5: Optional[float] = None
             epoch_history: list[dict[str, object]] = []
             log_every = max(1, epochs // 5)
@@ -1123,6 +1132,7 @@ def train_task_model(
                 )
                 pr_auc = val_metrics.get("pr_auc")
                 roc_auc = val_metrics.get("roc_auc")
+                max_f1 = val_metrics.get("max_f1")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
                 if pr_auc is not None:
                     best_pr_auc = (
@@ -1131,6 +1141,10 @@ def train_task_model(
                 if roc_auc is not None:
                     best_roc_auc = (
                         roc_auc if best_roc_auc is None else max(best_roc_auc, roc_auc)
+                    )
+                if max_f1 is not None:
+                    best_max_f1 = (
+                        max_f1 if best_max_f1 is None else max(best_max_f1, max_f1)
                     )
                 if acc_at_0_5 is not None:
                     best_acc_at_0_5 = (
@@ -1183,6 +1197,7 @@ def train_task_model(
                         "train_loss": train_loss,
                         "pr_auc": pr_auc,
                         "roc_auc": roc_auc,
+                        "max_f1": max_f1,
                         "acc@0.5": acc_at_0_5,
                         "objective_metric": score_name,
                         "objective_score": score,
@@ -1234,6 +1249,7 @@ def train_task_model(
                 "best_score": float(best_score),
                 "best_pr_auc": best_pr_auc,
                 "best_roc_auc": best_roc_auc,
+                "best_max_f1": best_max_f1,
                 "best_acc_at_0_5": best_acc_at_0_5,
                 "epoch_history": epoch_history,
                 "epochs_completed": epochs_completed,

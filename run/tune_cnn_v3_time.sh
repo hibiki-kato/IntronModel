@@ -74,17 +74,18 @@ MAX_POOL_SIZE="2"
 CONV_STRIDE="1"
 HEAD_TYPE="gap"
 
-CROSS_SPECIES_BEST_MODE="auto"
+CROSS_SPECIES_BEST_MODE="off"
 CROSS_SPECIES_BEST_OVERRIDE=""
 CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
-# Species scheduling order for repeated short cycles.
-JOB_ORDER=(
-	"Hsap"
-	"Dmel"
-	"Athal"
+# Source species used for one cross-species cnn_v3 model.
+TRAIN_SPECIES=(
 	"Mmus"
+	"Hsap"
 )
+# Artifact namespace for outputs/checkpoints under data/<artifact_species>/...
+# Set to "auto" to derive "cross/<species1>_<species2>...".
+ARTIFACT_SPECIES="auto"
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 {
@@ -270,6 +271,246 @@ print(",".join(resolved))
 PY
 }
 
+resolve_train_species_list() {
+	local data_root="$1"
+	shift
+	local -a resolved_species=()
+	local raw_species=""
+	local trimmed_species=""
+	local canonical_species=""
+	declare -A seen=()
+	for raw_species in "$@"; do
+		trimmed_species="$(echo "${raw_species}" | xargs)"
+		if [[ -z "${trimmed_species}" ]]; then
+			continue
+		fi
+		canonical_species="$(
+			resolve_species_case "${trimmed_species}" "${data_root}"
+		)" || return 1
+		if [[ -n "${seen[${canonical_species}]:-}" ]]; then
+			continue
+		fi
+		seen["${canonical_species}"]="1"
+		resolved_species+=("${canonical_species}")
+	done
+	if [[ ${#resolved_species[@]} -eq 0 ]]; then
+		return 1
+	fi
+	printf '%s\n' "${resolved_species[@]}"
+}
+
+resolve_artifact_species_name() {
+	local configured_value="$1"
+	shift
+	if [[ -n "${configured_value}" && "${configured_value}" != "auto" ]]; then
+		printf '%s\n' "${configured_value}"
+		return 0
+	fi
+	local joined=""
+	joined="$(
+		printf '%s\n' "$@" | awk 'NF' | LC_ALL=C sort -u | paste -sd '_' -
+	)"
+	if [[ -z "${joined}" ]]; then
+		return 1
+	fi
+	printf 'cross/%s\n' "${joined}"
+}
+
+resolve_cross_base_pair_checkpoints() {
+	local python_bin="$1"
+	local project_root="$2"
+	local explicit_value="$3"
+	shift 3
+	local -a train_species_list=("$@")
+	if [[ ${#train_species_list[@]} -eq 0 ]]; then
+		return 1
+	fi
+	if [[ -n "${explicit_value}" ]]; then
+		resolve_base_pair_checkpoints \
+			"${python_bin}" \
+			"${project_root}" \
+			"${train_species_list[0]}" \
+			"${explicit_value}"
+		return $?
+	fi
+	local -a merged=()
+	local species_name=""
+	local resolved_csv=""
+	local token=""
+	declare -A seen=()
+	for species_name in "${train_species_list[@]}"; do
+		resolved_csv="$(
+			resolve_base_pair_checkpoints \
+				"${python_bin}" \
+				"${project_root}" \
+				"${species_name}" \
+				""
+		)" || return 1
+		IFS=',' read -r -a resolved_tokens <<< "${resolved_csv}"
+		for token in "${resolved_tokens[@]}"; do
+			token="$(echo "${token}" | xargs)"
+			if [[ -z "${token}" ]]; then
+				continue
+			fi
+			if [[ -n "${seen[${token}]:-}" ]]; then
+				continue
+			fi
+			seen["${token}"]="1"
+			merged+=("${token}")
+		done
+	done
+	if [[ ${#merged[@]} -eq 0 ]]; then
+		return 1
+	fi
+	local merged_csv=""
+	merged_csv="$(IFS=','; echo "${merged[*]}")"
+	printf '%s\n' "${merged_csv}"
+}
+
+resolve_cross_train_paths() {
+	local python_bin="$1"
+	local project_root="$2"
+	local data_root="$3"
+	local artifact_species="$4"
+	local donor_len="$5"
+	local acceptor_len="$6"
+	local train_pos_template="$7"
+	local train_neg_template="$8"
+	local train_species_csv="$9"
+	"${python_bin}" - \
+		"${project_root}" \
+		"${data_root}" \
+		"${artifact_species}" \
+		"${donor_len}" \
+		"${acceptor_len}" \
+		"${train_pos_template}" \
+		"${train_neg_template}" \
+		"${train_species_csv}" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+project_root = Path(sys.argv[1]).resolve()
+data_root = Path(sys.argv[2]).resolve()
+artifact_species = sys.argv[3].strip()
+donor_len_raw = sys.argv[4].strip()
+acceptor_len_raw = sys.argv[5].strip()
+train_pos_template = sys.argv[6].strip()
+train_neg_template = sys.argv[7].strip()
+species_csv = sys.argv[8].strip()
+
+if artifact_species == "":
+    print(
+        "[tune_cnn_v3_time.sh] ARTIFACT_SPECIES must not be empty.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+species_list = [token.strip() for token in species_csv.split(",") if token.strip()]
+if not species_list:
+    print(
+        "[tune_cnn_v3_time.sh] TRAIN_SPECIES must contain at least one value.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+if (train_pos_template == "") != (train_neg_template == ""):
+    print(
+        "[tune_cnn_v3_time.sh] TRAIN_POS_PATH and TRAIN_NEG_PATH must be set "
+        "together for cross-species mode.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _parse_optional_len(raw_value: str) -> int | None:
+    text = raw_value.strip().lower()
+    if text in {"", "none", "null"}:
+        return None
+    value = int(text)
+    if value <= 0:
+        raise ValueError("window length must be positive")
+    return value
+
+
+def _resolve_species_template(template: str, species: str) -> str:
+    return (
+        template.replace("${SPECIES}", species)
+        .replace("{SPECIES}", species)
+        .replace("{species}", species)
+    )
+
+
+def _copy_concat(inputs: list[str], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as out_file:
+        for source_path in inputs:
+            with Path(source_path).open("r", encoding="utf-8") as in_file:
+                saw_content = False
+                for line in in_file:
+                    saw_content = True
+                    out_file.write(line)
+            if saw_content:
+                with Path(source_path).open("rb") as raw_file:
+                    raw_file.seek(0, os.SEEK_END)
+                    if raw_file.tell() > 0:
+                        raw_file.seek(-1, os.SEEK_END)
+                        if raw_file.read(1) != b"\n":
+                            out_file.write("\n")
+
+
+donor_len = _parse_optional_len(donor_len_raw)
+acceptor_len = _parse_optional_len(acceptor_len_raw)
+
+sys.path.insert(0, str(project_root / "src"))
+from util.data_proc import resolve_train_paths  # noqa: E402
+
+resolved_pos_paths: list[str] = []
+resolved_neg_paths: list[str] = []
+for species in species_list:
+    if train_pos_template != "":
+        pos_path = _resolve_species_template(train_pos_template, species)
+        neg_path = _resolve_species_template(train_neg_template, species)
+    else:
+        pos_path, neg_path, _ = resolve_train_paths(
+            species=species,
+            train_pos_path=None,
+            train_neg_path=None,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+        )
+    if not Path(pos_path).is_file():
+        print(
+            f"[tune_cnn_v3_time.sh] TRAIN_POS_PATH not found for species={species}: "
+            f"{pos_path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if not Path(neg_path).is_file():
+        print(
+            f"[tune_cnn_v3_time.sh] TRAIN_NEG_PATH not found for species={species}: "
+            f"{neg_path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    resolved_pos_paths.append(pos_path)
+    resolved_neg_paths.append(neg_path)
+
+species_token = "_".join(sorted(species_list, key=str.casefold))
+donor_token = "auto" if donor_len is None else str(donor_len)
+acceptor_token = "auto" if acceptor_len is None else str(acceptor_len)
+prefix = f"cross_{species_token}_d{donor_token}_a{acceptor_token}"
+output_dir = data_root / artifact_species / "train"
+merged_pos_path = output_dir / f"{prefix}.err"
+merged_neg_path = output_dir / f"{prefix}.neg.err"
+_copy_concat(resolved_pos_paths, merged_pos_path)
+_copy_concat(resolved_neg_paths, merged_neg_path)
+print(f"{merged_pos_path}\t{merged_neg_path}")
+PY
+}
+
 resolve_search_space_file() {
 	local explicit_file="$1"
 	local species="$2"
@@ -400,8 +641,8 @@ if ! awk -v x="${GUIDED_MUTATION_RATE}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
 	echo "[tune_cnn_v3_time.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
 	exit 1
 fi
-if [[ ${#JOB_ORDER[@]} -eq 0 ]]; then
-	echo "[tune_cnn_v3_time.sh] JOB_ORDER must contain at least one species." >&2
+if [[ ${#TRAIN_SPECIES[@]} -eq 0 ]]; then
+	echo "[tune_cnn_v3_time.sh] TRAIN_SPECIES must contain at least one species." >&2
 	exit 1
 fi
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
@@ -421,6 +662,66 @@ TUNING_MODEL_NAME="cnn_v3"
 
 PYTHON_BIN="$(resolve_python_bin)"
 mapfile -t SEED_VALUES < <(resolve_seed_list)
+mapfile -t TRAIN_SPECIES_RESOLVED < <(
+	resolve_train_species_list "${DATA_ROOT}" "${TRAIN_SPECIES[@]}"
+) || {
+	echo "[tune_cnn_v3_time.sh] Failed to resolve TRAIN_SPECIES." >&2
+	exit 1
+}
+if [[ ${#TRAIN_SPECIES_RESOLVED[@]} -eq 0 ]]; then
+	echo "[tune_cnn_v3_time.sh] TRAIN_SPECIES resolved to an empty list." >&2
+	exit 1
+fi
+ARTIFACT_SPECIES_RESOLVED="$(
+	resolve_artifact_species_name \
+		"${ARTIFACT_SPECIES}" \
+		"${TRAIN_SPECIES_RESOLVED[@]}"
+)"
+if [[ -z "${ARTIFACT_SPECIES_RESOLVED}" ]]; then
+	echo "[tune_cnn_v3_time.sh] ARTIFACT_SPECIES resolved to empty." >&2
+	exit 1
+fi
+TRAIN_SPECIES_CSV="$(IFS=','; echo "${TRAIN_SPECIES_RESOLVED[*]}")"
+if ! RESOLVED_BASE_PAIR_CHECKPOINTS="$(
+	resolve_cross_base_pair_checkpoints \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}" \
+		"${BASE_PAIR_CHECKPOINTS}" \
+		"${TRAIN_SPECIES_RESOLVED[@]}"
+)"; then
+	echo "[tune_cnn_v3_time.sh] Failed to resolve BASE_PAIR_CHECKPOINTS for TRAIN_SPECIES=${TRAIN_SPECIES_CSV}. Set BASE_PAIR_CHECKPOINTS explicitly." >&2
+	exit 1
+fi
+if ! RESOLVED_CROSS_TRAIN_PATHS="$(
+	resolve_cross_train_paths \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}" \
+		"${DATA_ROOT}" \
+		"${ARTIFACT_SPECIES_RESOLVED}" \
+		"${DONOR_LEN}" \
+		"${ACCEPTOR_LEN}" \
+		"${TRAIN_POS_PATH}" \
+		"${TRAIN_NEG_PATH}" \
+		"${TRAIN_SPECIES_CSV}"
+)"; then
+	exit 1
+fi
+IFS=$'\t' read -r CROSS_TRAIN_POS_PATH CROSS_TRAIN_NEG_PATH <<< \
+	"${RESOLVED_CROSS_TRAIN_PATHS}"
+if [[ -z "${CROSS_TRAIN_POS_PATH}" || -z "${CROSS_TRAIN_NEG_PATH}" ]]; then
+	echo "[tune_cnn_v3_time.sh] Failed to build cross-species train files." >&2
+	exit 1
+fi
+CROSS_TRAIN_POS_PATH_JSON="$(
+	intronmodel_json_string_or_null \
+		"${PYTHON_BIN}" \
+		"${CROSS_TRAIN_POS_PATH}"
+)"
+CROSS_TRAIN_NEG_PATH_JSON="$(
+	intronmodel_json_string_or_null \
+		"${PYTHON_BIN}" \
+		"${CROSS_TRAIN_NEG_PATH}"
+)"
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
 		"tune_cnn_v3_time.sh" \
@@ -447,8 +748,12 @@ echo "[tune_cnn_v3_time.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}mi
 echo "[tune_cnn_v3_time.sh] quick+full cycles: "\
 	"quick_trials=${QUICK_TRIALS} quick_epochs=${QUICK_EPOCHS} "\
 	"top_k=${TOP_K} full_epochs=${FULL_EPOCHS}"
-echo "[tune_cnn_v3_time.sh] schedule=${JOB_ORDER[*]}"
+echo "[tune_cnn_v3_time.sh] train_species=${TRAIN_SPECIES_CSV}"
+echo "[tune_cnn_v3_time.sh] artifact_species=${ARTIFACT_SPECIES_RESOLVED}"
 echo "[tune_cnn_v3_time.sh] seeds=${SEED_VALUES[*]}"
+echo "[tune_cnn_v3_time.sh] base_pair_checkpoints=${RESOLVED_BASE_PAIR_CHECKPOINTS}"
+echo "[tune_cnn_v3_time.sh] cross_train_pos=${CROSS_TRAIN_POS_PATH}"
+echo "[tune_cnn_v3_time.sh] cross_train_neg=${CROSS_TRAIN_NEG_PATH}"
 
 job_index=0
 while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
@@ -466,15 +771,8 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	fi
 	remaining_hms="$(format_elapsed "${remaining_seconds}")"
 
-	schedule_index=$((job_index % (${#JOB_ORDER[@]} * ${#SEED_VALUES[@]})))
-	species_index=$((schedule_index % ${#JOB_ORDER[@]}))
-	seed_index=$((schedule_index / ${#JOB_ORDER[@]}))
-	raw_species="${JOB_ORDER[${species_index}]}"
-	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
-	if ! resolved_base_pair_checkpoints="$(resolve_base_pair_checkpoints "${PYTHON_BIN}" "${PROJECT_ROOT}" "${species}" "${BASE_PAIR_CHECKPOINTS}")"; then
-		echo "[tune_cnn_v3_time.sh] Failed to resolve BASE_PAIR_CHECKPOINTS for species=${species}. Set BASE_PAIR_CHECKPOINTS explicitly." >&2
-		exit 1
-	fi
+	seed_index=$((job_index % ${#SEED_VALUES[@]}))
+	species="${ARTIFACT_SPECIES_RESOLVED}"
 	base_seed="${SEED_VALUES[${seed_index}]}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
@@ -508,25 +806,6 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
 	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
-	resolved_train_paths="$(
-		intronmodel_resolve_and_validate_train_paths \
-			"tune_cnn_v3_time.sh" \
-			"${species}" \
-			"${TRAIN_POS_PATH}" \
-			"${TRAIN_NEG_PATH}"
-	)" || exit 1
-	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
-		"${resolved_train_paths}"
-	TRAIN_POS_PATH_JSON="$(
-		intronmodel_json_string_or_null \
-			"${PYTHON_BIN}" \
-			"${TRAIN_POS_PATH_RESOLVED}"
-	)"
-	TRAIN_NEG_PATH_JSON="$(
-		intronmodel_json_string_or_null \
-			"${PYTHON_BIN}" \
-			"${TRAIN_NEG_PATH_RESOLVED}"
-	)"
 	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_PAIR}"
 	search_space_path=""
 	if search_space_resolved="$(
@@ -578,13 +857,13 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
   "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
-  "base_args": {
-	"model": "cnn_v3",
-    "species": "${species}",
-	"train_target": "pair",
-	"base_pair_checkpoints": "${resolved_base_pair_checkpoints}",
-	"meta_hidden_dim": 256,
-	"meta_dropout": 0.2,
+	"base_args": {
+		"model": "cnn_v3",
+	    "species": "${species}",
+		"train_target": "pair",
+		"base_pair_checkpoints": "${RESOLVED_BASE_PAIR_CHECKPOINTS}",
+		"meta_hidden_dim": 256,
+		"meta_dropout": 0.2,
     "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
@@ -606,13 +885,13 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
     "deterministic": ${DETERMINISTIC},
     "num_workers": "${NUM_WORKERS}",
     "prefetch_factor": ${PREFETCH_FACTOR},
-    "persistent_workers": ${PERSISTENT_WORKERS},
-    "pin_memory": ${PIN_MEMORY},
-    "min_batch_size": ${MIN_BATCH_SIZE},
-    "max_oom_retries": ${MAX_OOM_RETRIES},
-    "train_pos_path": ${TRAIN_POS_PATH_JSON},
-    "train_neg_path": ${TRAIN_NEG_PATH_JSON}
-  },
+	    "persistent_workers": ${PERSISTENT_WORKERS},
+	    "pin_memory": ${PIN_MEMORY},
+	    "min_batch_size": ${MIN_BATCH_SIZE},
+	    "max_oom_retries": ${MAX_OOM_RETRIES},
+	    "train_pos_path": ${CROSS_TRAIN_POS_PATH_JSON},
+	    "train_neg_path": ${CROSS_TRAIN_NEG_PATH_JSON}
+	  },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},
     "compile_mode": "${QUICK_COMPILE_MODE}"
@@ -632,7 +911,7 @@ JSON
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
-	echo "[tune_cnn_v3_time.sh] base_pair_checkpoints=${resolved_base_pair_checkpoints}"
+	echo "[tune_cnn_v3_time.sh] train_species=${TRAIN_SPECIES_CSV}"
 	run_status=0
 	intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \
@@ -677,7 +956,7 @@ JSON
 done
 
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
-	final_plot_species=("Hsap" "Dmel")
+	final_plot_species=("${ARTIFACT_SPECIES_RESOLVED}")
 	for final_species in "${final_plot_species[@]}"; do
 		run_double_descent_plot \
 			"${PYTHON_BIN}" \

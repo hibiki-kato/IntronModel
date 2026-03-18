@@ -47,7 +47,11 @@ SEED="1337"
 DEVICE="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
-COMPILE_MODE="auto"
+COMPILE_MODE="on"
+INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"  # reduce-overhead only
+INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
+INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
+TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -65,6 +69,10 @@ NAME_FIELDS="none"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 TAG=""
+USE_TUNED_HPARAMS="auto"   # off | auto | required
+TUNED_CONFIG_PATH=""
+SHARED_TUNED_CONFIG_PATH=""
+TUNED_TARGET="auto"        # auto | pair | donor | acceptor | both
 set +a
 
 # --------------------------
@@ -75,6 +83,108 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
+
+normalize_use_tuned_mode() {
+	local raw_mode="$1"
+	local normalized
+	normalized="$(echo "${raw_mode}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	case "${normalized}" in
+		off | auto | required)
+			printf '%s\n' "${normalized}"
+			;;
+		*)
+			echo "[cnn_v2.sh] USE_TUNED_HPARAMS must be off|auto|required." >&2
+			exit 1
+			;;
+	esac
+}
+
+resolve_tuned_target() {
+	local configured_target="$1"
+	local normalized
+	normalized="$(echo "${configured_target}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	if [[ "${normalized}" != "auto" && "${normalized}" != "" ]]; then
+		printf '%s\n' "${normalized}"
+		return 0
+	fi
+	local pair_mode_normalized
+	pair_mode_normalized="$(echo "${PAIR_MODE}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	if [[ "${pair_mode_normalized}" == "pair" ]]; then
+		printf 'pair\n'
+		return 0
+	fi
+	printf '%s\n' "$(echo "${TRAIN_TARGET}" | tr '[:upper:]' '[:lower:]' | xargs)"
+}
+
+resolve_tuned_config_path() {
+	local species="$1"
+	local tuned_target="$2"
+	if [[ -n "${TUNED_CONFIG_PATH}" ]]; then
+		printf '%s\n' "${TUNED_CONFIG_PATH}"
+		return 0
+	fi
+	local task_path="${DATA_ROOT}/${species}/tuning/cnn_v2/${tuned_target}/best_config.json"
+	if [[ -f "${task_path}" ]]; then
+		printf '%s\n' "${task_path}"
+		return 0
+	fi
+	if [[ -n "${SHARED_TUNED_CONFIG_PATH}" ]]; then
+		printf '%s\n' "${SHARED_TUNED_CONFIG_PATH}"
+		return 0
+	fi
+	local shared_path="${DATA_ROOT}/${species}/tuning/cnn_v2/best_config.json"
+	if [[ -f "${shared_path}" ]]; then
+		printf '%s\n' "${shared_path}"
+		return 0
+	fi
+	printf ''
+}
+
+load_tuned_overrides() {
+	local config_path="$1"
+	python3 - "${config_path}" <<'PY'
+from __future__ import annotations
+
+import json
+import math
+import sys
+from pathlib import Path
+
+
+def _scalar_to_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Non-finite float value in sampled_params.")
+        return format(value, ".15g")
+    return str(value)
+
+
+config_path = Path(sys.argv[1]).resolve()
+payload = json.loads(config_path.read_text(encoding="utf-8"))
+if not isinstance(payload, dict):
+    raise ValueError("best_config payload must be an object.")
+status = str(payload.get("status", "")).strip().lower()
+if status != "ok":
+    raise ValueError(f"Expected status='ok', got: {status or '<missing>'}")
+sampled_params = payload.get("sampled_params")
+if not isinstance(sampled_params, dict):
+    raise ValueError("sampled_params is missing or invalid.")
+for key in sorted(sampled_params):
+    value = sampled_params[key]
+    if value is None:
+        continue
+    print(f"{key}\t{_scalar_to_text(value)}")
+PY
+}
+
+USE_TUNED_HPARAMS_MODE="$(normalize_use_tuned_mode "${USE_TUNED_HPARAMS}")"
+if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
+	RESOLVED_TUNED_TARGET="$(resolve_tuned_target "${TUNED_TARGET}")"
+fi
 
 IFS=',' read -r -a SPECIES_LIST <<<"${SPECIES}"
 for species_raw in "${SPECIES_LIST[@]}"; do
@@ -131,6 +241,61 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 		--softmin_tau "${SOFTMIN_TAU}"
 	)
 
+	tuned_path=""
+	tuned_output=""
+	tuned_args=()
+	if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
+		tuned_path="$(
+			resolve_tuned_config_path \
+				"${species}" \
+				"${RESOLVED_TUNED_TARGET}"
+		)"
+		if [[ -z "${tuned_path}" ]]; then
+			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+				echo "[cnn_v2.sh] tuned config is required but not found: "\
+					"species=${species} target=${RESOLVED_TUNED_TARGET}" >&2
+				exit 1
+			fi
+			echo "[cnn_v2.sh] tuned config not found; "\
+				"using CONFIG defaults for species=${species}." >&2
+		elif [[ ! -f "${tuned_path}" ]]; then
+			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+				echo "[cnn_v2.sh] tuned config path not found: ${tuned_path}" >&2
+				exit 1
+			fi
+			echo "[cnn_v2.sh] tuned config path not found: ${tuned_path}; "\
+				"using CONFIG defaults for species=${species}." >&2
+			tuned_path=""
+		fi
+	fi
+
+	if [[ -n "${tuned_path}" ]]; then
+		if ! tuned_output="$(load_tuned_overrides "${tuned_path}" 2>&1)"; then
+			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+				echo "[cnn_v2.sh] failed to load tuned config: ${tuned_path}" >&2
+				echo "[cnn_v2.sh] detail: ${tuned_output}" >&2
+				exit 1
+			fi
+			echo "[cnn_v2.sh] failed to load tuned config: ${tuned_path}; "\
+				"using CONFIG defaults for species=${species}." >&2
+		else
+			loaded_count=0
+			while IFS= read -r line; do
+				if [[ -z "${line}" ]]; then
+					continue
+				fi
+				IFS=$'\t' read -r tuned_key tuned_value <<<"${line}"
+				if [[ -z "${tuned_key}" || -z "${tuned_value}" ]]; then
+					continue
+				fi
+				tuned_args+=(--"${tuned_key}" "${tuned_value}")
+				loaded_count=$((loaded_count + 1))
+			done <<<"${tuned_output}"
+			echo "[cnn_v2.sh] tuned params loaded from ${tuned_path} "\
+				"(species=${species}, count=${loaded_count})"
+		fi
+	fi
+
 	if [[ -n "${BPE_PRETRAINED_REVISION}" ]]; then
 		args+=(--bpe_pretrained_revision "${BPE_PRETRAINED_REVISION}")
 	fi
@@ -151,6 +316,9 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 	fi
 	if [[ -n "${TAG}" ]]; then
 		args+=(--tag "${TAG}")
+	fi
+	if [[ ${#tuned_args[@]} -gt 0 ]]; then
+		args+=("${tuned_args[@]}")
 	fi
 
 	echo "[cnn_v2.sh] species=${species} input_mode=${INPUT_MODE} pair_mode=${PAIR_MODE}"

@@ -78,17 +78,28 @@ target = sys.argv[3]
 excluded_species = sys.argv[4]
 
 rows: list[tuple[float, str, Path]] = []
-for species_dir in sorted(data_root.iterdir()):
-    if not species_dir.is_dir():
+candidate_species_dirs: list[tuple[str, Path]] = []
+for first_level in sorted(data_root.iterdir()):
+    if not first_level.is_dir():
         continue
-    species = species_dir.name
+    if (first_level / "tuning").is_dir():
+        candidate_species_dirs.append((first_level.name, first_level))
+    for second_level in sorted(first_level.iterdir()):
+        if not second_level.is_dir():
+            continue
+        if not (second_level / "tuning").is_dir():
+            continue
+        nested_species = f"{first_level.name}/{second_level.name}"
+        candidate_species_dirs.append((nested_species, second_level))
+
+for species, species_dir in candidate_species_dirs:
     if species == excluded_species:
         continue
     candidate = species_dir / "tuning" / model_name / target / "best_config.json"
     if not candidate.exists():
         continue
     score = read_score(candidate)
-    rows.append((score, species, candidate))
+    rows.append((score, species, candidate.resolve()))
 
 rows.sort(
     key=lambda row: (

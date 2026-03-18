@@ -274,6 +274,72 @@ def test_read_examples_pair_task_negative_pair_only_filter(tmp_path: Path) -> No
     assert [item.label for item in unfiltered] == [1, 0, 0]
 
 
+def test_read_examples_pair_task_auto_adds_mixed_one_side_negatives(
+    tmp_path: Path,
+) -> None:
+    """Add default mixed-one-side negatives from species processed directory."""
+    clear_training_example_caches()
+    species_dir = tmp_path / "Mmus"
+    raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    pos_path = raw_dir / "100bp.err"
+    neg_path = raw_dir / "100bp.neg.err"
+    mixed_neg_path = processed_dir / "100bp_mixed_one_side.neg.err"
+    mixed_extra_path = processed_dir / "100bp_mixed_one_side_extra.neg.err"
+
+    _write_text(pos_path, "DEBUG pair AACCAA TTGGTT + 56\n")
+    _write_text(neg_path, "DEBUG pair CCCCAA GGTTGG - 31\n")
+    _write_text(mixed_neg_path, "DEBUG pair TTTTAA AAAACC - 12\n")
+    _write_text(mixed_extra_path, "DEBUG pair GGGGTT CCCCAA - 77\n")
+
+    loaded = read_examples_pair_task_with_metadata(
+        str(pos_path),
+        str(neg_path),
+        donor_len=4,
+        acceptor_len=4,
+        negative_pair_only=True,
+    )
+
+    assert len(loaded) == 4
+    assert [item.label for item in loaded] == [1, 0, 0, 0]
+    assert [item.transcript_id for item in loaded] == [None, None, None, None]
+    assert [item.intron_half_length for item in loaded] == [56, 31, 12, 77]
+    clear_training_example_caches()
+
+
+def test_read_examples_pair_task_does_not_duplicate_primary_negative_path(
+    tmp_path: Path,
+) -> None:
+    """Avoid double-reading when primary negative path already is mixed file."""
+    clear_training_example_caches()
+    species_dir = tmp_path / "Hsap"
+    raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    pos_path = raw_dir / "100bp.err"
+    neg_path = processed_dir / "100bp_mixed_one_side.neg.err"
+
+    _write_text(pos_path, "DEBUG pair AACCAA TTGGTT + 56\n")
+    _write_text(neg_path, "DEBUG pair CCCCAA GGTTGG - 31\n")
+
+    loaded = read_examples_pair_task_with_metadata(
+        str(pos_path),
+        str(neg_path),
+        donor_len=4,
+        acceptor_len=4,
+        negative_pair_only=True,
+    )
+
+    assert len(loaded) == 2
+    assert [item.label for item in loaded] == [1, 0]
+    clear_training_example_caches()
+
+
 def test_read_examples_single_task_cache_tracks_file_updates(tmp_path: Path) -> None:
     """Reload updated file content when cache key changes by file signature."""
     clear_training_example_caches()

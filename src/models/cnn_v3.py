@@ -329,6 +329,13 @@ def _evaluate_meta_model(
     metrics: dict[str, float] = {
         "acc@0.5": float(np.mean((probs >= 0.5) == (labels >= 0.5)))
     }
+    max_f1: Optional[float] = None
+    try:
+        max_f1 = float(cnn_v2._fallback_max_f1(labels, probs))
+    except ValueError:
+        max_f1 = None
+    if max_f1 is not None:
+        metrics["max_f1"] = max_f1
     if labels.min() != labels.max():
         pr_auc: Optional[float] = None
         if average_precision_score is not None:
@@ -474,6 +481,7 @@ def train(
     criterion = nn.BCEWithLogitsLoss()
     best_score = float("-inf")
     best_epoch = 0
+    best_max_f1: Optional[float] = None
     history: list[dict[str, object]] = []
     best_state: dict[str, torch.Tensor] | None = None
     for epoch in range(1, resolved_epochs + 1):
@@ -486,7 +494,12 @@ def train(
             optimizer.step()
         val_metrics = _evaluate_meta_model(model, val_loader, device)
         pr_auc = val_metrics.get("pr_auc")
+        max_f1 = val_metrics.get("max_f1")
         score = pr_auc if pr_auc is not None else float(val_metrics["acc@0.5"])
+        if max_f1 is not None:
+            best_max_f1 = (
+                max_f1 if best_max_f1 is None else max(best_max_f1, max_f1)
+            )
         improved = score > best_score
         if improved:
             best_score = score
@@ -499,6 +512,7 @@ def train(
             {
                 "epoch": epoch,
                 "pr_auc": pr_auc,
+                "max_f1": max_f1,
                 "acc@0.5": float(val_metrics["acc@0.5"]),
                 "objective_score": float(score),
                 "improved": improved,
@@ -556,6 +570,7 @@ def train(
             "best_metric": "pr_auc_or_acc",
             "best_epoch": best_epoch,
             "best_score": float(best_score),
+            "best_max_f1": best_max_f1,
             "epoch_history": history,
             "checkpoint": pair_checkpoint_path,
             "num_examples": int(labels.shape[0]),

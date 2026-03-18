@@ -88,6 +88,7 @@ NAME_FIELD_LABELS: dict[str, str] = {
 TrainingRecordType = Literal["donor", "acceptor", "pair"]
 TrainingFileSignature = Tuple[str, int, int]
 _TRAINING_EXAMPLE_CACHE_MAXSIZE: int = 4
+_MIXED_PAIR_NEGATIVE_PATTERN = re.compile(r".*mixed_one_side.*\.neg\.err$")
 
 
 @dataclass(frozen=True)
@@ -515,8 +516,8 @@ def build_run_name(
     tag: Optional[str] = None,
 ) -> str:
     """Build a stable run-name token from key hyperparameters."""
-    suffix = window_suffix(donor_len=donor_len, acceptor_len=acceptor_len)
-    base = f"{model_name}_{suffix}_lr{lr:g}_bs{batch_size}_ep{epochs}"
+    del donor_len, acceptor_len
+    base = f"{model_name}_lr{lr:g}_bs{batch_size}_ep{epochs}"
     if tag:
         return f"{base}_{tag}"
     return base
@@ -1113,12 +1114,27 @@ def read_examples_pair_task_with_metadata(
     -------
     list[PairTrainingExample]
         Pair-task examples with optional metadata fields populated.
+
+    Notes
+    -----
+    When available, this loader automatically appends additional negative rows
+    from ``processed/*mixed_one_side*.neg.err`` under the same species
+    directory as ``pos_path``/``neg_path``.
     """
     pos_signature = _resolve_training_file_signature(pos_path)
     neg_signature = _resolve_training_file_signature(neg_path)
+    extra_negative_paths = _discover_default_pair_extra_negative_paths(
+        pos_path=pos_signature[0],
+        neg_path=neg_signature[0],
+    )
+    extra_negative_signatures = tuple(
+        _resolve_training_file_signature(path)
+        for path in extra_negative_paths
+    )
     cached_examples = _read_examples_pair_task_with_metadata_cached(
         pos_signature,
         neg_signature,
+        extra_negative_signatures,
         donor_len,
         acceptor_len,
         negative_pair_only,
@@ -1130,6 +1146,7 @@ def _read_examples_pair_task_with_metadata_uncached(
     *,
     pos_path: str,
     neg_path: str,
+    extra_neg_paths: Sequence[str],
     donor_len: Optional[int],
     acceptor_len: Optional[int],
     negative_pair_only: bool,
@@ -1182,6 +1199,8 @@ def _read_examples_pair_task_with_metadata_uncached(
 
     read_one_set(pos_path, label=1)
     read_one_set(neg_path, label=0)
+    for extra_neg_path in extra_neg_paths:
+        read_one_set(extra_neg_path, label=0)
     return tuple(examples)
 
 
@@ -1189,6 +1208,7 @@ def _read_examples_pair_task_with_metadata_uncached(
 def _read_examples_pair_task_with_metadata_cached(
     pos_signature: TrainingFileSignature,
     neg_signature: TrainingFileSignature,
+    extra_neg_signatures: tuple[TrainingFileSignature, ...],
     donor_len: Optional[int],
     acceptor_len: Optional[int],
     negative_pair_only: bool,
@@ -1197,10 +1217,88 @@ def _read_examples_pair_task_with_metadata_cached(
     return _read_examples_pair_task_with_metadata_uncached(
         pos_path=pos_signature[0],
         neg_path=neg_signature[0],
+        extra_neg_paths=tuple(signature[0] for signature in extra_neg_signatures),
         donor_len=donor_len,
         acceptor_len=acceptor_len,
         negative_pair_only=negative_pair_only,
     )
+
+
+def _infer_processed_dir_from_training_path(path: str) -> str | None:
+    """Infer one species ``processed`` directory from a train data path.
+
+    Parameters
+    ----------
+    path : str
+        Training file path.
+
+    Returns
+    -------
+    str | None
+        Canonical processed directory path, or ``None`` when not inferrable.
+    """
+    resolved_path = os.path.realpath(path)
+    parent_dir = os.path.dirname(resolved_path)
+    parent_name = os.path.basename(parent_dir).strip().lower()
+    if parent_name not in {"raw", "processed"}:
+        return None
+    species_dir = os.path.dirname(parent_dir)
+    processed_dir = os.path.join(species_dir, "processed")
+    if not os.path.isdir(processed_dir):
+        return None
+    return os.path.realpath(processed_dir)
+
+
+def _discover_default_pair_extra_negative_paths(
+    *,
+    pos_path: str,
+    neg_path: str,
+) -> tuple[str, ...]:
+    """Discover extra mixed negative files for one pair-training run.
+
+    Parameters
+    ----------
+    pos_path : str
+        Positive training file path.
+    neg_path : str
+        Primary negative training file path.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted unique extra negative file paths.
+    """
+    processed_dirs: set[str] = set()
+    for candidate_path in (pos_path, neg_path):
+        processed_dir = _infer_processed_dir_from_training_path(candidate_path)
+        if processed_dir is not None:
+            processed_dirs.add(processed_dir)
+
+    resolved_pos = os.path.realpath(pos_path)
+    resolved_neg = os.path.realpath(neg_path)
+    discovered_paths: list[str] = []
+    seen_paths: set[str] = set()
+
+    for processed_dir in sorted(processed_dirs):
+        try:
+            entries = sorted(
+                entry.name
+                for entry in os.scandir(processed_dir)
+                if entry.is_file()
+            )
+        except OSError:
+            continue
+        for entry_name in entries:
+            if _MIXED_PAIR_NEGATIVE_PATTERN.fullmatch(entry_name) is None:
+                continue
+            candidate = os.path.realpath(os.path.join(processed_dir, entry_name))
+            if candidate in {resolved_pos, resolved_neg}:
+                continue
+            if candidate in seen_paths:
+                continue
+            seen_paths.add(candidate)
+            discovered_paths.append(candidate)
+    return tuple(discovered_paths)
 
 
 def read_examples_pair_task(
