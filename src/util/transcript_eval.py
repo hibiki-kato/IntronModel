@@ -414,18 +414,24 @@ def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
             )
 
 
-def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
+def write_site_scores(
+    output_tsv: str,
+    rows: List[Dict[str, object]],
+    labels: Dict[tuple[str, int], int] | None = None,
+) -> None:
     """Write site-level scores to the wide 5-column TSV format.
 
     Output schema:
     ``transcript_id``, ``intron_index``, ``donor_score``,
     ``acceptor_score``, ``label``.
-    Donor/acceptor columns contain per-site probabilities directly.
-    ``label`` is left empty here and can be filled by post-processing scripts.
+    Donor/acceptor columns contain per-site probabilities directly. When
+    `labels` is provided, `label` is filled from
+    ``(transcript_id, intron_index) -> {0,1}`` mapping.
     """
     outdir = os.path.dirname(output_tsv)
     if outdir:
         os.makedirs(outdir, exist_ok=True)
+    label_map = labels or {}
 
     grouped: dict[tuple[str, int], dict[str, float]] = defaultdict(dict)
     for row in rows:
@@ -463,8 +469,16 @@ def write_site_scores(output_tsv: str, rows: List[Dict[str, object]]):
             acceptor_text = (
                 "" if acceptor_score is None else f"{float(acceptor_score):.6f}"
             )
+            label = label_map.get((transcript_id, intron_index))
+            label_text = "" if label is None else str(int(label))
             writer.writerow(
-                [transcript_id, str(intron_index), donor_text, acceptor_text, ""]
+                [
+                    transcript_id,
+                    str(intron_index),
+                    donor_text,
+                    acceptor_text,
+                    label_text,
+                ]
             )
 
 

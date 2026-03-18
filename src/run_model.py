@@ -1450,9 +1450,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
             f"--site_score_tsv: {site_score_tsv}"
         )
     else:
-        write_site_scores(site_output_tsv, unique_site_rows)
+        intron_labels = _load_optional_intron_labels(args.species)
+        write_site_scores(
+            site_output_tsv,
+            unique_site_rows,
+            labels=intron_labels,
+        )
         site_score_tsv = site_output_tsv
         print(f"Saved site scores: {site_output_tsv}")
+    if args.site_score_tsv:
+        intron_labels = _load_optional_intron_labels(args.species)
     infer_stage_elapsed_sec = time.perf_counter() - infer_stage_started_at
     print(f"[pipeline] inference stage elapsed: {infer_stage_elapsed_sec:.3f}s")
 
@@ -1460,7 +1467,6 @@ def run_pipeline(args: argparse.Namespace) -> None:
         site_score_rows=unique_site_rows,
         intron_score_op=args.intron_score_op,
     )
-    intron_labels = _load_optional_intron_labels(args.species)
     write_intron_scores(
         intron_output_tsv,
         intron_rows,

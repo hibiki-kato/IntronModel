@@ -73,12 +73,12 @@ JOB_ORDER=(
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 {
-  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "donor_len": {"type": "int", "min": 30, "max": 100, "step": 10},
   "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "lr": {"type": "float", "min": 1e-5, "max": 2e-3, "scale": "log"},
+  "lr": {"type": "float", "min": 3e-6, "max": 5e-3, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096]
+    "values": [64, 128, 256, 512, 1024, 2048, 4096, 8192]
   },
   "pair_arch": {
     "type": "categorical",
@@ -86,33 +86,37 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   },
   "use_sep_token": {
     "type": "categorical",
-    "values": [0, 1]
+    "values": [1]
+  },
+  "input_mode": {
+    "type": "categorical",
+    "values": ["dna", "kmer3", "bpe"]
   },
   "embedding_dim": {
     "type": "categorical",
-    "values": [16]
+    "values": [8, 16, 24, 32, 48, 64]
   },
   "hidden_size": {
     "type": "categorical",
-    "values": [64, 128]
+    "values": [32, 48, 64, 96, 128, 192, 256, 384]
   },
   "num_layers": {
     "type": "categorical",
-    "values": [1]
+    "values": [1, 2, 3, 4]
   },
-  "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
+  "dropout": {"type": "float", "min": 0.0, "max": 0.7, "scale": "linear"},
   "fc_hidden": {
     "type": "categorical",
-    "values": [64, 128, 256, 512]
+    "values": [64, 96, 128, 192, 256, 384, 512, 768, 1024]
   },
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
-  "eta_min_ratio": {"type": "float", "min": 5e-4, "max": 5e-2, "scale": "log"},
-  "grad_clip": {"type": "float", "min": 0.5, "max": 5.0, "scale": "linear"},
+  "weight_decay": {"type": "float", "min": 1e-10, "max": 1e-1, "scale": "log"},
+  "eta_min_ratio": {"type": "float", "min": 1e-5, "max": 2e-1, "scale": "log"},
+  "grad_clip": {"type": "float", "min": 0.1, "max": 10.0, "scale": "linear"},
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"}
+  "f1_lambda": {"type": "float", "min": 0.005, "max": 0.8, "scale": "log"}
 }
 JSON
 )"
@@ -467,9 +471,13 @@ while true; do
     "val_frac": ${VAL_FRAC},
     "pair_arch": "separate",
     "use_sep_token": 1,
+    "input_mode": "dna",
     "embedding_dim": 16,
     "hidden_size": 64,
     "num_layers": 1,
+    "bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
+    "bpe_pretrained_revision": null,
+    "bpe_trust_remote_code": 0,
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

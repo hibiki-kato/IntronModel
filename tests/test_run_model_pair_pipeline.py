@@ -389,6 +389,11 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
             ],
         },
     )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 0, ("tx1", 2): 1},
+    )
 
     run_model.run_pipeline(args)
     captured = capsys.readouterr()
@@ -406,6 +411,19 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
         "label",
     ]
     assert len(intron_lines) == 3
+    assert intron_lines[1].split("\t")[3] == "0"
+    assert intron_lines[2].split("\t")[3] == "1"
+
+    site_lines = site_output_tsv.read_text(encoding="utf-8").splitlines()
+    assert site_lines[0].split("\t") == [
+        "transcript_id",
+        "intron_index",
+        "donor_score",
+        "acceptor_score",
+        "label",
+    ]
+    assert site_lines[1].split("\t")[4] == "0"
+    assert site_lines[2].split("\t")[4] == "1"
 
     lines = transcript_output_tsv.read_text(encoding="utf-8").strip().splitlines()
     assert lines[0].split("\t") == [

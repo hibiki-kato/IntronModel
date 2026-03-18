@@ -219,6 +219,33 @@ def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
     assert lines[1] == "tx1\t1\t0.910000\t0.820000"
 
 
+def test_write_site_scores_fills_label_from_mapping(tmp_path: Path) -> None:
+    """Fill wide-format label column from optional intron label mapping."""
+    output_tsv = tmp_path / "site_with_labels.tsv"
+    rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": 0.91,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": 0.82,
+        },
+    ]
+    write_site_scores(
+        str(output_tsv),
+        rows,
+        labels={("tx1", 1): 1},
+    )
+    lines = output_tsv.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[1] == "tx1\t1\t0.910000\t0.820000\t1"
+
+
 def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
     """Read wide-format TSV into donor/acceptor row dictionaries."""
     site_score_tsv = tmp_path / "site.tsv"

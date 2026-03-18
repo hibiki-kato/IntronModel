@@ -53,6 +53,7 @@ MAX_MODEL_PARAMS_MODEL_FACTOR="1.00"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
+SEQUENCE_TRANSFORM="none"
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
@@ -95,6 +96,10 @@ DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-1, "scale": "log"},
+  "sequence_transform": {
+    "type": "categorical",
+    "values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
+  },
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
@@ -146,6 +151,10 @@ DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
   },
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
+  "sequence_transform": {
+    "type": "categorical",
+    "values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
+  },
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
@@ -585,6 +594,7 @@ while true; do
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
     "tag": ${TAG_JSON},
+    "sequence_transform": "${SEQUENCE_TRANSFORM}",
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
     "allow_tf32": ${ALLOW_TF32},

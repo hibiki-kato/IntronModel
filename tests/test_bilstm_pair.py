@@ -31,6 +31,25 @@ def test_add_train_args_accepts_pair_arch_and_hidden_size() -> None:
     assert args.use_sep_token == 1
 
 
+def test_add_train_args_accepts_input_mode_alias() -> None:
+    parser = argparse.ArgumentParser()
+    bilstm_pair.add_train_args(parser)
+    args = parser.parse_args(
+        [
+            "--input_mode",
+            "onehot",
+            "--bpe_pretrained_model_name",
+            "fake/model",
+            "--bpe_trust_remote_code",
+            "1",
+        ]
+    )
+
+    assert args.input_mode == "onehot"
+    assert args.bpe_pretrained_model_name == "fake/model"
+    assert args.bpe_trust_remote_code == 1
+
+
 def test_add_train_args_accepts_compile_mode_flags() -> None:
     parser = argparse.ArgumentParser()
     bilstm_pair.add_train_args(parser)
@@ -43,9 +62,9 @@ def test_add_train_args_accepts_compile_mode_flags() -> None:
 def test_resolve_pair_train_params_validates_hidden_size() -> None:
     parser = argparse.ArgumentParser()
     bilstm_pair.add_train_args(parser)
-    args = parser.parse_args(["--hidden_size", "96"])
+    args = parser.parse_args(["--hidden_size", "0"])
 
-    with pytest.raises(ValueError, match="--hidden_size must be 64 or 128"):
+    with pytest.raises(ValueError, match="--hidden_size must be positive"):
         _ = bilstm_pair._resolve_pair_train_params(args)
 
 
@@ -110,3 +129,47 @@ def test_pair_bilstm_classifier_concat_forward_shape() -> None:
 def test_encode_dna_sequence_maps_unknown_to_n() -> None:
     tokens = bilstm_pair._encode_dna_sequence("ACGTXn")
     assert tokens == [1, 2, 3, 4, 5, 5]
+
+
+def test_build_sequence_encoder_kmer3_returns_shifted_ids() -> None:
+    encoder = bilstm_pair._build_sequence_encoder(
+        mode="kmer3",
+        bpe_pretrained_model_name="ignored/model",
+        bpe_pretrained_revision=None,
+        bpe_trust_remote_code=False,
+    )
+
+    tokens = encoder.encode("ACGTN", window_len=5)
+
+    assert len(tokens) == 3
+    assert min(tokens) >= 1
+    assert encoder.vocab_size == 67
+    assert encoder.sep_token_id == 66
+
+
+def test_build_sequence_encoder_bpe_shifts_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeTokenizer:
+        vocab_size = 10
+
+        def __call__(self, *_args: object, **_kwargs: object) -> dict[str, list[int]]:
+            return {"input_ids": [2, 5, 9]}
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(*_args: object, **_kwargs: object) -> _FakeTokenizer:
+            return _FakeTokenizer()
+
+    monkeypatch.setattr(bilstm_pair, "AutoTokenizer", _FakeAutoTokenizer)
+    bilstm_pair._TOKENIZER_CACHE.clear()
+
+    encoder = bilstm_pair._build_sequence_encoder(
+        mode="bpe",
+        bpe_pretrained_model_name="fake/model",
+        bpe_pretrained_revision=None,
+        bpe_trust_remote_code=False,
+    )
+    tokens = encoder.encode("ACGT", window_len=4)
+
+    assert tokens == [3, 6, 10]
+    assert encoder.vocab_size == 12
+    assert encoder.sep_token_id == 11

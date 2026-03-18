@@ -118,7 +118,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
 	"sequence_transform": {
 		"type": "categorical",
-		"values": ["none"]
+		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
 	},
 	"embedding_dim": {
 		"type": "categorical",

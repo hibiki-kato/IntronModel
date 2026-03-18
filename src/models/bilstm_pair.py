@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
+from itertools import product
 import os
 import random
 import time
-from typing import Callable, ContextManager, Optional, Sequence
+from typing import Callable, ContextManager, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -71,7 +72,18 @@ except ImportError:  # pragma: no cover
     average_precision_score = None
     roc_auc_score = None
 
+try:
+    from transformers import AutoTokenizer
+except ImportError:  # pragma: no cover
+    AutoTokenizer = None
+
 PAIR_ARCH_CHOICES: tuple[str, ...] = ("separate", "concat")
+INPUT_MODE_CHOICES: tuple[str, ...] = ("dna", "kmer3", "bpe")
+INPUT_MODE_ALIASES: dict[str, str] = {"onehot": "dna"}
+INPUT_MODE_PARSE_CHOICES: tuple[str, ...] = (
+    *INPUT_MODE_CHOICES,
+    *tuple(INPUT_MODE_ALIASES.keys()),
+)
 _DNA_TO_TOKEN_ID: dict[str, int] = {
     "A": 1,
     "C": 2,
@@ -82,6 +94,8 @@ _DNA_TO_TOKEN_ID: dict[str, int] = {
 _PAD_TOKEN_ID: int = 0
 _SEP_TOKEN_ID: int = 6
 _VOCAB_SIZE: int = 7
+BPE_DEFAULT_MODEL_NAME: str = "zhihan1996/DNABERT-2-117M"
+_TOKENIZER_CACHE: dict[tuple[str, Optional[str], bool], object] = {}
 
 PairBatch = tuple[
     torch.Tensor,
@@ -110,6 +124,10 @@ class PairTrainParams:
     batch_size: int
     lr: float
     loss_name: str
+    input_mode: str
+    bpe_pretrained_model_name: str
+    bpe_pretrained_revision: Optional[str]
+    bpe_trust_remote_code: bool
     pair_arch: str
     use_sep_token: bool
     embedding_dim: int
@@ -137,6 +155,169 @@ class InferRuntimeConfig:
     batch_size: int
     use_amp: bool
     amp_dtype: Optional[torch.dtype]
+
+
+@dataclass(frozen=True)
+class SequenceInputEncoder:
+    """Encode DNA sequence into integer-token list for BiLSTM input."""
+
+    mode: str
+    kmer_vocab: Optional[Mapping[str, int]]
+    bpe_tokenizer: Optional[object]
+
+    @property
+    def vocab_size(self) -> int:
+        """Return embedding vocabulary size including PAD and SEP IDs."""
+        if self.mode == "dna":
+            return _VOCAB_SIZE
+        if self.mode == "kmer3":
+            assert self.kmer_vocab is not None
+            return len(self.kmer_vocab) + 3
+        assert self.mode == "bpe"
+        if self.bpe_tokenizer is None:
+            raise RuntimeError("BPE tokenizer is not initialized.")
+        return int(getattr(self.bpe_tokenizer, "vocab_size")) + 2
+
+    @property
+    def pad_token_id(self) -> int:
+        """Return reserved PAD token ID."""
+        return _PAD_TOKEN_ID
+
+    @property
+    def sep_token_id(self) -> int:
+        """Return reserved SEP token ID for concat architecture."""
+        if self.mode == "dna":
+            return _SEP_TOKEN_ID
+        return self.vocab_size - 1
+
+    def encode(self, sequence: str, *, window_len: Optional[int]) -> list[int]:
+        """Encode one sequence according to configured input mode."""
+        normalized = sequence.upper()
+        if self.mode == "dna":
+            return _encode_dna_sequence(normalized)
+
+        if window_len is None or window_len <= 0:
+            raise ValueError(
+                "Positive --donor_len/--acceptor_len is required for token modes "
+                "kmer3 and bpe."
+            )
+
+        if self.mode == "kmer3":
+            assert self.kmer_vocab is not None
+            clipped = normalized[:window_len]
+            if len(clipped) < window_len:
+                clipped = clipped + ("N" * (window_len - len(clipped)))
+            token_count = max(1, window_len - 3 + 1)
+            unknown_token_id = len(self.kmer_vocab) + 1
+            tokens = [unknown_token_id] * token_count
+            for index in range(token_count):
+                token = clipped[index : index + 3]
+                token_id = self.kmer_vocab.get(token)
+                if token_id is not None:
+                    tokens[index] = int(token_id) + 1
+            return tokens
+
+        assert self.mode == "bpe"
+        if self.bpe_tokenizer is None:
+            raise RuntimeError("BPE tokenizer is not initialized.")
+        call_fn = getattr(self.bpe_tokenizer, "__call__", None)
+        if not callable(call_fn):
+            raise TypeError("Tokenizer object is not callable.")
+        encoded_obj = call_fn(
+            normalized,
+            add_special_tokens=False,
+            padding=False,
+            truncation=True,
+            max_length=window_len,
+            return_attention_mask=False,
+        )
+        if not isinstance(encoded_obj, Mapping):
+            raise TypeError("Tokenizer output must be a mapping.")
+        input_ids_obj = encoded_obj.get("input_ids")
+        token_ids = np.asarray(input_ids_obj, dtype=np.int64).tolist()
+        if token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        return [int(token_id) + 1 for token_id in token_ids]
+
+
+def _normalize_input_mode(raw_mode: object, *, arg_name: str) -> str:
+    """Normalize input mode and resolve backward-compatible aliases."""
+    mode = str(raw_mode).strip().lower()
+    if mode in INPUT_MODE_ALIASES:
+        return INPUT_MODE_ALIASES[mode]
+    if mode not in INPUT_MODE_CHOICES:
+        choices_text = ", ".join(INPUT_MODE_CHOICES)
+        raise ValueError(f"{arg_name} must be one of: {choices_text}.")
+    return mode
+
+
+def _build_kmer3_vocab() -> dict[str, int]:
+    """Build fixed k=3 vocabulary over A/C/G/T."""
+    return {
+        "".join(chars): index
+        for index, chars in enumerate(product(("A", "C", "G", "T"), repeat=3))
+    }
+
+
+def _load_bpe_tokenizer(
+    *,
+    pretrained_model_name: str,
+    pretrained_revision: Optional[str],
+    trust_remote_code: bool,
+) -> object:
+    """Load and cache BPE tokenizer from Hugging Face source."""
+    if AutoTokenizer is None:
+        raise RuntimeError(
+            "transformers is required for --input_mode=bpe but is not installed."
+        )
+    cache_key = (pretrained_model_name, pretrained_revision, trust_remote_code)
+    tokenizer = _TOKENIZER_CACHE.get(cache_key)
+    if tokenizer is not None:
+        return tokenizer
+    tokenizer_kwargs: dict[str, object] = {
+        "trust_remote_code": trust_remote_code,
+    }
+    if pretrained_revision is not None:
+        tokenizer_kwargs["revision"] = pretrained_revision
+    tokenizer = AutoTokenizer.from_pretrained(
+        pretrained_model_name,
+        **tokenizer_kwargs,
+    )
+    _TOKENIZER_CACHE[cache_key] = tokenizer
+    return tokenizer
+
+
+def _build_sequence_encoder(
+    *,
+    mode: str,
+    bpe_pretrained_model_name: str,
+    bpe_pretrained_revision: Optional[str],
+    bpe_trust_remote_code: bool,
+) -> SequenceInputEncoder:
+    """Construct one sequence encoder from tokenizer-mode configuration."""
+    normalized_mode = _normalize_input_mode(mode, arg_name="--input_mode")
+    if normalized_mode == "dna":
+        return SequenceInputEncoder(
+            mode=normalized_mode,
+            kmer_vocab=None,
+            bpe_tokenizer=None,
+        )
+    if normalized_mode == "kmer3":
+        return SequenceInputEncoder(
+            mode=normalized_mode,
+            kmer_vocab=_build_kmer3_vocab(),
+            bpe_tokenizer=None,
+        )
+    tokenizer = _load_bpe_tokenizer(
+        pretrained_model_name=bpe_pretrained_model_name,
+        pretrained_revision=bpe_pretrained_revision,
+        trust_remote_code=bpe_trust_remote_code,
+    )
+    return SequenceInputEncoder(
+        mode=normalized_mode,
+        kmer_vocab=None,
+        bpe_tokenizer=tokenizer,
+    )
 
 
 def _normalize_pair_arch(raw_arch: object) -> str:
@@ -175,6 +356,8 @@ class PairTokenDataset(Dataset):
 def _build_pair_collate(
     *,
     use_sep_token: bool,
+    pad_token_id: int,
+    sep_token_id: int,
 ) -> Callable[[Sequence[PairTokenExample]], PairBatch]:
     """Build one collate function for pair-token batches."""
 
@@ -195,12 +378,12 @@ def _build_pair_collate(
         acceptor_max_len = int(acceptor_lengths.max().item())
         donor_ids = torch.full(
             (len(batch), donor_max_len),
-            fill_value=_PAD_TOKEN_ID,
+            fill_value=pad_token_id,
             dtype=torch.long,
         )
         acceptor_ids = torch.full(
             (len(batch), acceptor_max_len),
-            fill_value=_PAD_TOKEN_ID,
+            fill_value=pad_token_id,
             dtype=torch.long,
         )
 
@@ -218,7 +401,7 @@ def _build_pair_collate(
                 dtype=torch.long,
             )
             if use_sep_token:
-                concat_tokens = donor_tokens + [_SEP_TOKEN_ID] + acceptor_tokens
+                concat_tokens = donor_tokens + [sep_token_id] + acceptor_tokens
             else:
                 concat_tokens = donor_tokens + acceptor_tokens
             concat_tokens_list.append(concat_tokens)
@@ -228,7 +411,7 @@ def _build_pair_collate(
         concat_max_len = int(concat_lengths.max().item())
         concat_ids = torch.full(
             (len(batch), concat_max_len),
-            fill_value=_PAD_TOKEN_ID,
+            fill_value=pad_token_id,
             dtype=torch.long,
         )
         for row_index, concat_tokens in enumerate(concat_tokens_list):
@@ -353,6 +536,7 @@ class PairBiLSTMClassifier(nn.Module):
         *,
         pair_arch: str,
         use_sep_token: bool,
+        vocab_size: int = _VOCAB_SIZE,
         embedding_dim: int,
         hidden_size: int,
         num_layers: int,
@@ -363,19 +547,21 @@ class PairBiLSTMClassifier(nn.Module):
         normalized_arch = _normalize_pair_arch(pair_arch)
         if fc_hidden <= 0:
             raise ValueError("fc_hidden must be positive.")
+        if vocab_size <= 0:
+            raise ValueError("vocab_size must be positive.")
 
         self.pair_arch = normalized_arch
         self.use_sep_token = bool(use_sep_token)
         if self.pair_arch == "separate":
             self.donor_encoder = BiLSTMEncoder(
-                vocab_size=_VOCAB_SIZE,
+                vocab_size=vocab_size,
                 embedding_dim=embedding_dim,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
                 dropout=dropout,
             )
             self.acceptor_encoder = BiLSTMEncoder(
-                vocab_size=_VOCAB_SIZE,
+                vocab_size=vocab_size,
                 embedding_dim=embedding_dim,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
@@ -387,7 +573,7 @@ class PairBiLSTMClassifier(nn.Module):
             self.concat_encoder = None
         else:
             self.concat_encoder = BiLSTMEncoder(
-                vocab_size=_VOCAB_SIZE,
+                vocab_size=vocab_size,
                 embedding_dim=embedding_dim,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
@@ -430,14 +616,35 @@ class PairBiLSTMClassifier(nn.Module):
 def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParams:
     """Resolve and validate pair BiLSTM train args."""
     hidden_size = int(model_args.hidden_size)
-    if hidden_size not in {64, 128}:
-        raise ValueError("--hidden_size must be 64 or 128.")
+    if hidden_size <= 0:
+        raise ValueError("--hidden_size must be positive.")
+
+    input_mode = _normalize_input_mode(
+        getattr(model_args, "input_mode", "dna"),
+        arg_name="--input_mode",
+    )
+    bpe_pretrained_model_name = str(
+        getattr(model_args, "bpe_pretrained_model_name", BPE_DEFAULT_MODEL_NAME)
+    ).strip()
+    if input_mode == "bpe" and bpe_pretrained_model_name == "":
+        raise ValueError("--bpe_pretrained_model_name must not be empty.")
+    bpe_pretrained_revision_raw = getattr(model_args, "bpe_pretrained_revision", None)
+    bpe_pretrained_revision = (
+        str(bpe_pretrained_revision_raw).strip()
+        if bpe_pretrained_revision_raw is not None
+        and str(bpe_pretrained_revision_raw).strip() != ""
+        else None
+    )
 
     pair_arch = _normalize_pair_arch(model_args.pair_arch)
     return PairTrainParams(
         batch_size=int(model_args.batch_size),
         lr=float(model_args.lr),
         loss_name=str(model_args.loss),
+        input_mode=input_mode,
+        bpe_pretrained_model_name=bpe_pretrained_model_name,
+        bpe_pretrained_revision=bpe_pretrained_revision,
+        bpe_trust_remote_code=bool(int(model_args.bpe_trust_remote_code)),
         pair_arch=pair_arch,
         use_sep_token=bool(int(model_args.use_sep_token)),
         embedding_dim=int(model_args.embedding_dim),
@@ -685,6 +892,12 @@ def train_pair_model(
         acceptor_len=acceptor_len,
         negative_pair_only=True,
     )
+    sequence_encoder = _build_sequence_encoder(
+        mode=train_params.input_mode,
+        bpe_pretrained_model_name=train_params.bpe_pretrained_model_name,
+        bpe_pretrained_revision=train_params.bpe_pretrained_revision,
+        bpe_trust_remote_code=train_params.bpe_trust_remote_code,
+    )
     token_examples: list[PairTokenExample] = []
     for item in raw_examples:
         transformed_pair = apply_pair_sequence_transform(
@@ -697,8 +910,14 @@ def train_pair_model(
         )
         token_examples.append(
             PairTokenExample(
-                donor_tokens=_encode_dna_sequence(transformed_pair.donor_seq),
-                acceptor_tokens=_encode_dna_sequence(transformed_pair.acceptor_seq),
+                donor_tokens=sequence_encoder.encode(
+                    transformed_pair.donor_seq,
+                    window_len=donor_len,
+                ),
+                acceptor_tokens=sequence_encoder.encode(
+                    transformed_pair.acceptor_seq,
+                    window_len=acceptor_len,
+                ),
                 label=item.label,
             )
         )
@@ -723,7 +942,11 @@ def train_pair_model(
 
     train_ds = PairTokenDataset(train_examples)
     val_ds = PairTokenDataset(val_examples)
-    collate_fn = _build_pair_collate(use_sep_token=train_params.use_sep_token)
+    collate_fn = _build_pair_collate(
+        use_sep_token=train_params.use_sep_token,
+        pad_token_id=sequence_encoder.pad_token_id,
+        sep_token_id=sequence_encoder.sep_token_id,
+    )
 
     loader_generator = torch.Generator()
     loader_generator.manual_seed(seed)
@@ -774,6 +997,7 @@ def train_pair_model(
     model = PairBiLSTMClassifier(
         pair_arch=train_params.pair_arch,
         use_sep_token=train_params.use_sep_token,
+        vocab_size=sequence_encoder.vocab_size,
         embedding_dim=train_params.embedding_dim,
         hidden_size=train_params.hidden_size,
         num_layers=train_params.num_layers,
@@ -990,6 +1214,13 @@ def train_pair_model(
                     "task": "pair",
                     "model_state": model.state_dict(),
                     "model_config": {
+                        "input_mode": train_params.input_mode,
+                        "vocab_size": sequence_encoder.vocab_size,
+                        "bpe_pretrained_model_name": (
+                            train_params.bpe_pretrained_model_name
+                        ),
+                        "bpe_pretrained_revision": train_params.bpe_pretrained_revision,
+                        "bpe_trust_remote_code": train_params.bpe_trust_remote_code,
                         "pair_arch": train_params.pair_arch,
                         "use_sep_token": train_params.use_sep_token,
                         "embedding_dim": train_params.embedding_dim,
@@ -1062,6 +1293,10 @@ def train_pair_model(
         "early_stop_min_delta": early_stop_min_delta,
         "checkpoint": checkpoint_path,
         "loss": train_params.loss_name,
+        "input_mode": train_params.input_mode,
+        "bpe_pretrained_model_name": train_params.bpe_pretrained_model_name,
+        "bpe_pretrained_revision": train_params.bpe_pretrained_revision,
+        "bpe_trust_remote_code": train_params.bpe_trust_remote_code,
         "pos_weight": loss_meta["pos_weight"],
         "focal_gamma": loss_meta["focal_gamma"],
         "focal_alpha_pos": loss_meta["focal_alpha_pos"],
@@ -1109,6 +1344,8 @@ def infer_pair_site_scores(
     *,
     pair_rows: Sequence[dict[str, object]],
     pair_model_path: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
     device: str,
     batch_size: int,
     sequence_transform: str,
@@ -1127,11 +1364,34 @@ def infer_pair_site_scores(
     device_name = pick_device(device)
     ckpt = torch.load(pair_model_path, map_location=device_name)
     model_config = ckpt.get("model_config", {})
+    input_mode = _normalize_input_mode(
+        model_config.get("input_mode", "dna"),
+        arg_name="checkpoint input_mode",
+    )
+    bpe_pretrained_model_name = str(
+        model_config.get("bpe_pretrained_model_name", BPE_DEFAULT_MODEL_NAME)
+    )
+    bpe_pretrained_revision_raw = model_config.get("bpe_pretrained_revision")
+    bpe_pretrained_revision = (
+        str(bpe_pretrained_revision_raw).strip()
+        if bpe_pretrained_revision_raw is not None
+        and str(bpe_pretrained_revision_raw).strip() != ""
+        else None
+    )
+    bpe_trust_remote_code = bool(model_config.get("bpe_trust_remote_code", False))
+    sequence_encoder = _build_sequence_encoder(
+        mode=input_mode,
+        bpe_pretrained_model_name=bpe_pretrained_model_name,
+        bpe_pretrained_revision=bpe_pretrained_revision,
+        bpe_trust_remote_code=bpe_trust_remote_code,
+    )
     pair_arch = _normalize_pair_arch(model_config.get("pair_arch", "separate"))
     use_sep_token = bool(model_config.get("use_sep_token", True))
+    vocab_size = int(model_config.get("vocab_size", sequence_encoder.vocab_size))
     model = PairBiLSTMClassifier(
         pair_arch=pair_arch,
         use_sep_token=use_sep_token,
+        vocab_size=vocab_size,
         embedding_dim=int(model_config.get("embedding_dim", 16)),
         hidden_size=int(model_config.get("hidden_size", 64)),
         num_layers=int(model_config.get("num_layers", 1)),
@@ -1164,8 +1424,14 @@ def infer_pair_site_scores(
         )
         token_examples.append(
             PairTokenExample(
-                donor_tokens=_encode_dna_sequence(transformed.donor_seq),
-                acceptor_tokens=_encode_dna_sequence(transformed.acceptor_seq),
+                donor_tokens=sequence_encoder.encode(
+                    transformed.donor_seq,
+                    window_len=donor_len,
+                ),
+                acceptor_tokens=sequence_encoder.encode(
+                    transformed.acceptor_seq,
+                    window_len=acceptor_len,
+                ),
                 label=0,
             )
         )
@@ -1177,7 +1443,11 @@ def infer_pair_site_scores(
         shuffle=False,
         num_workers=0,
         pin_memory=(device_name == "cuda"),
-        collate_fn=_build_pair_collate(use_sep_token=use_sep_token),
+        collate_fn=_build_pair_collate(
+            use_sep_token=use_sep_token,
+            pad_token_id=sequence_encoder.pad_token_id,
+            sep_token_id=sequence_encoder.sep_token_id,
+        ),
     )
 
     probs_list: list[np.ndarray] = []
@@ -1266,9 +1536,33 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         default=1,
         help="Insert SEP token between donor/acceptor in concat mode.",
     )
+    parser.add_argument(
+        "--input_mode",
+        choices=list(INPUT_MODE_PARSE_CHOICES),
+        default="dna",
+        help="Input encoding mode: dna, kmer3, bpe, or onehot(alias for dna).",
+    )
     parser.add_argument("--embedding_dim", type=int, default=16)
     parser.add_argument("--hidden_size", type=int, default=64)
     parser.add_argument("--num_layers", type=int, default=1)
+    parser.add_argument(
+        "--bpe_pretrained_model_name",
+        type=str,
+        default=BPE_DEFAULT_MODEL_NAME,
+        help="Pretrained tokenizer source for --input_mode=bpe.",
+    )
+    parser.add_argument(
+        "--bpe_pretrained_revision",
+        default=None,
+        help="Optional tokenizer revision for --input_mode=bpe.",
+    )
+    parser.add_argument(
+        "--bpe_trust_remote_code",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Set to 1 to enable trust_remote_code for BPE tokenizer loading.",
+    )
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--fc_hidden", type=int, default=128)
     parser.add_argument("--weight_decay", type=float, default=0.01)
@@ -1441,6 +1735,10 @@ def train(
         "device": common_args.device,
         "checkpoint_name": os.path.basename(pair_checkpoint_path),
         "pair_checkpoint_path": pair_checkpoint_path,
+        "input_mode": train_params.input_mode,
+        "bpe_pretrained_model_name": train_params.bpe_pretrained_model_name,
+        "bpe_pretrained_revision": train_params.bpe_pretrained_revision,
+        "bpe_trust_remote_code": train_params.bpe_trust_remote_code,
         "pair_arch": train_params.pair_arch,
         "use_sep_token": train_params.use_sep_token,
         "embedding_dim": train_params.embedding_dim,
@@ -1478,6 +1776,7 @@ def train(
                 "batch_size": train_params.batch_size,
                 "lr": train_params.lr,
                 "loss": train_params.loss_name,
+                "input_mode": train_params.input_mode,
                 "pair_arch": train_params.pair_arch,
                 "use_sep_token": train_params.use_sep_token,
                 "embedding_dim": train_params.embedding_dim,
@@ -1496,6 +1795,11 @@ def train(
                 "asym_gamma_pos": train_params.asym_gamma_pos,
                 "asym_gamma_neg": train_params.asym_gamma_neg,
                 "asym_alpha_pos": train_params.asym_alpha_pos,
+                "bpe_pretrained_model_name": (
+                    train_params.bpe_pretrained_model_name
+                ),
+                "bpe_pretrained_revision": train_params.bpe_pretrained_revision,
+                "bpe_trust_remote_code": train_params.bpe_trust_remote_code,
             }
         },
     }
@@ -1563,6 +1867,8 @@ def infer_site(
     return infer_pair_site_scores(
         pair_rows=pair_rows,
         pair_model_path=pair_model_path,
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
         device=common_args.device,
         batch_size=infer_batch_size,
         sequence_transform=model_args.sequence_transform,

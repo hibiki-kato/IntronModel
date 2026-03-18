@@ -241,6 +241,11 @@ def test_bilstm_pair_spec_supports_tuned_hparams() -> None:
     assert spec.model_env_name == "bilstm_pair"
     assert spec.supports_tuned_hparams is True
     assert spec.tuned_key_map["hidden_size"] == "HIDDEN_SIZE"
+    assert spec.tuned_key_map["input_mode"] == "INPUT_MODE"
+    assert (
+        spec.tuned_key_map["bpe_pretrained_model_name"]
+        == "BPE_PRETRAINED_MODEL_NAME"
+    )
 
 
 def test_bilstm_pair_spec_excludes_intron_score_op() -> None:

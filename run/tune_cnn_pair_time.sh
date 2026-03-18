@@ -101,7 +101,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
 	"pair_mode": {
 		"type": "categorical",
-		"values": ["pair", "concat"]
+		"values": ["pair", "independent"]
 	},
 	"sequence_transform": {
 		"type": "categorical",

@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="300"
+TIME_BUDGET_MINUTES="360"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional output/data overrides for tagged or mask-data tuning runs.
@@ -79,6 +79,8 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
+	"Athal"
+	"Dmel"
 	"Hsap"
 	"Mmus"
 )
@@ -100,15 +102,15 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
 	"pair_mode": {
 		"type": "categorical",
-		"values": ["pair"]
+		"values": ["pair", "independent"]
 	},
 	"sequence_transform": {
 		"type": "categorical",
-		"values": ["none"]
+		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
 	},
 	"embedding_dim": {
 		"type": "categorical",
-		"values": [32, 48, 64]
+		"values": [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
 	},
   "loss": {
     "type": "categorical",
