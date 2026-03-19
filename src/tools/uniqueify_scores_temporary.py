@@ -5,7 +5,7 @@ This tool rewrites existing ``data/<species>/site_score/*.tsv`` and
 
 - Replace ``(transcript_id, intron_index)`` with unique intron keys.
 - Collapse duplicate original introns mapped to one unique intron.
-- Attach ``seen_train_any`` and representative source metadata columns.
+- Attach ``train_leak`` and representative source metadata columns.
 
 The script is intentionally strict and fails fast when inputs are inconsistent.
 """
@@ -38,7 +38,7 @@ OriginalKey = tuple[str, int]
 UniqueKey = tuple[str, int]
 SCORE_COLUMNS: tuple[str, ...] = ("donor_score", "acceptor_score", "score")
 ADDED_COLUMNS: tuple[str, ...] = (
-    "seen_train_any",
+    "train_leak",
     "source_transcript_id",
     "source_intron_index",
     "member_count",
@@ -49,7 +49,7 @@ ADDED_COLUMNS: tuple[str, ...] = (
 class CatalogRecord:
     """One unique intron record loaded from ``intron_unique_catalog.tsv``."""
 
-    seen_train_any: int
+    train_leak: int
     member_count: int
 
 
@@ -69,6 +69,26 @@ class SpeciesResult:
     intron_files: int
     rows_in: int
     rows_out: int
+
+
+@dataclass
+class ScoreDriftAccumulator:
+    """Running score statistics for one score column."""
+
+    has_empty: bool
+    has_non_empty: bool
+    min_value: float | None
+    max_value: float | None
+
+
+@dataclass
+class GroupAccumulator:
+    """Running aggregation state for one unique intron group."""
+
+    first_row: dict[str, str]
+    representative_row: dict[str, str] | None
+    label_values: set[str]
+    score_stats: dict[str, ScoreDriftAccumulator]
 
 
 def _parse_species_csv(raw_species: Optional[str]) -> list[str]:
@@ -196,21 +216,25 @@ def _load_catalog(path: Path) -> dict[UniqueKey, CatalogRecord]:
     if not path.is_file():
         raise FileNotFoundError(f"Unique intron catalog TSV not found: {path}")
 
-    required = {
+    required_base = {
         "unique_transcript_id",
         "unique_intron_index",
         "member_count",
-        "seen_train_any",
     }
     catalog: dict[UniqueKey, CatalogRecord] = {}
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+        fieldnames = set(reader.fieldnames or [])
+        if not required_base.issubset(fieldnames):
             raise ValueError(
                 "Unique intron catalog TSV must include columns: "
-                "unique_transcript_id, unique_intron_index, member_count, "
-                "seen_train_any"
+                "unique_transcript_id, unique_intron_index, member_count"
+            )
+        leak_column = "train_leak"
+        if leak_column not in fieldnames:
+            raise ValueError(
+                "Unique intron catalog TSV must include column: train_leak"
             )
         for line_no, raw in enumerate(reader, start=2):
             unique_transcript_id = str(raw["unique_transcript_id"]).strip()
@@ -228,7 +252,7 @@ def _load_catalog(path: Path) -> dict[UniqueKey, CatalogRecord]:
                 path=path,
                 line_no=line_no,
             )
-            seen_train_any = parse_bool_flag(str(raw["seen_train_any"]))
+            train_leak = parse_bool_flag(str(raw[leak_column]))
             unique_key = (unique_transcript_id, unique_intron_index)
             if unique_key in catalog:
                 raise ValueError(
@@ -236,7 +260,7 @@ def _load_catalog(path: Path) -> dict[UniqueKey, CatalogRecord]:
                     f"{unique_key} at {path}:{line_no}"
                 )
             catalog[unique_key] = CatalogRecord(
-                seen_train_any=seen_train_any,
+                train_leak=train_leak,
                 member_count=member_count,
             )
 
@@ -277,88 +301,102 @@ def _build_representative_map(
     return representatives
 
 
-def _validate_group_labels(
+def _init_score_stats(score_columns: list[str]) -> dict[str, ScoreDriftAccumulator]:
+    """Build empty score-drift accumulators for one group."""
+    return {
+        column: ScoreDriftAccumulator(
+            has_empty=False,
+            has_non_empty=False,
+            min_value=None,
+            max_value=None,
+        )
+        for column in score_columns
+    }
+
+
+def _update_label_accumulator(
     *,
-    rows: list[tuple[int, dict[str, str]]],
+    row: dict[str, str],
+    line_no: int,
+    path: Path,
+    label_values: set[str],
+) -> None:
+    """Update one group label accumulator from one row."""
+    if "label" not in row:
+        return
+    value = str(row["label"]).strip()
+    if value != "" and value not in {"0", "1"}:
+        raise ValueError(
+            f"Label must be 0/1 or empty at {path}:{line_no}, got: {row['label']}"
+        )
+    if value != "":
+        label_values.add(value)
+
+
+def _update_score_accumulators(
+    *,
+    row: dict[str, str],
+    line_no: int,
+    path: Path,
+    score_stats: dict[str, ScoreDriftAccumulator],
+) -> None:
+    """Update score drift accumulators for one group from one row."""
+    for column, stats in score_stats.items():
+        parsed = _parse_optional_float(
+            raw_value=str(row.get(column, "")),
+            path=path,
+            line_no=line_no,
+            column=column,
+        )
+        if parsed is None:
+            stats.has_empty = True
+            continue
+        stats.has_non_empty = True
+        if stats.min_value is None or parsed < stats.min_value:
+            stats.min_value = parsed
+        if stats.max_value is None or parsed > stats.max_value:
+            stats.max_value = parsed
+
+
+def _resolve_label_value(
+    *,
+    label_values: set[str],
     path: Path,
     unique_key: UniqueKey,
 ) -> str:
-    """Validate one unique group has consistent non-empty label values."""
-    non_empty_labels: set[str] = set()
-    for line_no, row in rows:
-        if "label" not in row:
-            continue
-        value = str(row["label"]).strip()
-        if value != "":
-            non_empty_labels.add(value)
-        if value != "" and value not in {"0", "1"}:
-            raise ValueError(
-                "Label must be 0/1 or empty at "
-                f"{path}:{line_no}, got: {row['label']}"
-            )
-    if len(non_empty_labels) > 1:
+    """Resolve one output label from collected group labels."""
+    if len(label_values) > 1:
         raise ValueError(
             "Conflicting labels in one unique intron group: "
-            f"{unique_key} labels={sorted(non_empty_labels)} file={path}"
+            f"{unique_key} labels={sorted(label_values)} file={path}"
         )
-    if not non_empty_labels:
+    if not label_values:
         return ""
-    return sorted(non_empty_labels)[0]
+    return sorted(label_values)[0]
 
 
-def _validate_group_scores(
+def _validate_score_stats(
     *,
-    rows: list[tuple[int, dict[str, str]]],
-    score_columns: list[str],
+    score_stats: dict[str, ScoreDriftAccumulator],
     tolerance: float,
     path: Path,
     unique_key: UniqueKey,
+    strict_score_drift: bool,
 ) -> None:
-    """Validate one unique group has score differences within tolerance.
-
-    Parameters
-    ----------
-    rows : list[tuple[int, dict[str, str]]]
-        Group rows as ``(line_no, row_dict)``.
-    score_columns : list[str]
-        Score columns to validate.
-    tolerance : float
-        Allowed absolute max-min range per score column.
-    path : Path
-        Source TSV path.
-    unique_key : tuple[str, int]
-        Current unique intron key.
-
-    Raises
-    ------
-    ValueError
-        If one score column has empty/non-empty mismatch or exceeds tolerance.
-    """
-    for column in score_columns:
-        parsed_values: list[float] = []
-        has_empty = False
-        has_non_empty = False
-        for line_no, row in rows:
-            raw_value = str(row.get(column, ""))
-            parsed = _parse_optional_float(
-                raw_value=raw_value,
-                path=path,
-                line_no=line_no,
-                column=column,
-            )
-            if parsed is None:
-                has_empty = True
-            else:
-                has_non_empty = True
-                parsed_values.append(parsed)
-        if has_empty and has_non_empty:
+    """Validate one group score accumulators."""
+    for column, stats in score_stats.items():
+        if stats.has_empty and stats.has_non_empty:
             raise ValueError(
                 "Mixed empty/non-empty values in one unique intron group: "
                 f"file={path} key={unique_key} column={column}"
             )
-        if len(parsed_values) <= 1:
+        if (
+            stats.min_value is None
+            or stats.max_value is None
+            or not strict_score_drift
+        ):
             continue
-        diff = max(parsed_values) - min(parsed_values)
+        diff = stats.max_value - stats.min_value
         if diff > tolerance:
             raise ValueError(
                 "Score drift exceeds tolerance in one unique intron group: "
@@ -383,6 +421,7 @@ def _transform_one_file(
     representative_map: dict[UniqueKey, OriginalKey],
     catalog: dict[UniqueKey, CatalogRecord],
     tolerance: float,
+    strict_score_drift: bool,
     dry_run: bool,
 ) -> FileResult:
     """Transform one score TSV file to unique keys and overwrite in-place.
@@ -426,7 +465,7 @@ def _transform_one_file(
             )
 
         score_columns = [column for column in SCORE_COLUMNS if column in fieldnames]
-        grouped_rows: dict[UniqueKey, list[tuple[int, dict[str, str]]]] = {}
+        grouped_rows: dict[UniqueKey, GroupAccumulator] = {}
         total_rows = 0
         for line_no, raw in enumerate(reader, start=2):
             total_rows += 1
@@ -443,47 +482,77 @@ def _transform_one_file(
             original_key = (transcript_id, intron_index)
             unique_key = original_to_unique.get(original_key)
             if unique_key is None:
-                raise ValueError(
-                    "Unmapped original intron key in score TSV: "
-                    f"{original_key} at {path}:{line_no}"
+                # Some score files may already be rewritten to unique keys.
+                if original_key in representative_map:
+                    unique_key = original_key
+                else:
+                    raise ValueError(
+                        "Unmapped original intron key in score TSV: "
+                        f"{original_key} at {path}:{line_no}"
+                    )
+            representative_key = representative_map.get(unique_key)
+            if representative_key is None:
+                raise ValueError(f"Missing representative key for: {unique_key}")
+
+            group = grouped_rows.get(unique_key)
+            if group is None:
+                group = GroupAccumulator(
+                    first_row=row,
+                    representative_row=None,
+                    label_values=set(),
+                    score_stats=_init_score_stats(score_columns),
                 )
-            grouped_rows.setdefault(unique_key, []).append((line_no, row))
+                grouped_rows[unique_key] = group
+
+            if original_key == representative_key:
+                group.representative_row = row
+            _update_label_accumulator(
+                row=row,
+                line_no=line_no,
+                path=path,
+                label_values=group.label_values,
+            )
+            _update_score_accumulators(
+                row=row,
+                line_no=line_no,
+                path=path,
+                score_stats=group.score_stats,
+            )
 
     output_fieldnames = _build_output_fieldnames(fieldnames)
     output_rows: list[dict[str, str]] = []
     for unique_key in sorted(grouped_rows.keys()):
-        rows = grouped_rows[unique_key]
+        group = grouped_rows[unique_key]
         catalog_record = catalog.get(unique_key)
         if catalog_record is None:
             raise ValueError(f"Missing catalog record for unique key: {unique_key}")
-        representative_key = representative_map[unique_key]
-        label_value = _validate_group_labels(
-            rows=rows,
+        representative_key = representative_map.get(unique_key)
+        if representative_key is None:
+            raise ValueError(f"Missing representative key for: {unique_key}")
+        label_value = _resolve_label_value(
+            label_values=group.label_values,
             path=path,
             unique_key=unique_key,
         )
-        _validate_group_scores(
-            rows=rows,
-            score_columns=score_columns,
+        _validate_score_stats(
+            score_stats=group.score_stats,
             tolerance=tolerance,
             path=path,
             unique_key=unique_key,
+            strict_score_drift=strict_score_drift,
         )
-        representative_row: dict[str, str] | None = None
-        for _, row in rows:
-            key = (row["transcript_id"].strip(), int(row["intron_index"].strip()))
-            if key == representative_key:
-                representative_row = row
-                break
-        if representative_row is None:
-            representative_row = rows[0][1]
+        representative_row = (
+            group.representative_row
+            if group.representative_row is not None
+            else group.first_row
+        )
 
         output_row = {name: representative_row.get(name, "") for name in fieldnames}
         output_row["transcript_id"] = unique_key[0]
         output_row["intron_index"] = str(unique_key[1])
         if "label" in output_row:
             output_row["label"] = label_value
-        output_row["seen_train_any"] = str(catalog_record.seen_train_any)
+        output_row["train_leak"] = str(catalog_record.train_leak)
         output_row["source_transcript_id"] = representative_key[0]
         output_row["source_intron_index"] = str(representative_key[1])
         output_row["member_count"] = str(catalog_record.member_count)
@@ -514,6 +583,7 @@ def _transform_path_group(
     representative_map: dict[UniqueKey, OriginalKey],
     catalog: dict[UniqueKey, CatalogRecord],
     tolerance: float,
+    strict_score_drift: bool,
     dry_run: bool,
     label: str,
 ) -> tuple[int, int, int]:
@@ -531,6 +601,7 @@ def _transform_path_group(
             representative_map=representative_map,
             catalog=catalog,
             tolerance=tolerance,
+            strict_score_drift=strict_score_drift,
             dry_run=dry_run,
         )
         rows_in += result.rows_in
@@ -556,6 +627,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--site-pattern", type=str, default="*.tsv")
     parser.add_argument("--intron-pattern", type=str, default="*.tsv")
     parser.add_argument("--tolerance", type=float, default=1e-4)
+    parser.add_argument(
+        "--strict-score-drift",
+        type=int,
+        choices=[0, 1],
+        default=0,
+    )
     parser.add_argument("--dry-run", type=int, choices=[0, 1], default=0)
     return parser
 
@@ -590,6 +667,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     tolerance = float(args.tolerance)
     if tolerance < 0.0:
         raise ValueError(f"tolerance must be >= 0, got {tolerance}")
+    strict_score_drift = bool(args.strict_score_drift)
     dry_run = bool(args.dry_run)
     include_species = _parse_species_csv(args.species)
 
@@ -632,6 +710,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             representative_map=representative_map,
             catalog=catalog,
             tolerance=tolerance,
+            strict_score_drift=strict_score_drift,
             dry_run=dry_run,
             label="site",
         )
@@ -641,6 +720,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             representative_map=representative_map,
             catalog=catalog,
             tolerance=tolerance,
+            strict_score_drift=strict_score_drift,
             dry_run=dry_run,
             label="intron",
         )

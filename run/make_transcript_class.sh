@@ -20,6 +20,7 @@ Notes:
   - Query GTF priority: <fasta>.gtf, then *.fna.gtf, then *.gtf.
   - Reference annotation priority: *.fix.gff, *.gff.fix, *.gff, *.gff3.
   - Requires gffcompare to be available on PATH.
+	- Class extraction source: <prefix>.annotated.gtf (transcript features).
 EOT
 }
 
@@ -233,7 +234,7 @@ for raw_species in "${species_tokens[@]}"; do
 
 	out_path="${raw_dir}/${OUT_NAME}"
 	tmp_prefix="${processed_dir}/gffcompare_tmp_$$"
-	tracking_path="${tmp_prefix}.tracking"
+	annotated_gtf="${tmp_prefix}.annotated.gtf"
 
 	echo "[make_transcript_class.sh] species=${species}"
 	echo "[make_transcript_class.sh] query_gtf=${query_gtf}"
@@ -250,14 +251,14 @@ for raw_species in "${species_tokens[@]}"; do
 		"${query_gtf}" \
 		-o "${tmp_prefix}"
 
-	if [[ ! -f "${tracking_path}" ]]; then
-		echo "gffcompare tracking not found: ${tracking_path}" >&2
+	if [[ ! -f "${annotated_gtf}" ]]; then
+		echo "gffcompare annotated gtf not found: ${annotated_gtf}" >&2
 		exit 6
 	fi
 
 	"${python_bin}" \
-		"${PROJECT_ROOT}/src/util/make_transcript_class_from_tmap.py" \
-		--tracking "${tracking_path}" \
+		"${PROJECT_ROOT}/src/util/make_transcript_class_from_annotated_gtf.py" \
+		--gtf "${annotated_gtf}" \
 		--out "${out_path}"
 
 	if [[ "${KEEP_TEMP}" == "0" ]]; then

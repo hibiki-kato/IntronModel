@@ -136,6 +136,7 @@ for raw_species in "${species_tokens[@]}"; do
 	raw_dir="${DATA_ROOT}/${species}/raw"
 	processed_dir="${DATA_ROOT}/${species}/processed"
 	site_score_dir="${DATA_ROOT}/${species}/site_score"
+	unique_map_tsv="${processed_dir}/transcripts.unique.map.tsv"
 	if [[ ! -d "${raw_dir}" ]]; then
 		echo "Raw directory not found: ${raw_dir}" >&2
 		exit 2
@@ -168,7 +169,7 @@ for raw_species in "${species_tokens[@]}"; do
 	summary_tsv="${summary_dir}/${SUMMARY_NAME}"
 
 	printf '%s\n' \
-		"species	site_score_tsv	summary_json	used_introns	positive_count	negative_count	positive_fraction	pr_auc	roc_auc	skipped_missing_score_introns	unlabeled_site_score_introns	seen_train_any_introns	unseen_train_any_introns	seen_train_pos_coord_introns	seen_train_neg_seq_introns	intron_score_op	score_source" \
+		"species	site_score_tsv	summary_json	used_introns	positive_count	negative_count	positive_fraction	pr_auc	roc_auc	skipped_missing_score_introns	unlabeled_site_score_introns	train_leak_introns	non_train_leak_introns	seen_train_pos_coord_introns	seen_train_neg_seq_introns	intron_score_op	score_source" \
 		> "${summary_tsv}"
 
 	site_files=()
@@ -209,6 +210,9 @@ for raw_species in "${species_tokens[@]}"; do
 			--score-source "${SCORE_SOURCE}"
 			--output-json "${out_json}"
 		)
+		if [[ -f "${unique_map_tsv}" ]]; then
+			run_args+=(--unique-map-tsv "${unique_map_tsv}")
+		fi
 		if [[ "${STRICT_MISSING}" == "1" ]]; then
 			run_args+=(--strict-missing)
 		fi
@@ -243,8 +247,8 @@ row = [
     str(payload["roc_auc"]),
     str(payload["skipped_missing_score_introns"]),
     str(payload["unlabeled_site_score_introns"]),
-    str(payload["seen_train_any_introns"]),
-    str(payload["unseen_train_any_introns"]),
+    str(payload["train_leak_introns"]),
+    str(payload["non_train_leak_introns"]),
     str(payload["seen_train_pos_coord_introns"]),
     str(payload["seen_train_neg_seq_introns"]),
     str(payload["intron_score_op"]),

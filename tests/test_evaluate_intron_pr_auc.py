@@ -277,7 +277,7 @@ def test_evaluate_labeled_introns_counts_seen_flags(tmp_path: Path) -> None:
         labeled_tsv,
         "\n".join(
             [
-                "transcript_id\tintron_index\tlabel\tseen_train_pos_coord\tseen_train_neg_seq\tseen_train_any",
+                "transcript_id\tintron_index\tlabel\tseen_train_pos_coord\tseen_train_neg_seq\ttrain_leak",
                 "tx1\t1\t1\t1\t0\t1",
                 "tx2\t1\t0\t0\t1\t1",
                 "tx3\t1\t1\t0\t0\t0",
@@ -302,7 +302,7 @@ def test_evaluate_labeled_introns_counts_seen_flags(tmp_path: Path) -> None:
     )
 
     assert len(rows) == 3
-    assert summary.seen_train_any_introns == 2
-    assert summary.unseen_train_any_introns == 1
+    assert summary.train_leak_introns == 2
+    assert summary.non_train_leak_introns == 1
     assert summary.seen_train_pos_coord_introns == 1
     assert summary.seen_train_neg_seq_introns == 1

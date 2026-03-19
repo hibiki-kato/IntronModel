@@ -87,7 +87,7 @@ def _prepare_assets(data_root: Path, species: str) -> Path:
             "member_count",
             "seen_train_pos_coord",
             "seen_train_neg_seq",
-            "seen_train_any",
+            "train_leak",
         ],
         rows=[
             {
@@ -100,7 +100,7 @@ def _prepare_assets(data_root: Path, species: str) -> Path:
                 "member_count": "2",
                 "seen_train_pos_coord": "1",
                 "seen_train_neg_seq": "0",
-                "seen_train_any": "1",
+                "train_leak": "1",
             },
             {
                 "unique_transcript_id": "uintron_00000002",
@@ -112,7 +112,7 @@ def _prepare_assets(data_root: Path, species: str) -> Path:
                 "member_count": "1",
                 "seen_train_pos_coord": "0",
                 "seen_train_neg_seq": "0",
-                "seen_train_any": "0",
+                "train_leak": "0",
             },
         ],
     )
@@ -205,7 +205,7 @@ def test_uniqueify_scores_temporary_rewrites_site_and_intron(tmp_path: Path) -> 
     assert first_site["source_transcript_id"] == "txA"
     assert first_site["source_intron_index"] == "1"
     assert first_site["member_count"] == "2"
-    assert first_site["seen_train_any"] == "1"
+    assert first_site["train_leak"] == "1"
     assert first_site["label"] == "1"
 
     first_intron = intron_rows[0]
@@ -214,7 +214,7 @@ def test_uniqueify_scores_temporary_rewrites_site_and_intron(tmp_path: Path) -> 
     assert first_intron["source_transcript_id"] == "txA"
     assert first_intron["source_intron_index"] == "1"
     assert first_intron["member_count"] == "2"
-    assert first_intron["seen_train_any"] == "1"
+    assert first_intron["train_leak"] == "1"
     assert first_intron["label"] == "1"
 
 

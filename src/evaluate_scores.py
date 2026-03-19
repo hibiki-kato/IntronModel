@@ -303,13 +303,13 @@ def resolve_plot_bounds(
 def _sync_legend_entry_visibility(
     legend_handle: Artist,
     legend_text: Text,
-    plotted_artist: Artist,
+    target_artists: tuple[Artist, ...],
 ) -> None:
-    """Match legend entry opacity to the plotted artist visibility."""
+    """Match legend entry opacity to target artist visibility."""
 
-    alpha = LEGEND_VISIBLE_ALPHA
-    if not plotted_artist.get_visible():
-        alpha = LEGEND_HIDDEN_ALPHA
+    alpha = LEGEND_HIDDEN_ALPHA
+    if any(artist.get_visible() for artist in target_artists):
+        alpha = LEGEND_VISIBLE_ALPHA
     legend_handle.set_alpha(alpha)
     legend_text.set_alpha(alpha)
 
@@ -317,7 +317,7 @@ def _sync_legend_entry_visibility(
 def _connect_interactive_legend_toggle(
     fig: Figure,
     legend: Legend,
-    labeled_artists: dict[str, Artist],
+    labeled_artists: dict[str, tuple[Artist, ...]],
 ) -> Callable[[PickEvent], None]:
     """Attach legend click handlers that toggle plotted artist visibility.
 
@@ -327,9 +327,9 @@ def _connect_interactive_legend_toggle(
         Figure that owns the legend and receives pick events.
     legend : matplotlib.legend.Legend
         Legend whose handles and texts should be clickable.
-    labeled_artists : dict[str, matplotlib.artist.Artist]
-        Mapping from legend label text to the plotted artist that should be
-        shown or hidden.
+    labeled_artists : dict[str, tuple[matplotlib.artist.Artist, ...]]
+        Mapping from legend label text to plotted artists that should be
+        shown or hidden together.
 
     Returns
     -------
@@ -342,24 +342,24 @@ def _connect_interactive_legend_toggle(
         If a legend label does not have a matching plotted artist.
     """
 
-    legend_targets: dict[Artist, tuple[Artist, Text, Artist]] = {}
+    legend_targets: dict[Artist, tuple[Artist, Text, tuple[Artist, ...]]] = {}
     legend_handles = list(legend.legend_handles)
     legend_texts = list(legend.get_texts())
 
     for legend_handle, legend_text in zip(legend_handles, legend_texts, strict=True):
         label = legend_text.get_text()
-        plotted_artist = labeled_artists.get(label)
-        if plotted_artist is None:
+        target_artists = labeled_artists.get(label)
+        if target_artists is None:
             raise ValueError(f"Legend label '{label}' does not match a plotted artist.")
         legend_handle.set_picker(True)
         legend_text.set_picker(True)
         _sync_legend_entry_visibility(
             legend_handle=legend_handle,
             legend_text=legend_text,
-            plotted_artist=plotted_artist,
+            target_artists=target_artists,
         )
-        legend_targets[legend_handle] = (legend_handle, legend_text, plotted_artist)
-        legend_targets[legend_text] = (legend_handle, legend_text, plotted_artist)
+        legend_targets[legend_handle] = (legend_handle, legend_text, target_artists)
+        legend_targets[legend_text] = (legend_handle, legend_text, target_artists)
 
     def on_pick(event: PickEvent) -> None:
         """Toggle the artist associated with a picked legend entry."""
@@ -367,12 +367,15 @@ def _connect_interactive_legend_toggle(
         target = legend_targets.get(event.artist)
         if target is None:
             return
-        legend_handle, legend_text, plotted_artist = target
-        plotted_artist.set_visible(not plotted_artist.get_visible())
+        legend_handle, legend_text, target_artists = target
+        currently_visible = any(artist.get_visible() for artist in target_artists)
+        new_visible = not currently_visible
+        for artist in target_artists:
+            artist.set_visible(new_visible)
         _sync_legend_entry_visibility(
             legend_handle=legend_handle,
             legend_text=legend_text,
-            plotted_artist=plotted_artist,
+            target_artists=target_artists,
         )
         fig.canvas.draw_idle()
 
@@ -417,7 +420,7 @@ def plot_eval_scores(
 
     fig, ax = plt.subplots(figsize=(16, 12), dpi=100)
     markers = ["o", "s", "^", "D", "v", "p", "*", "h", "x", "+"]
-    labeled_artists: dict[str, Artist] = {}
+    labeled_artists: dict[str, tuple[Artist, ...]] = {}
 
     best_model_label: str = ""
     best_model_f1: float = -1.0
@@ -443,13 +446,14 @@ def plot_eval_scores(
 
         max_f1_idx = int(np.argmax(f1_scores))
         model_max_f1 = float(f1_scores[max_f1_idx])
-        ax.scatter(
+        max_f1_artist = ax.scatter(
             sensitivity[max_f1_idx],
             precision[max_f1_idx],
             s=20,
             color="black",
             zorder=5,
         )
+        labeled_artists[label] = (scatter_artist, max_f1_artist)
         if model_max_f1 > best_model_f1:
             best_model_f1 = model_max_f1
             best_model_label = label

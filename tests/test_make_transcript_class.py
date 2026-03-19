@@ -1,4 +1,4 @@
-"""Tests for src/util/make_transcript_class_from_tmap.py."""
+"""Tests for annotated GTF transcript class extraction."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from src.util.make_transcript_class_from_tmap import (
-    parse_tmap,
-    parse_tracking,
+from src.util.make_transcript_class_from_annotated_gtf import (
+    parse_annotated_gtf,
     write_transcript_class,
 )
 
@@ -22,117 +21,61 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _read_class_set(path: Path) -> set[str]:
-    """Return the set of non-empty lines from a transcript_class.txt file."""
-    return {line for line in path.read_text(encoding="utf-8").splitlines() if line}
-
-
-def _write_tmap(path: Path, content: str) -> None:
+def _write_gtf(path: Path, content: str) -> None:
     path.write_text(textwrap.dedent(content), encoding="utf-8")
 
 
-def _write_tracking(path: Path, content: str) -> None:
-    path.write_text(textwrap.dedent(content), encoding="utf-8")
-
-
-def test_parse_tmap_returns_expected_records(tmp_path: Path) -> None:
-    tmap = tmp_path / "test.tmap"
-    _write_tmap(
-        tmap,
+def test_parse_annotated_gtf_returns_expected_records(tmp_path: Path) -> None:
+    gtf = tmp_path / "sample.annotated.gtf"
+    _write_gtf(
+        gtf,
         """\
-        ref_gene_id\tref_id\tclass_code\tqry_gene_id\tqry_id\tnum_exons\tFPKM\tTPM\tcov\tlen\tmajor_iso_id\tref_match_len
-        GeneA\trna-NM_001.1\t=\tXLOC_000001\tMSTRG_00000001:2:3.45\t3\t0.0\t0.0\t1.0\t500\tMSTRG_00000001:2:3.45\t500
-        GeneB\trna-NM_002.1\tj\tXLOC_000002\tMSTRG_00000002:1:1.20\t2\t0.0\t0.0\t1.0\t300\tMSTRG_00000002:1:1.20\t-
-        GeneC\t-\tu\tXLOC_000003\tMSTRG_00000003:3:0.80\t4\t0.0\t0.0\t1.0\t400\t-\t-
+        chr1\tgffcompare\ttranscript\t100\t200\t.\t+\t.\tgene_id "g1"; transcript_id "tx1"; class_code "=";
+        chr1\tgffcompare\texon\t100\t150\t.\t+\t.\tgene_id "g1"; transcript_id "tx1"; exon_number "1";
+        chr1\tgffcompare\ttranscript\t300\t400\t.\t+\t.\tgene_id "g2"; transcript_id "tx2"; class_code "j";
         """,
     )
 
-    records = parse_tmap(tmap)
+    records = parse_annotated_gtf(gtf)
 
-    assert records == [
-        ("MSTRG_00000001:2:3.45", "="),
-        ("MSTRG_00000002:1:1.20", "j"),
-        ("MSTRG_00000003:3:0.80", "u"),
-    ]
+    assert records == [("tx1", "="), ("tx2", "j")]
 
 
-def test_parse_tmap_skips_empty_qry_id(tmp_path: Path) -> None:
-    tmap = tmp_path / "test.tmap"
-    _write_tmap(
-        tmap,
+def test_parse_annotated_gtf_skips_rows_without_required_attrs(tmp_path: Path) -> None:
+    gtf = tmp_path / "missing_attrs.annotated.gtf"
+    _write_gtf(
+        gtf,
         """\
-        ref_gene_id\tref_id\tclass_code\tqry_gene_id\tqry_id\tnum_exons\tFPKM\tTPM\tcov\tlen\tmajor_iso_id\tref_match_len
-        GeneA\trna-NM_001.1\t=\tXLOC_000001\tMSTRG_00000001:1:2.00\t2\t0.0\t0.0\t1.0\t200\tMSTRG_00000001:1:2.00\t200
-        GeneB\t-\tj\tXLOC_000002\t\t1\t0.0\t0.0\t0.0\t0\t-\t-
+        chr1\tgffcompare\ttranscript\t100\t200\t.\t+\t.\tgene_id "g1"; transcript_id "tx1";
+        chr1\tgffcompare\ttranscript\t300\t400\t.\t+\t.\tgene_id "g2"; class_code "u";
+        chr1\tgffcompare\ttranscript\t500\t600\t.\t+\t.\tgene_id "g3"; transcript_id "tx3"; class_code "c";
         """,
     )
 
-    records = parse_tmap(tmap)
+    records = parse_annotated_gtf(gtf)
 
-    assert len(records) == 1
-    assert records[0] == ("MSTRG_00000001:1:2.00", "=")
+    assert records == [("tx3", "c")]
 
 
-def test_parse_tmap_raises_on_missing_file(tmp_path: Path) -> None:
+def test_parse_annotated_gtf_raises_on_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="not found"):
-        parse_tmap(tmp_path / "nonexistent.tmap")
+        parse_annotated_gtf(tmp_path / "not_found.annotated.gtf")
 
 
-def test_parse_tmap_raises_on_empty_file(tmp_path: Path) -> None:
-    tmap = tmp_path / "empty.tmap"
-    tmap.write_text("", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="empty"):
-        parse_tmap(tmap)
-
-
-def test_parse_tmap_raises_on_wrong_header(tmp_path: Path) -> None:
-    tmap = tmp_path / "bad_header.tmap"
-    tmap.write_text("wrong_header\tcol2\tcol3\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="header"):
-        parse_tmap(tmap)
-
-
-def test_parse_tmap_raises_on_too_few_columns(tmp_path: Path) -> None:
-    tmap = tmp_path / "short.tmap"
-    _write_tmap(
-        tmap,
-        """\
-        ref_gene_id\tref_id\tclass_code\tqry_gene_id\tqry_id\tnum_exons
-        GeneA\trna-NM_001.1\t=
-        """,
-    )
+def test_parse_annotated_gtf_raises_on_malformed_row(tmp_path: Path) -> None:
+    gtf = tmp_path / "bad.annotated.gtf"
+    _write_gtf(gtf, "chr1\tgffcompare\ttranscript\n")
 
     with pytest.raises(ValueError, match="columns"):
-        parse_tmap(tmap)
+        parse_annotated_gtf(gtf)
 
 
-def test_write_transcript_class_creates_correct_file(tmp_path: Path) -> None:
-    records = [
-        ("MSTRG_00000001:2:3.45", "="),
-        ("MSTRG_00000002:1:1.20", "j"),
-        ("MSTRG_00000003:3:0.80", "u"),
-    ]
-    out = tmp_path / "transcript_class.txt"
+def test_write_transcript_class_writes_expected_lines(tmp_path: Path) -> None:
+    out_path = tmp_path / "transcript_class.txt"
 
-    write_transcript_class(records, out)
+    write_transcript_class([("tx1", "="), ("tx2", "u")], out_path)
 
-    lines = out.read_text(encoding="utf-8").splitlines()
-    assert lines == [
-        "MSTRG_00000001:2:3.45 =",
-        "MSTRG_00000002:1:1.20 j",
-        "MSTRG_00000003:3:0.80 u",
-    ]
-
-
-def test_write_transcript_class_creates_parent_dirs(tmp_path: Path) -> None:
-    out = tmp_path / "nested" / "dir" / "transcript_class.txt"
-    records = [("MSTRG_00000001:1:1.00", "=")]
-
-    write_transcript_class(records, out)
-
-    assert out.is_file()
+    assert out_path.read_text(encoding="utf-8").splitlines() == ["tx1 =", "tx2 u"]
 
 
 def test_write_transcript_class_raises_on_empty_records(tmp_path: Path) -> None:
@@ -140,125 +83,37 @@ def test_write_transcript_class_raises_on_empty_records(tmp_path: Path) -> None:
         write_transcript_class([], tmp_path / "transcript_class.txt")
 
 
-def test_roundtrip_parse_and_write(tmp_path: Path) -> None:
-    tmap = tmp_path / "test.tmap"
-    _write_tmap(
-        tmap,
-        """\
-        ref_gene_id\tref_id\tclass_code\tqry_gene_id\tqry_id\tnum_exons\tFPKM\tTPM\tcov\tlen\tmajor_iso_id\tref_match_len
-        GeneA\trna-NM_001.1\t=\tXLOC_000001\tMSTRG_00000001:2:5.50\t3\t0.0\t0.0\t1.0\t500\tMSTRG_00000001:2:5.50\t500
-        GeneB\trna-NM_002.1\tc\tXLOC_000002\tMSTRG_00000002:1:0.90\t2\t0.0\t0.0\t1.0\t200\tMSTRG_00000002:1:0.90\t100
-        """,
+def _find_reference_annotation(raw_dir: Path) -> Path | None:
+    preferred = sorted(raw_dir.glob("*.fix.gff")) + sorted(raw_dir.glob("*.gff.fix"))
+    if preferred:
+        return preferred[0]
+
+    generic = sorted(raw_dir.glob("*.gff")) + sorted(raw_dir.glob("*.gff3"))
+    if generic:
+        return generic[0]
+    return None
+
+
+def _find_query_gtf(raw_dir: Path) -> Path | None:
+    fasta_candidates = sorted(raw_dir.glob("*.clean.fna")) + sorted(
+        raw_dir.glob("*.fna")
     )
-    out = tmp_path / "transcript_class.txt"
+    for fasta in fasta_candidates:
+        direct_gtf = Path(f"{fasta}.gtf")
+        if direct_gtf.is_file():
+            return direct_gtf
 
-    records = parse_tmap(tmap)
-    write_transcript_class(records, out)
+    fna_gtf = sorted(raw_dir.glob("*.fna.gtf"))
+    if fna_gtf:
+        return fna_gtf[0]
 
-    lines = out.read_text(encoding="utf-8").splitlines()
-    assert lines == [
-        "MSTRG_00000001:2:5.50 =",
-        "MSTRG_00000002:1:0.90 c",
-    ]
-
-
-# ---------------------------------------------------------------------------
-# parse_tracking unit tests
-# ---------------------------------------------------------------------------
+    gtf = sorted(raw_dir.glob("*.gtf"))
+    if gtf:
+        return gtf[0]
+    return None
 
 
-def test_parse_tracking_returns_expected_records(tmp_path: Path) -> None:
-    tracking = tmp_path / "test.tracking"
-    _write_tracking(
-        tracking,
-        """\
-        TCONS_00000001|3|500\tXLOC_000001\tGeneA|rna-NM_001.1\t=\tq1:XLOC_000001|MSTRG_00000001:2:3.45|3|0.0|0.0|1.0|500
-        TCONS_00000002|2|300\tXLOC_000002\tGeneB|rna-NM_002.1\tj\tq1:XLOC_000002|MSTRG_00000002:1:1.20|2|0.0|0.0|1.0|300
-        TCONS_00000003|4|400\tXLOC_000003\t-\tu\tq1:XLOC_000003|MSTRG_00000003:3:0.80|4|0.0|0.0|1.0|400
-        """,
-    )
-
-    records = parse_tracking(tracking)
-
-    assert records == [
-        ("MSTRG_00000001:2:3.45", "="),
-        ("MSTRG_00000002:1:1.20", "j"),
-        ("MSTRG_00000003:3:0.80", "u"),
-    ]
-
-
-def test_parse_tracking_raises_on_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="not found"):
-        parse_tracking(tmp_path / "nonexistent.tracking")
-
-
-def test_parse_tracking_raises_on_empty_file(tmp_path: Path) -> None:
-    tracking = tmp_path / "empty.tracking"
-    tracking.write_text("", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="empty"):
-        parse_tracking(tracking)
-
-
-def test_parse_tracking_raises_on_too_few_columns(tmp_path: Path) -> None:
-    tracking = tmp_path / "short.tracking"
-    _write_tracking(
-        tracking,
-        """\
-        TCONS_00000001|3|500\tXLOC_000001\tGeneA|rna-NM_001.1
-        """,
-    )
-
-    with pytest.raises(ValueError, match="columns"):
-        parse_tracking(tracking)
-
-
-def test_parse_tracking_novel_transcript(tmp_path: Path) -> None:
-    """Novel transcripts (class_code ``u``) with ref ``-`` are parsed correctly."""
-    tracking = tmp_path / "novel.tracking"
-    _write_tracking(
-        tracking,
-        """\
-        TCONS_00000074|3|965\tXLOC_000008\t-\tu\tq1:XLOC_000008|MSTRG_00000286:1:0.82|3|0.0|0.0|1.0|965
-        """,
-    )
-
-    records = parse_tracking(tracking)
-
-    assert records == [("MSTRG_00000286:1:0.82", "u")]
-
-
-# ---------------------------------------------------------------------------
-# Integration tests: require gffcompare on PATH and existing species data
-# ---------------------------------------------------------------------------
-
-
-def _run_gffcompare(
-    ref_annotation: Path,
-    query_gtf: Path,
-    out_prefix: Path,
-) -> Path:
-    """Run gffcompare and return the path to the generated ``.tracking`` file.
-
-    Parameters
-    ----------
-    ref_annotation : Path
-        Reference GFF/GFF3 annotation.
-    query_gtf : Path
-        Query GTF (e.g. StringTie output).
-    out_prefix : Path
-        Prefix for gffcompare output files.
-
-    Returns
-    -------
-    Path
-        Path to the ``.tracking`` file produced by gffcompare.
-
-    Raises
-    ------
-    FileNotFoundError
-        If the expected ``.tracking`` file is not created by gffcompare.
-    """
+def _run_gffcompare(ref_annotation: Path, query_gtf: Path, out_prefix: Path) -> Path:
     result = subprocess.run(
         [
             "gffcompare",
@@ -274,84 +129,51 @@ def _run_gffcompare(
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"gffcompare failed (exit {result.returncode}):\n{result.stderr}"
+            "gffcompare failed "
+            f"(exit {result.returncode}):\n{result.stdout}\n{result.stderr}"
         )
-    tracking_path = out_prefix.parent / f"{out_prefix.name}.tracking"
-    if not tracking_path.is_file():
+
+    annotated = out_prefix.parent / f"{out_prefix.name}.annotated.gtf"
+    if not annotated.is_file():
         raise FileNotFoundError(
-            f"Expected tracking not found after gffcompare: {tracking_path}"
+            f"Expected annotated gtf not found after gffcompare: {annotated}"
         )
-    return tracking_path
+    return annotated
 
 
-def _find_fix_gff(raw_dir: Path) -> Path | None:
-    candidates = sorted(raw_dir.glob("*.fix.gff")) + sorted(raw_dir.glob("*.gff.fix"))
-    if candidates:
-        return candidates[0]
-    candidates = sorted(raw_dir.glob("*.gff"))
-    return candidates[0] if candidates else None
-
-
-def _find_fna_gtf(raw_dir: Path) -> Path | None:
-    candidates = sorted(raw_dir.glob("*.fna.gtf"))
-    if candidates:
-        return candidates[0]
-    candidates = sorted(raw_dir.glob("*.gtf"))
-    return candidates[0] if candidates else None
-
-
-@pytest.mark.skipif(
-    not _GFFCOMPARE_AVAILABLE,
-    reason="gffcompare not found on PATH",
-)
-@pytest.mark.parametrize("species", ["Dmel", "Mmus", "Athal"])
-def test_gffcompare_output_matches_existing_transcript_class(
+@pytest.mark.skipif(not _GFFCOMPARE_AVAILABLE, reason="gffcompare not found on PATH")
+@pytest.mark.parametrize("species", ["Dmel", "Mmus", "Athal", "Hsap"])
+def test_gffcompare_annotated_matches_existing_transcript_class(
     tmp_path: Path,
     species: str,
 ) -> None:
-    """Re-run gffcompare on existing data and verify the parsed output matches
-    the committed ``transcript_class.txt`` for that species.
-
-    The existing file is never modified; all gffcompare output goes to
-    ``tmp_path``.
-
-    Parameters
-    ----------
-    tmp_path : Path
-        Pytest-provided temporary directory.
-    species : str
-        Species folder name under ``data/``.
-    """
+    """Generated transcript_class must match committed transcript_class.txt."""
     root = _project_root()
     raw_dir = root / "data" / species / "raw"
-    existing_class_file = raw_dir / "transcript_class.txt"
+    existing_class = raw_dir / "transcript_class.txt"
 
-    if not existing_class_file.is_file():
+    if not existing_class.is_file():
         pytest.skip(f"transcript_class.txt not found for {species}")
 
-    ref_annotation = _find_fix_gff(raw_dir)
-    query_gtf = _find_fna_gtf(raw_dir)
-
+    ref_annotation = _find_reference_annotation(raw_dir)
     if ref_annotation is None:
-        pytest.skip(f"No reference GFF found for {species}")
-    if query_gtf is None:
-        pytest.skip(f"No query GTF found for {species}")
+        pytest.skip(f"reference annotation not found for {species}")
 
-    tracking_path = _run_gffcompare(
+    query_gtf = _find_query_gtf(raw_dir)
+    if query_gtf is None:
+        pytest.skip(f"query gtf not found for {species}")
+
+    annotated_gtf = _run_gffcompare(
         ref_annotation=ref_annotation,
         query_gtf=query_gtf,
-        out_prefix=tmp_path / "gffcmp",
+        out_prefix=tmp_path / "gffcompare_tmp",
     )
 
-    records = parse_tracking(tracking_path)
-    out_path = tmp_path / "transcript_class.txt"
-    write_transcript_class(records, out_path)
+    records = parse_annotated_gtf(annotated_gtf)
+    generated_class = tmp_path / "transcript_class.generated.txt"
+    write_transcript_class(records, generated_class)
 
-    generated = _read_class_set(out_path)
-    existing = _read_class_set(existing_class_file)
+    generated_lines = generated_class.read_text(encoding="utf-8").splitlines()
+    existing_lines = existing_class.read_text(encoding="utf-8").splitlines()
 
-    assert generated == existing, (
-        f"[{species}] transcript_class.txt mismatch: "
-        f"{len(generated - existing)} lines only in generated, "
-        f"{len(existing - generated)} lines only in existing."
-    )
+    assert generated_lines == existing_lines

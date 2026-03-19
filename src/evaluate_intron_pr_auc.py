@@ -17,6 +17,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+from util.unique_intron import UNIQUE_MAP_TSV_NAME, invert_unique_map, load_unique_map
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -32,6 +33,7 @@ SCORE_SOURCE_CHOICES: tuple[str, ...] = (
     "donor",
     "acceptor",
 )
+SCORE_COLLAPSE_TOLERANCE: float = 2e-4
 
 
 def _set_csv_field_limit_max() -> None:
@@ -66,7 +68,7 @@ class IntronEvalRow:
         1 when the coordinate appears in train-positive introns.
     seen_train_neg_seq : int
         1 when donor/acceptor sequence pair appears in train negatives.
-    seen_train_any : int
+    train_leak : int
         OR of ``seen_train_pos_coord`` and ``seen_train_neg_seq``.
     """
 
@@ -79,7 +81,7 @@ class IntronEvalRow:
     pair_score: float | None
     seen_train_pos_coord: int
     seen_train_neg_seq: int
-    seen_train_any: int
+    train_leak: int
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,7 @@ class LabeledIntronRecord:
     label: int
     seen_train_pos_coord: int
     seen_train_neg_seq: int
-    seen_train_any: int
+    train_leak: int
 
 
 @dataclass(frozen=True)
@@ -101,8 +103,8 @@ class IntronEvalSummary:
     used_introns: int
     skipped_missing_score_introns: int
     unlabeled_site_score_introns: int
-    seen_train_any_introns: int
-    unseen_train_any_introns: int
+    train_leak_introns: int
+    non_train_leak_introns: int
     seen_train_pos_coord_introns: int
     seen_train_neg_seq_introns: int
     positive_count: int
@@ -305,24 +307,24 @@ def _read_labeled_introns(path: Path) -> dict[tuple[str, int], LabeledIntronReco
                 path=path,
                 line_no=line_no,
             )
-            seen_train_any = _parse_optional_seen_flag(
-                raw_value=str(raw.get("seen_train_any", "")),
-                column_name="seen_train_any",
+            train_leak = _parse_optional_seen_flag(
+                raw_value=str(raw.get("train_leak", "")),
+                column_name="train_leak",
                 path=path,
                 line_no=line_no,
             )
             expected_seen_any = int(
                 seen_train_pos_coord == 1 or seen_train_neg_seq == 1
             )
-            if seen_train_any != expected_seen_any:
-                seen_train_any = expected_seen_any
+            if train_leak != expected_seen_any:
+                train_leak = expected_seen_any
 
             key = (transcript_id, intron_index)
             record = LabeledIntronRecord(
                 label=label,
                 seen_train_pos_coord=seen_train_pos_coord,
                 seen_train_neg_seq=seen_train_neg_seq,
-                seen_train_any=seen_train_any,
+                train_leak=train_leak,
             )
             previous = labels.get(key)
             if previous is not None and previous != record:
@@ -471,6 +473,66 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
     return site_scores
 
 
+def _uses_unique_intron_ids(keys: set[tuple[str, int]]) -> bool:
+    """Return whether all keys use canonical unique intron transcript IDs."""
+    if not keys:
+        return False
+    return all(transcript_id.startswith("uintron_") for transcript_id, _ in keys)
+
+
+def _resolve_unique_map_path(
+    *,
+    labeled_tsv: Path,
+    site_score_tsv: Path,
+    unique_map_tsv: Path | None,
+) -> Path | None:
+    """Resolve unique-map path from explicit option or input-relative defaults."""
+    if unique_map_tsv is not None:
+        if not unique_map_tsv.is_file():
+            raise FileNotFoundError(f"Unique map TSV not found: {unique_map_tsv}")
+        return unique_map_tsv
+
+    candidates = (
+        labeled_tsv.parent / UNIQUE_MAP_TSV_NAME,
+        site_score_tsv.parent.parent / "processed" / UNIQUE_MAP_TSV_NAME,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _collapse_site_scores_to_unique(
+    *,
+    site_scores_by_key: dict[tuple[str, int], dict[str, float]],
+    original_to_unique: dict[tuple[str, int], tuple[str, int]],
+    tolerance: float = SCORE_COLLAPSE_TOLERANCE,
+) -> dict[tuple[str, int], dict[str, float]]:
+    """Collapse site scores to unique intron keys via unique-map reverse lookup.
+
+    Rows keyed by original transcript intron IDs are mapped to one unique key.
+    If multiple rows map to one unique key, donor/acceptor/pair scores must be
+    consistent within tolerance.
+    """
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be >= 0.")
+
+    collapsed: dict[tuple[str, int], dict[str, float]] = {}
+    for key, per_site in site_scores_by_key.items():
+        unique_key = original_to_unique.get(key, key)
+        target = collapsed.setdefault(unique_key, {})
+        for site_type, score in per_site.items():
+            previous = target.get(site_type)
+            if previous is not None and abs(previous - score) > tolerance:
+                raise ValueError(
+                    "Conflicting scores after unique collapse. "
+                    f"key={unique_key} site_type={site_type} "
+                    f"score_a={previous:.8g} score_b={score:.8g}"
+                )
+            target[site_type] = score
+    return collapsed
+
+
 def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
     """Combine donor/acceptor scores into one intron score."""
     if op == "+":
@@ -541,6 +603,7 @@ def evaluate_labeled_introns(
     intron_score_op: str = "*",
     score_source: str = "auto",
     strict_missing: bool = False,
+    unique_map_tsv: Path | None = None,
 ) -> tuple[IntronEvalSummary, list[IntronEvalRow]]:
     """Evaluate intron-level PR-AUC from label and score TSV files.
 
@@ -562,6 +625,9 @@ def evaluate_labeled_introns(
         ``acceptor`` uses acceptor score only.
     strict_missing : bool, default=False
         If ``True``, raise when some labeled introns cannot be scored.
+    unique_map_tsv : Path | None, default=None
+        Optional path to ``transcripts.unique.map.tsv`` used to collapse
+        original-keyed site scores into unique intron keys.
 
     Returns
     -------
@@ -589,6 +655,30 @@ def evaluate_labeled_introns(
 
     labels_by_key = _read_labeled_introns(labeled_tsv)
     site_scores_by_key = _read_site_scores(site_score_tsv)
+    label_keys = set(labels_by_key.keys())
+    score_keys = set(site_scores_by_key.keys())
+    labels_are_unique = _uses_unique_intron_ids(label_keys)
+    scores_are_unique = _uses_unique_intron_ids(score_keys)
+
+    if labels_are_unique and not scores_are_unique:
+        resolved_unique_map_path = _resolve_unique_map_path(
+            labeled_tsv=labeled_tsv,
+            site_score_tsv=site_score_tsv,
+            unique_map_tsv=unique_map_tsv,
+        )
+        if resolved_unique_map_path is None:
+            raise ValueError(
+                "Labeled TSV uses unique intron IDs but site-score TSV does not. "
+                "Could not resolve transcripts.unique.map.tsv automatically. "
+                "Pass --unique-map-tsv explicitly or rewrite score files to "
+                "unique keys first."
+            )
+        unique_map = load_unique_map(resolved_unique_map_path)
+        original_to_unique = invert_unique_map(unique_map)
+        site_scores_by_key = _collapse_site_scores_to_unique(
+            site_scores_by_key=site_scores_by_key,
+            original_to_unique=original_to_unique,
+        )
 
     rows: list[IntronEvalRow] = []
     skipped_missing_score_introns = 0
@@ -625,7 +715,7 @@ def evaluate_labeled_introns(
                 pair_score=pair_score,
                 seen_train_pos_coord=label_record.seen_train_pos_coord,
                 seen_train_neg_seq=label_record.seen_train_neg_seq,
-                seen_train_any=label_record.seen_train_any,
+                train_leak=label_record.train_leak,
             )
         )
 
@@ -647,12 +737,12 @@ def evaluate_labeled_introns(
             "Both positive and negative labels are required for PR-AUC/ROC-AUC."
         )
 
-    seen_train_any_introns = int(sum(row.seen_train_any for row in rows))
+    train_leak_introns = int(sum(row.train_leak for row in rows))
     seen_train_pos_coord_introns = int(
         sum(row.seen_train_pos_coord for row in rows)
     )
     seen_train_neg_seq_introns = int(sum(row.seen_train_neg_seq for row in rows))
-    unseen_train_any_introns = int(len(rows) - seen_train_any_introns)
+    non_train_leak_introns = int(len(rows) - train_leak_introns)
 
     pr_auc = compute_average_precision(labels, scores)
     roc_auc = compute_roc_auc(labels, scores)
@@ -666,8 +756,8 @@ def evaluate_labeled_introns(
         used_introns=len(rows),
         skipped_missing_score_introns=skipped_missing_score_introns,
         unlabeled_site_score_introns=unlabeled_site_score_introns,
-        seen_train_any_introns=seen_train_any_introns,
-        unseen_train_any_introns=unseen_train_any_introns,
+        train_leak_introns=train_leak_introns,
+        non_train_leak_introns=non_train_leak_introns,
         seen_train_pos_coord_introns=seen_train_pos_coord_introns,
         seen_train_neg_seq_introns=seen_train_neg_seq_introns,
         positive_count=positive_count,
@@ -695,7 +785,7 @@ def _write_eval_rows_tsv(path: Path, rows: list[IntronEvalRow]) -> None:
         "pair_score",
         "seen_train_pos_coord",
         "seen_train_neg_seq",
-        "seen_train_any",
+        "train_leak",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -721,7 +811,7 @@ def _write_eval_rows_tsv(path: Path, rows: list[IntronEvalRow]) -> None:
                     ),
                     "seen_train_pos_coord": row.seen_train_pos_coord,
                     "seen_train_neg_seq": row.seen_train_neg_seq,
-                    "seen_train_any": row.seen_train_any,
+                    "train_leak": row.train_leak,
                 }
             )
 
@@ -762,6 +852,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Fail if some labeled introns do not have usable scores.",
     )
     parser.add_argument(
+        "--unique-map-tsv",
+        default="",
+        help=(
+            "Optional transcripts.unique.map.tsv path for collapsing "
+            "original-keyed site scores to unique intron IDs."
+        ),
+    )
+    parser.add_argument(
         "--output-json",
         default="",
         help="Optional JSON output path for metric summary.",
@@ -777,12 +875,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
+    unique_map_tsv_text = str(args.unique_map_tsv).strip()
+    unique_map_tsv = Path(unique_map_tsv_text) if unique_map_tsv_text != "" else None
     summary, rows = evaluate_labeled_introns(
         labeled_tsv=Path(str(args.labeled_intron_tsv)),
         site_score_tsv=Path(str(args.site_score_tsv)),
         intron_score_op=str(args.intron_score_op),
         score_source=str(args.score_source),
         strict_missing=bool(args.strict_missing),
+        unique_map_tsv=unique_map_tsv,
     )
 
     print(
@@ -790,8 +891,8 @@ def main(argv: list[str] | None = None) -> int:
         f"used={summary.used_introns} "
         f"pos={summary.positive_count} "
         f"neg={summary.negative_count} "
-        f"seen_any={summary.seen_train_any_introns} "
-        f"unseen_any={summary.unseen_train_any_introns} "
+        f"train_leak={summary.train_leak_introns} "
+        f"non_train_leak={summary.non_train_leak_introns} "
         f"missing={summary.skipped_missing_score_introns} "
         f"unlabeled_site_only={summary.unlabeled_site_score_introns} "
         f"pr_auc={summary.pr_auc:.6f} "

@@ -115,7 +115,7 @@ def test_build_unique_intron_assets_merges_duplicate_coordinates(
     assert label_rows[0]["member_count"] == "2"
     assert label_rows[0]["seen_train_pos_coord"] == "1"
     assert label_rows[0]["seen_train_neg_seq"] == "1"
-    assert label_rows[0]["seen_train_any"] == "1"
+    assert label_rows[0]["train_leak"] == "1"
 
     with catalog_tsv.open("r", encoding="utf-8", newline="") as handle:
         catalog_rows = list(csv.DictReader(handle, delimiter="\t"))

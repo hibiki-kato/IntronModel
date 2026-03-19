@@ -3,11 +3,19 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOT'
-Usage: bash run/eval_trans_score.sh
+Usage: bash run/eval_trans_score.sh [options]
 
-This script uses internal configuration only.
-Edit the top CONFIG block in this file to change species, score files,
-visualization mode, or environment settings.
+This script uses internal CONFIG defaults, but you can override targets
+from CLI to process multiple species/scores in one run.
+
+Options:
+  --species <csv>    Comma-separated species list (e.g. Hsap,Mmus)
+  --scores <csv>     Comma-separated score files/paths
+  --score <value>    One score file/path (repeatable)
+
+Behavior:
+	- If SCORE_INPUTS is empty, all *.tsv and *.txt files under
+		data/<species>/trans_score are evaluated.
 
 Optional:
   -h, --help   Show this help
@@ -17,10 +25,6 @@ EOT
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
 	usage
 	exit 0
-fi
-if [[ $# -gt 0 ]]; then
-	echo "This script does not accept CLI options. Edit the top CONFIG block instead." >&2
-	exit 1
 fi
 
 # --------------------------
@@ -36,10 +40,66 @@ X_MAX=""
 Y_MIN=""
 Y_MAX=""
 TARGET_SPECIES=("Hsap")
-SCORE_INPUTS=("cnn_pair.tsv" "Markov.txt" "cnn_mask.tsv")
+SCORE_INPUTS=("cnn_pair")
 CLASS_FILE_OVERRIDE=""
 REF_GFF_OVERRIDE=""
 INTRONMODEL_AUTO_TMUX=off
+
+CLI_SPECIES_CSV=""
+CLI_SCORES_CSV=""
+CLI_SCORE_INPUTS=()
+
+append_csv_items() {
+	local csv_text="$1"
+	local raw_item=""
+	IFS=',' read -r -a _csv_items <<<"${csv_text}"
+	for raw_item in "${_csv_items[@]}"; do
+		item="$(printf '%s' "${raw_item}" | tr -d '[:space:]')"
+		if [[ -n "${item}" ]]; then
+			CLI_SCORE_INPUTS+=("${item}")
+		fi
+	done
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--species)
+		CLI_SPECIES_CSV="$2"
+		shift 2
+		;;
+	--scores)
+		CLI_SCORES_CSV="$2"
+		shift 2
+		;;
+	--score)
+		CLI_SCORE_INPUTS+=("$2")
+		shift 2
+		;;
+	*)
+		echo "Unknown option: $1" >&2
+		usage >&2
+		exit 1
+		;;
+	esac
+done
+
+if [[ -n "${CLI_SPECIES_CSV}" ]]; then
+	TARGET_SPECIES=()
+	IFS=',' read -r -a _species_items <<<"${CLI_SPECIES_CSV}"
+	for raw_item in "${_species_items[@]}"; do
+		item="$(printf '%s' "${raw_item}" | tr -d '[:space:]')"
+		if [[ -n "${item}" ]]; then
+			TARGET_SPECIES+=("${item}")
+		fi
+	done
+fi
+
+if [[ -n "${CLI_SCORES_CSV}" ]]; then
+	append_csv_items "${CLI_SCORES_CSV}"
+fi
+if [[ ${#CLI_SCORE_INPUTS[@]} -gt 0 ]]; then
+	SCORE_INPUTS=("${CLI_SCORE_INPUTS[@]}")
+fi
 
 
 if [[ "${VISUALIZE}" != "none" && "${VISUALIZE}" != "true" \
@@ -51,10 +111,12 @@ if [[ ${#TARGET_SPECIES[@]} -eq 0 ]]; then
 	echo "TARGET_SPECIES must contain at least one species." >&2
 	exit 1
 fi
-if [[ ${#SCORE_INPUTS[@]} -eq 0 ]]; then
-	echo "SCORE_INPUTS must contain at least one score file name/path." >&2
-	exit 1
-fi
+for score_input in "${SCORE_INPUTS[@]}"; do
+	if [[ -z "${score_input}" ]]; then
+		echo "SCORE_INPUTS contains an empty item." >&2
+		exit 1
+	fi
+done
 
 # --------------------------
 # Runtime implementation
@@ -107,6 +169,13 @@ resolve_score_file() {
 	fi
 
 	return 1
+}
+
+collect_all_score_inputs() {
+	local trans_score_dir="$1"
+
+	find "${trans_score_dir}" -maxdepth 1 -type f \
+		\( -name '*.tsv' -o -name '*.txt' \) -printf '%f\n' | sort
 }
 
 resolve_ref_gff() {
@@ -214,7 +283,22 @@ for species in "${TARGET_SPECIES[@]}"; do
 
 	mkdir -p "${EVAL_SCORE_DIR}"
 
-	for input_value in "${SCORE_INPUTS[@]}"; do
+	score_inputs_for_species=()
+	if [[ ${#SCORE_INPUTS[@]} -eq 0 ]]; then
+		mapfile -t score_inputs_for_species < <(
+			collect_all_score_inputs "${TRANS_SCORE_DIR}"
+		)
+		if [[ ${#score_inputs_for_species[@]} -eq 0 ]]; then
+			echo "No score files found under: ${TRANS_SCORE_DIR}" >&2
+			echo "Expected at least one *.tsv or *.txt." >&2
+			exit 5
+		fi
+		echo "[eval_trans_score] species=${species} evaluating all score files"
+	else
+		score_inputs_for_species=("${SCORE_INPUTS[@]}")
+	fi
+
+	for input_value in "${score_inputs_for_species[@]}"; do
 		score_file="$(resolve_score_file "${input_value}" "${TRANS_SCORE_DIR}" || true)"
 		if [[ -z "${score_file}" ]]; then
 			echo "score file not found for species=${species}: ${input_value}" >&2

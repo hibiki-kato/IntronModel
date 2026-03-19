@@ -616,6 +616,7 @@ def test_build_intron_count_comparison_rows(tmp_path: Path) -> None:
             [
                 "DEBUG donor AAAA acceptor CCCC + TX1 10",
                 "DEBUG donor GGGG acceptor TTTT + TX1 15",
+                "DEBUG donor GGGG acceptor TTTT + TX2 15",
             ]
         )
         + "\n",
@@ -625,6 +626,7 @@ def test_build_intron_count_comparison_rows(tmp_path: Path) -> None:
         "\n".join(
             [
                 "DEBUG pair AAAA CCCC + 5",
+                "DEBUG pair GGGG TTTT - 6",
                 "DEBUG pair GGGG TTTT - 6",
                 "DEBUG donor ACGT +",
             ]
@@ -781,6 +783,7 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
             [
                 "DEBUG donor AAAA acceptor CCCC + TX1 10",
                 "DEBUG donor GGGG +",
+                "DEBUG donor GGGG +",
             ]
         )
         + "\n",
@@ -792,6 +795,7 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
                 "DEBUG pair AAAA CCCC + 10",
                 "DEBUG donor TTTT +",
                 "DEBUG acceptor GGGG -",
+                "DEBUG acceptor GGGG -",
             ]
         )
         + "\n",
@@ -800,10 +804,14 @@ def test_build_site_label_count_rows_counts_train_and_test(tmp_path: Path) -> No
     (processed_dir / "intron_eval_flank10.tsv").write_text(
         "\n".join(
             [
-                "species\ttranscript_id\tintron_index\tdonor_label\tacceptor_label",
-                "SpX\ttx1\t1\t1\t0",
-                "SpX\ttx2\t2\t0\t1",
-                "SpX\ttx3\t3\t1\t1",
+                (
+                    "species\ttranscript_id\tintron_index\tdonor_label\t"
+                    "acceptor_label\tdonor_seq_100bp\tacceptor_seq_100bp"
+                ),
+                "SpX\ttx1\t1\t1\t0\tAAAA\tCCCC",
+                "SpX\ttx2\t2\t0\t1\tTTTT\tGGGG",
+                "SpX\ttx3\t3\t1\t1\tPPPP\tQQQQ",
+                "SpX\ttx4\t4\t1\t0\tAAAA\tCCCC",
             ]
         )
         + "\n",

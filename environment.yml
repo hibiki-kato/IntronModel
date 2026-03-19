@@ -1,5 +1,6 @@
 name: intronmodel
 channels:
+  - bioconda
   - conda-forge
 dependencies:
   - python=3.12
@@ -19,6 +20,7 @@ dependencies:
   - tqdm
   - pyyaml
   - xgboost
+  - gffcompare
   - pip:
       - pytest>=8.0
       - sphinx>=8.0

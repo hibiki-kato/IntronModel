@@ -1485,26 +1485,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
             _disable_infer_compile_flags(args)
             site_rows = model_module.infer_site(common_args=args, model_args=args)
 
-    if (not args.site_score_tsv) and _uses_default_unique_test_tsv(
-        species=args.species,
-        test_tsv=args.test_tsv,
-    ):
-        unique_site_rows = site_rows
+    unique_site_rows = _collapse_site_rows_to_unique(
+        site_score_rows=site_rows,
+        unique_map=unique_map,
+        score_tolerance=args.site_collapse_score_tolerance,
+    )
+    if len(unique_site_rows) != len(site_rows):
         print(
-            "[pipeline] site-score unique collapse skipped: "
-            "inference used processed/transcripts.unique.tsv"
+            "[pipeline] site-score unique collapse: "
+            f"input_rows={len(site_rows)} unique_rows={len(unique_site_rows)}"
         )
-    else:
-        unique_site_rows = _collapse_site_rows_to_unique(
-            site_score_rows=site_rows,
-            unique_map=unique_map,
-            score_tolerance=args.site_collapse_score_tolerance,
-        )
-        if len(unique_site_rows) != len(site_rows):
-            print(
-                "[pipeline] site-score unique collapse: "
-                f"input_rows={len(site_rows)} unique_rows={len(unique_site_rows)}"
-            )
     if args.site_score_tsv:
         print(
             "[pipeline] intron evaluation uses unique-collapsed site rows from "

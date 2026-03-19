@@ -91,7 +91,7 @@ class UniqueIntronRecord:
     member_keys: tuple[MemberKey, ...]
     seen_train_pos_coord: int
     seen_train_neg_seq: int
-    seen_train_any: int
+    train_leak: int
 
 
 def _parse_species_csv(raw_species: str) -> list[str]:
@@ -508,7 +508,7 @@ def _build_unique_introns(
                 member_keys=member_keys,
                 seen_train_pos_coord=seen_train_pos_coord,
                 seen_train_neg_seq=seen_train_neg_seq,
-                seen_train_any=int(seen_train_pos_coord == 1 or seen_train_neg_seq == 1),
+                train_leak=int(seen_train_pos_coord == 1 or seen_train_neg_seq == 1),
             )
         )
     return unique_records
@@ -623,7 +623,7 @@ def _write_unique_labeled_tsv(
         "member_count",
         "seen_train_pos_coord",
         "seen_train_neg_seq",
-        "seen_train_any",
+        "train_leak",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
@@ -649,7 +649,7 @@ def _write_unique_labeled_tsv(
                     "member_count": len(row.member_keys),
                     "seen_train_pos_coord": row.seen_train_pos_coord,
                     "seen_train_neg_seq": row.seen_train_neg_seq,
-                    "seen_train_any": row.seen_train_any,
+                    "train_leak": row.train_leak,
                 }
             )
 
@@ -667,7 +667,7 @@ def _write_catalog_tsv(path: Path, rows: Iterable[UniqueIntronRecord]) -> None:
         "member_count",
         "seen_train_pos_coord",
         "seen_train_neg_seq",
-        "seen_train_any",
+        "train_leak",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
@@ -684,7 +684,7 @@ def _write_catalog_tsv(path: Path, rows: Iterable[UniqueIntronRecord]) -> None:
                     "member_count": len(row.member_keys),
                     "seen_train_pos_coord": row.seen_train_pos_coord,
                     "seen_train_neg_seq": row.seen_train_neg_seq,
-                    "seen_train_any": row.seen_train_any,
+                    "train_leak": row.train_leak,
                 }
             )
 
@@ -763,11 +763,11 @@ def _build_for_species(
     _write_unique_labeled_tsv(output_labeled_unique, unique_introns, species=species)
     _write_catalog_tsv(output_catalog, unique_introns)
 
-    seen_any_count = sum(row.seen_train_any for row in unique_introns)
+    train_leak_count = sum(row.train_leak for row in unique_introns)
     print(
         "[build_unique_intron_assets] "
         f"species={species} unique_introns={len(unique_introns)} "
-        f"seen_any={seen_any_count} "
+        f"train_leak={train_leak_count} "
         f"outputs={output_transcripts_unique},{output_unique_map},"
         f"{output_labeled_unique},{output_catalog}"
     )
