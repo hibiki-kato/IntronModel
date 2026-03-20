@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] This script is config-only." \
+	echo "[tune_cnn_v2_pair_time.sh] This script is config-only." \
 		"Edit top CONFIG and run without args." >&2
 	exit 1
 fi
@@ -13,24 +13,31 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="300"
-MASK_MODE="on"
-CHEAT_MODE="off"
-QUICK_TRIALS="32"
-QUICK_EPOCHS="3"
-TOP_K="8"
-FULL_EPOCHS="10"
-VAL_FRAC="0.2"
-INTRONMODEL_AUTO_TMUX=off
 
+# Optional output/data overrides for tagged or mask-data tuning runs.
+TAG=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+MASK_MODE="off"
+CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+VAL_FRAC="0.2"
 BASE_SEED="1337"
+# Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
+SEED_LIST=""
 PROCESS_TITLE="ETA"
 
+QUICK_TRIALS="32"
+QUICK_EPOCHS="2"
+TOP_K="8"
+FULL_EPOCHS="8"
+QUICK_COMPILE_MODE="off"
+FULL_COMPILE_MODE="off"
 
 GPU_IDS="auto"
+# Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="2"
-TRIAL_PROCESS_MODE="persistent_all"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -43,21 +50,17 @@ PREFETCH_FACTOR="4"
 PERSISTENT_WORKERS="1"
 PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
-MAX_OOM_RETRIES="8"
+MAX_OOM_RETRIES="5"
 MAX_MODEL_PARAMS="auto"
 MAX_MODEL_PARAMS_FALLBACK="30000000"
 MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
 MAX_MODEL_PARAMS_RESERVE_MIB="2048"
 MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
-MAX_MODEL_PARAMS_MODEL_FACTOR="1.00"
+MAX_MODEL_PARAMS_MODEL_FACTOR="0.75"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
 SEQUENCE_TRANSFORM="none"
-# Optional output/data overrides for tagged or mask-data tuning runs.
-TAG=""
-TRAIN_POS_PATH=""
-TRAIN_NEG_PATH=""
 UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
@@ -73,125 +76,42 @@ CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
 CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
-# Hsap-priority short cycles.
-# Keep Hsap:others around 3:1.
+# Species scheduling order for repeated short cycles.
 JOB_ORDER=(
-	"Hsap:acceptor"
-	"Hsap:donor"
-	"Athal:acceptor"
-	"Athal:donor"
-	"Dmel:acceptor"
-	"Dmel:donor"
-	"Mmus:acceptor"
-	"Mmus:donor"
+	"Hsap"
+	"Dmel"
+	"Athal"
+	"Mmus"
 )
 
-DEFAULT_SEARCH_SPACE_JSON_DONOR="$(cat <<'JSON'
+DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "lr": {"type": "float", "min": 1e-4, "max": 3e-3, "scale": "log"},
-  "batch_size": {
-    "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096, 6144, 8192]
-  },
-  "dropout": {"type": "float", "min": 0.0, "max": 0.5, "scale": "linear"},
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 1e-1, "scale": "log"},
-  "sequence_transform": {
-    "type": "categorical",
-    "values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
-  },
-  "loss": {
-    "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
-  },
-  "f1_lambda": {"type": "float", "min": 0.01, "max": 0.8, "scale": "linear"},
-  "conv_depth": {
-    "type": "categorical",
-    "values": [2, 3, 4, 5, 6]
-  },
-  "channel_candidates": {
-    "type": "categorical",
-    "values": [
-      "64,96,128,192,256,384,512,768,1024"
-    ]
-  },
-  "kernel_candidates": {
-    "type": "categorical",
-    "values": [
-      "3,5,7,9,11,13,15,17,19"
-    ]
-  },
-  "max_pool_size": {
-    "type": "categorical",
-    "values": [1, 2, 3, 4]
-  },
-  "conv_stride": {
-    "type": "categorical",
-    "values": [1, 2]
-  },
-  "head_type": {
-    "type": "categorical",
-    "values": ["gap", "center"]
-  },
-  "fc_hidden": {
-    "type": "categorical",
-    "values": [64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096]
-  }
-}
-JSON
-)"
-
-DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR="$(cat <<'JSON'
-{
   "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
-  "batch_size": {
-    "type": "categorical",
-    "values": [128, 256, 512, 1024, 2048, 4096, 6144, 8192, 12288]
-  },
+	"batch_size": {
+		"type": "categorical",
+		"values": [128, 256, 512, 1024, 2048]
+	},
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
-  "sequence_transform": {
-    "type": "categorical",
-    "values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
-  },
+	"input_mode": {
+		"type": "categorical",
+		"values": ["onehot", "kmer3", "bpe"]
+	},
+	"sequence_transform": {
+		"type": "categorical",
+		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
+	},
+	"embedding_dim": {
+		"type": "categorical",
+		"values": [32, 48, 64]
+	},
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
   },
-  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"},
-  "conv_depth": {
-    "type": "categorical",
-    "values": [2, 3, 4, 5]
-  },
-  "channel_candidates": {
-    "type": "categorical",
-    "values": [
-      "64,96,128,192,256,384,512,768,1024"
-    ]
-  },
-  "kernel_candidates": {
-    "type": "categorical",
-    "values": [
-      "3,5,7,9,11,13,15,17,19"
-    ]
-  },
-  "max_pool_size": {
-    "type": "categorical",
-    "values": [1, 2, 3, 4]
-  },
-  "conv_stride": {
-    "type": "categorical",
-    "values": [1, 2]
-  },
-  "head_type": {
-    "type": "categorical",
-    "values": ["gap", "center"]
-  },
-  "fc_hidden": {
-    "type": "categorical",
-    "values": [128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144]
-  }
+  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"}
 }
 JSON
 )"
@@ -233,26 +153,32 @@ resolve_species_case() {
 }
 
 resolve_python_bin() {
-	intronmodel_resolve_python_bin "temp_tune_cnn_6h.sh"
+	intronmodel_resolve_python_bin "tune_cnn_v2_pair_time.sh"
+}
+
+resolve_seed_list() {
+	intronmodel_resolve_seed_list \
+		"tune_cnn_v2_pair_time.sh" \
+		"${BASE_SEED}" \
+		"${SEED_LIST}" \
+		"${PYTHON_BIN}"
 }
 
 resolve_search_space_file() {
 	local explicit_file="$1"
-	local project_root="$2"
-	local species="$3"
-	local target="$4"
-	local tuning_model_name="$5"
+	local species="$2"
+	local tuning_model_name="$3"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
 			printf '%s\n' "${explicit_file}"
 			return 0
 		fi
-		echo "[temp_tune_cnn_6h.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
+		echo "[tune_cnn_v2_pair_time.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/${target}/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/pair/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
@@ -262,6 +188,18 @@ resolve_search_space_file() {
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
+	fi
+	if [[ "${tuning_model_name}" != "cnn_pair" ]]; then
+		local base_target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
+		if [[ -f "${base_target_file}" ]]; then
+			printf '%s\n' "${base_target_file}"
+			return 0
+		fi
+		local base_species_file="${DATA_ROOT}/${species}/tuning/cnn_pair/search_space.json"
+		if [[ -f "${base_species_file}" ]]; then
+			printf '%s\n' "${base_species_file}"
+			return 0
+		fi
 	fi
 
 	return 1
@@ -290,131 +228,96 @@ run_double_descent_plot() {
 	local python_bin="$1"
 	local project_root="$2"
 	local species_name="$3"
-	local target_name="$4"
-	local model_name="$5"
+	local model_name="$4"
 
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
-		--target "${target_name}" \
+		--target "pair" \
 		--model "${model_name}" || true
 }
 
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
 	|| [[ "${TIME_BUDGET_MINUTES}" -le 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
+	echo "[tune_cnn_v2_pair_time.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${QUICK_TRIALS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_TRIALS}" -le 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] QUICK_TRIALS must be a positive integer." >&2
+	echo "[tune_cnn_v2_pair_time.sh] QUICK_TRIALS must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${QUICK_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_EPOCHS}" -le 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] QUICK_EPOCHS must be a positive integer." >&2
+	echo "[tune_cnn_v2_pair_time.sh] QUICK_EPOCHS must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${TOP_K}" =~ ^[0-9]+$ ]] || [[ "${TOP_K}" -le 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] TOP_K must be a positive integer." >&2
+	echo "[tune_cnn_v2_pair_time.sh] TOP_K must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${FULL_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${FULL_EPOCHS}" -le 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] FULL_EPOCHS must be a positive integer." >&2
+	echo "[tune_cnn_v2_pair_time.sh] FULL_EPOCHS must be a positive integer." >&2
+	exit 1
+fi
+if [[ "${QUICK_COMPILE_MODE}" != "off" \
+	&& "${QUICK_COMPILE_MODE}" != "on" \
+	&& "${QUICK_COMPILE_MODE}" != "auto" ]]; then
+	echo "[tune_cnn_v2_pair_time.sh] QUICK_COMPILE_MODE must be off|on|auto." >&2
+	exit 1
+fi
+if [[ "${FULL_COMPILE_MODE}" != "off" \
+	&& "${FULL_COMPILE_MODE}" != "on" \
+	&& "${FULL_COMPILE_MODE}" != "auto" ]]; then
+	echo "[tune_cnn_v2_pair_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
 	exit 1
 fi
 if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; then
-	echo "[temp_tune_cnn_6h.sh] SEARCH_ALGO must be random|history_guided." >&2
-	exit 1
-fi
-if [[ "${TRIAL_PROCESS_MODE}" != "subprocess" && \
-	"${TRIAL_PROCESS_MODE}" != "persistent_quick" && \
-	"${TRIAL_PROCESS_MODE}" != "persistent_all" ]]; then
-	echo "[temp_tune_cnn_6h.sh] TRIAL_PROCESS_MODE must be "\
-		"subprocess|persistent_quick|persistent_all." >&2
+	echo "[tune_cnn_v2_pair_time.sh] SEARCH_ALGO must be random|history_guided." >&2
 	exit 1
 fi
 if ! [[ "${HISTORY_TOP_N}" =~ ^[0-9]+$ ]] || [[ "${HISTORY_TOP_N}" -le 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] HISTORY_TOP_N must be a positive integer." >&2
+	echo "[tune_cnn_v2_pair_time.sh] HISTORY_TOP_N must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${GUIDED_RANDOM_FRACTION}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-	echo "[temp_tune_cnn_6h.sh] GUIDED_RANDOM_FRACTION must be numeric in [0,1]." >&2
+	echo "[tune_cnn_v2_pair_time.sh] GUIDED_RANDOM_FRACTION must be numeric in [0,1]." >&2
 	exit 1
 fi
 if ! awk -v x="${GUIDED_RANDOM_FRACTION}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
-	echo "[temp_tune_cnn_6h.sh] GUIDED_RANDOM_FRACTION must be in [0,1]." >&2
+	echo "[tune_cnn_v2_pair_time.sh] GUIDED_RANDOM_FRACTION must be in [0,1]." >&2
 	exit 1
 fi
 if ! [[ "${GUIDED_MUTATION_RATE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-	echo "[temp_tune_cnn_6h.sh] GUIDED_MUTATION_RATE must be numeric in [0,1]." >&2
+	echo "[tune_cnn_v2_pair_time.sh] GUIDED_MUTATION_RATE must be numeric in [0,1]." >&2
 	exit 1
 fi
 if ! awk -v x="${GUIDED_MUTATION_RATE}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
-	echo "[temp_tune_cnn_6h.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
+	echo "[tune_cnn_v2_pair_time.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
 	exit 1
 fi
 if [[ ${#JOB_ORDER[@]} -eq 0 ]]; then
-	echo "[temp_tune_cnn_6h.sh] JOB_ORDER must contain at least one" \
-		"species:target pair." >&2
+	echo "[tune_cnn_v2_pair_time.sh] JOB_ORDER must contain at least one species." >&2
 	exit 1
 fi
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	&& "${UPDATE_DOUBLE_DESCENT_PLOT}" != "1" ]]; then
-	echo "[temp_tune_cnn_6h.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
+	echo "[tune_cnn_v2_pair_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
 	exit 1
 fi
 if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
-	echo "[temp_tune_cnn_6h.sh] MASK_MODE must be off|on." >&2
+	echo "[tune_cnn_v2_pair_time.sh] MASK_MODE must be off|on." >&2
 	exit 1
 fi
 if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
-	echo "[temp_tune_cnn_6h.sh] CHEAT_MODE must be off|on." >&2
+	echo "[tune_cnn_v2_pair_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
-if [[ "${MASK_MODE}" == "on" ]]; then
-	mask_bp="${DONOR_LEN}"
-	if (( ACCEPTOR_LEN > DONOR_LEN )); then
-		mask_bp="${ACCEPTOR_LEN}"
-	fi
-	if [[ -z "${TRAIN_POS_PATH}" ]]; then
-		TRAIN_POS_PATH="data/{species}/processed/${mask_bp}bp_trimmed_npad.err"
-	fi
-	if [[ -z "${TRAIN_NEG_PATH}" ]]; then
-		TRAIN_NEG_PATH="data/{species}/processed/${mask_bp}bp_trimmed_npad.neg.err"
-	fi
-	if [[ -z "${TAG}" ]]; then
-		TAG="mask"
-	fi
-	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
-		NAME_FIELDS="tag"
-	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
-		NAME_FIELDS="${NAME_FIELDS},tag"
-	fi
-fi
-if [[ "${CHEAT_MODE}" == "on" ]]; then
-	if [[ -z "${TAG}" ]]; then
-		TAG="cheat"
-	elif [[ "${TAG}" != *"cheat"* ]]; then
-		TAG="${TAG}_cheat"
-	fi
-	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
-		NAME_FIELDS="tag"
-	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
-		NAME_FIELDS="${NAME_FIELDS},tag"
-	fi
-fi
-
-TUNING_MODEL_NAME="cnn"
-if [[ "${MASK_MODE}" == "on" ]]; then
-	TUNING_MODEL_NAME="cnn_mask"
-fi
-if [[ "${CHEAT_MODE}" == "on" ]]; then
-	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
-fi
+TUNING_MODEL_NAME="cnn_v2_pair"
 
 PYTHON_BIN="$(resolve_python_bin)"
+mapfile -t SEED_VALUES < <(resolve_seed_list)
 RESOLVED_MAX_MODEL_PARAMS="$(
 	intronmodel_resolve_max_model_params \
-		"temp_tune_cnn_6h.sh" \
+		"tune_cnn_v2_pair_time.sh" \
 		"${MAX_MODEL_PARAMS}" \
 		"${GPU_IDS}" \
 		"${MAX_MODEL_PARAMS_FALLBACK}" \
@@ -434,11 +337,12 @@ START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
 
-echo "[temp_tune_cnn_6h.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}min"
-echo "[temp_tune_cnn_6h.sh] quick+full cycles: "\
+echo "[tune_cnn_v2_pair_time.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}min"
+echo "[tune_cnn_v2_pair_time.sh] quick+full cycles: "\
 	"quick_trials=${QUICK_TRIALS} quick_epochs=${QUICK_EPOCHS} "\
 	"top_k=${TOP_K} full_epochs=${FULL_EPOCHS}"
-echo "[temp_tune_cnn_6h.sh] schedule=${JOB_ORDER[*]}"
+echo "[tune_cnn_v2_pair_time.sh] schedule=${JOB_ORDER[*]}"
+echo "[tune_cnn_v2_pair_time.sh] seeds=${SEED_VALUES[*]}"
 
 job_index=0
 while true; do
@@ -451,7 +355,7 @@ while true; do
 		avg_cycle_seconds_guard=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
 		if [[ "${avg_cycle_seconds_guard}" -gt 0 ]] \
 			&& [[ "${remaining_seconds}" -lt "${avg_cycle_seconds_guard}" ]]; then
-			echo "[temp_tune_cnn_6h.sh] stop before next cycle: "\
+			echo "[tune_cnn_v2_pair_time.sh] stop before next cycle: "\
 				"remaining=$(format_elapsed "${remaining_seconds}") "\
 				"< avg_cycle=$(format_elapsed "${avg_cycle_seconds_guard}")"
 			break
@@ -459,29 +363,25 @@ while true; do
 	fi
 	remaining_hms="$(format_elapsed "${remaining_seconds}")"
 
-	pair="${JOB_ORDER[$((job_index % ${#JOB_ORDER[@]}))]}"
-	raw_species="${pair%%:*}"
-	target="${pair##*:}"
+	schedule_index=$((job_index % (${#JOB_ORDER[@]} * ${#SEED_VALUES[@]})))
+	species_index=$((schedule_index % ${#JOB_ORDER[@]}))
+	seed_index=$((schedule_index / ${#JOB_ORDER[@]}))
+	raw_species="${JOB_ORDER[${species_index}]}"
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
-	if [[ "${target}" != "donor" && "${target}" != "acceptor" ]]; then
-		echo "[temp_tune_cnn_6h.sh] invalid target in JOB_ORDER: ${pair}" >&2
-		exit 1
-	fi
-
+	base_seed="${SEED_VALUES[${seed_index}]}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
-	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}"\
-"/best_config.json"
+	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
-			"temp_tune_cnn_6h.sh" \
+			"tune_cnn_v2_pair_time.sh" \
 			"${PYTHON_BIN}" \
 			"${DATA_ROOT}" \
 			"${TUNING_MODEL_NAME}" \
 			"${species}" \
-			"${target}" \
+			"pair" \
 			"${global_best_path}" \
 			"${CROSS_SPECIES_BEST_MODE}" \
 			"${CROSS_SPECIES_BEST_OVERRIDE}" \
@@ -493,67 +393,63 @@ while true; do
 	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
-		objective_metric="${target}_pr_auc"
-		if [[ "${CHEAT_MODE}" == "on" ]]; then
-			objective_metric="test_pr_auc"
-		fi
-		config_path="${output_dir}/hparam_search_config.json"
-		mkdir -p "${output_dir}"
-		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
-		resolved_train_paths="$(
-			intronmodel_resolve_and_validate_train_paths \
-				"temp_tune_cnn_6h.sh" \
-				"${species}" \
-				"${TRAIN_POS_PATH}" \
-				"${TRAIN_NEG_PATH}"
-		)" || exit 1
-		IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
-			"${resolved_train_paths}"
-		TRAIN_POS_PATH_JSON="$(
-			intronmodel_json_string_or_null \
-				"${PYTHON_BIN}" \
-				"${TRAIN_POS_PATH_RESOLVED}"
-		)"
-		TRAIN_NEG_PATH_JSON="$(
-			intronmodel_json_string_or_null \
-				"${PYTHON_BIN}" \
-				"${TRAIN_NEG_PATH_RESOLVED}"
-		)"
-		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
-		if [[ "${target}" == "acceptor" ]]; then
-			target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
-		fi
-		search_space_path=""
-		if search_space_resolved="$(
-			resolve_search_space_file \
-				"${SEARCH_SPACE_FILE}" \
-				"${PROJECT_ROOT}" \
-				"${species}" \
-				"${target}" \
-				"${TUNING_MODEL_NAME}"
-		)"; then
-			search_space_path="${search_space_resolved}"
-			if ! target_space_json="$(
-				normalize_json_object_file \
-					"${PYTHON_BIN}" \
-					"${search_space_path}" 2>&1
-			)"; then
-				echo "[temp_tune_cnn_6h.sh] failed to parse search-space file: "\
-					"${search_space_path}" >&2
-				echo "[temp_tune_cnn_6h.sh] parse detail: ${target_space_json}" >&2
-				exit 1
-			fi
-			target_search_space_json="${target_space_json}"
-			echo "[temp_tune_cnn_6h.sh] using search space: ${search_space_path}"
-		else
-			search_space_status=$?
-			if [[ "${search_space_status}" -eq 2 ]]; then
-				exit 1
-			fi
-			echo "[temp_tune_cnn_6h.sh] using embedded ${target} search space."
-		fi
 
-		cat > "${config_path}" <<JSON
+	objective_metric="pair_pr_auc"
+	if [[ "${CHEAT_MODE}" == "on" ]]; then
+		objective_metric="test_pr_auc"
+	fi
+	config_path="${output_dir}/hparam_search_config.json"
+	mkdir -p "${output_dir}"
+	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+	resolved_train_paths="$(
+		intronmodel_resolve_and_validate_train_paths \
+			"tune_cnn_v2_pair_time.sh" \
+			"${species}" \
+			"${TRAIN_POS_PATH}" \
+			"${TRAIN_NEG_PATH}"
+	)" || exit 1
+	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+		"${resolved_train_paths}"
+	TRAIN_POS_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"${TRAIN_POS_PATH_RESOLVED}"
+	)"
+	TRAIN_NEG_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"${TRAIN_NEG_PATH_RESOLVED}"
+	)"
+	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_PAIR}"
+	search_space_path=""
+	if search_space_resolved="$(
+		resolve_search_space_file \
+			"${SEARCH_SPACE_FILE}" \
+			"${species}" \
+			"${TUNING_MODEL_NAME}"
+	)"; then
+		search_space_path="${search_space_resolved}"
+		if ! target_space_json="$(
+			normalize_json_object_file \
+				"${PYTHON_BIN}" \
+				"${search_space_path}" 2>&1
+		)"; then
+			echo "[tune_cnn_v2_pair_time.sh] failed to parse search-space file: "\
+				"${search_space_path}" >&2
+			echo "[tune_cnn_v2_pair_time.sh] parse detail: ${target_space_json}" >&2
+			exit 1
+		fi
+		target_search_space_json="${target_space_json}"
+		echo "[tune_cnn_v2_pair_time.sh] using search space: ${search_space_path}"
+	else
+		search_space_status=$?
+		if [[ "${search_space_status}" -eq 2 ]]; then
+			exit 1
+		fi
+		echo "[tune_cnn_v2_pair_time.sh] using embedded pair search space."
+	fi
+
+	cat > "${config_path}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
   "species": "${species}",
@@ -562,10 +458,9 @@ while true; do
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
   "full_epochs": ${FULL_EPOCHS},
-  "base_seed": ${BASE_SEED},
+  "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
-  "trial_process_mode": "${TRIAL_PROCESS_MODE}",
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
   "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
@@ -576,20 +471,19 @@ while true; do
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
   "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
-  "base_args": {
-    "model": "cnn",
+	"base_args": {
+	"model": "cnn_v2_pair",
     "species": "${species}",
-    "train_target": "${target}",
-    "seed": ${BASE_SEED},
+    "train_target": "pair",
+    "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
-    "conv_depth": 3,
-    "channel_candidates": "64,96,128,192,256,384,512",
-    "kernel_candidates": "3,5,7,9,11,13,15",
-    "max_pool_size": ${MAX_POOL_SIZE},
-    "conv_stride": ${CONV_STRIDE},
-    "head_type": "${HEAD_TYPE}",
+	"input_mode": "onehot",
+	"pair_mode": "pair",
+	"embedding_dim": 32,
+	"bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
+	"bpe_trust_remote_code": 0,
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
@@ -611,37 +505,36 @@ while true; do
   },
   "quick_overrides": {
     "epochs": ${QUICK_EPOCHS},
-    "compile_mode": "off"
+    "compile_mode": "${QUICK_COMPILE_MODE}"
   },
-	  "full_overrides": {
-	    "epochs": ${FULL_EPOCHS},
-	    "compile_mode": "off"
-	  },
-	  "search_space": ${target_search_space_json}
+  "full_overrides": {
+    "epochs": ${FULL_EPOCHS},
+    "compile_mode": "${FULL_COMPILE_MODE}"
+  },
+  "search_space": ${target_search_space_json}
 }
 JSON
 
 	job_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	job_start_seconds="${SECONDS}"
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
-	printf '[temp_tune_cnn_6h.sh] cycle=%s elapsed=%s start=%s ' \
+	printf '[tune_cnn_v2_pair_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-		printf 'ETA_remaining=%s species=%s target=%s\n' \
-			"${remaining_hms}" "${species}" "${target}"
-		if ! intronmodel_run_with_process_title \
-			"${RUNTIME_PROCESS_TITLE}" \
-			"${PYTHON_BIN}" \
-			"${PROJECT_ROOT}/src/tools/hparam_search.py" \
-			--config "${config_path}"; then
-		echo "[temp_tune_cnn_6h.sh] cycle=${job_index} failed "\
-			"species=${species} target=${target}" >&2
+	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
+		"${remaining_hms}" "${species}" "${base_seed}"
+	if ! intronmodel_run_with_process_title \
+		"${RUNTIME_PROCESS_TITLE}" \
+		"${PYTHON_BIN}" \
+		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
+		--config "${config_path}"; then
+		echo "[tune_cnn_v2_pair_time.sh] cycle=${job_index} failed "\
+			"species=${species} target=pair seed=${base_seed}" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 		run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
-			"${target}" \
 			"${TUNING_MODEL_NAME}"
 	fi
 	cycle_duration_seconds=$((SECONDS - job_start_seconds))
@@ -656,7 +549,7 @@ JSON
 	if [[ "${avg_cycle_seconds}" -gt 0 ]]; then
 		estimated_cycles_left=$((remaining_seconds / avg_cycle_seconds))
 	fi
-	printf '[temp_tune_cnn_6h.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
+	printf '[tune_cnn_v2_pair_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
 		"${job_index}" \
 		"$(format_elapsed "${cycle_duration_seconds}")" \
 		"$(format_elapsed "${avg_cycle_seconds}")"
@@ -666,25 +559,18 @@ JSON
 done
 
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
-	final_plot_jobs=(
-		"Hsap:donor"
-		"Hsap:acceptor"
-		"Dmel:donor"
-		"Dmel:acceptor"
-	)
-	for final_pair in "${final_plot_jobs[@]}"; do
-		final_species="${final_pair%%:*}"
-		final_target="${final_pair##*:}"
+	final_plot_species=("Hsap" "Dmel")
+	for final_species in "${final_plot_species[@]}"; do
 		run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${final_species}" \
-			"${final_target}"
+			"${TUNING_MODEL_NAME}"
 	done
 fi
 
 END_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_SECONDS=$((SECONDS - START_SECONDS))
 TOTAL_HMS="$(format_elapsed "${TOTAL_SECONDS}")"
-echo "[temp_tune_cnn_6h.sh] done start=${START_EPOCH} end=${END_EPOCH} "\
+echo "[tune_cnn_v2_pair_time.sh] done start=${START_EPOCH} end=${END_EPOCH} "\
 	"elapsed=${TOTAL_HMS} cycles=${job_index}"
