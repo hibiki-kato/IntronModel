@@ -317,7 +317,9 @@ def _resolve_task_train_params(
         loss_name=str(_override_or_default("loss", model_args.loss)),
         conv_channels=resolved_conv_channels,
         kernel_sizes=list(resolved_kernel_sizes),
-        max_pool_size=int(model_args.max_pool_size),
+        max_pool_size=int(
+            _override_or_default("max_pool_size", model_args.max_pool_size)
+        ),
         conv_stride=int(_override_or_default("conv_stride", model_args.conv_stride)),
         head_type=_normalize_cnn_head_type(
             _override_or_default("head_type", model_args.head_type),
@@ -1679,6 +1681,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Acceptor-only override for --dropout.",
+    )
+    parser.add_argument(
+        "--donor_max_pool_size",
+        type=int,
+        default=None,
+        help="Donor-only override for --max_pool_size.",
+    )
+    parser.add_argument(
+        "--acceptor_max_pool_size",
+        type=int,
+        default=None,
+        help="Acceptor-only override for --max_pool_size.",
     )
     parser.add_argument(
         "--donor_conv_stride",

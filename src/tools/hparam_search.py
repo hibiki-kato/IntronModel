@@ -967,7 +967,7 @@ def _score_site_rows_pair_model(
     """Score pair-site rows for one pair-model checkpoint."""
     if model_name == "cnn_pair":
         from models import cnn_pair as pair_module
-    elif model_name == "cnn_v2":
+    elif model_name in {"cnn_v2", "cnn_v2_pair"}:
         from models import cnn_v2 as pair_module
     else:
         raise ValueError(f"Unsupported pair model for scoring: {model_name}")
@@ -1007,6 +1007,8 @@ def _compute_test_pr_auc_objective(
     if train_target not in {"both", "donor", "acceptor", "pair"}:
         return None
     cnn_v2_pair_mode = str(merged_args.get("pair_mode", "pair")).strip().lower()
+    if model_name == "cnn_v2_pair":
+        cnn_v2_pair_mode = "pair"
     if model_name == "cnn_v2" and cnn_v2_pair_mode != "pair" and train_target == "pair":
         train_target = "both"
 
@@ -1028,7 +1030,7 @@ def _compute_test_pr_auc_objective(
 
     checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
     scored_rows: list[dict[str, object]] = []
-    use_pair_model_scoring = model_name == "cnn_pair" or (
+    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_v2_pair"} or (
         model_name == "cnn_v2" and cnn_v2_pair_mode == "pair"
     )
     if use_pair_model_scoring:
@@ -2854,6 +2856,8 @@ def _derive_validation_protocol_from_args(
     if train_target == "pair":
         include_pair_mixed_negatives = True
     elif model_name == "cnn_v2" and pair_mode in {"pair", "on", "true", "1"}:
+        include_pair_mixed_negatives = True
+    elif model_name == "cnn_v2_pair":
         include_pair_mixed_negatives = True
     elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
         include_pair_mixed_negatives = True

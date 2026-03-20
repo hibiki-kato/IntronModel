@@ -1467,7 +1467,7 @@ def score_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(batch_x)
-        probs = torch.sigmoid(logits).cpu().numpy()
+        probs = torch.sigmoid(logits).float().cpu().numpy()
         all_probs.append(probs)
 
     return np.concatenate(all_probs)

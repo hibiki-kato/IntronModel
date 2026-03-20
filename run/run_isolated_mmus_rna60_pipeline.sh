@@ -14,7 +14,7 @@ Options:
   --source-model-root <path> Source model root used for checkpoints
                              (default: <repo>/model)
   --work-root <path>         Isolated workspace root
-                             (default: <repo>/temp/isolated_<species>_rna60_<timestamp>)
+                             (default: <repo>/temp/isolated_<species>_rna60)
   --device <name>            DEVICE for inference wrappers (default: auto)
   --gpu-ids <csv|auto>       GPU_IDS for inference wrappers (default: auto)
   --max-parallel <n|auto>    MAX_PARALLEL_TRIALS for inference wrappers
@@ -53,6 +53,15 @@ MAX_PARALLEL_SETTING="auto"
 RUN_INFERENCE="1"
 ALLOW_MISSING_MODELS="0"
 TRAIN_ON_MISSING="1"
+# Set to "1" to force-skip Step 1-7, or "0" to skip only when outputs exist.
+SKIP_PREP_STEPS="1"
+# Set to "1" to skip inference when output score files already exist.
+SKIP_EXISTING_INFER="1"
+# Comma-separated inference model allowlist.
+# Use "all" to run every model block below.
+# Available keys:
+#   cnn,cnn_pair,bilstm_pair,cnn_resdil,tcn,bert,reservoir,dnabert6,dnabert2_pair,cnn_v2
+INFER_MODELS="cnn_v2,dnabert2_pair"
 
 # --------------------------
 # Runtime implementation
@@ -144,8 +153,7 @@ if [[ -z "${SOURCE_MODEL_ROOT}" ]]; then
 	SOURCE_MODEL_ROOT="${PROJECT_ROOT}/model"
 fi
 if [[ -z "${WORK_ROOT}" ]]; then
-	now_stamp="$(date +%Y%m%d_%H%M%S)"
-	WORK_ROOT="${PROJECT_ROOT}/temp/isolated_${SPECIES}_rna60_${now_stamp}"
+	WORK_ROOT="${PROJECT_ROOT}/temp/isolated_${SPECIES}_rna60"
 fi
 
 resolve_existing_file() {
@@ -230,25 +238,36 @@ ISOLATED_RAW_DIR="${ISOLATED_SPECIES_DIR}/raw"
 ISOLATED_PROCESSED_DIR="${ISOLATED_SPECIES_DIR}/processed"
 mkdir -p "${ISOLATED_RAW_DIR}" "${ISOLATED_PROCESSED_DIR}"
 
-link_asset() {
+copy_asset() {
 	local src_path="$1"
 	local dst_path="$2"
-	rm -f "${dst_path}"
-	ln -s "${src_path}" "${dst_path}"
+	if [[ -L "${dst_path}" ]]; then
+		# Replace legacy symlink output with a real copied file.
+		rm -f "${dst_path}"
+	fi
+	if [[ -e "${dst_path}" && ! -f "${dst_path}" ]]; then
+		die "destination exists but is not a regular file: ${dst_path}"
+	fi
+	if [[ ! -f "${dst_path}" || "${src_path}" -nt "${dst_path}" ]]; then
+		cp -f "${src_path}" "${dst_path}"
+	fi
 }
 
 ISOLATED_FASTA="${ISOLATED_RAW_DIR}/$(basename "${SOURCE_FASTA}")"
 ISOLATED_REF_ANNOT="${ISOLATED_RAW_DIR}/$(basename "${SOURCE_REF_ANNOT}")"
 ISOLATED_QUERY_GTF="${ISOLATED_RAW_DIR}/query.rna60.gtf"
+ISOLATED_FASTA_GTF="${ISOLATED_FASTA}.gtf"
 ISOLATED_100BP_POS="${ISOLATED_RAW_DIR}/100bp.err"
 ISOLATED_100BP_NEG="${ISOLATED_RAW_DIR}/100bp.neg.err"
 ISOLATED_CLASS_FILE="${ISOLATED_RAW_DIR}/transcript_class.txt"
 
-link_asset "${SOURCE_FASTA}" "${ISOLATED_FASTA}"
-link_asset "${SOURCE_REF_ANNOT}" "${ISOLATED_REF_ANNOT}"
-link_asset "${QUERY_GTF_ABS}" "${ISOLATED_QUERY_GTF}"
-link_asset "${SOURCE_100BP_POS}" "${ISOLATED_100BP_POS}"
-link_asset "${SOURCE_100BP_NEG}" "${ISOLATED_100BP_NEG}"
+copy_asset "${SOURCE_FASTA}" "${ISOLATED_FASTA}"
+copy_asset "${SOURCE_REF_ANNOT}" "${ISOLATED_REF_ANNOT}"
+copy_asset "${QUERY_GTF_ABS}" "${ISOLATED_QUERY_GTF}"
+# make_intron_training_data_from_err expects <fasta>.gtf exactly.
+copy_asset "${QUERY_GTF_ABS}" "${ISOLATED_FASTA_GTF}"
+copy_asset "${SOURCE_100BP_POS}" "${ISOLATED_100BP_POS}"
+copy_asset "${SOURCE_100BP_NEG}" "${ISOLATED_100BP_NEG}"
 
 run_with_isolated_root() {
 	INTRONMODEL_AUTO_TMUX=off \
@@ -257,82 +276,183 @@ run_with_isolated_root() {
 		"$@"
 }
 
+all_files_exist() {
+	local path=""
+	for path in "$@"; do
+		if [[ ! -f "${path}" ]]; then
+			return 1
+		fi
+	done
+	return 0
+}
+
+TRANSCRIPTS_TSV="${ISOLATED_PROCESSED_DIR}/transcripts.tsv"
+INTRON_EVAL_TSV="${ISOLATED_PROCESSED_DIR}/intron_eval_flank10.tsv"
+INTRON_POS_TSV="${ISOLATED_PROCESSED_DIR}/intron_full_flank10.pos.tsv"
+INTRON_QC_TSV="${ISOLATED_PROCESSED_DIR}/intron_full_flank10.pos.qc.tsv"
+INTRON_NEG_REQ_TSV="${ISOLATED_PROCESSED_DIR}/intron_full_flank10.neg_coordinate_request.tsv"
+TRIMMED_POS="${ISOLATED_PROCESSED_DIR}/100bp_trimmed.err"
+TRIMMED_NEG="${ISOLATED_PROCESSED_DIR}/100bp_trimmed.neg.err"
+TRIMMED_NPAD_POS="${ISOLATED_PROCESSED_DIR}/100bp_trimmed_npad.err"
+TRIMMED_NPAD_NEG="${ISOLATED_PROCESSED_DIR}/100bp_trimmed_npad.neg.err"
+UNIQUE_TSV="${ISOLATED_PROCESSED_DIR}/transcripts.unique.tsv"
+UNIQUE_MAP_TSV="${ISOLATED_PROCESSED_DIR}/transcripts.unique.map.tsv"
+UNIQUE_LABELED_TSV="${ISOLATED_PROCESSED_DIR}/intron_eval_flank10.unique.tsv"
+UNIQUE_CATALOG_TSV="${ISOLATED_PROCESSED_DIR}/intron_unique_catalog.tsv"
+UNIQUE_MASK_TSV="${ISOLATED_PROCESSED_DIR}/transcripts.unique.mask.tsv"
+UNIQUE_TRUNC_TSV="${ISOLATED_PROCESSED_DIR}/transcripts.unique.trunc.tsv"
+
 log "work_root=${WORK_ROOT}"
 log "isolated_data_root=${ISOLATED_DATA_ROOT}"
 log "source_model_root=${SOURCE_MODEL_ROOT}"
 log "species=${SPECIES}"
 log "query_gtf=${QUERY_GTF_ABS}"
+log "skip_prep_steps=${SKIP_PREP_STEPS}"
+log "skip_existing_infer=${SKIP_EXISTING_INFER}"
 
-log "Step 1/7: build transcripts.tsv (100bp windows)"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_test_data.sh" \
-		--species "${SPECIES}" \
-		--fasta "${ISOLATED_FASTA}" \
-		--gtf "${ISOLATED_QUERY_GTF}" \
-		--out-tsv "${ISOLATED_PROCESSED_DIR}/transcripts.tsv" \
-		--donor-len "${DONOR_LEN}" \
-		--acceptor-len "${ACCEPTOR_LEN}"
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 1/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist "${TRANSCRIPTS_TSV}"; then
+	log "Step 1/7: skip (already exists: ${TRANSCRIPTS_TSV})"
+else
+	log "Step 1/7: build transcripts.tsv (100bp windows)"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_test_data.sh" \
+			--species "${SPECIES}" \
+			--fasta "${ISOLATED_FASTA}" \
+			--gtf "${ISOLATED_QUERY_GTF}" \
+			--out-tsv "${TRANSCRIPTS_TSV}" \
+			--donor-len "${DONOR_LEN}" \
+			--acceptor-len "${ACCEPTOR_LEN}"
+fi
 
-log "Step 2/7: build transcript_label (transcript_class.txt)"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_transcript_class.sh" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--gtf "${ISOLATED_QUERY_GTF}" \
-		--reference-annotation "${ISOLATED_REF_ANNOT}" \
-		--out-name "transcript_class.txt"
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 2/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist "${ISOLATED_CLASS_FILE}"; then
+	log "Step 2/7: skip (already exists: ${ISOLATED_CLASS_FILE})"
+else
+	log "Step 2/7: build transcript_label (transcript_class.txt)"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_transcript_class.sh" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--gtf "${ISOLATED_QUERY_GTF}" \
+			--reference-annotation "${ISOLATED_REF_ANNOT}" \
+			--out-name "transcript_class.txt"
+fi
 
-log "Step 3/7: build labeled intron eval TSV"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_labeled_intron_eval_data.sh" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--fasta "${ISOLATED_FASTA}" \
-		--query-gtf "${ISOLATED_QUERY_GTF}" \
-		--reference-annotation "${ISOLATED_REF_ANNOT}" \
-		--out-name "intron_eval_flank10.tsv" \
-		--donor-len "${DONOR_LEN}" \
-		--acceptor-len "${ACCEPTOR_LEN}" \
-		--flank-bp "${FLANK_BP}"
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 3/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist "${INTRON_EVAL_TSV}"; then
+	log "Step 3/7: skip (already exists: ${INTRON_EVAL_TSV})"
+else
+	log "Step 3/7: build labeled intron eval TSV"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_labeled_intron_eval_data.sh" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--fasta "${ISOLATED_FASTA}" \
+			--query-gtf "${ISOLATED_QUERY_GTF}" \
+			--reference-annotation "${ISOLATED_REF_ANNOT}" \
+			--out-name "intron_eval_flank10.tsv" \
+			--donor-len "${DONOR_LEN}" \
+			--acceptor-len "${ACCEPTOR_LEN}" \
+			--flank-bp "${FLANK_BP}"
+fi
 
-log "Step 4/7: build 100bp-derived train utility data"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_intron_training_data.sh" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--flank-bp "${FLANK_BP}"
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 4/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist "${INTRON_POS_TSV}" "${INTRON_QC_TSV}" "${INTRON_NEG_REQ_TSV}"; then
+	log "Step 4/7: skip (intron training utility TSVs already exist)"
+else
+	log "Step 4/7: build 100bp-derived train utility data"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_intron_training_data.sh" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--flank-bp "${FLANK_BP}" \
+			--no-strict
+fi
 
-log "Step 5/7: build truncated/masked 100bp pair data"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_trimmed_pair_data.sh" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--out-pos-name "100bp_trimmed.err" \
-		--out-neg-name "100bp_trimmed.neg.err" \
-		--exon-context-bp "${EXON_CONTEXT_BP}"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_trimmed_pair_data.sh" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--out-pos-name "100bp_trimmed_npad.err" \
-		--out-neg-name "100bp_trimmed_npad.neg.err" \
-		--exon-context-bp "${EXON_CONTEXT_BP}" \
-		--pad-with-n
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 5/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist \
+	"${TRIMMED_POS}" \
+	"${TRIMMED_NEG}" \
+	"${TRIMMED_NPAD_POS}" \
+	"${TRIMMED_NPAD_NEG}"; then
+	log "Step 5/7: skip (trimmed/masked pair files already exist)"
+else
+	log "Step 5/7: build truncated/masked 100bp pair data"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_trimmed_pair_data.sh" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--out-pos-name "100bp_trimmed.err" \
+			--out-neg-name "100bp_trimmed.neg.err" \
+			--exon-context-bp "${EXON_CONTEXT_BP}"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_trimmed_pair_data.sh" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--out-pos-name "100bp_trimmed_npad.err" \
+			--out-neg-name "100bp_trimmed_npad.neg.err" \
+			--exon-context-bp "${EXON_CONTEXT_BP}" \
+			--pad-with-n
+fi
 
-log "Step 6/7: build unique intron assets (unique/map)"
-run_with_isolated_root \
-	bash "${PROJECT_ROOT}/run/make_unique_intron_assets.sh" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--overwrite
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 6/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist \
+	"${UNIQUE_TSV}" \
+	"${UNIQUE_MAP_TSV}" \
+	"${UNIQUE_LABELED_TSV}" \
+	"${UNIQUE_CATALOG_TSV}"; then
+	log "Step 6/7: skip (unique/map assets already exist)"
+else
+	log "Step 6/7: build unique intron assets (unique/map)"
+	run_with_isolated_root \
+		bash "${PROJECT_ROOT}/run/make_unique_intron_assets.sh" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--overwrite
+fi
 
-log "Step 7/7: build unique mask/trunc sequence variants"
-run_with_isolated_root \
-	python3 "${PROJECT_ROOT}/src/tools/build_unique_sequence_variants.py" \
-		--species "${SPECIES}" \
-		--data-root "${ISOLATED_DATA_ROOT}" \
-		--exon-context-bp "${EXON_CONTEXT_BP}" \
-		--overwrite
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	log "Step 7/7: skip (SKIP_PREP_STEPS=1)"
+elif all_files_exist "${UNIQUE_MASK_TSV}" "${UNIQUE_TRUNC_TSV}"; then
+	log "Step 7/7: skip (unique mask/trunc variants already exist)"
+else
+	log "Step 7/7: build unique mask/trunc sequence variants"
+	run_with_isolated_root \
+		python3 "${PROJECT_ROOT}/src/tools/build_unique_sequence_variants.py" \
+			--species "${SPECIES}" \
+			--data-root "${ISOLATED_DATA_ROOT}" \
+			--exon-context-bp "${EXON_CONTEXT_BP}" \
+			--overwrite
+fi
+
+if [[ "${SKIP_PREP_STEPS}" == "1" ]]; then
+	if ! all_files_exist \
+		"${ISOLATED_CLASS_FILE}" \
+		"${TRANSCRIPTS_TSV}" \
+		"${INTRON_EVAL_TSV}" \
+		"${INTRON_POS_TSV}" \
+		"${INTRON_QC_TSV}" \
+		"${INTRON_NEG_REQ_TSV}" \
+		"${TRIMMED_POS}" \
+		"${TRIMMED_NEG}" \
+		"${TRIMMED_NPAD_POS}" \
+		"${TRIMMED_NPAD_NEG}" \
+		"${UNIQUE_TSV}" \
+		"${UNIQUE_MAP_TSV}" \
+		"${UNIQUE_LABELED_TSV}" \
+		"${UNIQUE_CATALOG_TSV}" \
+		"${UNIQUE_MASK_TSV}" \
+		"${UNIQUE_TRUNC_TSV}"; then
+		die "SKIP_PREP_STEPS=1 but required prep outputs are missing under ${ISOLATED_SPECIES_DIR}. Set SKIP_PREP_STEPS=0 once, or reuse a prepared --work-root."
+	fi
+fi
 
 extract_config_block() {
 	local wrapper_path="$1"
@@ -367,6 +487,23 @@ missing_tuned_configs_text() {
 			printf ', %s' "${path}"
 		fi
 	done
+}
+
+model_is_selected() {
+	local model_key="${1,,}"
+	local raw_list="${INFER_MODELS,,}"
+	local normalized="${raw_list//[[:space:]]/}"
+	if [[ -z "${normalized}" || "${normalized}" == "all" ]]; then
+		return 0
+	fi
+	local token=""
+	IFS=',' read -r -a model_tokens <<< "${normalized}"
+	for token in "${model_tokens[@]}"; do
+		if [[ "${token}" == "${model_key}" ]]; then
+			return 0
+		fi
+	done
+	return 1
 }
 
 missing_action_for_model() {
@@ -427,10 +564,13 @@ run_wrapper_pipeline_mode() {
 		export CONTINUE_TRAINING="0"
 		export TRAIN_ONLY="0"
 		export TUNED_HPARAMS_MODE="normal"
-		export VISUALIZE="false"
+		export VISUALIZE="none"
 		export DEVICE="${DEVICE_SETTING}"
 		export GPU_IDS="${GPU_IDS_SETTING}"
 		export MAX_PARALLEL_TRIALS="${MAX_PARALLEL_SETTING}"
+		export COMPILE_MODE="off"
+		export INFER_COMPILE="0"
+		export INFER_COMPILE_MODE="off"
 		export CLASS_FILE_PATH="${pipeline_class_file}"
 		export TEST_TSV_PATH=""
 		export TRAIN_POS_PATH=""
@@ -440,6 +580,7 @@ run_wrapper_pipeline_mode() {
 		export CHECKPOINT_PRUNE_DRY_RUN="0"
 		export NAME_FIELDS=""
 		export TAG=""
+		export SKIP_EXISTING_INFER="${SKIP_EXISTING_INFER}"
 
 		local assignment=""
 		for assignment in "$@"; do
@@ -557,6 +698,12 @@ run_args: list[str] = [
     "1337",
     "--device",
     "auto",
+    "--compile_mode",
+    "off",
+    "--infer_compile",
+    "0",
+    "--infer_compile_mode",
+    "off",
     "--skip_train",
     "--test_tsv",
     str(test_tsv),
@@ -625,193 +772,258 @@ DNABERT2_PAIR_TRUNC_CFG="${TUNING_ROOT}/dnabert2_pair_trunc/pair/best_config.jso
 CNN_V2_PAIR_CFG="${TUNING_ROOT}/cnn_v2/pair/best_config.json"
 
 log "Inference: wrappers (Markov excluded)"
+log "infer_models=${INFER_MODELS}"
 
-if all_tuned_configs_exist "${CNN_DONOR_CFG}" "${CNN_ACCEPTOR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn.sh" "cnn.sh" \
-		"MODEL=cnn" \
-		"MASK_MODE=on" \
-		"DONOR_TUNED_CONFIG_PATH=${CNN_DONOR_CFG}" \
-		"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_ACCEPTOR_CFG}"
-else
-	missing_text="$(
-		missing_tuned_configs_text "${CNN_DONOR_CFG}" "${CNN_ACCEPTOR_CFG}"
-	)"
-	action="$(missing_action_for_model "cnn" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn.sh" "cnn.sh" \
+if model_is_selected "cnn"; then
+	if all_tuned_configs_exist "${CNN_DONOR_CFG}" "${CNN_ACCEPTOR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn.sh" "cnn.sh" \
 			"MODEL=cnn" \
 			"MASK_MODE=on" \
 			"DONOR_TUNED_CONFIG_PATH=${CNN_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_ACCEPTOR_CFG}"
+	else
+		missing_text="$(
+			missing_tuned_configs_text "${CNN_DONOR_CFG}" "${CNN_ACCEPTOR_CFG}"
+		)"
+		action="$(missing_action_for_model "cnn" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn.sh" "cnn.sh" \
+				"MODEL=cnn" \
+				"MASK_MODE=on" \
+				"DONOR_TUNED_CONFIG_PATH=${CNN_DONOR_CFG}" \
+				"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_ACCEPTOR_CFG}"
+		fi
 	fi
+else
+	log "Skip cnn: not selected"
 fi
 
-if all_tuned_configs_exist "${CNN_PAIR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_pair.sh" "cnn_pair.sh" \
-		"MASK_MODE=on" \
-		"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
-else
-	missing_text="$(missing_tuned_configs_text "${CNN_PAIR_CFG}")"
-	action="$(missing_action_for_model "cnn_pair" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_pair.sh" "cnn_pair.sh" \
+if model_is_selected "cnn_pair"; then
+	if all_tuned_configs_exist "${CNN_PAIR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_pair.sh" "cnn_pair.sh" \
 			"MASK_MODE=on" \
 			"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
+	else
+		missing_text="$(missing_tuned_configs_text "${CNN_PAIR_CFG}")"
+		action="$(missing_action_for_model "cnn_pair" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_pair.sh" "cnn_pair.sh" \
+				"MASK_MODE=on" \
+				"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
+		fi
 	fi
+else
+	log "Skip cnn_pair: not selected"
 fi
 
-if all_tuned_configs_exist "${BILSTM_PAIR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_bilstm_pair.sh" "bilstm_pair.sh" \
-		"MASK_MODE=on" \
-		"PAIR_TUNED_CONFIG_PATH=${BILSTM_PAIR_CFG}"
-else
-	missing_text="$(missing_tuned_configs_text "${BILSTM_PAIR_CFG}")"
-	action="$(missing_action_for_model "bilstm_pair" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_bilstm_pair.sh" "bilstm_pair.sh" \
+if model_is_selected "bilstm_pair"; then
+	if all_tuned_configs_exist "${BILSTM_PAIR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_bilstm_pair.sh" "bilstm_pair.sh" \
 			"MASK_MODE=on" \
 			"PAIR_TUNED_CONFIG_PATH=${BILSTM_PAIR_CFG}"
+	else
+		missing_text="$(missing_tuned_configs_text "${BILSTM_PAIR_CFG}")"
+		action="$(missing_action_for_model "bilstm_pair" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_bilstm_pair.sh" "bilstm_pair.sh" \
+				"MASK_MODE=on" \
+				"PAIR_TUNED_CONFIG_PATH=${BILSTM_PAIR_CFG}"
+		fi
 	fi
+else
+	log "Skip bilstm_pair: not selected"
 fi
 
-if all_tuned_configs_exist "${CNN_RESDIL_DONOR_CFG}" "${CNN_RESDIL_ACCEPTOR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
-		"MODEL=cnn_resdil" \
-		"MASK_MODE=on" \
-		"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
-		"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_RESDIL_ACCEPTOR_CFG}"
-else
-	missing_text="$(
-		missing_tuned_configs_text \
-			"${CNN_RESDIL_DONOR_CFG}" \
-			"${CNN_RESDIL_ACCEPTOR_CFG}"
-	)"
-	action="$(missing_action_for_model "cnn_resdil" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
+if model_is_selected "cnn_resdil"; then
+	if all_tuned_configs_exist "${CNN_RESDIL_DONOR_CFG}" "${CNN_RESDIL_ACCEPTOR_CFG}"; then
+		if ! run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
 			"MODEL=cnn_resdil" \
 			"MASK_MODE=on" \
 			"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
-			"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_RESDIL_ACCEPTOR_CFG}"
+			"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_RESDIL_ACCEPTOR_CFG}"; then
+			if [[ "${TRAIN_ON_MISSING}" == "1" ]]; then
+				log "cnn_resdil infer failed; retry with train fallback."
+				run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
+					"MODEL=cnn_resdil" \
+					"MASK_MODE=on" \
+					"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
+					"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_RESDIL_ACCEPTOR_CFG}"
+			else
+				die "cnn_resdil inference failed. Set TRAIN_ON_MISSING=1 to allow retraining fallback."
+			fi
+		fi
+	else
+		missing_text="$(
+			missing_tuned_configs_text \
+				"${CNN_RESDIL_DONOR_CFG}" \
+				"${CNN_RESDIL_ACCEPTOR_CFG}"
+		)"
+		action="$(missing_action_for_model "cnn_resdil" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
+				"MODEL=cnn_resdil" \
+				"MASK_MODE=on" \
+				"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
+				"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_RESDIL_ACCEPTOR_CFG}"
+		fi
 	fi
+else
+	log "Skip cnn_resdil: not selected"
 fi
 
-if all_tuned_configs_exist "${TCN_DONOR_CFG}" "${TCN_ACCEPTOR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_tcn.sh" "tcn.sh" \
-		"MODEL=tcn" \
-		"MASK_MODE=off" \
-		"DONOR_TUNED_CONFIG_PATH=${TCN_DONOR_CFG}" \
-		"ACCEPTOR_TUNED_CONFIG_PATH=${TCN_ACCEPTOR_CFG}"
-else
-	missing_text="$(missing_tuned_configs_text "${TCN_DONOR_CFG}" "${TCN_ACCEPTOR_CFG}")"
-	action="$(missing_action_for_model "tcn" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_tcn.sh" "tcn.sh" \
+if model_is_selected "tcn"; then
+	if all_tuned_configs_exist "${TCN_DONOR_CFG}" "${TCN_ACCEPTOR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_tcn.sh" "tcn.sh" \
 			"MODEL=tcn" \
 			"MASK_MODE=off" \
 			"DONOR_TUNED_CONFIG_PATH=${TCN_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${TCN_ACCEPTOR_CFG}"
+	else
+		missing_text="$(missing_tuned_configs_text "${TCN_DONOR_CFG}" "${TCN_ACCEPTOR_CFG}")"
+		action="$(missing_action_for_model "tcn" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_tcn.sh" "tcn.sh" \
+				"MODEL=tcn" \
+				"MASK_MODE=off" \
+				"DONOR_TUNED_CONFIG_PATH=${TCN_DONOR_CFG}" \
+				"ACCEPTOR_TUNED_CONFIG_PATH=${TCN_ACCEPTOR_CFG}"
+		fi
 	fi
+else
+	log "Skip tcn: not selected"
 fi
 
-if all_tuned_configs_exist "${BERT_DONOR_CFG}" "${BERT_ACCEPTOR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_bert.sh" "bert.sh" \
-		"MODEL=bert" \
-		"MASK_MODE=off" \
-		"DONOR_TUNED_CONFIG_PATH=${BERT_DONOR_CFG}" \
-		"ACCEPTOR_TUNED_CONFIG_PATH=${BERT_ACCEPTOR_CFG}"
-else
-	missing_text="$(
-		missing_tuned_configs_text "${BERT_DONOR_CFG}" "${BERT_ACCEPTOR_CFG}"
-	)"
-	action="$(missing_action_for_model "bert" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_bert.sh" "bert.sh" \
+if model_is_selected "bert"; then
+	if all_tuned_configs_exist "${BERT_DONOR_CFG}" "${BERT_ACCEPTOR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_bert.sh" "bert.sh" \
 			"MODEL=bert" \
 			"MASK_MODE=off" \
 			"DONOR_TUNED_CONFIG_PATH=${BERT_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${BERT_ACCEPTOR_CFG}"
+	else
+		missing_text="$(
+			missing_tuned_configs_text "${BERT_DONOR_CFG}" "${BERT_ACCEPTOR_CFG}"
+		)"
+		action="$(missing_action_for_model "bert" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_bert.sh" "bert.sh" \
+				"MODEL=bert" \
+				"MASK_MODE=off" \
+				"DONOR_TUNED_CONFIG_PATH=${BERT_DONOR_CFG}" \
+				"ACCEPTOR_TUNED_CONFIG_PATH=${BERT_ACCEPTOR_CFG}"
+		fi
 	fi
+else
+	log "Skip bert: not selected"
 fi
 
-if all_tuned_configs_exist "${RESERVOIR_DONOR_CFG}" "${RESERVOIR_ACCEPTOR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_reservoir.sh" "reservoir.sh" \
-		"MODEL=reservoir" \
-		"MASK_MODE=off" \
-		"DONOR_TUNED_CONFIG_PATH=${RESERVOIR_DONOR_CFG}" \
-		"ACCEPTOR_TUNED_CONFIG_PATH=${RESERVOIR_ACCEPTOR_CFG}"
-else
-	missing_text="$(
-		missing_tuned_configs_text \
-			"${RESERVOIR_DONOR_CFG}" \
-			"${RESERVOIR_ACCEPTOR_CFG}"
-	)"
-	action="$(missing_action_for_model "reservoir" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_reservoir.sh" "reservoir.sh" \
+if model_is_selected "reservoir"; then
+	if all_tuned_configs_exist "${RESERVOIR_DONOR_CFG}" "${RESERVOIR_ACCEPTOR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_reservoir.sh" "reservoir.sh" \
 			"MODEL=reservoir" \
 			"MASK_MODE=off" \
 			"DONOR_TUNED_CONFIG_PATH=${RESERVOIR_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${RESERVOIR_ACCEPTOR_CFG}"
+	else
+		missing_text="$(
+			missing_tuned_configs_text \
+				"${RESERVOIR_DONOR_CFG}" \
+				"${RESERVOIR_ACCEPTOR_CFG}"
+		)"
+		action="$(missing_action_for_model "reservoir" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_reservoir.sh" "reservoir.sh" \
+				"MODEL=reservoir" \
+				"MASK_MODE=off" \
+				"DONOR_TUNED_CONFIG_PATH=${RESERVOIR_DONOR_CFG}" \
+				"ACCEPTOR_TUNED_CONFIG_PATH=${RESERVOIR_ACCEPTOR_CFG}"
+		fi
 	fi
+else
+	log "Skip reservoir: not selected"
 fi
 
-if all_tuned_configs_exist "${DNABERT6_DONOR_CFG}" "${DNABERT6_ACCEPTOR_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_dnabert.sh" "dnabert.sh" \
-		"DNABERT_VARIANT=6" \
-		"TRUST_REMOTE_CODE=1" \
-		"MASK_MODE=off" \
-		"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert6" \
-		"DONOR_TUNED_CONFIG_PATH=${DNABERT6_DONOR_CFG}" \
-		"ACCEPTOR_TUNED_CONFIG_PATH=${DNABERT6_ACCEPTOR_CFG}"
-else
-	missing_text="$(
-		missing_tuned_configs_text \
-			"${DNABERT6_DONOR_CFG}" \
-			"${DNABERT6_ACCEPTOR_CFG}"
-	)"
-	action="$(missing_action_for_model "dnabert6" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert.sh" "dnabert.sh" \
+if model_is_selected "dnabert6"; then
+	if all_tuned_configs_exist "${DNABERT6_DONOR_CFG}" "${DNABERT6_ACCEPTOR_CFG}"; then
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_dnabert.sh" "dnabert.sh" \
 			"DNABERT_VARIANT=6" \
 			"TRUST_REMOTE_CODE=1" \
 			"MASK_MODE=off" \
 			"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert6" \
 			"DONOR_TUNED_CONFIG_PATH=${DNABERT6_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${DNABERT6_ACCEPTOR_CFG}"
+	else
+		missing_text="$(
+			missing_tuned_configs_text \
+				"${DNABERT6_DONOR_CFG}" \
+				"${DNABERT6_ACCEPTOR_CFG}"
+		)"
+		action="$(missing_action_for_model "dnabert6" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert.sh" "dnabert.sh" \
+				"DNABERT_VARIANT=6" \
+				"TRUST_REMOTE_CODE=1" \
+				"MASK_MODE=off" \
+				"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert6" \
+				"DONOR_TUNED_CONFIG_PATH=${DNABERT6_DONOR_CFG}" \
+				"ACCEPTOR_TUNED_CONFIG_PATH=${DNABERT6_ACCEPTOR_CFG}"
+		fi
 	fi
+else
+	log "Skip dnabert6: not selected"
 fi
 
-if all_tuned_configs_exist "${DNABERT2_PAIR_TRUNC_CFG}"; then
-	run_wrapper_infer "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
-		"DNABERT_VARIANT=2" \
-		"TRUST_REMOTE_CODE=1" \
-		"TRUNC_MODE=on" \
-		"MASK_MODE=on" \
-		"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0" \
-		"PAIR_TUNED_CONFIG_PATH=${DNABERT2_PAIR_TRUNC_CFG}"
-else
-	missing_text="$(missing_tuned_configs_text "${DNABERT2_PAIR_TRUNC_CFG}")"
-	action="$(missing_action_for_model "dnabert2_pair_trunc" "${missing_text}" "1")"
-	if [[ "${action}" == "train" ]]; then
-		run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
+if model_is_selected "dnabert2_pair"; then
+	if all_tuned_configs_exist "${DNABERT2_PAIR_TRUNC_CFG}"; then
+		if ! run_wrapper_infer "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
 			"DNABERT_VARIANT=2" \
 			"TRUST_REMOTE_CODE=1" \
 			"TRUNC_MODE=on" \
 			"MASK_MODE=on" \
 			"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0" \
-			"PAIR_TUNED_CONFIG_PATH=${DNABERT2_PAIR_TRUNC_CFG}"
+			"PAIR_TUNED_CONFIG_PATH=${DNABERT2_PAIR_TRUNC_CFG}"; then
+			if [[ "${TRAIN_ON_MISSING}" == "1" ]]; then
+				log "dnabert2_pair infer failed; retry with train fallback."
+				run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
+					"DNABERT_VARIANT=2" \
+					"TRUST_REMOTE_CODE=1" \
+					"TRUNC_MODE=on" \
+					"MASK_MODE=on" \
+					"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0" \
+					"PAIR_TUNED_CONFIG_PATH=${DNABERT2_PAIR_TRUNC_CFG}"
+			else
+				die "dnabert2_pair inference failed. Set TRAIN_ON_MISSING=1 to allow retraining fallback."
+			fi
+		fi
+	else
+		missing_text="$(missing_tuned_configs_text "${DNABERT2_PAIR_TRUNC_CFG}")"
+		action="$(missing_action_for_model "dnabert2_pair_trunc" "${missing_text}" "1")"
+		if [[ "${action}" == "train" ]]; then
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
+				"DNABERT_VARIANT=2" \
+				"TRUST_REMOTE_CODE=1" \
+				"TRUNC_MODE=on" \
+				"MASK_MODE=on" \
+				"PRETRAINED_MODEL_NAME=${SOURCE_MODEL_ROOT}/pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0" \
+				"PAIR_TUNED_CONFIG_PATH=${DNABERT2_PAIR_TRUNC_CFG}"
+		fi
 	fi
+else
+	log "Skip dnabert2_pair: not selected"
 fi
 
-if all_tuned_configs_exist "${CNN_V2_PAIR_CFG}"; then
-	run_legacy_cnn_v2_infer "${CNN_V2_PAIR_CFG}"
-else
-	missing_text="$(missing_tuned_configs_text "${CNN_V2_PAIR_CFG}")"
-	action="$(missing_action_for_model "legacy cnn_v2" "${missing_text}" "0")"
-	if [[ "${action}" == "train" ]]; then
-		die "Internal error: legacy cnn_v2 does not support train fallback."
+if model_is_selected "cnn_v2"; then
+	if all_tuned_configs_exist "${CNN_V2_PAIR_CFG}"; then
+		run_legacy_cnn_v2_infer "${CNN_V2_PAIR_CFG}"
+	else
+		missing_text="$(missing_tuned_configs_text "${CNN_V2_PAIR_CFG}")"
+		action="$(missing_action_for_model "legacy cnn_v2" "${missing_text}" "0")"
+		if [[ "${action}" == "train" ]]; then
+			die "Internal error: legacy cnn_v2 does not support train fallback."
+		fi
 	fi
+else
+	log "Skip cnn_v2: not selected"
 fi
 
 log "Done."

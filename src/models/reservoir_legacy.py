@@ -1748,7 +1748,7 @@ def score_sequences(
         mask_tensor = torch.from_numpy(np.stack(encoded_masks)).to(device)
 
         logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
-        probs = torch.sigmoid(logits).cpu().numpy()
+        probs = torch.sigmoid(logits).float().cpu().numpy()
         all_probs.append(probs)
 
     return np.concatenate(all_probs)

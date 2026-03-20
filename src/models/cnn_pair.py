@@ -1495,7 +1495,7 @@ def score_pair_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(batch_donor, batch_acceptor)
-        probs = torch.sigmoid(logits).detach().cpu().numpy()
+        probs = torch.sigmoid(logits).float().detach().cpu().numpy()
         outputs.append(probs)
     return np.concatenate(outputs)
 

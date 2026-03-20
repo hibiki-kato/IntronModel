@@ -115,10 +115,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--samples-per-positive",
+        "--samples-per-negative",
         type=int,
         default=1,
-        help="Number of generated rows per positive and per enabled mix side.",
+        help="Number of generated rows per negative and per enabled mix side.",
+    )
+    parser.add_argument(
+        "--samples-per-positive",
+        dest="samples_per_negative",
+        type=int,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--seed",
@@ -154,8 +160,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
-    if args.samples_per_positive <= 0:
-        raise ValueError("--samples-per-positive must be a positive integer.")
+    if args.samples_per_negative <= 0:
+        raise ValueError("--samples-per-negative must be a positive integer.")
     return args
 
 
@@ -278,48 +284,45 @@ def _read_negative_site_pools(
     return donor_sites, acceptor_sites
 
 
-def _sample_false_acceptor(
+def _sample_positive_for_false_acceptor(
     *,
     rng: random.Random,
-    positive: PositivePairRecord,
-    acceptor_pool: list[NegativeSiteRecord],
+    false_acceptor: str,
+    positive_pool: list[PositivePairRecord],
     positive_pairs: set[tuple[str, str]],
-) -> str:
-    """Sample one false acceptor that does not recreate a known positive pair."""
-    if not acceptor_pool:
-        raise ValueError("Negative acceptor pool is empty.")
-    max_tries = max(32, len(acceptor_pool) * 2)
+) -> PositivePairRecord:
+    """Sample one positive anchor that stays negative with false acceptor."""
+    if not positive_pool:
+        raise ValueError("Positive pair pool is empty.")
+    max_tries = max(32, len(positive_pool) * 2)
     for _ in range(max_tries):
-        candidate = acceptor_pool[rng.randrange(len(acceptor_pool))]
-        pair_key = (positive.donor_seq, candidate.sequence)
-        if (
-            candidate.sequence != positive.acceptor_seq
-            and pair_key not in positive_pairs
-        ):
-            return candidate.sequence
+        positive = positive_pool[rng.randrange(len(positive_pool))]
+        pair_key = (positive.donor_seq, false_acceptor)
+        if false_acceptor != positive.acceptor_seq and pair_key not in positive_pairs:
+            return positive
     raise ValueError(
-        "Failed to sample a false acceptor without colliding with known positives."
+        "Failed to sample positive donor anchor for false acceptor."
     )
 
 
-def _sample_false_donor(
+def _sample_positive_for_false_donor(
     *,
     rng: random.Random,
-    positive: PositivePairRecord,
-    donor_pool: list[NegativeSiteRecord],
+    false_donor: str,
+    positive_pool: list[PositivePairRecord],
     positive_pairs: set[tuple[str, str]],
-) -> str:
-    """Sample one false donor that does not recreate a known positive pair."""
-    if not donor_pool:
-        raise ValueError("Negative donor pool is empty.")
-    max_tries = max(32, len(donor_pool) * 2)
+) -> PositivePairRecord:
+    """Sample one positive anchor that stays negative with false donor."""
+    if not positive_pool:
+        raise ValueError("Positive pair pool is empty.")
+    max_tries = max(32, len(positive_pool) * 2)
     for _ in range(max_tries):
-        candidate = donor_pool[rng.randrange(len(donor_pool))]
-        pair_key = (candidate.sequence, positive.acceptor_seq)
-        if candidate.sequence != positive.donor_seq and pair_key not in positive_pairs:
-            return candidate.sequence
+        positive = positive_pool[rng.randrange(len(positive_pool))]
+        pair_key = (false_donor, positive.acceptor_seq)
+        if false_donor != positive.donor_seq and pair_key not in positive_pairs:
+            return positive
     raise ValueError(
-        "Failed to sample a false donor without colliding with known positives."
+        "Failed to sample positive acceptor anchor for false donor."
     )
 
 
@@ -342,7 +345,7 @@ def generate_mixed_negative_lines(
     negative_donor_pool: list[NegativeSiteRecord],
     negative_acceptor_pool: list[NegativeSiteRecord],
     mix_mode: MixMode,
-    samples_per_positive: int,
+    samples_per_negative: int,
     seed: int,
     shuffle: bool,
 ) -> list[str]:
@@ -358,8 +361,8 @@ def generate_mixed_negative_lines(
         Acceptor-side false candidates from negative non-pair rows.
     mix_mode : {"both", "donor_pos", "acceptor_pos"}
         Which one-sided patterns to emit.
-    samples_per_positive : int
-        Number of generated rows per positive and per enabled mix side.
+    samples_per_negative : int
+        Number of generated rows per negative and per enabled mix side.
     seed : int
         Random seed.
     shuffle : bool
@@ -380,11 +383,11 @@ def generate_mixed_negative_lines(
     Core idea: keep one side of a true pair fixed and replace the other side
     with a site sampled from negative non-pair rows. Sampling rejects exact
     collisions with known positive donor/acceptor combinations. Complexity is
-    ``O(P * K)`` expected, where ``P`` is positive count and ``K`` is samples
-    per positive (small constant in practice).
+    ``O((Nd + Na) * K)`` expected, where ``Nd``/``Na`` are negative donor and
+    acceptor counts and ``K`` is samples per negative.
     """
-    if samples_per_positive <= 0:
-        raise ValueError("samples_per_positive must be positive.")
+    if samples_per_negative <= 0:
+        raise ValueError("samples_per_negative must be positive.")
     if not positive_pairs:
         raise ValueError("No positive pair rows found.")
     if mix_mode not in {"both", "donor_pos", "acceptor_pos"}:
@@ -400,33 +403,34 @@ def generate_mixed_negative_lines(
         for item in positive_pairs
     }
     lines: list[str] = []
-    for positive in positive_pairs:
-        for _ in range(samples_per_positive):
-            if mix_mode in {"both", "donor_pos"}:
-                false_acceptor = _sample_false_acceptor(
+    for _ in range(samples_per_negative):
+        if mix_mode in {"both", "donor_pos"}:
+            for false_acceptor_item in negative_acceptor_pool:
+                positive = _sample_positive_for_false_acceptor(
                     rng=rng,
-                    positive=positive,
-                    acceptor_pool=negative_acceptor_pool,
+                    false_acceptor=false_acceptor_item.sequence,
+                    positive_pool=positive_pairs,
                     positive_pairs=known_positive_pairs,
                 )
                 lines.append(
                     _format_pair_line(
                         donor_seq=positive.donor_seq,
-                        acceptor_seq=false_acceptor,
+                        acceptor_seq=false_acceptor_item.sequence,
                         strand=positive.strand,
                         intron_half_length=positive.intron_half_length,
                     )
                 )
-            if mix_mode in {"both", "acceptor_pos"}:
-                false_donor = _sample_false_donor(
+        if mix_mode in {"both", "acceptor_pos"}:
+            for false_donor_item in negative_donor_pool:
+                positive = _sample_positive_for_false_donor(
                     rng=rng,
-                    positive=positive,
-                    donor_pool=negative_donor_pool,
+                    false_donor=false_donor_item.sequence,
+                    positive_pool=positive_pairs,
                     positive_pairs=known_positive_pairs,
                 )
                 lines.append(
                     _format_pair_line(
-                        donor_seq=false_donor,
+                        donor_seq=false_donor_item.sequence,
                         acceptor_seq=positive.acceptor_seq,
                         strand=positive.strand,
                         intron_half_length=positive.intron_half_length,
@@ -445,7 +449,7 @@ def process_species(
     neg_input_name: str,
     output_name: str,
     mix_mode: MixMode,
-    samples_per_positive: int,
+    samples_per_negative: int,
     seed: int,
     shuffle: bool,
     strict: bool,
@@ -466,8 +470,8 @@ def process_species(
         Output filename in ``processed`` directory.
     mix_mode : {"both", "donor_pos", "acceptor_pos"}
         One-sided mixing mode.
-    samples_per_positive : int
-        Number of outputs per positive and per enabled side.
+    samples_per_negative : int
+        Number of outputs per negative and per enabled side.
     seed : int
         Random seed.
     shuffle : bool
@@ -499,7 +503,7 @@ def process_species(
         negative_donor_pool=donor_pool,
         negative_acceptor_pool=acceptor_pool,
         mix_mode=mix_mode,
-        samples_per_positive=samples_per_positive,
+        samples_per_negative=samples_per_negative,
         seed=seed,
         shuffle=shuffle,
     )
@@ -535,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             neg_input_name=args.neg_input_name,
             output_name=args.output_name,
             mix_mode=args.mix_mode,
-            samples_per_positive=args.samples_per_positive,
+            samples_per_negative=args.samples_per_negative,
             seed=args.seed,
             shuffle=args.shuffle,
             strict=args.strict,

@@ -1338,6 +1338,29 @@ def _run_single_species(
     env["OUTPUT_TRANS_SCORE_TSV"] = str(output_trans_score_tsv)
     env["OUTPUT_EVAL_SCORE_TXT"] = str(output_eval_score_txt)
 
+    skip_existing_infer = _as_bool_env(env.get("SKIP_EXISTING_INFER", "0"))
+    if (
+        skip_existing_infer
+        and env.get("SKIP_TRAINING", "0") == "1"
+        and env.get("TRAIN_ONLY", "0") != "1"
+    ):
+        existing_outputs = (
+            output_site_score_tsv,
+            output_intron_score_tsv,
+            output_trans_score_tsv,
+            output_eval_score_txt,
+        )
+        if all(path.is_file() for path in existing_outputs):
+            print(
+                f"[{spec.script_name}] Skip inference: outputs already exist for "
+                f"species={species} stem={output_stem}"
+            )
+            print(f"[{spec.script_name}] site_score={output_site_score_tsv}")
+            print(f"[{spec.script_name}] intron_score={output_intron_score_tsv}")
+            print(f"[{spec.script_name}] transcript_score={output_trans_score_tsv}")
+            print(f"[{spec.script_name}] eval_score={output_eval_score_txt}")
+            return 0
+
     run_args = _build_run_args(spec, env)
     if env.get("SKIP_TRAINING", "0") == "1" or env.get("CONTINUE_TRAINING", "0") == "1":
         _ensure_tuned_checkpoint_aliases(
@@ -1453,6 +1476,12 @@ def _format_elapsed_seconds(total_seconds: float) -> str:
     minutes = (total % 3600) // 60
     seconds = total % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _as_bool_env(value: str) -> bool:
+    """Parse one env-like bool token."""
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "on", "yes", "y"}
 
 
 def _summarize_training_best_scores(

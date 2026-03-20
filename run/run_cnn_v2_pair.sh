@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[cnn_v2.sh] This script is config-only." \
+	echo "[cnn_v2_pair.sh] This script is config-only." \
 		"Edit top CONFIG and run without args." >&2
 	exit 1
 fi
@@ -15,7 +15,7 @@ SPECIES="Mmus,Athal,Dmel,Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 SEQUENCE_TRANSFORM="none"
-TRAIN_TARGET="both"
+TRAIN_TARGET="pair"
 
 EPOCHS="10"
 MAX_EPOCHS="200"
@@ -25,7 +25,7 @@ BATCH_SIZE="512"
 LR="5e-4"
 LOSS="focal"
 INPUT_MODE="onehot"   # onehot | kmer3 | bpe
-PAIR_MODE="independent"      # pair | independent
+PAIR_MODE="pair"      # pair | independent
 EMBEDDING_DIM="32"
 BPE_PRETRAINED_MODEL_NAME="zhihan1996/DNABERT-2-117M"
 BPE_PRETRAINED_REVISION=""
@@ -72,7 +72,7 @@ TAG=""
 USE_TUNED_HPARAMS="auto"   # off | auto | required
 TUNED_CONFIG_PATH=""
 SHARED_TUNED_CONFIG_PATH=""
-TUNED_TARGET="auto"        # auto | pair | donor | acceptor | both
+TUNED_TARGET="auto"        # auto | pair
 set +a
 
 # --------------------------
@@ -93,7 +93,7 @@ normalize_use_tuned_mode() {
 			printf '%s\n' "${normalized}"
 			;;
 		*)
-			echo "[cnn_v2.sh] USE_TUNED_HPARAMS must be off|auto|required." >&2
+			echo "[cnn_v2_pair.sh] USE_TUNED_HPARAMS must be off|auto|required." >&2
 			exit 1
 			;;
 	esac
@@ -107,13 +107,7 @@ resolve_tuned_target() {
 		printf '%s\n' "${normalized}"
 		return 0
 	fi
-	local pair_mode_normalized
-	pair_mode_normalized="$(echo "${PAIR_MODE}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	if [[ "${pair_mode_normalized}" == "pair" ]]; then
-		printf 'pair\n'
-		return 0
-	fi
-	printf '%s\n' "$(echo "${TRAIN_TARGET}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	printf 'pair\n'
 }
 
 resolve_tuned_config_path() {
@@ -123,7 +117,7 @@ resolve_tuned_config_path() {
 		printf '%s\n' "${TUNED_CONFIG_PATH}"
 		return 0
 	fi
-	local task_path="${DATA_ROOT}/${species}/tuning/cnn_v2/${tuned_target}/best_config.json"
+	local task_path="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/${tuned_target}/best_config.json"
 	if [[ -f "${task_path}" ]]; then
 		printf '%s\n' "${task_path}"
 		return 0
@@ -132,7 +126,7 @@ resolve_tuned_config_path() {
 		printf '%s\n' "${SHARED_TUNED_CONFIG_PATH}"
 		return 0
 	fi
-	local shared_path="${DATA_ROOT}/${species}/tuning/cnn_v2/best_config.json"
+	local shared_path="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/best_config.json"
 	if [[ -f "${shared_path}" ]]; then
 		printf '%s\n' "${shared_path}"
 		return 0
@@ -194,7 +188,7 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 	fi
 
 	args=(
-		--model cnn_v2
+		--model cnn_v2_pair
 		--species "${species}"
 		--donor_len "${DONOR_LEN}"
 		--acceptor_len "${ACCEPTOR_LEN}"
@@ -252,18 +246,18 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 		)"
 		if [[ -z "${tuned_path}" ]]; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2.sh] tuned config is required but not found: "\
+				echo "[cnn_v2_pair.sh] tuned config is required but not found: "\
 					"species=${species} target=${RESOLVED_TUNED_TARGET}" >&2
 				exit 1
 			fi
-			echo "[cnn_v2.sh] tuned config not found; "\
+			echo "[cnn_v2_pair.sh] tuned config not found; "\
 				"using CONFIG defaults for species=${species}." >&2
 		elif [[ ! -f "${tuned_path}" ]]; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2.sh] tuned config path not found: ${tuned_path}" >&2
+				echo "[cnn_v2_pair.sh] tuned config path not found: ${tuned_path}" >&2
 				exit 1
 			fi
-			echo "[cnn_v2.sh] tuned config path not found: ${tuned_path}; "\
+			echo "[cnn_v2_pair.sh] tuned config path not found: ${tuned_path}; "\
 				"using CONFIG defaults for species=${species}." >&2
 			tuned_path=""
 		fi
@@ -272,11 +266,11 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 	if [[ -n "${tuned_path}" ]]; then
 		if ! tuned_output="$(load_tuned_overrides "${tuned_path}" 2>&1)"; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2.sh] failed to load tuned config: ${tuned_path}" >&2
-				echo "[cnn_v2.sh] detail: ${tuned_output}" >&2
+				echo "[cnn_v2_pair.sh] failed to load tuned config: ${tuned_path}" >&2
+				echo "[cnn_v2_pair.sh] detail: ${tuned_output}" >&2
 				exit 1
 			fi
-			echo "[cnn_v2.sh] failed to load tuned config: ${tuned_path}; "\
+			echo "[cnn_v2_pair.sh] failed to load tuned config: ${tuned_path}; "\
 				"using CONFIG defaults for species=${species}." >&2
 		else
 			loaded_count=0
@@ -291,7 +285,7 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 				tuned_args+=(--"${tuned_key}" "${tuned_value}")
 				loaded_count=$((loaded_count + 1))
 			done <<<"${tuned_output}"
-			echo "[cnn_v2.sh] tuned params loaded from ${tuned_path} "\
+			echo "[cnn_v2_pair.sh] tuned params loaded from ${tuned_path} "\
 				"(species=${species}, count=${loaded_count})"
 		fi
 	fi
@@ -321,7 +315,7 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 		args+=("${tuned_args[@]}")
 	fi
 
-	echo "[cnn_v2.sh] species=${species} input_mode=${INPUT_MODE} pair_mode=${PAIR_MODE}"
+	echo "[cnn_v2_pair.sh] species=${species} input_mode=${INPUT_MODE} pair_mode=${PAIR_MODE}"
 	PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
 		python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 done

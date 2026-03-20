@@ -347,6 +347,8 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--acceptor_kernel_size", type=int, default=None)
     parser.add_argument("--donor_dropout", type=float, default=None)
     parser.add_argument("--acceptor_dropout", type=float, default=None)
+    parser.add_argument("--donor_max_pool_size", type=int, default=None)
+    parser.add_argument("--acceptor_max_pool_size", type=int, default=None)
     parser.add_argument("--donor_conv_stride", type=int, default=None)
     parser.add_argument("--acceptor_conv_stride", type=int, default=None)
     parser.add_argument("--donor_head_type", type=str, default=None)
@@ -561,18 +563,33 @@ def _add_cnn_v2_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pair_mode",
         choices=["pair", "independent"],
-        default="pair",
+        default="independent",
     )
     parser.add_argument(
         "--train_target",
         choices=["both", "donor", "acceptor", "pair"],
+        default="both",
+    )
+
+
+def _add_cnn_v2_pair_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_v2_pair train args without importing torch-dependent modules."""
+    _add_cnn_pair_fallback_train_args(parser)
+    parser.add_argument(
+        "--pair_mode",
+        choices=["pair", "independent"],
+        default="pair",
+    )
+    parser.add_argument(
+        "--train_target",
+        choices=["pair"],
         default="pair",
     )
 
 
 def _add_cnn_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     """Add cnn_v3 train args without importing torch-dependent modules."""
-    _add_cnn_v2_fallback_train_args(parser)
+    _add_cnn_v2_pair_fallback_train_args(parser)
     parser.add_argument(
         "--base_pair_checkpoints",
         type=str,
@@ -631,6 +648,9 @@ def _build_parser(
         _add_cnn_pair_fallback_infer_args(parser)
     elif selected_model == "cnn_v2":
         _add_cnn_v2_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
+    elif selected_model == "cnn_v2_pair":
+        _add_cnn_v2_pair_fallback_train_args(parser)
         _add_cnn_pair_fallback_infer_args(parser)
     elif selected_model == "cnn_v3":
         _add_cnn_v3_fallback_train_args(parser)
@@ -787,15 +807,45 @@ def _assert_checkpoint_paths_exist(
             raise FileNotFoundError(f"{task.capitalize()} checkpoint not found: {path}")
 
 
-def _latest_checkpoint_for_task(species: str, task: str) -> Optional[str]:
-    """Return the newest checkpoint path for one species/task, if available."""
+def _latest_checkpoint_for_task(
+    species: str,
+    task: str,
+    *,
+    model_name: str | None = None,
+) -> Optional[str]:
+    """Return the newest checkpoint path for one species/task.
+
+    Parameters
+    ----------
+    species : str
+        Species identifier.
+    task : str
+        Task name (for example, ``donor``).
+    model_name : str | None, default=None
+        Optional model-name prefix filter. When set, only checkpoints whose
+        filename starts with ``"{model_name}_"`` are considered.
+
+    Returns
+    -------
+    str | None
+        Newest checkpoint path, or ``None`` if no candidate exists.
+    """
     task_dir = os.path.join(model_root(), species, task)
     if not os.path.isdir(task_dir):
         return None
 
     candidates: list[str] = []
+    normalized_model = None
+    if model_name is not None:
+        stripped = model_name.strip()
+        if stripped != "":
+            normalized_model = stripped
     for file_name in os.listdir(task_dir):
         if not file_name.endswith(".pt"):
+            continue
+        if normalized_model is not None and not file_name.startswith(
+            f"{normalized_model}_"
+        ):
             continue
         path = os.path.join(task_dir, file_name)
         if os.path.isfile(path):
@@ -813,6 +863,7 @@ def _latest_checkpoint_for_task(species: str, task: str) -> Optional[str]:
 def _resolve_missing_checkpoints_for_skip_train(
     *,
     species: str,
+    model_name: str,
     paths: dict[str, str],
     required_tasks: Sequence[str],
 ) -> dict[str, str]:
@@ -832,7 +883,11 @@ def _resolve_missing_checkpoints_for_skip_train(
             raise ValueError(f"Unknown checkpoint task requested: {task}")
         if os.path.exists(current):
             continue
-        fallback = _latest_checkpoint_for_task(species=species, task=task)
+        fallback = _latest_checkpoint_for_task(
+            species=species,
+            task=task,
+            model_name=model_name,
+        )
         if fallback is None:
             continue
         resolved[task] = fallback
@@ -1214,6 +1269,8 @@ def _attach_validation_metadata(
         include_pair_mixed_negatives = True
     elif model_name == "cnn_v2" and pair_mode in {"pair", "on", "true", "1"}:
         include_pair_mixed_negatives = True
+    elif model_name == "cnn_v2_pair":
+        include_pair_mixed_negatives = True
     elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
         include_pair_mixed_negatives = True
 
@@ -1301,25 +1358,23 @@ def run_pipeline(args: argparse.Namespace) -> None:
     model_module = load_model_module(args.model)
     model_tasks = checkpoint_tasks_for_model(args.model)
     if args.model == "cnn_v2":
-        pair_mode = str(getattr(args, "pair_mode", "pair")).strip().lower()
-        if pair_mode in {"pair", "on", "true", "1"}:
-            model_tasks = ("pair",)
-        else:
-            model_tasks = ("donor", "acceptor")
+        args.pair_mode = "independent"
+        model_tasks = ("donor", "acceptor")
+    elif args.model == "cnn_v2_pair":
+        args.pair_mode = "pair"
+        model_tasks = ("pair",)
     default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
     if args.model == "cnn_v2":
-        pair_mode = str(getattr(args, "pair_mode", "pair")).strip().lower()
-        if pair_mode in {"pair", "on", "true", "1"}:
-            if train_target == "both":
-                train_target = "pair"
-                args.train_target = "pair"
-        else:
-            if train_target != "both":
-                train_target = "both"
-                args.train_target = "both"
+        if train_target != "both":
+            train_target = "both"
+            args.train_target = "both"
+    elif args.model == "cnn_v2_pair":
+        if train_target != "pair":
+            train_target = "pair"
+            args.train_target = "pair"
     allowed_targets = (
         ("both", *model_tasks) if len(model_tasks) > 1 else tuple(model_tasks)
     )
@@ -1438,6 +1493,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         if args.skip_train:
             checkpoint_paths = _resolve_missing_checkpoints_for_skip_train(
                 species=args.species,
+                model_name=args.model,
                 paths=checkpoint_paths,
                 required_tasks=tasks_to_train,
             )
@@ -1461,6 +1517,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     else:
         checkpoint_paths = _resolve_missing_checkpoints_for_skip_train(
             species=args.species,
+            model_name=args.model,
             paths=checkpoint_paths,
             required_tasks=model_tasks,
         )

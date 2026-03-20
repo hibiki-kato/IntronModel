@@ -71,6 +71,7 @@ def test_resolve_train_target_rejects_invalid_value() -> None:
 
 def test_checkpoint_tasks_for_model_supports_pair_override() -> None:
     assert checkpoint_tasks_for_model("cnn_pair") == ("pair",)
+    assert checkpoint_tasks_for_model("cnn_v2_pair") == ("pair",)
     assert checkpoint_tasks_for_model("cnn_v3") == ("pair",)
     assert checkpoint_tasks_for_model("bilstm_pair") == ("pair",)
     assert checkpoint_tasks_for_model("markov_xgboost") == ("pair",)
@@ -78,6 +79,7 @@ def test_checkpoint_tasks_for_model_supports_pair_override() -> None:
     assert checkpoint_tasks_for_model("dnabert6_pair") == ("pair",)
     assert checkpoint_tasks_for_model("dnaberts_pair") == ("pair",)
     assert checkpoint_tasks_for_model("cnn") == ("donor", "acceptor")
+    assert checkpoint_tasks_for_model("cnn_v2") == ("donor", "acceptor")
 
 
 def test_resolve_required_checkpoint_paths_for_pair_task(tmp_path: Path) -> None:

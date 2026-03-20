@@ -16,6 +16,7 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     EvaluationTranscriptGroupIntronCountRow,
     FalseTranscriptIntronLabelRow,
     SiteLabelCountRow,
+    BinaryLabelCountRow,
     TrainTestSiteLabelConsistencyRow,
     build_annotation_coverage_rows,
     build_false_transcript_intron_label_rows,
@@ -23,6 +24,8 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     build_evaluation_transcript_group_intron_count_rows,
     build_intron_count_comparison_rows,
     build_site_label_count_rows,
+    build_test_intron_label_count_rows,
+    build_test_site_label_count_rows,
     build_noncanonical_ratio_rows,
     build_sequence_quality_rows,
     build_species_overlap_sets,
@@ -35,6 +38,8 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     parse_training_intron_lengths,
     plot_false_transcript_false_intron_scatter,
     plot_site_label_count_comparison,
+    plot_test_intron_label_ratio_pie,
+    plot_test_site_label_ratio_pie,
     plot_evaluation_transcript_group_ratio_by_intron_count,
     plot_test_transcript_true_false_ratio_pie,
 )
@@ -376,6 +381,7 @@ def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
                 "tx_false_a\t2\t1",
                 "tx_false_b\t3\t0",
                 "tx_false_b\t8\t0",
+                "tx_false_b\t8\t1",
                 "tx_true\t1\t0",
                 "tx_contained\t1\t0",
                 "tx_missing\t1\t0",
@@ -460,6 +466,92 @@ def test_plot_false_transcript_false_intron_scatter_validation() -> None:
         match="No false-transcript intron-label rows were provided.",
     ):
         plot_false_transcript_false_intron_scatter([])
+
+
+def test_build_test_intron_label_count_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    processed_dir = species_dir / "processed"
+    processed_dir.mkdir(parents=True)
+
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tlabel",
+                "tx_a\t1\t1",
+                "tx_a\t1\t1",
+                "tx_b\t2\t0",
+                "tx_c\t3\t1",
+                "tx_c\t3\t0",
+                "tx_d\tbad\t1",
+                "tx_e\t5\tunknown",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_test_intron_label_count_rows(data_root)
+
+    assert rows == [
+        BinaryLabelCountRow(
+            species="SpX",
+            positive_count=1,
+            negative_count=2,
+        )
+    ]
+
+
+def test_build_test_site_label_count_rows(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    processed_dir = species_dir / "processed"
+    processed_dir.mkdir(parents=True)
+
+    (processed_dir / "intron_eval_flank10.tsv").write_text(
+        "\n".join(
+            [
+                "donor_label\tacceptor_label",
+                "1\t1",
+                "1\t0",
+                "x\t1",
+                "0\t2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_test_site_label_count_rows(data_root)
+
+    assert rows == [
+        BinaryLabelCountRow(
+            species="SpX",
+            positive_count=4,
+            negative_count=2,
+        )
+    ]
+
+
+def test_plot_test_intron_label_ratio_pie(tmp_path: Path) -> None:
+    output_path = tmp_path / "test_intron_label_ratio_pie.png"
+    rows = [
+        BinaryLabelCountRow(
+            species="SpX",
+            positive_count=3,
+            negative_count=1,
+        )
+    ]
+
+    plot_test_intron_label_ratio_pie(rows, output_path=output_path)
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
+
+
+def test_plot_test_site_label_ratio_pie_validation() -> None:
+    with pytest.raises(ValueError, match="No test label-count rows were provided."):
+        plot_test_site_label_ratio_pie([])
 
 
 def test_plot_evaluation_transcript_group_ratio_by_intron_count(tmp_path: Path) -> None:

@@ -20,6 +20,8 @@ dependencies:
   - tqdm
   - pyyaml
   - xgboost
+  - shap
+  - plotly
   - gffcompare
   - pip:
       - pytest>=8.0

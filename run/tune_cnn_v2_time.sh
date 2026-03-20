@@ -85,7 +85,7 @@ JOB_ORDER=(
 	"Mmus"
 )
 
-DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
+DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
@@ -96,21 +96,25 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
-	"input_mode": {
+	"conv_channels": {
 		"type": "categorical",
-		"values": ["onehot", "kmer3", "bpe"]
+		"values": [
+			"64,128,256",
+			"96,192,384",
+			"64,128,256,512",
+			"128,256,512"
+		]
 	},
-	"pair_mode": {
+	"kernel_sizes": {
 		"type": "categorical",
-		"values": ["pair", "independent"]
+		"values": ["11,7,5", "9,7,5", "15,11,7", "11,9,7,5"]
 	},
+	"max_pool_size": {"type": "categorical", "values": [1, 2, 3]},
+	"conv_stride": {"type": "categorical", "values": [1, 2]},
+	"head_type": {"type": "categorical", "values": ["gap", "center"]},
 	"sequence_transform": {
 		"type": "categorical",
 		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
-	},
-	"embedding_dim": {
-		"type": "categorical",
-		"values": [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
 	},
   "loss": {
     "type": "categorical",
@@ -183,7 +187,7 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/pair/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/both/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
 		return 0
@@ -194,17 +198,10 @@ resolve_search_space_file() {
 		printf '%s\n' "${species_file}"
 		return 0
 	fi
-	if [[ "${tuning_model_name}" != "cnn_pair" ]]; then
-		local base_target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
-		if [[ -f "${base_target_file}" ]]; then
-			printf '%s\n' "${base_target_file}"
-			return 0
-		fi
-		local base_species_file="${DATA_ROOT}/${species}/tuning/cnn_pair/search_space.json"
-		if [[ -f "${base_species_file}" ]]; then
-			printf '%s\n' "${base_species_file}"
-			return 0
-		fi
+	local base_species_file="${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
+	if [[ -f "${base_species_file}" ]]; then
+		printf '%s\n' "${base_species_file}"
+		return 0
 	fi
 
 	return 1
@@ -238,7 +235,7 @@ run_double_descent_plot() {
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
-		--target "pair" \
+		--target "both" \
 		--model "${model_name}" || true
 }
 
@@ -373,8 +370,8 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	base_seed="${SEED_VALUES[${seed_index}]}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/best_config.json"
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/both/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/both/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
@@ -383,7 +380,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 			"${DATA_ROOT}" \
 			"${TUNING_MODEL_NAME}" \
 			"${species}" \
-			"pair" \
+			"both" \
 			"${global_best_path}" \
 			"${CROSS_SPECIES_BEST_MODE}" \
 			"${CROSS_SPECIES_BEST_OVERRIDE}" \
@@ -396,7 +393,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
 
-	objective_metric="pair_pr_auc"
+	objective_metric="mean_pr_auc"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
 		objective_metric="test_pr_auc"
 	fi
@@ -422,7 +419,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 			"${PYTHON_BIN}" \
 			"${TRAIN_NEG_PATH_RESOLVED}"
 	)"
-	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_PAIR}"
+	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_SITE}"
 	search_space_path=""
 	if search_space_resolved="$(
 		resolve_search_space_file \
@@ -448,7 +445,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 		if [[ "${search_space_status}" -eq 2 ]]; then
 			exit 1
 		fi
-		echo "[tune_cnn_v2_time.sh] using embedded pair search space."
+		echo "[tune_cnn_v2_time.sh] using embedded site search space."
 	fi
 
 	cat > "${config_path}" <<JSON
@@ -473,7 +470,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
   "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
-  "base_args": {
+	"base_args": {
 	"model": "cnn_v2",
     "species": "${species}",
 	"train_target": "both",
@@ -482,7 +479,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
     "acceptor_len": ${ACCEPTOR_LEN},
     "val_frac": ${VAL_FRAC},
 	"input_mode": "onehot",
-	"pair_mode": "pair",
+	"pair_mode": "independent",
 	"embedding_dim": 32,
 	"bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
 	"bpe_trust_remote_code": 0,
@@ -522,7 +519,7 @@ JSON
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
 	printf '[tune_cnn_v2_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
+	printf 'ETA_remaining=%s species=%s target=both seed=%s\n' \
 		"${remaining_hms}" "${species}" "${base_seed}"
 	run_status=0
 	intronmodel_run_with_process_title \
@@ -536,7 +533,7 @@ JSON
 	fi
 	if [[ "${run_status}" -ne 0 ]]; then
 		echo "[tune_cnn_v2_time.sh] cycle=${job_index} failed "\
-			"species=${species} target=pair seed=${base_seed} "\
+			"species=${species} target=both seed=${base_seed} "\
 			"(exit=${run_status})" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then

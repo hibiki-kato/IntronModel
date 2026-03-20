@@ -598,7 +598,7 @@ def score_sequences(
         batch_ids = input_ids[i : i + batch_size].to(device)
         batch_mask = attn_mask[i : i + batch_size].to(device)
         logits = model(batch_ids, batch_mask)
-        probs = torch.sigmoid(logits).cpu().numpy()
+        probs = torch.sigmoid(logits).float().cpu().numpy()
         all_probs.append(probs)
 
     return np.concatenate(all_probs) if all_probs else np.array([])

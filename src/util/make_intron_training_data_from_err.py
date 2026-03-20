@@ -1163,7 +1163,8 @@ def process_species(
             fasta_reader,
         )
 
-        _ensure_feasibility(positive_records, transcript_strands, species)
+        if strict:
+            _ensure_feasibility(positive_records, transcript_strands, species)
 
         output_rows: list[PositiveOutputRow] = []
         seq_lengths: list[int] = []

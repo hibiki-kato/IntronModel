@@ -1754,6 +1754,30 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--eta_min_ratio", type=float, default=0.01)
     parser.add_argument("--val_frac", type=float, default=0.1)
     parser.add_argument("--grad_clip", type=float, default=5.0)
+    parser.add_argument("--donor_batch_size", type=int, default=None)
+    parser.add_argument("--acceptor_batch_size", type=int, default=None)
+    parser.add_argument("--donor_lr", type=float, default=None)
+    parser.add_argument("--acceptor_lr", type=float, default=None)
+    parser.add_argument("--donor_kernel_size", type=int, default=None)
+    parser.add_argument("--acceptor_kernel_size", type=int, default=None)
+    parser.add_argument("--donor_dropout", type=float, default=None)
+    parser.add_argument("--acceptor_dropout", type=float, default=None)
+    parser.add_argument("--donor_max_pool_size", type=int, default=None)
+    parser.add_argument("--acceptor_max_pool_size", type=int, default=None)
+    parser.add_argument("--donor_conv_stride", type=int, default=None)
+    parser.add_argument("--acceptor_conv_stride", type=int, default=None)
+    parser.add_argument("--donor_head_type", type=str, default=None)
+    parser.add_argument("--acceptor_head_type", type=str, default=None)
+    parser.add_argument("--donor_fc_hidden", type=int, default=None)
+    parser.add_argument("--acceptor_fc_hidden", type=int, default=None)
+    parser.add_argument("--donor_weight_decay", type=float, default=None)
+    parser.add_argument("--acceptor_weight_decay", type=float, default=None)
+    parser.add_argument("--donor_eta_min_ratio", type=float, default=None)
+    parser.add_argument("--acceptor_eta_min_ratio", type=float, default=None)
+    parser.add_argument("--donor_val_frac", type=float, default=None)
+    parser.add_argument("--acceptor_val_frac", type=float, default=None)
+    parser.add_argument("--donor_grad_clip", type=float, default=None)
+    parser.add_argument("--acceptor_grad_clip", type=float, default=None)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--compile_mode", choices=["off", "on", "auto"], default="auto")
     parser.add_argument("--use_amp", type=int, choices=[0, 1], default=1)
@@ -1772,18 +1796,34 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         choices=list(LOSS_NAME_CHOICES),
         default="weighted_bce",
     )
+    parser.add_argument("--donor_loss", type=str, default=None)
+    parser.add_argument("--acceptor_loss", type=str, default=None)
     parser.add_argument("--pos_weight_cap", type=float, default=20.0)
+    parser.add_argument("--donor_pos_weight_cap", type=float, default=None)
+    parser.add_argument("--acceptor_pos_weight_cap", type=float, default=None)
     parser.add_argument("--focal_gamma", type=float, default=2.0)
+    parser.add_argument("--donor_focal_gamma", type=float, default=None)
+    parser.add_argument("--acceptor_focal_gamma", type=float, default=None)
     parser.add_argument("--focal_alpha_pos", type=float, default=None)
+    parser.add_argument("--donor_focal_alpha_pos", type=float, default=None)
+    parser.add_argument("--acceptor_focal_alpha_pos", type=float, default=None)
     parser.add_argument(
         "--f1_lambda",
         type=float,
         default=0.1,
         help=("Mixing coefficient for --loss weighted_bce_f1 or focal_f1."),
     )
+    parser.add_argument("--donor_f1_lambda", type=float, default=None)
+    parser.add_argument("--acceptor_f1_lambda", type=float, default=None)
     parser.add_argument("--asym_gamma_pos", type=float, default=0.0)
+    parser.add_argument("--donor_asym_gamma_pos", type=float, default=None)
+    parser.add_argument("--acceptor_asym_gamma_pos", type=float, default=None)
     parser.add_argument("--asym_gamma_neg", type=float, default=4.0)
+    parser.add_argument("--donor_asym_gamma_neg", type=float, default=None)
+    parser.add_argument("--acceptor_asym_gamma_neg", type=float, default=None)
     parser.add_argument("--asym_alpha_pos", type=float, default=None)
+    parser.add_argument("--donor_asym_alpha_pos", type=float, default=None)
+    parser.add_argument("--acceptor_asym_alpha_pos", type=float, default=None)
     parser.add_argument("--tag", default=None)
 
 
@@ -1834,6 +1874,9 @@ def train(
     model_args: argparse.Namespace,
 ) -> Dict[str, object]:
     """Train pair CNN model with unified argument interface."""
+    reported_model_name = str(getattr(common_args, "model", "cnn_v2")).strip()
+    if reported_model_name == "":
+        reported_model_name = "cnn_v2"
     requested_pair_mode = _normalize_pair_mode(
         getattr(model_args, "pair_mode", "pair"),
         arg_name="--pair_mode",
@@ -1874,10 +1917,25 @@ def train(
             site_model_args.sequence_transform = "none"
         site_model_args.train_target = effective_train_target
         summary = cnn_site_module.train(common_args, site_model_args)
-        summary["model"] = "cnn_v2"
+        summary["model"] = reported_model_name
         summary["pair_mode"] = "independent"
         summary["train_target"] = effective_train_target
         summary["delegated_backend"] = "cnn"
+        return summary
+
+    requested_input_mode = _normalize_input_mode(
+        getattr(model_args, "input_mode", "onehot"),
+        arg_name="--input_mode",
+    )
+    if requested_input_mode == "onehot":
+        from models import cnn_pair as legacy_pair_module
+
+        summary = legacy_pair_module.train(common_args, model_args)
+        summary["model"] = reported_model_name
+        summary["pair_mode"] = "pair"
+        summary["train_target"] = "pair"
+        summary["input_mode"] = "onehot"
+        summary["delegated_backend"] = "cnn_pair"
         return summary
 
     train_pos_path, train_neg_path, inferred_train_len = resolve_train_paths(
@@ -1954,7 +2012,7 @@ def train(
     )
 
     run_name = build_run_name(
-        model_name="cnn_v2",
+        model_name=reported_model_name,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
         lr=train_params.lr,
@@ -1964,7 +2022,7 @@ def train(
     )
 
     summary: Dict[str, object] = {
-        "model": "cnn_v2",
+        "model": reported_model_name,
         "species": common_args.species,
         "train_pos_path": train_pos_path,
         "train_neg_path": train_neg_path,
@@ -2085,6 +2143,21 @@ def infer_site(
                 }
             )
         return pair_rows
+
+    requested_input_mode = _normalize_input_mode(
+        getattr(model_args, "input_mode", "onehot"),
+        arg_name="--input_mode",
+    )
+    if requested_input_mode == "onehot":
+        from models import cnn_pair as legacy_pair_module
+
+        try:
+            return legacy_pair_module.infer_site(common_args, model_args)
+        except Exception as exc:
+            print(
+                "[cnn_v2] legacy cnn_pair inference backend failed "
+                f"({exc.__class__.__name__}). Falling back to cnn_v2 backend."
+            )
 
     dirs = species_data_dirs(common_args.species)
     inferred_train_len: Optional[int] = None

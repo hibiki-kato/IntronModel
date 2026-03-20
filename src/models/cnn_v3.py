@@ -655,7 +655,7 @@ def infer_site(
     model.eval()
     with torch.no_grad():
         logits = model(torch.from_numpy(features.astype(np.float32)).to(device))
-        probs = torch.sigmoid(logits).detach().cpu().numpy()
+        probs = torch.sigmoid(logits).float().detach().cpu().numpy()
 
     out_rows: list[dict[str, object]] = []
     for row, score in zip(pair_rows, probs):

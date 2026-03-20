@@ -99,10 +99,6 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 		"type": "categorical",
 		"values": ["onehot", "kmer3", "bpe"]
 	},
-	"pair_mode": {
-		"type": "categorical",
-		"values": ["pair", "independent"]
-	},
 	"sequence_transform": {
 		"type": "categorical",
 		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
@@ -315,7 +311,7 @@ if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
 	echo "[tune_cnn_pair_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
-TUNING_MODEL_NAME="cnn_v2"
+TUNING_MODEL_NAME="cnn_v2_pair"
 
 PYTHON_BIN="$(resolve_python_bin)"
 mapfile -t SEED_VALUES < <(resolve_seed_list)
@@ -475,8 +471,8 @@ while true; do
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
   "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
-  "base_args": {
-	"model": "cnn_v2",
+	"base_args": {
+	"model": "cnn_v2_pair",
     "species": "${species}",
     "train_target": "pair",
     "seed": ${base_seed},

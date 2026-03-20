@@ -177,6 +177,20 @@ def test_derive_validation_protocol_uses_test_split_for_test_objective() -> None
     assert protocol["split_type"] == "test_transcript_eval"
 
 
+def test_derive_validation_protocol_marks_cnn_v2_pair_as_pair_mode() -> None:
+    protocol = hparam_search._derive_validation_protocol_from_args(
+        merged_args={
+            "model": "cnn_v2_pair",
+            "species": "Dmel",
+            "batch_size": 512,
+            "train_target": "pair",
+        },
+        objective_metric="pair_pr_auc",
+    )
+
+    assert protocol["include_pair_mixed_negatives"] is True
+
+
 def test_load_config_accepts_trial_process_mode(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     config["trial_process_mode"] = "persistent_quick"

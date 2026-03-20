@@ -220,17 +220,27 @@ if explicit_value:
 	print(",".join(explicit_paths))
 	raise SystemExit(0)
 
-# Preferred source: model-separated tuning artifact for cnn_v2 pair.
-best_config_path = (
+# Preferred source: model-separated tuning artifact for cnn_v2_pair.
+preferred_best_paths = (
+	project_root
+	/ "data"
+	/ species
+	/ "tuning"
+	/ "cnn_v2_pair"
+	/ "pair"
+	/ "best_config.json",
+	# Backward-compatible fallback.
 	project_root
 	/ "data"
 	/ species
 	/ "tuning"
 	/ "cnn_v2"
 	/ "pair"
-	/ "best_config.json"
+	/ "best_config.json",
 )
-if best_config_path.is_file():
+for best_config_path in preferred_best_paths:
+	if not best_config_path.is_file():
+		continue
 	try:
 		payload = json.loads(best_config_path.read_text(encoding="utf-8"))
 	except Exception:
@@ -253,7 +263,7 @@ for path in learning_metric_dir.glob("*.train.json"):
 		continue
 	model_name = str(payload.get("model", "")).strip()
 	checkpoint_path = str(payload.get("pair_checkpoint_path", "")).strip()
-	if model_name != "cnn_v2" or checkpoint_path == "":
+	if model_name not in {"cnn_v2", "cnn_v2_pair"} or checkpoint_path == "":
 		continue
 	if not Path(checkpoint_path).exists():
 		continue
