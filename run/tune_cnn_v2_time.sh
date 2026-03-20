@@ -12,14 +12,14 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="360"
+TIME_BUDGET_MINUTES="300"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional output/data overrides for tagged or mask-data tuning runs.
 TAG=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-MASK_MODE="off"
+MASK_MODE="on"
 CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -36,7 +36,7 @@ FULL_EPOCHS="8"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="off"
 
-GPU_IDS="auto"
+GPU_IDS="4,5,6,7"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 
