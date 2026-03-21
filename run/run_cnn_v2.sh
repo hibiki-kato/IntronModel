@@ -11,13 +11,13 @@ fi
 # CONFIG (edit here)
 # --------------------------
 set -a
-SPECIES="Mmus,Athal,Dmel,Hsap"
+SPECIES="Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 SEQUENCE_TRANSFORM="none"
 TRAIN_TARGET="both"
 
-EPOCHS="10"
+EPOCHS="20"
 MAX_EPOCHS="200"
 EARLY_STOP_PATIENCE="12"
 EARLY_STOP_MIN_DELTA="0.0"

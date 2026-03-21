@@ -35,9 +35,9 @@ FULL_EPOCHS="8"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="off"
 
-GPU_IDS="auto"
+GPU_IDS="2,3,4"
 # Keep default conservative for single-GPU runs.
-MAX_PARALLEL_TRIALS="2"
+MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"
 USE_AMP="1"

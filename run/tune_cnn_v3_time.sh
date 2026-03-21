@@ -38,7 +38,7 @@ QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="off"
 
 GPU_IDS="auto"
-# Keep default conservative for single-GPU runs.
+# auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"

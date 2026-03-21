@@ -1550,8 +1550,10 @@ def resolve_max_parallel(setting: object, gpu_count: int) -> int:
     parsed: int
     if isinstance(setting, str):
         text = setting.strip()
-        if text == "auto":
-            return max(1, gpu_count if gpu_count > 0 else 1)
+        if text.lower() == "auto":
+            if gpu_count > 0:
+                return gpu_count
+            return 1
         try:
             parsed = int(text)
         except ValueError as exc:
@@ -2815,6 +2817,55 @@ def _normalize_cnn_pair_fusion_mode(raw_mode: object) -> str:
     return mode
 
 
+def _normalize_cnn_v2_pair_mode(raw_mode: object) -> str:
+    """Normalize cnn_v2 pair mode aliases for architecture validation."""
+    mode = str(raw_mode).strip().lower()
+    if mode in {"off", "false", "0", "independent"}:
+        return "independent"
+    if mode in {"on", "true", "1", "pair"}:
+        return "pair"
+    return mode
+
+
+def _resolve_cnn_architecture_validation_model_name(
+    *,
+    model_name: str,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> str:
+    """Resolve effective CNN-family model for shape validation.
+
+    Returns
+    -------
+    str
+        One of ``"cnn"``, ``"cnn_pair"``, or ``""`` when no shape check applies.
+    """
+    normalized_model = model_name.strip().lower()
+    if normalized_model in {"cnn", "cnn_pair"}:
+        return normalized_model
+    if normalized_model == "cnn_v2":
+        pair_mode_raw = sampled_params.get("pair_mode")
+        if pair_mode_raw is None:
+            pair_mode_raw = base_args.get("pair_mode", "pair")
+        pair_mode = _normalize_cnn_v2_pair_mode(pair_mode_raw)
+        if pair_mode == "independent":
+            return "cnn"
+        input_mode_raw = sampled_params.get("input_mode")
+        if input_mode_raw is None:
+            input_mode_raw = base_args.get("input_mode", "onehot")
+        if str(input_mode_raw).strip().lower() == "onehot":
+            return "cnn_pair"
+        return ""
+    if normalized_model == "cnn_v2_pair":
+        input_mode_raw = sampled_params.get("input_mode")
+        if input_mode_raw is None:
+            input_mode_raw = base_args.get("input_mode", "onehot")
+        if str(input_mode_raw).strip().lower() == "onehot":
+            return "cnn_pair"
+        return ""
+    return ""
+
+
 def _derive_validation_protocol_from_args(
     *,
     merged_args: dict[str, ArgValue],
@@ -3087,7 +3138,12 @@ def _is_valid_cnn_architecture(
     base_args: dict[str, ArgValue],
 ) -> bool:
     """Return whether sampled CNN-family architecture is shape-valid."""
-    if model_name not in {"cnn", "cnn_pair"}:
+    validation_model_name = _resolve_cnn_architecture_validation_model_name(
+        model_name=model_name,
+        sampled_params=sampled_params,
+        base_args=base_args,
+    )
+    if validation_model_name == "":
         return True
 
     max_pool_size = _resolve_max_pool_size(
@@ -3113,11 +3169,18 @@ def _is_valid_cnn_architecture(
     donor_len = _to_positive_int(donor_len_raw)
     acceptor_len = _to_positive_int(acceptor_len_raw)
 
-    if model_name == "cnn":
+    if validation_model_name == "cnn":
         train_target_raw = sampled_params.get("train_target")
         if train_target_raw is None:
             train_target_raw = base_args.get("train_target", "both")
         train_target = str(train_target_raw).strip().lower()
+        if str(model_name).strip().lower() == "cnn_v2":
+            pair_mode_raw = sampled_params.get("pair_mode")
+            if pair_mode_raw is None:
+                pair_mode_raw = base_args.get("pair_mode", "pair")
+            if _normalize_cnn_v2_pair_mode(pair_mode_raw) == "independent":
+                # cnn_v2 independent path delegates to cnn with forced both targets.
+                train_target = "both"
 
         conv_channels_raw = sampled_params.get("conv_channels")
         if conv_channels_raw is None:

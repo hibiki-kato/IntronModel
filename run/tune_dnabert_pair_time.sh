@@ -48,8 +48,7 @@ ADAM_BETA2="0.98"
 ADAM_EPS="1e-8"
 
 GPU_IDS="0,1,5"
-# Keep the default to one concurrent trial for stable single-GPU throughput.
-# Increase manually when you intentionally run multi-GPU parallel tuning.
+# auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 TRIAL_PROCESS_MODE="persistent_all"
 

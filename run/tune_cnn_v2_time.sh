@@ -32,12 +32,12 @@ PROCESS_TITLE="ETA"
 QUICK_TRIALS="12"
 QUICK_EPOCHS="2"
 TOP_K="3"
-FULL_EPOCHS="8"
+FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="off"
 
-GPU_IDS="4,5,6,7"
-# Keep default conservative for single-GPU runs.
+GPU_IDS="5,6,7"
+# auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"
