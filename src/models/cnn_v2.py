@@ -314,6 +314,7 @@ class PairTrainParams:
     loss_name: str
     input_mode: str
     pair_mode: str
+    fusion_mode: str
     embedding_dim: int
     bpe_pretrained_model_name: str
     bpe_pretrained_revision: Optional[str]
@@ -340,6 +341,144 @@ class InferRuntimeConfig:
     use_amp: bool
     amp_dtype: Optional[torch.dtype]
     compile_enabled: bool
+
+
+@dataclass(frozen=True)
+class PairModelArchParams:
+    """Resolved pair-model architecture hyperparameters."""
+
+    donor_conv_channels: list[int]
+    acceptor_conv_channels: list[int]
+    donor_kernel_sizes: list[int]
+    acceptor_kernel_sizes: list[int]
+    max_pool_size: int
+    conv_stride: int
+    head_type: str
+    fusion_mode: str
+    fc_hidden: int
+
+
+def _coerce_positive_int(raw_value: object, *, arg_name: str) -> int:
+    """Normalize one positive integer argument."""
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{arg_name} must be an integer.") from exc
+    if value <= 0:
+        raise ValueError(f"{arg_name} must be positive.")
+    return value
+
+
+def _coerce_optional_int_list(
+    raw_value: object,
+    *,
+    arg_name: str,
+) -> Optional[list[int]]:
+    """Normalize one optional integer list argument."""
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        parsed = parse_conv_channels(raw_value, arg_name=arg_name)
+        return None if parsed is None else list(parsed)
+    if isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes)):
+        values: list[int] = []
+        for item in raw_value:
+            try:
+                value = int(item)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid {arg_name} item '{item}'. Use positive integers."
+                ) from exc
+            if value <= 0:
+                raise ValueError(f"{arg_name} values must be positive.")
+            values.append(value)
+        return values if values else None
+    raise ValueError(f"{arg_name} must be a comma-separated string or a list.")
+
+
+def _resolve_pair_model_arch_params(
+    model_args: argparse.Namespace,
+    *,
+    lightweight: bool = False,
+) -> PairModelArchParams:
+    """Resolve pair-model architecture hyperparameters from CLI args."""
+    fusion_mode = _normalize_fusion_mode(
+        getattr(model_args, "fusion_mode", "late"),
+        arg_name="--fusion_mode",
+    )
+    shared_conv_channels = _coerce_optional_int_list(
+        getattr(model_args, "conv_channels", None),
+        arg_name="--conv_channels",
+    )
+    donor_conv_channels = _coerce_optional_int_list(
+        getattr(model_args, "donor_conv_channels", None),
+        arg_name="--donor_conv_channels",
+    )
+    if donor_conv_channels is None:
+        donor_conv_channels = shared_conv_channels
+    acceptor_conv_channels = _coerce_optional_int_list(
+        getattr(model_args, "acceptor_conv_channels", None),
+        arg_name="--acceptor_conv_channels",
+    )
+    if acceptor_conv_channels is None:
+        acceptor_conv_channels = shared_conv_channels
+    if donor_conv_channels is None:
+        donor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+    if acceptor_conv_channels is None:
+        acceptor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+    shared_kernel_sizes = _coerce_optional_int_list(
+        getattr(model_args, "kernel_sizes", None),
+        arg_name="--kernel_sizes",
+    )
+    scalar_kernel_size = _coerce_positive_int(
+        getattr(model_args, "kernel_size", 7),
+        arg_name="--kernel_size",
+    )
+    donor_kernel_sizes = _coerce_optional_int_list(
+        getattr(model_args, "donor_kernel_sizes", None),
+        arg_name="--donor_kernel_sizes",
+    )
+    if donor_kernel_sizes is None:
+        donor_kernel_sizes = shared_kernel_sizes
+    if donor_kernel_sizes is None:
+        donor_kernel_sizes = [scalar_kernel_size] * len(donor_conv_channels)
+    acceptor_kernel_sizes = _coerce_optional_int_list(
+        getattr(model_args, "acceptor_kernel_sizes", None),
+        arg_name="--acceptor_kernel_sizes",
+    )
+    if acceptor_kernel_sizes is None:
+        acceptor_kernel_sizes = shared_kernel_sizes
+    if acceptor_kernel_sizes is None:
+        acceptor_kernel_sizes = [scalar_kernel_size] * len(acceptor_conv_channels)
+
+    max_pool_size = _coerce_positive_int(
+        getattr(model_args, "max_pool_size", 2),
+        arg_name="--max_pool_size",
+    )
+    conv_stride = _coerce_positive_int(
+        getattr(model_args, "conv_stride", 1),
+        arg_name="--conv_stride",
+    )
+    head_type = normalize_cnn_head_type(
+        getattr(model_args, "head_type", "gap"),
+        arg_name="--head_type",
+    )
+    fc_hidden = _coerce_positive_int(
+        getattr(model_args, "fc_hidden", 128),
+        arg_name="--fc_hidden",
+    )
+    return PairModelArchParams(
+        donor_conv_channels=donor_conv_channels,
+        acceptor_conv_channels=acceptor_conv_channels,
+        donor_kernel_sizes=donor_kernel_sizes,
+        acceptor_kernel_sizes=acceptor_kernel_sizes,
+        max_pool_size=max_pool_size,
+        conv_stride=conv_stride,
+        head_type=head_type,
+        fusion_mode=fusion_mode,
+        fc_hidden=fc_hidden,
+    )
 
 
 def _resolve_infer_runtime_config(
@@ -502,55 +641,6 @@ class PairDNADataset(Dataset):
         )
 
 
-class MotifDilatedEncoder(nn.Module):
-    """CNN encoder with multi-kernel motif, interaction, and dilated blocks."""
-
-    def __init__(self, in_channels: int) -> None:
-        super().__init__()
-        self.motif_layers = nn.ModuleList(
-            [
-                nn.Conv1d(in_channels, 64, kernel_size=5, padding=2),
-                nn.Conv1d(in_channels, 64, kernel_size=11, padding=5),
-                nn.Conv1d(in_channels, 64, kernel_size=17, padding=8),
-            ]
-        )
-        self.motif_activation = nn.ReLU(inplace=True)
-        self.interaction = nn.Sequential(
-            nn.Conv1d(192, 256, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-        )
-        dilations = (1, 2, 4, 8)
-        self.dilated_blocks = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv1d(
-                        256,
-                        256,
-                        kernel_size=3,
-                        dilation=dilation,
-                        padding=dilation,
-                    ),
-                    nn.ReLU(inplace=True),
-                )
-                for dilation in dilations
-            ]
-        )
-        self.output_dim: int = 512
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode input tensor of shape ``(batch, channels, length)``."""
-        motif_features = [
-            self.motif_activation(layer(x)) for layer in self.motif_layers
-        ]
-        x = torch.cat(motif_features, dim=1)
-        x = self.interaction(x)
-        for block in self.dilated_blocks:
-            x = block(x)
-        max_pool = torch.amax(x, dim=2)
-        mean_pool = torch.mean(x, dim=2)
-        return torch.cat([max_pool, mean_pool], dim=1)
-
-
 class PairSpliceCNN(nn.Module):
     """Pair-scoring CNN with donor/acceptor branch encoders."""
 
@@ -560,43 +650,187 @@ class PairSpliceCNN(nn.Module):
         pair_mode: str,
         embedding_dim: int,
         vocab_size: Optional[int],
+        donor_conv_channels: Optional[Sequence[int]] = None,
+        acceptor_conv_channels: Optional[Sequence[int]] = None,
+        kernel_size: int = 7,
+        donor_kernel_sizes: Optional[Sequence[int]] = None,
+        acceptor_kernel_sizes: Optional[Sequence[int]] = None,
+        max_pool_size: int = 2,
+        conv_stride: int = 1,
+        head_type: str = "gap",
+        fusion_mode: str = "late",
         dropout: float = 0.3,
+        fc_hidden: int = 128,
     ) -> None:
         super().__init__()
         self.input_mode = _normalize_input_mode(input_mode, arg_name="input_mode")
         self.pair_mode = _normalize_pair_mode(pair_mode, arg_name="pair_mode")
+        self.fusion_mode = _normalize_fusion_mode(
+            fusion_mode,
+            arg_name="fusion_mode",
+        )
         if self.pair_mode != "pair":
             raise ValueError("PairSpliceCNN only supports pair_mode=pair.")
+        self.head_type = normalize_cnn_head_type(head_type, arg_name="head_type")
         if self.input_mode == "onehot":
             self.embedding = None
-            in_channels = 4
+            branch_in_channels = 4
         else:
             if embedding_dim <= 0:
                 raise ValueError("embedding_dim must be positive.")
             if vocab_size is None or vocab_size <= 0:
                 raise ValueError("vocab_size must be positive for token input modes.")
             self.embedding = nn.Embedding(vocab_size, embedding_dim)
-            in_channels = embedding_dim
+            branch_in_channels = embedding_dim
 
-        self.donor_encoder = MotifDilatedEncoder(in_channels=in_channels)
-        self.acceptor_encoder = MotifDilatedEncoder(in_channels=in_channels)
-        classifier_input_dim = (
-            self.donor_encoder.output_dim + self.acceptor_encoder.output_dim
+        donor_channels = (
+            list(donor_conv_channels)
+            if donor_conv_channels is not None
+            else [64, 128, 256]
+        )
+        acceptor_channels = (
+            list(acceptor_conv_channels)
+            if acceptor_conv_channels is not None
+            else [64, 128, 256]
+        )
+        donor_kernel_spec: int | Sequence[int] = (
+            list(donor_kernel_sizes)
+            if donor_kernel_sizes is not None
+            else kernel_size
+        )
+        acceptor_kernel_spec: int | Sequence[int] = (
+            list(acceptor_kernel_sizes)
+            if acceptor_kernel_sizes is not None
+            else kernel_size
         )
 
+        self.donor_encoder: Optional[CnnGapEncoder] = None
+        self.acceptor_encoder: Optional[CnnGapEncoder] = None
+        self.fused_encoder: Optional[CnnGapEncoder] = None
+        self.mid_donor_prefix: Optional[nn.Sequential] = None
+        self.mid_acceptor_prefix: Optional[nn.Sequential] = None
+        self.mid_fused_tail: Optional[CnnGapEncoder] = None
+        self.mid_readout: Optional[CnnFeatureReadout] = None
+
+        donor_probe = CnnGapEncoder(
+            in_channels=branch_in_channels,
+            conv_channels=donor_channels,
+            kernel_size=donor_kernel_spec,
+            dropout=dropout,
+            max_pool_size=max_pool_size,
+            conv_stride=conv_stride,
+            head_type=self.head_type,
+        )
+        acceptor_probe = CnnGapEncoder(
+            in_channels=branch_in_channels,
+            conv_channels=acceptor_channels,
+            kernel_size=acceptor_kernel_spec,
+            dropout=dropout,
+            max_pool_size=max_pool_size,
+            conv_stride=conv_stride,
+            head_type=self.head_type,
+        )
+        donor_layout_channels, donor_layout_kernels = _extract_encoder_layout(
+            donor_probe
+        )
+        acceptor_layout_channels, acceptor_layout_kernels = _extract_encoder_layout(
+            acceptor_probe
+        )
+
+        if self.fusion_mode == "late":
+            self.donor_encoder = donor_probe
+            self.acceptor_encoder = acceptor_probe
+            classifier_input_dim = (
+                self.donor_encoder.output_dim + self.acceptor_encoder.output_dim
+            )
+        elif self.fusion_mode == "early":
+            if donor_layout_channels != acceptor_layout_channels:
+                raise ValueError(
+                    "fusion_mode=early requires matching donor/acceptor conv "
+                    "channels."
+                )
+            if donor_layout_kernels != acceptor_layout_kernels:
+                raise ValueError(
+                    "fusion_mode=early requires matching donor/acceptor kernel "
+                    "sizes."
+                )
+            self.fused_encoder = CnnGapEncoder(
+                in_channels=2 * branch_in_channels,
+                conv_channels=donor_layout_channels,
+                kernel_size=donor_layout_kernels,
+                dropout=dropout,
+                max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=self.head_type,
+            )
+            classifier_input_dim = self.fused_encoder.output_dim
+        else:
+            if donor_layout_channels != acceptor_layout_channels:
+                raise ValueError(
+                    "fusion_mode=mid requires matching donor/acceptor conv "
+                    "channels."
+                )
+            if donor_layout_kernels != acceptor_layout_kernels:
+                raise ValueError(
+                    "fusion_mode=mid requires matching donor/acceptor kernel "
+                    "sizes."
+                )
+            split_index = max(1, len(donor_layout_channels) // 2)
+            prefix_channels = donor_layout_channels[:split_index]
+            prefix_kernels = donor_layout_kernels[:split_index]
+            suffix_channels = donor_layout_channels[split_index:]
+            suffix_kernels = donor_layout_kernels[split_index:]
+            self.mid_donor_prefix = CnnGapEncoder(
+                in_channels=branch_in_channels,
+                conv_channels=prefix_channels,
+                kernel_size=prefix_kernels,
+                dropout=dropout,
+                max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=self.head_type,
+            ).conv_layers
+            self.mid_acceptor_prefix = CnnGapEncoder(
+                in_channels=branch_in_channels,
+                conv_channels=prefix_channels,
+                kernel_size=prefix_kernels,
+                dropout=dropout,
+                max_pool_size=max_pool_size,
+                conv_stride=conv_stride,
+                head_type=self.head_type,
+            ).conv_layers
+            if suffix_channels:
+                self.mid_fused_tail = CnnGapEncoder(
+                    in_channels=2 * prefix_channels[-1],
+                    conv_channels=suffix_channels,
+                    kernel_size=suffix_kernels,
+                    dropout=dropout,
+                    max_pool_size=max_pool_size,
+                    conv_stride=conv_stride,
+                    head_type=self.head_type,
+                )
+                classifier_input_dim = self.mid_fused_tail.output_dim
+            else:
+                self.mid_readout = CnnFeatureReadout(
+                    output_channels=2 * prefix_channels[-1],
+                    head_type=self.head_type,
+                )
+                classifier_input_dim = self.mid_readout.output_dim
+
         self.fc = nn.Sequential(
-            nn.Linear(classifier_input_dim, 512),
+            nn.Linear(classifier_input_dim, fc_hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(512, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 1),
+            nn.Linear(fc_hidden, 1),
         )
 
     def _prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """Convert model input to channel-first float tensor."""
         if self.embedding is None:
+            if x.ndim != 3:
+                raise ValueError("One-hot inputs must have shape (batch, channels, length).")
             return x.float()
+        if x.ndim != 2:
+            raise ValueError("Token inputs must have shape (batch, length).")
         return self.embedding(x.long()).transpose(1, 2).contiguous()
 
     def forward(self, donor_x: torch.Tensor, acceptor_x: torch.Tensor) -> torch.Tensor:
@@ -616,13 +850,42 @@ class PairSpliceCNN(nn.Module):
         """
         donor_features = self._prepare_inputs(donor_x)
         acceptor_features = self._prepare_inputs(acceptor_x)
-        mixed = torch.cat(
-            [
-                self.donor_encoder(donor_features),
-                self.acceptor_encoder(acceptor_features),
-            ],
-            dim=1,
-        )
+        if self.fusion_mode == "late":
+            if self.donor_encoder is None or self.acceptor_encoder is None:
+                raise RuntimeError("late fusion encoders are not initialized.")
+            mixed = torch.cat(
+                [
+                    self.donor_encoder(donor_features),
+                    self.acceptor_encoder(acceptor_features),
+                ],
+                dim=1,
+            )
+        elif self.fusion_mode == "early":
+            if self.fused_encoder is None:
+                raise RuntimeError("early fusion encoder is not initialized.")
+            if donor_features.shape[2] != acceptor_features.shape[2]:
+                raise ValueError(
+                    "early fusion requires donor and acceptor lengths to match."
+                )
+            mixed = self.fused_encoder(
+                torch.cat([donor_features, acceptor_features], dim=1)
+            )
+        else:
+            if self.mid_donor_prefix is None or self.mid_acceptor_prefix is None:
+                raise RuntimeError("mid fusion prefixes are not initialized.")
+            if donor_features.shape[2] != acceptor_features.shape[2]:
+                raise ValueError(
+                    "mid fusion requires donor and acceptor lengths to match."
+                )
+            donor_mid = self.mid_donor_prefix(donor_features)
+            acceptor_mid = self.mid_acceptor_prefix(acceptor_features)
+            fused_mid = torch.cat([donor_mid, acceptor_mid], dim=1)
+            if self.mid_fused_tail is not None:
+                mixed = self.mid_fused_tail(fused_mid)
+            else:
+                if self.mid_readout is None:
+                    raise RuntimeError("mid fusion readout is not initialized.")
+                mixed = self.mid_readout(fused_mid)
         return self.fc(mixed).squeeze(-1)
 
 
@@ -741,6 +1004,10 @@ def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParam
         getattr(model_args, "pair_mode", "pair"),
         arg_name="--pair_mode",
     )
+    fusion_mode = _normalize_fusion_mode(
+        getattr(model_args, "fusion_mode", "late"),
+        arg_name="--fusion_mode",
+    )
     embedding_dim = int(getattr(model_args, "embedding_dim", 32))
     if embedding_dim <= 0:
         raise ValueError("--embedding_dim must be positive.")
@@ -750,6 +1017,7 @@ def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParam
         loss_name=str(model_args.loss),
         input_mode=input_mode,
         pair_mode=pair_mode,
+        fusion_mode=fusion_mode,
         embedding_dim=embedding_dim,
         bpe_pretrained_model_name=str(
             getattr(model_args, "bpe_pretrained_model_name", BPE_DEFAULT_MODEL_NAME)
@@ -834,6 +1102,27 @@ def train_pair_model(
             "Unsupported --sequence_transform: "
             f"{sequence_transform}. Supported: {SEQUENCE_TRANSFORM_CHOICES}"
         )
+
+    arch_params = _resolve_pair_model_arch_params(
+        model_args,
+        lightweight=lightweight,
+    )
+    if arch_params.fusion_mode in {"early", "mid"}:
+        if donor_window_len != acceptor_window_len:
+            raise ValueError(
+                f"--fusion_mode={arch_params.fusion_mode} requires "
+                "donor_len == acceptor_len."
+            )
+        if arch_params.donor_conv_channels != arch_params.acceptor_conv_channels:
+            raise ValueError(
+                f"--fusion_mode={arch_params.fusion_mode} requires matching "
+                "donor/acceptor conv channels."
+            )
+        if arch_params.donor_kernel_sizes != arch_params.acceptor_kernel_sizes:
+            raise ValueError(
+                f"--fusion_mode={arch_params.fusion_mode} requires matching "
+                "donor/acceptor kernel sizes."
+            )
 
     device = pick_device(device)
     resolved_num_workers = _resolve_num_workers(num_workers, device=device)
@@ -1035,7 +1324,17 @@ def train_pair_model(
                 pair_mode=train_params.pair_mode,
                 embedding_dim=train_params.embedding_dim,
                 vocab_size=donor_encoder.vocab_size,
+                donor_conv_channels=arch_params.donor_conv_channels,
+                acceptor_conv_channels=arch_params.acceptor_conv_channels,
+                kernel_size=7,
+                donor_kernel_sizes=arch_params.donor_kernel_sizes,
+                acceptor_kernel_sizes=arch_params.acceptor_kernel_sizes,
+                max_pool_size=arch_params.max_pool_size,
+                conv_stride=arch_params.conv_stride,
+                head_type=arch_params.head_type,
+                fusion_mode=arch_params.fusion_mode,
                 dropout=train_params.dropout,
+                fc_hidden=arch_params.fc_hidden,
             ).to(device)
 
             if compile_enabled_attempt:
@@ -1235,6 +1534,7 @@ def train_pair_model(
                             "model_config": {
                                 "input_mode": train_params.input_mode,
                                 "pair_mode": train_params.pair_mode,
+                                "fusion_mode": arch_params.fusion_mode,
                                 "embedding_dim": train_params.embedding_dim,
                                 "vocab_size": donor_encoder.vocab_size,
                                 "bpe_pretrained_model_name": (
@@ -1246,7 +1546,35 @@ def train_pair_model(
                                 "bpe_trust_remote_code": (
                                     train_params.bpe_trust_remote_code
                                 ),
+                                "conv_channels": (
+                                    arch_params.donor_conv_channels
+                                    if arch_params.donor_conv_channels
+                                    == arch_params.acceptor_conv_channels
+                                    else None
+                                ),
+                                "donor_conv_channels": (
+                                    list(arch_params.donor_conv_channels)
+                                ),
+                                "acceptor_conv_channels": (
+                                    list(arch_params.acceptor_conv_channels)
+                                ),
+                                "kernel_sizes": (
+                                    arch_params.donor_kernel_sizes
+                                    if arch_params.donor_kernel_sizes
+                                    == arch_params.acceptor_kernel_sizes
+                                    else None
+                                ),
+                                "donor_kernel_sizes": (
+                                    list(arch_params.donor_kernel_sizes)
+                                ),
+                                "acceptor_kernel_sizes": (
+                                    list(arch_params.acceptor_kernel_sizes)
+                                ),
+                                "max_pool_size": arch_params.max_pool_size,
+                                "conv_stride": arch_params.conv_stride,
+                                "head_type": arch_params.head_type,
                                 "dropout": train_params.dropout,
+                                "fc_hidden": arch_params.fc_hidden,
                             },
                             "model_state": state_dict_to_save,
                         },
@@ -1341,12 +1669,37 @@ def train_pair_model(
                 "f1_lambda": loss_meta["f1_lambda"],
                 "input_mode": train_params.input_mode,
                 "pair_mode": train_params.pair_mode,
+                "fusion_mode": arch_params.fusion_mode,
                 "embedding_dim": train_params.embedding_dim,
                 "dropout": train_params.dropout,
                 "weight_decay": train_params.weight_decay,
                 "eta_min_ratio": train_params.eta_min_ratio,
                 "val_frac": train_params.val_frac,
                 "grad_clip": train_params.grad_clip,
+                "conv_channels": (
+                    (
+                        list(arch_params.donor_conv_channels)
+                        if arch_params.donor_conv_channels
+                        == arch_params.acceptor_conv_channels
+                        else None
+                    )
+                ),
+                "donor_conv_channels": list(arch_params.donor_conv_channels),
+                "acceptor_conv_channels": list(arch_params.acceptor_conv_channels),
+                "kernel_sizes": (
+                    (
+                        list(arch_params.donor_kernel_sizes)
+                        if arch_params.donor_kernel_sizes
+                        == arch_params.acceptor_kernel_sizes
+                        else None
+                    )
+                ),
+                "donor_kernel_sizes": list(arch_params.donor_kernel_sizes),
+                "acceptor_kernel_sizes": list(arch_params.acceptor_kernel_sizes),
+                "max_pool_size": arch_params.max_pool_size,
+                "conv_stride": arch_params.conv_stride,
+                "head_type": arch_params.head_type,
+                "fc_hidden": arch_params.fc_hidden,
                 "compile_enabled": compile_enabled_attempt,
                 "use_amp": use_amp_bool,
                 "amp_dtype": (
@@ -1441,13 +1794,26 @@ def load_pair_model(
     dropout = float(model_config.get("dropout", 0.3))
     if input_mode != "onehot" and vocab_size is None:
         raise ValueError("checkpoint is missing vocab_size for token input mode.")
+    arch_params = _resolve_pair_model_arch_params(
+        argparse.Namespace(**model_config),
+    )
 
     model = PairSpliceCNN(
         input_mode=input_mode,
         pair_mode=pair_mode,
         embedding_dim=embedding_dim,
         vocab_size=vocab_size,
+        donor_conv_channels=arch_params.donor_conv_channels,
+        acceptor_conv_channels=arch_params.acceptor_conv_channels,
+        kernel_size=7,
+        donor_kernel_sizes=arch_params.donor_kernel_sizes,
+        acceptor_kernel_sizes=arch_params.acceptor_kernel_sizes,
+        max_pool_size=arch_params.max_pool_size,
+        conv_stride=arch_params.conv_stride,
+        head_type=arch_params.head_type,
+        fusion_mode=arch_params.fusion_mode,
         dropout=dropout,
+        fc_hidden=arch_params.fc_hidden,
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()

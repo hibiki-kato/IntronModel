@@ -51,6 +51,52 @@ def test_pair_splice_cnn_forward_onehot_pair_mode() -> None:
     assert logits.shape == (3,)
 
 
+def test_pair_splice_cnn_supports_token_early_fusion() -> None:
+    model = cnn_v2.PairSpliceCNN(
+        input_mode="kmer3",
+        pair_mode="pair",
+        embedding_dim=8,
+        vocab_size=65,
+        donor_conv_channels=[8, 16],
+        acceptor_conv_channels=[8, 16],
+        donor_kernel_sizes=[5, 3],
+        acceptor_kernel_sizes=[5, 3],
+        max_pool_size=2,
+        conv_stride=1,
+        head_type="gap",
+        fusion_mode="early",
+        dropout=0.1,
+        fc_hidden=32,
+    )
+    donor_x = torch.randint(0, 65, (2, 12))
+    acceptor_x = torch.randint(0, 65, (2, 12))
+    logits = model(donor_x, acceptor_x)
+    assert logits.shape == (2,)
+
+
+def test_pair_splice_cnn_late_allows_asymmetric_branches() -> None:
+    model = cnn_v2.PairSpliceCNN(
+        input_mode="kmer3",
+        pair_mode="pair",
+        embedding_dim=8,
+        vocab_size=65,
+        donor_conv_channels=[8, 16],
+        acceptor_conv_channels=[16, 32, 32],
+        donor_kernel_sizes=[5, 3],
+        acceptor_kernel_sizes=[7, 5, 3],
+        max_pool_size=2,
+        conv_stride=1,
+        head_type="gap",
+        fusion_mode="late",
+        dropout=0.1,
+        fc_hidden=32,
+    )
+    donor_x = torch.randint(0, 65, (2, 10))
+    acceptor_x = torch.randint(0, 65, (2, 8))
+    logits = model(donor_x, acceptor_x)
+    assert logits.shape == (2,)
+
+
 def test_pair_mode_off_alias_maps_to_independent() -> None:
     assert cnn_v2._normalize_pair_mode("off", arg_name="--pair_mode") == "independent"
 
@@ -62,6 +108,7 @@ def test_resolve_pair_train_params_v2_flags() -> None:
         loss="weighted_bce",
         input_mode="kmer3",
         pair_mode="pair",
+        fusion_mode="early",
         embedding_dim=32,
         bpe_pretrained_model_name=cnn_v2.BPE_DEFAULT_MODEL_NAME,
         bpe_pretrained_revision=None,
@@ -82,6 +129,7 @@ def test_resolve_pair_train_params_v2_flags() -> None:
     params = cnn_v2._resolve_pair_train_params(args)
     assert params.input_mode == "kmer3"
     assert params.pair_mode == "pair"
+    assert params.fusion_mode == "early"
     assert params.embedding_dim == 32
 
 

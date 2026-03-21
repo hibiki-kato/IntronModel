@@ -2858,19 +2858,9 @@ def _resolve_cnn_architecture_validation_model_name(
         pair_mode = _normalize_cnn_v2_pair_mode(pair_mode_raw)
         if pair_mode == "independent":
             return "cnn"
-        input_mode_raw = sampled_params.get("input_mode")
-        if input_mode_raw is None:
-            input_mode_raw = base_args.get("input_mode", "onehot")
-        if str(input_mode_raw).strip().lower() == "onehot":
-            return "cnn_pair"
-        return ""
+        return "cnn_pair"
     if normalized_model == "cnn_v2_pair":
-        input_mode_raw = sampled_params.get("input_mode")
-        if input_mode_raw is None:
-            input_mode_raw = base_args.get("input_mode", "onehot")
-        if str(input_mode_raw).strip().lower() == "onehot":
-            return "cnn_pair"
-        return ""
+        return "cnn_pair"
     return ""
 
 
@@ -4955,12 +4945,14 @@ def build_trial_params(
     if seed_source is not None:
         return [dict(row.sampled_params) for row in seed_source[:count]]
     sampled: list[dict[str, Scalar]] = []
+    sampled_keys: set[str] = set()
     max_resample_attempts = 64
     model_name = str(config.base_args.get("model", ""))
     for trial_id in range(count):
         trial_seed = config.base_seed + seed_offset + trial_id
         rng = random.Random(trial_seed)
         params: dict[str, Scalar]
+        params_key: Optional[str] = None
         best_under_cap_params: Optional[dict[str, Scalar]] = None
         best_under_cap_complexity: Optional[int] = None
         last_invalid_reason = "Failed to sample a valid architecture."
@@ -4990,6 +4982,17 @@ def build_trial_params(
                 sampled_params=params,
                 base_args=config.base_args,
             )
+            params_key = json.dumps(
+                params,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if params_key in sampled_keys:
+                last_invalid_reason = (
+                    "Failed to sample a unique architecture after "
+                    f"{max_resample_attempts} attempts."
+                )
+                continue
             if not _is_valid_cnn_architecture(
                 model_name=model_name,
                 sampled_params=params,
@@ -5018,8 +5021,18 @@ def build_trial_params(
         else:
             if best_under_cap_params is not None:
                 params = best_under_cap_params
+                params_key = json.dumps(
+                    params,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             else:
                 raise ValueError(last_invalid_reason)
+        if params_key is None:
+            raise ValueError("Failed to sample a unique architecture.")
+        if params_key in sampled_keys:
+            raise ValueError("Failed to sample a unique architecture.")
+        sampled_keys.add(params_key)
         sampled.append(params)
     return sampled
 
@@ -5422,7 +5435,8 @@ def run_search(config: SearchConfig) -> int:
             flush=True,
         )
     else:
-        selected_for_full = ranked_quick[: config.top_k]
+        selected_for_full: list[TrialResult] = []
+        selected_for_full_keys: set[str] = set()
         full_compile_mode = (
             str(full_overrides.get("compile_mode", "auto")).strip().lower()
         )
@@ -5436,7 +5450,6 @@ def run_search(config: SearchConfig) -> int:
                     "CUDA_HOME/CUDA_PATH) to enable torch.compile.",
                     flush=True,
                 )
-        filtered_for_full: list[TrialResult] = []
         skipped_same_best_epoch = 0
         skipped_seed_context_match = 0
         seed_best_key: Optional[str] = None
@@ -5446,12 +5459,14 @@ def run_search(config: SearchConfig) -> int:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-        for row in selected_for_full:
+        for row in ranked_quick:
             row_key = json.dumps(
                 row.sampled_params,
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            if row_key in selected_for_full_keys:
+                continue
             if (
                 seed_best_key is not None
                 and row_key == seed_best_key
@@ -5470,8 +5485,11 @@ def run_search(config: SearchConfig) -> int:
             ):
                 skipped_same_best_epoch += 1
                 continue
-            filtered_for_full.append(row)
-        full_params = [dict(row.sampled_params) for row in filtered_for_full]
+            selected_for_full.append(row)
+            selected_for_full_keys.add(row_key)
+            if len(selected_for_full) >= config.top_k:
+                break
+        full_params = [dict(row.sampled_params) for row in selected_for_full]
         injected_seed_full_recheck = False
         if seed_best_params is not None and seed_best_context_mismatch:
             existing_param_keys = {

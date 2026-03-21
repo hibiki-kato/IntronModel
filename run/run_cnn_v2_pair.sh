@@ -26,10 +26,21 @@ LR="5e-4"
 LOSS="focal"
 INPUT_MODE="onehot"   # onehot | kmer3 | bpe
 PAIR_MODE="pair"      # pair | independent
+FUSION_MODE="late"    # late | mid | early
 EMBEDDING_DIM="32"
 BPE_PRETRAINED_MODEL_NAME="zhihan1996/DNABERT-2-117M"
 BPE_PRETRAINED_REVISION=""
 BPE_TRUST_REMOTE_CODE="0"
+CONV_CHANNELS=""
+KERNEL_SIZES=""
+DONOR_CONV_CHANNELS=""
+ACCEPTOR_CONV_CHANNELS=""
+DONOR_KERNEL_SIZES=""
+ACCEPTOR_KERNEL_SIZES=""
+MAX_POOL_SIZE="2"
+CONV_STRIDE="1"
+HEAD_TYPE="gap"
+FC_HIDDEN="128"
 DROPOUT="0.3"
 WEIGHT_DECAY="0.01"
 ETA_MIN_RATIO="0.01"
@@ -206,9 +217,20 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 		--loss "${LOSS}"
 		--input_mode "${INPUT_MODE}"
 		--pair_mode "${PAIR_MODE}"
+		--fusion_mode "${FUSION_MODE}"
 		--embedding_dim "${EMBEDDING_DIM}"
 		--bpe_pretrained_model_name "${BPE_PRETRAINED_MODEL_NAME}"
 		--bpe_trust_remote_code "${BPE_TRUST_REMOTE_CODE}"
+		--conv_channels "${CONV_CHANNELS}"
+		--kernel_sizes "${KERNEL_SIZES}"
+		--donor_conv_channels "${DONOR_CONV_CHANNELS}"
+		--acceptor_conv_channels "${ACCEPTOR_CONV_CHANNELS}"
+		--donor_kernel_sizes "${DONOR_KERNEL_SIZES}"
+		--acceptor_kernel_sizes "${ACCEPTOR_KERNEL_SIZES}"
+		--max_pool_size "${MAX_POOL_SIZE}"
+		--conv_stride "${CONV_STRIDE}"
+		--head_type "${HEAD_TYPE}"
+		--fc_hidden "${FC_HIDDEN}"
 		--dropout "${DROPOUT}"
 		--weight_decay "${WEIGHT_DECAY}"
 		--eta_min_ratio "${ETA_MIN_RATIO}"
@@ -315,7 +337,7 @@ for species_raw in "${SPECIES_LIST[@]}"; do
 		args+=("${tuned_args[@]}")
 	fi
 
-	echo "[cnn_v2_pair.sh] species=${species} input_mode=${INPUT_MODE} pair_mode=${PAIR_MODE}"
+	echo "[cnn_v2_pair.sh] species=${species} input_mode=${INPUT_MODE} pair_mode=${PAIR_MODE} fusion_mode=${FUSION_MODE}"
 	PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
 		python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 done

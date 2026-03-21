@@ -21,6 +21,7 @@ def test_build_validation_protocol_includes_train_source_signatures(
         metric_primary="pair_pr_auc",
     )
 
+    assert protocol["include_pair_mixed_negatives"] is False
     signature_obj = protocol["train_source_signature"]
     assert isinstance(signature_obj, dict)
     pos_signature = signature_obj["train_pos"]
@@ -57,6 +58,7 @@ def test_build_validation_protocol_tracks_pair_mixed_negative_signatures(
         include_pair_mixed_negatives=True,
     )
 
+    assert protocol["include_pair_mixed_negatives"] is True
     signature_obj = protocol["train_source_signature"]
     assert isinstance(signature_obj, dict)
     extra_negatives_obj = signature_obj["pair_extra_negatives"]

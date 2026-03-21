@@ -2429,7 +2429,7 @@ def test_run_search_skips_seed_full_recheck_when_context_matches(
     assert exit_code == 0
     full_params = cast(list[dict[str, object]], captured["full_params"])
     assert seed_params not in full_params
-    assert len(full_params) == 1
+    assert len(full_params) == 2
 
 
 def test_run_search_injects_seed_into_full_when_fixed_run_args_change(
@@ -2846,6 +2846,7 @@ def test_load_historical_trials_defaults_missing_window_lengths_to_100(
 
 def test_build_trial_params_history_guided_is_reproducible(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_dict = _base_config_dict(tmp_path)
     search_space = hparam_search._validate_search_space(config_dict["search_space"])
@@ -2878,7 +2879,34 @@ def test_build_trial_params_history_guided_is_reproducible(
     history_trials = [
         (0.83, {"batch_size": 512, "kernel_size": 7, "lr": 2e-4}),
         (0.81, {"batch_size": 1024, "kernel_size": 9, "lr": 1.5e-4}),
+        (0.79, {"batch_size": 512, "kernel_size": 5, "lr": 1e-3}),
     ]
+
+    guided_rows = [
+        {"batch_size": 512, "kernel_size": 7, "lr": 2e-4},
+        {"batch_size": 1024, "kernel_size": 9, "lr": 1.5e-4},
+        {"batch_size": 512, "kernel_size": 5, "lr": 1e-3},
+    ]
+    call_count = {"value": 0}
+
+    def _fake_history_guided(
+        *,
+        search_space: dict[str, hparam_search.SearchDimension],
+        seed: int,
+        history_trials: list[tuple[float, dict[str, hparam_search.Scalar]]],
+        random_fraction: float,
+        mutation_rate: float,
+    ) -> dict[str, hparam_search.Scalar]:
+        del search_space, seed, history_trials, random_fraction, mutation_rate
+        index = call_count["value"] % len(guided_rows)
+        call_count["value"] += 1
+        return dict(guided_rows[index])
+
+    monkeypatch.setattr(
+        hparam_search,
+        "sample_trial_params_history_guided",
+        _fake_history_guided,
+    )
 
     first = hparam_search.build_trial_params(
         config=config,
@@ -2899,6 +2927,90 @@ def test_build_trial_params_history_guided_is_reproducible(
     anchors = [row[1] for row in history_trials]
     for params in first:
         assert params in anchors
+
+
+def test_build_trial_params_skips_duplicate_quick_samples(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "lr": {"type": "categorical", "values": [1e-4, 2e-4]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=7,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 256},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+    sampled_rows = iter(
+        [
+            {"batch_size": 256, "lr": 1e-4},
+            {"batch_size": 256, "lr": 1e-4},
+            {"batch_size": 256, "lr": 2e-4},
+        ]
+    )
+    call_count = {"value": 0}
+
+    def _fake_sample(
+        _search_space: dict[str, hparam_search.SearchDimension],
+        _rng: object,
+    ) -> dict[str, hparam_search.Scalar]:
+        call_count["value"] += 1
+        return next(sampled_rows)
+
+    def _fake_materialize(
+        *,
+        model_name: str,
+        sampled_params: dict[str, hparam_search.Scalar],
+        base_args: dict[str, hparam_search.ArgValue],
+        rng: object,
+    ) -> dict[str, hparam_search.Scalar]:
+        del model_name, base_args, rng
+        return dict(sampled_params)
+
+    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
+    monkeypatch.setattr(
+        hparam_search,
+        "_materialize_cnn_architecture_params",
+        _fake_materialize,
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "_is_valid_cnn_architecture",
+        lambda **kwargs: True,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=2,
+        seed_offset=0,
+    )
+
+    assert call_count["value"] == 3
+    assert params == [
+        {"batch_size": 256, "lr": 1e-4},
+        {"batch_size": 256, "lr": 2e-4},
+    ]
 
 
 def test_build_trial_params_dnabert_linear_drops_inactive_readout_keys(

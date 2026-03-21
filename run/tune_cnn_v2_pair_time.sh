@@ -125,6 +125,40 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 		"type": "categorical",
 		"values": ["3,5,7,9,11,13,15,17,19,21"]
 	},
+	"donor_conv_depth": {"type": "int", "min": 3, "max": 6, "step": 1},
+	"acceptor_conv_depth": {"type": "int", "min": 3, "max": 6, "step": 1},
+	"donor_channel_candidates": {
+		"type": "categorical",
+		"values": ["64,96,128,160,192,256,320,384,512,640,768"]
+	},
+	"acceptor_channel_candidates": {
+		"type": "categorical",
+		"values": ["64,96,128,160,192,256,320,384,512,640,768"]
+	},
+	"donor_kernel_candidates": {
+		"type": "categorical",
+		"values": ["3,5,7,9,11,13,15,17,19,21"]
+	},
+	"acceptor_kernel_candidates": {
+		"type": "categorical",
+		"values": ["3,5,7,9,11,13,15,17,19,21"]
+	},
+	"donor_channel_order": {
+		"type": "categorical",
+		"values": ["nondecreasing"]
+	},
+	"acceptor_channel_order": {
+		"type": "categorical",
+		"values": ["nondecreasing"]
+	},
+	"donor_kernel_order": {
+		"type": "categorical",
+		"values": ["nonincreasing"]
+	},
+	"acceptor_kernel_order": {
+		"type": "categorical",
+		"values": ["nonincreasing"]
+	},
 	"channel_order": {"type": "categorical", "values": ["nondecreasing"]},
 	"kernel_order": {"type": "categorical", "values": ["nonincreasing"]},
 	"conv_stride_candidates": {

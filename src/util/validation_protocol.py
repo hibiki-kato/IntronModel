@@ -150,6 +150,7 @@ def build_validation_protocol(
         "split_type": split_type,
         "val_frac": None if val_frac is None else float(val_frac),
         "seed": None if seed is None else int(seed),
+        "include_pair_mixed_negatives": include_pair_mixed_negatives,
         "train_source": {
             "train_pos_path": normalized_pos,
             "train_neg_path": normalized_neg,
