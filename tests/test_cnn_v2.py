@@ -133,6 +133,104 @@ def test_resolve_pair_train_params_v2_flags() -> None:
     assert params.embedding_dim == 32
 
 
+def test_train_pair_model_forwards_model_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _StopAfterArchResolution(Exception):
+        """Stop the train path after architecture resolution."""
+
+    def _fake_resolve_pair_model_arch_params(
+        model_args: argparse.Namespace,
+        *,
+        lightweight: bool = False,
+    ) -> cnn_v2.PairModelArchParams:
+        captured["model_args"] = model_args
+        captured["lightweight"] = lightweight
+        raise _StopAfterArchResolution
+
+    monkeypatch.setattr(
+        cnn_v2,
+        "_resolve_pair_model_arch_params",
+        _fake_resolve_pair_model_arch_params,
+    )
+    train_params = cnn_v2.PairTrainParams(
+        batch_size=4,
+        lr=1e-3,
+        loss_name="focal",
+        input_mode="onehot",
+        pair_mode="pair",
+        fusion_mode="late",
+        embedding_dim=8,
+        bpe_pretrained_model_name=cnn_v2.BPE_DEFAULT_MODEL_NAME,
+        bpe_pretrained_revision=None,
+        bpe_trust_remote_code=False,
+        dropout=0.1,
+        weight_decay=0.01,
+        eta_min_ratio=0.01,
+        val_frac=0.2,
+        grad_clip=5.0,
+        pos_weight_cap=20.0,
+        focal_gamma=2.0,
+        focal_alpha_pos=None,
+        asym_gamma_pos=0.0,
+        asym_gamma_neg=4.0,
+        asym_alpha_pos=None,
+        f1_lambda=0.1,
+    )
+    model_args = argparse.Namespace(
+        fusion_mode="late",
+        conv_channels=None,
+        donor_conv_channels=[8, 16],
+        acceptor_conv_channels=[8, 16],
+        donor_kernel_sizes=[5, 3],
+        acceptor_kernel_sizes=[5, 3],
+        max_pool_size=2,
+        conv_stride=1,
+        head_type="gap",
+        fc_hidden=32,
+    )
+
+    with pytest.raises(_StopAfterArchResolution):
+        cnn_v2.train_pair_model(
+            pos_path="pos.tsv",
+            neg_path="neg.tsv",
+            checkpoint_path="pair.pt",
+            donor_window_len=100,
+            acceptor_window_len=100,
+            donor_len=100,
+            acceptor_len=100,
+            model_args=model_args,
+            train_params=train_params,
+            epochs=1,
+            early_stop_patience=0,
+            early_stop_min_delta=0.0,
+            sequence_transform="none",
+            seed=1,
+            lightweight=False,
+            compile_model=False,
+            compile_mode="off",
+            device="cpu",
+            use_amp=False,
+            amp_dtype="auto",
+            allow_tf32=False,
+            cudnn_benchmark=False,
+            deterministic=False,
+            num_workers=0,
+            prefetch_factor=2,
+            persistent_workers=False,
+            pin_memory=False,
+            min_batch_size=1,
+            max_oom_retries=0,
+            quick_phase=False,
+            gpu_id=None,
+        )
+
+    assert captured["model_args"] is model_args
+    assert captured["lightweight"] is False
+
+
 def test_bpe_encoder_uses_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeAutoTokenizer:
         @staticmethod
