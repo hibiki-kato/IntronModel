@@ -197,6 +197,72 @@ def test_train_independent_fills_cnn_defaults(
     assert summary["delegated_backend"] == "cnn"
 
 
+def test_train_independent_preserves_single_site_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeCnnModule:
+        @staticmethod
+        def add_train_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument("--report_train_metrics", type=int, default=1)
+
+        @staticmethod
+        def add_infer_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument("--infer_batch_size", type=int, default=None)
+
+        @staticmethod
+        def train(
+            common_args: argparse.Namespace,
+            model_args: argparse.Namespace,
+        ) -> dict[str, object]:
+            _ = common_args
+            assert model_args.train_target == "donor"
+            return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
+
+    monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
+    common_args = argparse.Namespace(species="Hsap")
+    model_args = argparse.Namespace(pair_mode="independent", train_target="donor")
+
+    summary = cnn_v2.train(common_args, model_args)
+
+    assert summary["model"] == "cnn_v2"
+    assert summary["pair_mode"] == "independent"
+    assert summary["train_target"] == "donor"
+    assert summary["delegated_backend"] == "cnn"
+
+
+def test_train_independent_maps_pair_target_to_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeCnnModule:
+        @staticmethod
+        def add_train_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument("--report_train_metrics", type=int, default=1)
+
+        @staticmethod
+        def add_infer_args(parser: argparse.ArgumentParser) -> None:
+            parser.add_argument("--infer_batch_size", type=int, default=None)
+
+        @staticmethod
+        def train(
+            common_args: argparse.Namespace,
+            model_args: argparse.Namespace,
+        ) -> dict[str, object]:
+            _ = common_args
+            assert model_args.train_target == "both"
+            return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
+
+    monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
+    common_args = argparse.Namespace(species="Hsap")
+    model_args = argparse.Namespace(pair_mode="independent", train_target="pair")
+
+    summary = cnn_v2.train(common_args, model_args)
+
+    assert summary["model"] == "cnn_v2"
+    assert summary["pair_mode"] == "independent"
+    assert summary["train_target"] == "both"
+    assert summary["delegated_backend"] == "cnn"
+
+
 def test_train_independent_tolerates_duplicate_parser_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

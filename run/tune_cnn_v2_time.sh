@@ -85,6 +85,12 @@ JOB_ORDER=(
 	"Mmus"
 )
 
+# Tune site tasks independently.
+TARGET_ORDER=(
+	"donor"
+	"acceptor"
+)
+
 DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
@@ -96,21 +102,25 @@ DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 	},
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
-	"conv_channels": {
+	"conv_depth": {"type": "int", "min": 3, "max": 5, "step": 1},
+	"channel_candidates": {
 		"type": "categorical",
-		"values": [
-			"64,128,256",
-			"96,192,384",
-			"64,128,256,512",
-			"128,256,512"
-		]
+		"values": ["64,96,128,192,256,384,512,768"]
 	},
-	"kernel_sizes": {
+	"kernel_candidates": {
 		"type": "categorical",
-		"values": ["11,7,5", "9,7,5", "15,11,7", "11,9,7,5"]
+		"values": ["3,5,7,9,11,13,15,17,19"]
 	},
-	"max_pool_size": {"type": "categorical", "values": [1, 2, 3]},
-	"conv_stride": {"type": "categorical", "values": [1, 2]},
+	"channel_order": {"type": "categorical", "values": ["nondecreasing"]},
+	"kernel_order": {"type": "categorical", "values": ["nonincreasing"]},
+	"max_pool_candidates": {
+		"type": "categorical",
+		"values": ["1,2,3"]
+	},
+	"conv_stride_candidates": {
+		"type": "categorical",
+		"values": ["1,2"]
+	},
 	"head_type": {"type": "categorical", "values": ["gap", "center"]},
 	"sequence_transform": {
 		"type": "categorical",
@@ -177,6 +187,7 @@ resolve_search_space_file() {
 	local explicit_file="$1"
 	local species="$2"
 	local tuning_model_name="$3"
+	local target_name="$4"
 
 	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
 		if [[ -f "${explicit_file}" ]]; then
@@ -187,9 +198,14 @@ resolve_search_space_file() {
 		return 2
 	fi
 
-	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/both/search_space.json"
+	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/${target_name}/search_space.json"
 	if [[ -f "${target_file}" ]]; then
 		printf '%s\n' "${target_file}"
+		return 0
+	fi
+	local both_target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/both/search_space.json"
+	if [[ -f "${both_target_file}" ]]; then
+		printf '%s\n' "${both_target_file}"
 		return 0
 	fi
 
@@ -230,12 +246,13 @@ run_double_descent_plot() {
 	local python_bin="$1"
 	local project_root="$2"
 	local species_name="$3"
-	local model_name="$4"
+	local target_name="$4"
+	local model_name="$5"
 
 	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
 		--project_root "${project_root}" \
 		--species "${species_name}" \
-		--target "both" \
+		--target "${target_name}" \
 		--model "${model_name}" || true
 }
 
@@ -300,6 +317,16 @@ if [[ ${#JOB_ORDER[@]} -eq 0 ]]; then
 	echo "[tune_cnn_v2_time.sh] JOB_ORDER must contain at least one species." >&2
 	exit 1
 fi
+if [[ ${#TARGET_ORDER[@]} -eq 0 ]]; then
+	echo "[tune_cnn_v2_time.sh] TARGET_ORDER must contain at least one task." >&2
+	exit 1
+fi
+for target_name in "${TARGET_ORDER[@]}"; do
+	if [[ "${target_name}" != "donor" && "${target_name}" != "acceptor" ]]; then
+		echo "[tune_cnn_v2_time.sh] TARGET_ORDER values must be donor|acceptor." >&2
+		exit 1
+	fi
+done
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	&& "${UPDATE_DOUBLE_DESCENT_PLOT}" != "1" ]]; then
 	echo "[tune_cnn_v2_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
@@ -344,6 +371,7 @@ echo "[tune_cnn_v2_time.sh] quick+full cycles: "\
 	"quick_trials=${QUICK_TRIALS} quick_epochs=${QUICK_EPOCHS} "\
 	"top_k=${TOP_K} full_epochs=${FULL_EPOCHS}"
 echo "[tune_cnn_v2_time.sh] schedule=${JOB_ORDER[*]}"
+echo "[tune_cnn_v2_time.sh] targets=${TARGET_ORDER[*]}"
 echo "[tune_cnn_v2_time.sh] seeds=${SEED_VALUES[*]}"
 
 job_index=0
@@ -362,16 +390,18 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	fi
 	remaining_hms="$(format_elapsed "${remaining_seconds}")"
 
-	schedule_index=$((job_index % (${#JOB_ORDER[@]} * ${#SEED_VALUES[@]})))
+	schedule_index=$((job_index % (${#JOB_ORDER[@]} * ${#TARGET_ORDER[@]} * ${#SEED_VALUES[@]})))
 	species_index=$((schedule_index % ${#JOB_ORDER[@]}))
-	seed_index=$((schedule_index / ${#JOB_ORDER[@]}))
+	target_index=$(((schedule_index / ${#JOB_ORDER[@]}) % ${#TARGET_ORDER[@]}))
+	seed_index=$((schedule_index / (${#JOB_ORDER[@]} * ${#TARGET_ORDER[@]})))
 	raw_species="${JOB_ORDER[${species_index}]}"
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
+	target_name="${TARGET_ORDER[${target_index}]}"
 	base_seed="${SEED_VALUES[${seed_index}]}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
-	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/both/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/both/best_config.json"
+	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target_name}/${run_id}"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target_name}/best_config.json"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
@@ -380,7 +410,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 			"${DATA_ROOT}" \
 			"${TUNING_MODEL_NAME}" \
 			"${species}" \
-			"both" \
+			"${target_name}" \
 			"${global_best_path}" \
 			"${CROSS_SPECIES_BEST_MODE}" \
 			"${CROSS_SPECIES_BEST_OVERRIDE}" \
@@ -393,7 +423,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
 	fi
 
-	objective_metric="mean_pr_auc"
+	objective_metric="${target_name}_pr_auc"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
 		objective_metric="test_pr_auc"
 	fi
@@ -425,7 +455,8 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 		resolve_search_space_file \
 			"${SEARCH_SPACE_FILE}" \
 			"${species}" \
-			"${TUNING_MODEL_NAME}"
+			"${TUNING_MODEL_NAME}" \
+			"${target_name}"
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(
@@ -473,7 +504,7 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	"base_args": {
 	"model": "cnn_v2",
     "species": "${species}",
-	"train_target": "both",
+	"train_target": "${target_name}",
     "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
@@ -519,8 +550,8 @@ JSON
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
 	printf '[tune_cnn_v2_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-	printf 'ETA_remaining=%s species=%s target=both seed=%s\n' \
-		"${remaining_hms}" "${species}" "${base_seed}"
+	printf 'ETA_remaining=%s species=%s target=%s seed=%s\n' \
+		"${remaining_hms}" "${species}" "${target_name}" "${base_seed}"
 	run_status=0
 	intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \
@@ -533,7 +564,7 @@ JSON
 	fi
 	if [[ "${run_status}" -ne 0 ]]; then
 		echo "[tune_cnn_v2_time.sh] cycle=${job_index} failed "\
-			"species=${species} target=both seed=${base_seed} "\
+			"species=${species} target=${target_name} seed=${base_seed} "\
 			"(exit=${run_status})" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
@@ -541,6 +572,7 @@ JSON
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
+			"${target_name}" \
 			"${TUNING_MODEL_NAME}"
 	fi
 	cycle_duration_seconds=$((SECONDS - job_start_seconds))
@@ -567,11 +599,14 @@ done
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 	final_plot_species=("Hsap" "Dmel")
 	for final_species in "${final_plot_species[@]}"; do
-		run_double_descent_plot \
-			"${PYTHON_BIN}" \
-			"${PROJECT_ROOT}" \
-			"${final_species}" \
-			"${TUNING_MODEL_NAME}"
+		for final_target in "${TARGET_ORDER[@]}"; do
+			run_double_descent_plot \
+				"${PYTHON_BIN}" \
+				"${PROJECT_ROOT}" \
+				"${final_species}" \
+				"${final_target}" \
+				"${TUNING_MODEL_NAME}"
+		done
 	done
 fi
 

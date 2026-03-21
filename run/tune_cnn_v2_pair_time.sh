@@ -71,6 +71,7 @@ SEARCH_SPACE_FILE="auto"
 MAX_POOL_SIZE="2"
 CONV_STRIDE="1"
 HEAD_TYPE="gap"
+FUSION_MODE="late"
 
 CROSS_SPECIES_BEST_MODE="auto"
 CROSS_SPECIES_BEST_OVERRIDE=""
@@ -91,7 +92,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
 	"batch_size": {
 		"type": "categorical",
-		"values": [128, 256, 512, 1024, 2048]
+		"values": [128, 256, 512, 1024, 2048, 4096]
 	},
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
@@ -99,14 +100,42 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 		"type": "categorical",
 		"values": ["onehot", "kmer3", "bpe"]
 	},
+	"fusion_mode": {
+		"type": "categorical",
+		"values": ["late", "mid", "early"]
+	},
 	"sequence_transform": {
 		"type": "categorical",
 		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
 	},
 	"embedding_dim": {
 		"type": "categorical",
-		"values": [32, 48, 64]
+		"values": [24, 32, 48, 64, 96, 128]
 	},
+	"fc_hidden": {
+		"type": "categorical",
+		"values": [96, 128, 192, 256, 384]
+	},
+	"conv_depth": {"type": "int", "min": 3, "max": 6, "step": 1},
+	"channel_candidates": {
+		"type": "categorical",
+		"values": ["64,96,128,160,192,256,320,384,512,640,768"]
+	},
+	"kernel_candidates": {
+		"type": "categorical",
+		"values": ["3,5,7,9,11,13,15,17,19,21"]
+	},
+	"channel_order": {"type": "categorical", "values": ["nondecreasing"]},
+	"kernel_order": {"type": "categorical", "values": ["nonincreasing"]},
+	"conv_stride_candidates": {
+		"type": "categorical",
+		"values": ["1,2,3"]
+	},
+	"max_pool_candidates": {
+		"type": "categorical",
+		"values": ["1,2,3,4"]
+	},
+	"head_type": {"type": "categorical", "values": ["gap", "center"]},
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
@@ -481,6 +510,8 @@ while true; do
     "val_frac": ${VAL_FRAC},
 	"input_mode": "onehot",
 	"pair_mode": "pair",
+	"fusion_mode": "${FUSION_MODE}",
+	"head_type": "${HEAD_TYPE}",
 	"embedding_dim": 32,
 	"bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
 	"bpe_trust_remote_code": 0,

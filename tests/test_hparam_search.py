@@ -494,6 +494,10 @@ def test_build_run_model_command_skips_architecture_helper_keys(
             "conv_depth": 3,
             "channel_candidates": "64,128,256",
             "kernel_candidates": "3,5,7",
+            "channel_order": "nondecreasing",
+            "kernel_order": "nonincreasing",
+            "conv_stride_candidates": "1,2",
+            "max_pool_candidates": "1,2,3",
         },
     )
 
@@ -502,6 +506,10 @@ def test_build_run_model_command_skips_architecture_helper_keys(
     assert "--conv_depth" not in cmd
     assert "--channel_candidates" not in cmd
     assert "--kernel_candidates" not in cmd
+    assert "--channel_order" not in cmd
+    assert "--kernel_order" not in cmd
+    assert "--conv_stride_candidates" not in cmd
+    assert "--max_pool_candidates" not in cmd
 
 
 def test_rank_successful_trials_prefers_high_mean_pr_auc() -> None:
@@ -1386,6 +1394,8 @@ def test_run_trial_ignores_architecture_helper_keys_in_base_args(
             "conv_depth": 3,
             "channel_candidates": "64,128,256",
             "kernel_candidates": "3,5,7",
+            "conv_stride_candidates": "1,2",
+            "max_pool_candidates": "1,2,3",
         },
         quick_overrides={},
         full_overrides={},
@@ -1404,6 +1414,8 @@ def test_run_trial_ignores_architecture_helper_keys_in_base_args(
         assert "--conv_depth" not in cmd
         assert "--channel_candidates" not in cmd
         assert "--kernel_candidates" not in cmd
+        assert "--conv_stride_candidates" not in cmd
+        assert "--max_pool_candidates" not in cmd
         metrics_path: Optional[Path] = None
         for idx, token in enumerate(cmd):
             if token == "--metrics_json":
@@ -3081,6 +3093,90 @@ def test_build_trial_params_materializes_independent_cnn_architecture(
         assert all(value in {3, 5, 7} for value in kernels)
 
 
+def test_build_trial_params_materializes_cnn_v2_stride_pool_with_constraints(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "conv_depth": {"type": "categorical", "values": [3]},
+            "channel_candidates": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "kernel_candidates": {
+                "type": "categorical",
+                "values": ["3,5,7"],
+            },
+            "channel_order": {
+                "type": "categorical",
+                "values": ["nondecreasing"],
+            },
+            "kernel_order": {
+                "type": "categorical",
+                "values": ["nonincreasing"],
+            },
+            "conv_stride_candidates": {
+                "type": "categorical",
+                "values": ["1,2"],
+            },
+            "max_pool_candidates": {
+                "type": "categorical",
+                "values": ["2,4"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=3,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=17,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="donor_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_v2",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 8,
+            "pair_mode": "independent",
+            "train_target": "donor",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=3,
+        seed_offset=0,
+    )
+
+    for row in params:
+        assert row["conv_stride"] == 1
+        assert row["max_pool_size"] == 2
+        assert "conv_stride_candidates" not in row
+        assert "max_pool_candidates" not in row
+        assert "channel_order" not in row
+        assert "kernel_order" not in row
+
+        channels = [int(value) for value in str(row["conv_channels"]).split(",")]
+        kernels = [int(value) for value in str(row["kernel_sizes"]).split(",")]
+        assert channels == sorted(channels)
+        assert kernels == sorted(kernels, reverse=True)
+
+
 def test_build_trial_params_preserves_explicit_cnn_layer_layout(
     tmp_path: Path,
 ) -> None:
@@ -3141,6 +3237,78 @@ def test_build_trial_params_preserves_explicit_cnn_layer_layout(
             "conv_channels": "64,96,128",
             "kernel_sizes": "11,7,5",
             "max_pool_size": 1,
+        }
+    ]
+
+
+def test_build_trial_params_materializes_stride_pool_without_arch_helper_keys(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "conv_channels": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "kernel_sizes": {
+                "type": "categorical",
+                "values": ["7,7,7"],
+            },
+            "conv_stride_candidates": {
+                "type": "categorical",
+                "values": ["1,2"],
+            },
+            "max_pool_candidates": {
+                "type": "categorical",
+                "values": ["2,4"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=19,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="donor_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_v2",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 8,
+            "pair_mode": "independent",
+            "train_target": "donor",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )
+
+    assert params == [
+        {
+            "batch_size": 256,
+            "conv_channels": "64,128,256",
+            "kernel_sizes": "7,7,7",
+            "conv_stride": 1,
+            "max_pool_size": 2,
         }
     ]
 
@@ -3293,6 +3461,87 @@ def test_build_trial_params_preserves_explicit_pair_layer_layout(
             "max_pool_size": 1,
         }
     ]
+
+
+def test_build_trial_params_materializes_cnn_v2_pair_stride_pool_candidates(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "input_mode": {"type": "categorical", "values": ["onehot"]},
+            "fusion_mode": {"type": "categorical", "values": ["late"]},
+            "conv_depth": {"type": "categorical", "values": [3]},
+            "channel_candidates": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "kernel_candidates": {
+                "type": "categorical",
+                "values": ["7"],
+            },
+            "conv_stride_candidates": {
+                "type": "categorical",
+                "values": ["1,2"],
+            },
+            "max_pool_candidates": {
+                "type": "categorical",
+                "values": ["2,4"],
+            },
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=37,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_v2_pair",
+            "species": "Dmel",
+            "batch_size": 256,
+            "input_mode": "onehot",
+            "pair_mode": "pair",
+            "donor_len": 8,
+            "acceptor_len": 8,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=2,
+        seed_offset=0,
+    )
+
+    for row in params:
+        assert row["input_mode"] == "onehot"
+        assert row["fusion_mode"] == "late"
+        assert row["conv_stride"] == 1
+        assert row["max_pool_size"] == 2
+        assert "donor_conv_channels" in row
+        assert "acceptor_conv_channels" in row
+        assert "donor_kernel_sizes" in row
+        assert "acceptor_kernel_sizes" in row
+        assert "conv_depth" not in row
+        assert "channel_candidates" not in row
+        assert "kernel_candidates" not in row
+        assert "conv_stride_candidates" not in row
+        assert "max_pool_candidates" not in row
 
 
 def test_build_trial_params_resamples_invalid_cnn_pool_shape(

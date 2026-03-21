@@ -1722,12 +1722,20 @@ def _build_run_model_command(
         "conv_depth",
         "channel_candidates",
         "kernel_candidates",
+        "channel_order",
+        "kernel_order",
+        "conv_stride_candidates",
+        "max_pool_candidates",
         "donor_conv_depth",
         "acceptor_conv_depth",
         "donor_channel_candidates",
         "acceptor_channel_candidates",
         "donor_kernel_candidates",
         "acceptor_kernel_candidates",
+        "donor_channel_order",
+        "acceptor_channel_order",
+        "donor_kernel_order",
+        "acceptor_kernel_order",
     }
     cmd = [sys.executable, "-u", str(project_root / "src" / "run_model.py")]
     for key in sorted(args):
@@ -3014,11 +3022,41 @@ def _sample_list_by_depth(
     candidates: list[int],
     depth: int,
     rng: random.Random,
+    order: str = "any",
 ) -> list[int]:
-    """Sample one depth-aligned list from candidates independently."""
+    """Sample one depth-aligned integer list with optional monotonic constraint."""
+    if depth <= 0:
+        raise ValueError("depth must be > 0.")
+    if not candidates:
+        raise ValueError("candidates must not be empty.")
+
+    normalized_order = order.strip().lower()
+    if normalized_order == "any":
+        sampled: list[int] = []
+        for _ in range(depth):
+            sampled.append(candidates[rng.randrange(len(candidates))])
+        return sampled
+
+    sorted_candidates = sorted(set(candidates))
+    if normalized_order not in {"nondecreasing", "nonincreasing"}:
+        raise ValueError(
+            "order must be one of: any, nondecreasing, nonincreasing."
+        )
+
+    sampled_indices: list[int] = [rng.randrange(len(sorted_candidates))]
+    for _ in range(1, depth):
+        previous_idx = sampled_indices[-1]
+        if normalized_order == "nondecreasing":
+            next_idx = previous_idx + rng.randrange(
+                len(sorted_candidates) - previous_idx
+            )
+        else:
+            next_idx = rng.randrange(previous_idx + 1)
+        sampled_indices.append(next_idx)
+
     sampled: list[int] = []
-    for _ in range(depth):
-        sampled.append(candidates[rng.randrange(len(candidates))])
+    for idx in sampled_indices:
+        sampled.append(sorted_candidates[idx])
     return sampled
 
 
@@ -3033,6 +3071,46 @@ def _resolve_candidate_pool(
     if raw is None:
         raw = base_args.get(key)
     return _coerce_positive_int_list(raw)
+
+
+def _normalize_sampling_order(raw_value: object, *, key_name: str) -> str:
+    """Normalize one list-sampling order setting."""
+    text = str(raw_value).strip().lower()
+    alias_map: dict[str, str] = {
+        "any": "any",
+        "none": "any",
+        "free": "any",
+        "asc": "nondecreasing",
+        "ascending": "nondecreasing",
+        "increase": "nondecreasing",
+        "nondecreasing": "nondecreasing",
+        "desc": "nonincreasing",
+        "descending": "nonincreasing",
+        "decrease": "nonincreasing",
+        "nonincreasing": "nonincreasing",
+    }
+    normalized = alias_map.get(text)
+    if normalized is None:
+        raise ValueError(
+            f"{key_name} must be any|nondecreasing|nonincreasing "
+            f"(got {raw_value!r})."
+        )
+    return normalized
+
+
+def _resolve_sampling_order(
+    *,
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+    key: str,
+) -> str:
+    """Resolve optional sampling-order control from sampled/base args."""
+    raw = sampled_params.get(key)
+    if raw is None:
+        raw = base_args.get(key)
+    if raw is None:
+        return "any"
+    return _normalize_sampling_order(raw, key_name=key)
 
 
 def _stringify_int_list(values: list[int]) -> str:
@@ -3178,8 +3256,11 @@ def _is_valid_cnn_architecture(
             pair_mode_raw = sampled_params.get("pair_mode")
             if pair_mode_raw is None:
                 pair_mode_raw = base_args.get("pair_mode", "pair")
-            if _normalize_cnn_v2_pair_mode(pair_mode_raw) == "independent":
-                # cnn_v2 independent path delegates to cnn with forced both targets.
+            if (
+                _normalize_cnn_v2_pair_mode(pair_mode_raw) == "independent"
+                and train_target == "pair"
+            ):
+                # cnn_v2 independent path delegates to cnn; pair target is invalid.
                 train_target = "both"
 
         conv_channels_raw = sampled_params.get("conv_channels")
@@ -3376,9 +3457,13 @@ def _materialize_cnn_architecture_params(
         kernel_pool_key: str,
         conv_out_key: str,
         kernel_out_key: str,
+        channel_order_key: Optional[str] = None,
+        kernel_order_key: Optional[str] = None,
         shared_depth_key: Optional[str] = None,
         shared_channel_key: Optional[str] = None,
         shared_kernel_key: Optional[str] = None,
+        shared_channel_order_key: Optional[str] = None,
+        shared_kernel_order_key: Optional[str] = None,
     ) -> None:
         explicit_conv_raw = out.get(conv_out_key)
         if explicit_conv_raw is None:
@@ -3440,12 +3525,41 @@ def _materialize_cnn_architecture_params(
         if not kernel_candidates:
             raise ValueError("kernel_candidates must include at least one odd value.")
 
+        channel_order = "any"
+        if channel_order_key is not None:
+            channel_order = _resolve_sampling_order(
+                sampled_params=out,
+                base_args=base_args,
+                key=channel_order_key,
+            )
+        if channel_order == "any" and shared_channel_order_key is not None:
+            channel_order = _resolve_sampling_order(
+                sampled_params=out,
+                base_args=base_args,
+                key=shared_channel_order_key,
+            )
+
+        kernel_order = "any"
+        if kernel_order_key is not None:
+            kernel_order = _resolve_sampling_order(
+                sampled_params=out,
+                base_args=base_args,
+                key=kernel_order_key,
+            )
+        if kernel_order == "any" and shared_kernel_order_key is not None:
+            kernel_order = _resolve_sampling_order(
+                sampled_params=out,
+                base_args=base_args,
+                key=shared_kernel_order_key,
+            )
+
         if explicit_conv is None:
             out[conv_out_key] = _stringify_int_list(
                 _sample_list_by_depth(
                     candidates=channel_candidates,
                     depth=depth,
                     rng=rng,
+                    order=channel_order,
                 )
             )
         if explicit_kernel is None:
@@ -3454,28 +3568,278 @@ def _materialize_cnn_architecture_params(
                     candidates=kernel_candidates,
                     depth=depth,
                     rng=rng,
+                    order=kernel_order,
                 )
             )
 
-    if model_name in {"cnn", "cnn_resdil"}:
+    def _materialize_stride_and_pool_for_site_models() -> None:
+        conv_stride_raw = out.get("conv_stride")
+        if conv_stride_raw is None:
+            conv_stride_raw = base_args.get("conv_stride")
+        explicit_conv_stride = _to_positive_int(conv_stride_raw)
+
+        max_pool_raw = out.get("max_pool_size")
+        if max_pool_raw is None:
+            max_pool_raw = base_args.get("max_pool_size")
+        explicit_max_pool = _to_positive_int(max_pool_raw)
+
+        stride_candidate_pool = _resolve_candidate_pool(
+            sampled_params=out,
+            base_args=base_args,
+            key="conv_stride_candidates",
+        )
+        pool_candidate_pool = _resolve_candidate_pool(
+            sampled_params=out,
+            base_args=base_args,
+            key="max_pool_candidates",
+        )
+        stride_controlled = (
+            explicit_conv_stride is not None or stride_candidate_pool is not None
+        )
+        pool_controlled = (
+            explicit_max_pool is not None or pool_candidate_pool is not None
+        )
+        if (not stride_controlled) and (not pool_controlled):
+            return
+
+        if explicit_conv_stride is not None:
+            stride_candidates = [explicit_conv_stride]
+        elif stride_candidate_pool is not None:
+            stride_candidates = stride_candidate_pool
+        else:
+            stride_candidates = [
+                _resolve_conv_stride(sampled_params=out, base_args=base_args)
+            ]
+
+        if explicit_max_pool is not None:
+            pool_candidates = [explicit_max_pool]
+        elif pool_candidate_pool is not None:
+            pool_candidates = pool_candidate_pool
+        else:
+            pool_candidates = [
+                _resolve_max_pool_size(sampled_params=out, base_args=base_args)
+            ]
+
+        kernel_raw = out.get("kernel_sizes")
+        if kernel_raw is None:
+            kernel_raw = base_args.get("kernel_sizes")
+        scalar_kernel_raw = out.get("kernel_size")
+        if scalar_kernel_raw is None:
+            scalar_kernel_raw = base_args.get("kernel_size", 7)
+
+        conv_raw = out.get("conv_channels")
+        if conv_raw is None:
+            conv_raw = base_args.get("conv_channels")
+        conv_channels = _parse_conv_channels(conv_raw)
+        if conv_channels is None:
+            lightweight = _to_bool(base_args.get("lightweight"))
+            conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+        kernel_sizes = _resolve_kernel_sizes_for_depth(
+            kernel_raw=kernel_raw,
+            fallback_scalar_raw=scalar_kernel_raw,
+            depth=len(conv_channels),
+        )
+        if kernel_sizes is None:
+            return
+
+        train_target_raw = out.get("train_target")
+        if train_target_raw is None:
+            train_target_raw = base_args.get("train_target", "both")
+        train_target = str(train_target_raw).strip().lower() or "both"
+        if model_name == "cnn_v2":
+            pair_mode_raw = out.get("pair_mode")
+            if pair_mode_raw is None:
+                pair_mode_raw = base_args.get("pair_mode", "pair")
+            if (
+                _normalize_cnn_v2_pair_mode(pair_mode_raw) == "independent"
+                and train_target == "pair"
+            ):
+                train_target = "both"
+
+        donor_len_raw = out.get("donor_len")
+        if donor_len_raw is None:
+            donor_len_raw = base_args.get("donor_len")
+        acceptor_len_raw = out.get("acceptor_len")
+        if acceptor_len_raw is None:
+            acceptor_len_raw = base_args.get("acceptor_len")
+        donor_len = _to_positive_int(donor_len_raw)
+        acceptor_len = _to_positive_int(acceptor_len_raw)
+
+        lengths_to_check: list[int] = []
+        if train_target in {"both", "donor"} and donor_len is not None:
+            lengths_to_check.append(donor_len)
+        if train_target in {"both", "acceptor"} and acceptor_len is not None:
+            lengths_to_check.append(acceptor_len)
+        if train_target == "pair":
+            if donor_len is not None:
+                lengths_to_check.append(donor_len)
+            if acceptor_len is not None:
+                lengths_to_check.append(acceptor_len)
+
+        valid_pairs: list[tuple[int, int]] = []
+        for stride in stride_candidates:
+            for max_pool in pool_candidates:
+                if not lengths_to_check:
+                    valid_pairs.append((stride, max_pool))
+                    continue
+                is_valid = True
+                for input_len in lengths_to_check:
+                    output_len = _apply_cnn_length_schedule(
+                        input_len,
+                        kernel_sizes,
+                        stride,
+                        max_pool,
+                    )
+                    if output_len <= 0:
+                        is_valid = False
+                        break
+                if is_valid:
+                    valid_pairs.append((stride, max_pool))
+
+        chosen_stride: int
+        chosen_max_pool: int
+        if valid_pairs:
+            chosen_stride, chosen_max_pool = valid_pairs[
+                rng.randrange(len(valid_pairs))
+            ]
+        else:
+            chosen_stride = min(stride_candidates)
+            chosen_max_pool = min(pool_candidates)
+
+        if stride_controlled and explicit_conv_stride is None:
+            out["conv_stride"] = chosen_stride
+        if pool_controlled and explicit_max_pool is None:
+            out["max_pool_size"] = chosen_max_pool
+
+    def _materialize_stride_and_pool_for_pair_models(
+        *,
+        validation_model_name: str,
+    ) -> None:
+        conv_stride_raw = out.get("conv_stride")
+        if conv_stride_raw is None:
+            conv_stride_raw = base_args.get("conv_stride")
+        explicit_conv_stride = _to_positive_int(conv_stride_raw)
+
+        max_pool_raw = out.get("max_pool_size")
+        if max_pool_raw is None:
+            max_pool_raw = base_args.get("max_pool_size")
+        explicit_max_pool = _to_positive_int(max_pool_raw)
+
+        stride_candidate_pool = _resolve_candidate_pool(
+            sampled_params=out,
+            base_args=base_args,
+            key="conv_stride_candidates",
+        )
+        pool_candidate_pool = _resolve_candidate_pool(
+            sampled_params=out,
+            base_args=base_args,
+            key="max_pool_candidates",
+        )
+        stride_controlled = (
+            explicit_conv_stride is not None or stride_candidate_pool is not None
+        )
+        pool_controlled = (
+            explicit_max_pool is not None or pool_candidate_pool is not None
+        )
+        if (not stride_controlled) and (not pool_controlled):
+            return
+
+        if explicit_conv_stride is not None:
+            stride_candidates = [explicit_conv_stride]
+        elif stride_candidate_pool is not None:
+            stride_candidates = stride_candidate_pool
+        else:
+            stride_candidates = [
+                _resolve_conv_stride(sampled_params=out, base_args=base_args)
+            ]
+
+        if explicit_max_pool is not None:
+            pool_candidates = [explicit_max_pool]
+        elif pool_candidate_pool is not None:
+            pool_candidates = pool_candidate_pool
+        else:
+            pool_candidates = [
+                _resolve_max_pool_size(sampled_params=out, base_args=base_args)
+            ]
+
+        valid_pairs: list[tuple[int, int]] = []
+        for stride in stride_candidates:
+            for max_pool in pool_candidates:
+                candidate_params = dict(out)
+                candidate_params["conv_stride"] = stride
+                candidate_params["max_pool_size"] = max_pool
+                if _is_valid_cnn_architecture(
+                    model_name=validation_model_name,
+                    sampled_params=candidate_params,
+                    base_args=base_args,
+                ):
+                    valid_pairs.append((stride, max_pool))
+
+        chosen_stride: int
+        chosen_max_pool: int
+        if valid_pairs:
+            chosen_stride, chosen_max_pool = valid_pairs[
+                rng.randrange(len(valid_pairs))
+            ]
+        else:
+            chosen_stride = min(stride_candidates)
+            chosen_max_pool = min(pool_candidates)
+
+        if stride_controlled and explicit_conv_stride is None:
+            out["conv_stride"] = chosen_stride
+        if pool_controlled and explicit_max_pool is None:
+            out["max_pool_size"] = chosen_max_pool
+
+    if model_name in {"cnn", "cnn_resdil", "cnn_v2"}:
         has_arch_keys = any(
             key in out or key in base_args
-            for key in ("conv_depth", "channel_candidates", "kernel_candidates")
+            for key in (
+                "conv_depth",
+                "channel_candidates",
+                "kernel_candidates",
+                "channel_order",
+                "kernel_order",
+                "conv_stride_candidates",
+                "max_pool_candidates",
+            )
         )
         if has_arch_keys:
-            _materialize_branch(
-                depth_key="conv_depth",
-                channel_pool_key="channel_candidates",
-                kernel_pool_key="kernel_candidates",
-                conv_out_key="conv_channels",
-                kernel_out_key="kernel_sizes",
+            has_channel_or_kernel_keys = any(
+                key in out or key in base_args
+                for key in (
+                    "conv_depth",
+                    "channel_candidates",
+                    "kernel_candidates",
+                    "channel_order",
+                    "kernel_order",
+                )
             )
-    elif model_name == "cnn_pair":
+            if has_channel_or_kernel_keys:
+                _materialize_branch(
+                    depth_key="conv_depth",
+                    channel_pool_key="channel_candidates",
+                    kernel_pool_key="kernel_candidates",
+                    conv_out_key="conv_channels",
+                    kernel_out_key="kernel_sizes",
+                    channel_order_key="channel_order",
+                    kernel_order_key="kernel_order",
+                )
+            _materialize_stride_and_pool_for_site_models()
+    elif model_name in {"cnn_pair", "cnn_v2_pair"}:
         fusion_mode_raw = out.get("fusion_mode")
         if fusion_mode_raw is None:
-            fusion_mode_raw = base_args.get("fusion_mode", "late")
-        fusion_mode = _normalize_cnn_pair_fusion_mode(fusion_mode_raw)
-        out["fusion_mode"] = fusion_mode
+            fusion_mode_raw = base_args.get("fusion_mode")
+        if fusion_mode_raw is None:
+            fusion_mode = "late"
+        else:
+            fusion_mode = _normalize_cnn_pair_fusion_mode(fusion_mode_raw)
+            out["fusion_mode"] = fusion_mode
+        validation_model_name = _resolve_cnn_architecture_validation_model_name(
+            model_name=model_name,
+            sampled_params=out,
+            base_args=base_args,
+        )
         has_arch_keys = any(
             key in out or key in base_args
             for key in (
@@ -3488,9 +3852,17 @@ def _materialize_cnn_architecture_params(
                 "acceptor_channel_candidates",
                 "donor_kernel_candidates",
                 "acceptor_kernel_candidates",
+                "channel_order",
+                "kernel_order",
+                "donor_channel_order",
+                "acceptor_channel_order",
+                "donor_kernel_order",
+                "acceptor_kernel_order",
+                "conv_stride_candidates",
+                "max_pool_candidates",
             )
         )
-        if has_arch_keys:
+        if has_arch_keys and validation_model_name == "cnn_pair":
             donor_has_arch_keys = any(
                 key in out or key in base_args
                 for key in (
@@ -3515,9 +3887,13 @@ def _materialize_cnn_architecture_params(
                         kernel_pool_key="donor_kernel_candidates",
                         conv_out_key="donor_conv_channels",
                         kernel_out_key="donor_kernel_sizes",
+                        channel_order_key="donor_channel_order",
+                        kernel_order_key="donor_kernel_order",
                         shared_depth_key="conv_depth",
                         shared_channel_key="channel_candidates",
                         shared_kernel_key="kernel_candidates",
+                        shared_channel_order_key="channel_order",
+                        shared_kernel_order_key="kernel_order",
                     )
                 elif acceptor_has_arch_keys:
                     _materialize_branch(
@@ -3526,9 +3902,13 @@ def _materialize_cnn_architecture_params(
                         kernel_pool_key="acceptor_kernel_candidates",
                         conv_out_key="donor_conv_channels",
                         kernel_out_key="donor_kernel_sizes",
+                        channel_order_key="acceptor_channel_order",
+                        kernel_order_key="acceptor_kernel_order",
                         shared_depth_key="conv_depth",
                         shared_channel_key="channel_candidates",
                         shared_kernel_key="kernel_candidates",
+                        shared_channel_order_key="channel_order",
+                        shared_kernel_order_key="kernel_order",
                     )
                 else:
                     _materialize_branch(
@@ -3537,6 +3917,8 @@ def _materialize_cnn_architecture_params(
                         kernel_pool_key="kernel_candidates",
                         conv_out_key="donor_conv_channels",
                         kernel_out_key="donor_kernel_sizes",
+                        channel_order_key="channel_order",
+                        kernel_order_key="kernel_order",
                     )
                 out["acceptor_conv_channels"] = out["donor_conv_channels"]
                 out["acceptor_kernel_sizes"] = out["donor_kernel_sizes"]
@@ -3547,9 +3929,13 @@ def _materialize_cnn_architecture_params(
                     kernel_pool_key="donor_kernel_candidates",
                     conv_out_key="donor_conv_channels",
                     kernel_out_key="donor_kernel_sizes",
+                    channel_order_key="donor_channel_order",
+                    kernel_order_key="donor_kernel_order",
                     shared_depth_key="conv_depth",
                     shared_channel_key="channel_candidates",
                     shared_kernel_key="kernel_candidates",
+                    shared_channel_order_key="channel_order",
+                    shared_kernel_order_key="kernel_order",
                 )
                 _materialize_branch(
                     depth_key="acceptor_conv_depth",
@@ -3557,21 +3943,36 @@ def _materialize_cnn_architecture_params(
                     kernel_pool_key="acceptor_kernel_candidates",
                     conv_out_key="acceptor_conv_channels",
                     kernel_out_key="acceptor_kernel_sizes",
+                    channel_order_key="acceptor_channel_order",
+                    kernel_order_key="acceptor_kernel_order",
                     shared_depth_key="conv_depth",
                     shared_channel_key="channel_candidates",
                     shared_kernel_key="kernel_candidates",
+                    shared_channel_order_key="channel_order",
+                    shared_kernel_order_key="kernel_order",
                 )
+            _materialize_stride_and_pool_for_pair_models(
+                validation_model_name=validation_model_name
+            )
 
     helper_keys = {
         "conv_depth",
         "channel_candidates",
         "kernel_candidates",
+        "channel_order",
+        "kernel_order",
         "donor_conv_depth",
         "acceptor_conv_depth",
         "donor_channel_candidates",
         "acceptor_channel_candidates",
         "donor_kernel_candidates",
         "acceptor_kernel_candidates",
+        "donor_channel_order",
+        "acceptor_channel_order",
+        "donor_kernel_order",
+        "acceptor_kernel_order",
+        "conv_stride_candidates",
+        "max_pool_candidates",
     }
     for key in helper_keys:
         out.pop(key, None)

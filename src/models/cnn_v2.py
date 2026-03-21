@@ -1889,9 +1889,13 @@ def train(
     if requested_pair_mode == "independent":
         from models import cnn as cnn_site_module
 
-        effective_train_target = "both"
-        if requested_train_target != "both":
-            print("[cnn_v2] pair_mode=independent forces --train_target=both.")
+        effective_train_target = requested_train_target
+        if effective_train_target == "pair":
+            print(
+                "[cnn_v2] pair_mode=independent does not support "
+                "--train_target=pair; using both."
+            )
+            effective_train_target = "both"
 
         site_model_args = argparse.Namespace(**vars(model_args))
         site_train_arg_parser = argparse.ArgumentParser(add_help=False)
