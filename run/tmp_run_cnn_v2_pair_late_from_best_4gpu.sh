@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PYTHON_BIN="/home/hibiki/miniforge3/envs/intronmodel/bin/python"
+PYTHON_BIN="/export/hibiki/miniforge3/envs/intronmodel/bin/python3"
 SPECIES=("Athal" "Dmel" "Hsap" "Mmus")
 GPUS=("4" "5" "6" "7")
 LOG_DIR="$PROJECT_ROOT/run/tmp_cnn_v2_pair_late_logs"
@@ -11,6 +11,11 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_LOG_DIR="$LOG_DIR/late_from_best_4gpu_$STAMP"
 
 mkdir -p "$RUN_LOG_DIR"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  printf '[late_from_best_4gpu] missing python: %s\n' "$PYTHON_BIN" >&2
+  exit 1
+fi
 
 build_args() {
   local project_root="$1"
