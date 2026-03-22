@@ -12,37 +12,7 @@ fi
 # --------------------------
 set -a
 SPECIES="Athal, Dmel, Mmus, Hsap"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-TRAIN_TARGET="both"
-
-EPOCHS="20"
-MAX_EPOCHS="200"
-EARLY_STOP_PATIENCE="12"
-EARLY_STOP_MIN_DELTA="0.0"
-BATCH_SIZE="512"
-LR="5e-4"
-LOSS="focal"
-INPUT_MODE="onehot"   # onehot | kmer3 | bpe
-PAIR_MODE="independent"      # pair | independent
-EMBEDDING_DIM="32"
-BPE_PRETRAINED_MODEL_NAME="zhihan1996/DNABERT-2-117M"
-BPE_PRETRAINED_REVISION=""
-BPE_TRUST_REMOTE_CODE="0"
-DROPOUT="0.3"
-WEIGHT_DECAY="0.01"
-ETA_MIN_RATIO="0.01"
-VAL_FRAC="0.2"
-GRAD_CLIP="5.0"
-POS_WEIGHT_CAP="20.0"
-FOCAL_GAMMA="2.0"
-FOCAL_ALPHA_POS=""
-F1_LAMBDA="0.1"
-ASYM_GAMMA_POS="0.0"
-ASYM_GAMMA_NEG="4.0"
-ASYM_ALPHA_POS=""
-
-SEED="1337"
+INTRONMODEL_AUTO_TMUX="on"  # off | on | auto
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
@@ -69,10 +39,10 @@ REF_GFF_PATH=""
 NAME_FIELDS="none"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
-USE_TUNED_HPARAMS="auto"   # off | auto | required
+USE_TUNED_HPARAMS="required"   # off | auto | required
 TUNED_CONFIG_PATH=""
 SHARED_TUNED_CONFIG_PATH=""
-TUNED_TARGET="auto"        # auto | pair | donor | acceptor | both
+TUNED_TARGET="auto"        # auto | both | donor | acceptor
 set +a
 
 # --------------------------
@@ -83,6 +53,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
+
+intronmodel_abort_parallel_run() {
+	trap - INT TERM HUP
+	kill -TERM 0 2>/dev/null || true
+	exit 130
+}
+
+trap 'intronmodel_abort_parallel_run' INT TERM HUP
 
 normalize_use_tuned_mode() {
 	local raw_mode="$1"
@@ -107,13 +86,7 @@ resolve_tuned_target() {
 		printf '%s\n' "${normalized}"
 		return 0
 	fi
-	local pair_mode_normalized
-	pair_mode_normalized="$(echo "${PAIR_MODE}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	if [[ "${pair_mode_normalized}" == "pair" ]]; then
-		printf 'pair\n'
-		return 0
-	fi
-	printf '%s\n' "$(echo "${TRAIN_TARGET}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	printf 'both\n'
 }
 
 resolve_tuned_config_path() {
@@ -147,34 +120,8 @@ run_species_once() {
 	args=(
 		--model cnn_v2
 		--species "${species}"
-		--donor_len "${DONOR_LEN}"
-		--acceptor_len "${ACCEPTOR_LEN}"
 		--device "${DEVICE}"
-		--seed "${SEED}"
 		--name_fields "${NAME_FIELDS}"
-		--epochs "${EPOCHS}"
-		--max_epochs "${MAX_EPOCHS}"
-		--early_stop_patience "${EARLY_STOP_PATIENCE}"
-		--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
-		--train_target "${TRAIN_TARGET}"
-		--batch_size "${BATCH_SIZE}"
-		--lr "${LR}"
-		--loss "${LOSS}"
-		--input_mode "${INPUT_MODE}"
-		--pair_mode "${PAIR_MODE}"
-		--embedding_dim "${EMBEDDING_DIM}"
-		--bpe_pretrained_model_name "${BPE_PRETRAINED_MODEL_NAME}"
-		--bpe_trust_remote_code "${BPE_TRUST_REMOTE_CODE}"
-		--dropout "${DROPOUT}"
-		--weight_decay "${WEIGHT_DECAY}"
-		--eta_min_ratio "${ETA_MIN_RATIO}"
-		--val_frac "${VAL_FRAC}"
-		--grad_clip "${GRAD_CLIP}"
-		--pos_weight_cap "${POS_WEIGHT_CAP}"
-		--focal_gamma "${FOCAL_GAMMA}"
-		--f1_lambda "${F1_LAMBDA}"
-		--asym_gamma_pos "${ASYM_GAMMA_POS}"
-		--asym_gamma_neg "${ASYM_GAMMA_NEG}"
 		--use_amp "${USE_AMP}"
 		--amp_dtype "${AMP_DTYPE}"
 		--compile_mode "${COMPILE_MODE}"
@@ -246,15 +193,6 @@ run_species_once() {
 		fi
 	fi
 
-	if [[ -n "${BPE_PRETRAINED_REVISION}" ]]; then
-		args+=(--bpe_pretrained_revision "${BPE_PRETRAINED_REVISION}")
-	fi
-	if [[ -n "${FOCAL_ALPHA_POS}" ]]; then
-		args+=(--focal_alpha_pos "${FOCAL_ALPHA_POS}")
-	fi
-	if [[ -n "${ASYM_ALPHA_POS}" ]]; then
-		args+=(--asym_alpha_pos "${ASYM_ALPHA_POS}")
-	fi
 	if [[ -n "${TEST_TSV_PATH}" ]]; then
 		args+=(--test_tsv "${TEST_TSV_PATH}")
 	fi
@@ -268,7 +206,7 @@ run_species_once() {
 		args+=("${tuned_args[@]}")
 	fi
 
-	echo "[cnn_v2.sh] species=${species} input_mode=${INPUT_MODE} pair_mode=${PAIR_MODE}"
+	echo "[cnn_v2.sh] species=${species}"
 	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 	if [[ -n "${assigned_gpu_id}" ]]; then
 		CUDA_VISIBLE_DEVICES="${assigned_gpu_id}" \

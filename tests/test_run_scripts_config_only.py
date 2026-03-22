@@ -8,6 +8,12 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _has_top_level_assignment(content: str, name: str) -> bool:
+    """Return True when one exact top-level assignment exists."""
+    prefix = f"{name}="
+    return any(line.startswith(prefix) for line in content.splitlines())
+
+
 def test_cnn_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "run_cnn.sh"
     run = subprocess.run(
@@ -95,7 +101,34 @@ def test_run_cnn_v2_sh_leaves_mask_to_best_config() -> None:
     content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
         encoding="utf-8"
     )
-    assert 'MASK="off"' not in content
+    assert 'INTRONMODEL_AUTO_TMUX="on"' in content
+    assert "intronmodel_enable_auto_tmux" in content
+    for unwanted in (
+        "DONOR_LEN",
+        "ACCEPTOR_LEN",
+        "TRAIN_TARGET",
+        "EPOCHS",
+        "MAX_EPOCHS",
+        "BATCH_SIZE",
+        "LR",
+        "LOSS",
+        "INPUT_MODE",
+        "PAIR_MODE",
+        "EMBEDDING_DIM",
+        "BPE_PRETRAINED_MODEL_NAME",
+        "DROPOUT",
+        "WEIGHT_DECAY",
+        "ETA_MIN_RATIO",
+        "VAL_FRAC",
+        "GRAD_CLIP",
+        "POS_WEIGHT_CAP",
+        "FOCAL_GAMMA",
+        "F1_LAMBDA",
+        "ASYM_GAMMA_POS",
+        "ASYM_GAMMA_NEG",
+        "SEED",
+    ):
+        assert not _has_top_level_assignment(content, unwanted)
     assert "--sequence_transform" not in content
 
 
@@ -115,7 +148,45 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
         encoding="utf-8"
     )
-    assert 'MASK="off"' not in content
+    assert 'INTRONMODEL_AUTO_TMUX="on"' in content
+    assert "intronmodel_enable_auto_tmux" in content
+    for unwanted in (
+        "DONOR_LEN",
+        "ACCEPTOR_LEN",
+        "TRAIN_TARGET",
+        "EPOCHS",
+        "MAX_EPOCHS",
+        "BATCH_SIZE",
+        "LR",
+        "LOSS",
+        "INPUT_MODE",
+        "PAIR_MODE",
+        "FUSION_MODE",
+        "EMBEDDING_DIM",
+        "BPE_PRETRAINED_MODEL_NAME",
+        "CONV_CHANNELS",
+        "KERNEL_SIZES",
+        "DONOR_CONV_CHANNELS",
+        "ACCEPTOR_CONV_CHANNELS",
+        "DONOR_KERNEL_SIZES",
+        "ACCEPTOR_KERNEL_SIZES",
+        "MAX_POOL_SIZE",
+        "CONV_STRIDE",
+        "HEAD_TYPE",
+        "FC_HIDDEN",
+        "DROPOUT",
+        "WEIGHT_DECAY",
+        "ETA_MIN_RATIO",
+        "VAL_FRAC",
+        "GRAD_CLIP",
+        "POS_WEIGHT_CAP",
+        "FOCAL_GAMMA",
+        "F1_LAMBDA",
+        "ASYM_GAMMA_POS",
+        "ASYM_GAMMA_NEG",
+        "SEED",
+    ):
+        assert not _has_top_level_assignment(content, unwanted)
     assert "--sequence_transform" not in content
 
 
