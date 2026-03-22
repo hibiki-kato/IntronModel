@@ -79,6 +79,81 @@ def test_tune_cnn_pair_time_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_run_cnn_v2_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_cnn_v2.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_run_cnn_v2_sh_uses_mask_config() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'MASK="off"' in content
+    assert "SEQUENCE_TRANSFORM=" not in content
+
+
+def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_cnn_v2_pair.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_run_cnn_v2_pair_sh_uses_mask_config() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'MASK="off"' in content
+    assert "SEQUENCE_TRANSFORM=" not in content
+
+
+def test_run_cnn_v3_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_cnn_v3.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
+    content = (_project_root() / "run" / "tune_cnn_v2_time.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "MAX_MODEL_PARAMS" not in content
+    assert '"input_mode": {' in content
+    assert '"mask": {' in content
+    assert '"sequence_transform": {' not in content
+    assert "MASK_MODE" not in content
+    assert "TAG=" not in content
+
+
+def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
+    content = (_project_root() / "run" / "tune_cnn_v2_pair_time.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "MAX_MODEL_PARAMS" not in content
+    assert '"mask": {' in content
+    assert '"sequence_transform": {' not in content
+    assert "MASK_MODE" not in content
+    assert "TAG=" not in content
+
+
 def test_tune_bilstm_pair_time_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "tune_bilstm_pair_time.sh"
     run = subprocess.run(
@@ -301,6 +376,29 @@ def test_run_tcn_sh_includes_head_type_config() -> None:
     assert 'HEAD_TYPE="gap"' in content
 
 
+def test_run_cnn_v2_sh_includes_gpu_parallel_config() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'GPU_IDS="auto"' in content
+    assert 'MAX_PARALLEL_TRIALS="auto"' in content
+
+
+def test_run_cnn_v2_pair_sh_includes_gpu_parallel_config() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'GPU_IDS="auto"' in content
+    assert 'MAX_PARALLEL_TRIALS="auto"' in content
+
+
+def test_run_cnn_v3_sh_includes_gpu_config() -> None:
+    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'GPU_IDS="auto"' in content
+
+
 def test_run_dnabert_sh_sets_default_process_title() -> None:
     content = (_project_root() / "run" / "run_dnabert.sh").read_text(encoding="utf-8")
     assert 'PROCESS_TITLE="use? email me"' in content
@@ -358,6 +456,24 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     )
     bilstm_pair = subprocess.run(
         ["bash", "-n", str(root / "run" / "run_bilstm_pair.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cnn_v2 = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_cnn_v2.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cnn_v2_pair = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_cnn_v2_pair.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cnn_v3 = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_cnn_v3.sh")],
         capture_output=True,
         text=True,
         check=False,
@@ -497,6 +613,9 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert cnn_resdil.returncode == 0, cnn_resdil.stderr
     assert cnn_pair.returncode == 0, cnn_pair.stderr
     assert bilstm_pair.returncode == 0, bilstm_pair.stderr
+    assert cnn_v2.returncode == 0, cnn_v2.stderr
+    assert cnn_v2_pair.returncode == 0, cnn_v2_pair.stderr
+    assert cnn_v3.returncode == 0, cnn_v3.stderr
     assert tcn.returncode == 0, tcn.stderr
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr

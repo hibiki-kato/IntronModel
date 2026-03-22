@@ -197,6 +197,88 @@ def load_unique_map(
     return mapping
 
 
+def load_unique_half_lengths(
+    path: Path,
+) -> dict[tuple[str, int], int]:
+    """Load unique-intron half lengths from the unique map TSV.
+
+    Parameters
+    ----------
+    path : Path
+        TSV path for ``transcripts.unique.map.tsv``.
+
+    Returns
+    -------
+    dict[tuple[str, int], int]
+        Mapping from ``(unique_transcript_id, unique_intron_index)`` to
+        half intron length derived as ``(intron_end - intron_start + 1) // 2``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` does not exist.
+    ValueError
+        If the TSV schema or row values are invalid.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"Unique intron map TSV not found: {path}")
+
+    required = {
+        "unique_transcript_id",
+        "unique_intron_index",
+        "intron_start",
+        "intron_end",
+    }
+    half_lengths: dict[tuple[str, int], int] = {}
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+            raise ValueError(
+                "Unique map TSV must include columns: "
+                "unique_transcript_id, unique_intron_index, intron_start, "
+                "intron_end"
+            )
+
+        for line_no, raw_row in enumerate(reader, start=2):
+            unique_transcript_id = str(raw_row["unique_transcript_id"]).strip()
+            if unique_transcript_id == "":
+                raise ValueError(f"Empty unique_transcript_id at {path}:{line_no}")
+            unique_intron_index = _parse_row_int(
+                raw_row=raw_row,
+                key="unique_intron_index",
+                path=path,
+                line_no=line_no,
+            )
+            intron_start = _parse_row_int(
+                raw_row=raw_row,
+                key="intron_start",
+                path=path,
+                line_no=line_no,
+            )
+            intron_end = _parse_row_int(
+                raw_row=raw_row,
+                key="intron_end",
+                path=path,
+                line_no=line_no,
+            )
+            if intron_end < intron_start:
+                raise ValueError(f"intron_end < intron_start at {path}:{line_no}")
+            half_len = (intron_end - intron_start + 1) // 2
+            key = (unique_transcript_id, unique_intron_index)
+            existing = half_lengths.get(key)
+            if existing is not None and existing != half_len:
+                raise ValueError(
+                    "Conflicting half-length rows in unique map TSV: "
+                    f"{key} at {path}:{line_no}"
+                )
+            half_lengths[key] = half_len
+
+    if not half_lengths:
+        raise ValueError(f"No valid rows in unique map TSV: {path}")
+    return half_lengths
+
+
 def invert_unique_map(
     unique_map: Mapping[tuple[str, int], Iterable[UniqueMapMember]],
 ) -> Dict[tuple[str, int], tuple[str, int]]:

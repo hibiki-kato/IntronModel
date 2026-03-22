@@ -91,6 +91,9 @@ _DNABERT_CNN_ONLY_KEYS: frozenset[str] = frozenset({"readout_cnn_kernel_size"})
 _DNABERT_MLP_ONLY_KEYS: frozenset[str] = frozenset(
     {"readout_mlp_hidden_dim", "readout_mlp_layers"}
 )
+_MASK_HPARAM_VALUES: frozenset[str] = frozenset({"off", "on"})
+_MASK_SEQUENCE_TRANSFORM_OFF: str = "none"
+_MASK_SEQUENCE_TRANSFORM_ON: str = "mask_outside_intron_n"
 _CONTEXT_ARG_IGNORE_KEYS: set[str] = {
     "allow_tf32",
     "amp_dtype",
@@ -646,16 +649,50 @@ def _extract_hparam_context(raw: dict[str, object]) -> Optional[dict[str, object
     return normalized
 
 
+def _extract_scalar_search_value(
+    *,
+    mapping: dict[str, object],
+    key: str,
+    spec: dict[str, object],
+    context_name: str,
+) -> Optional[Scalar]:
+    """Extract one search-space value from a JSON-like mapping."""
+    if key not in mapping:
+        return None
+    value = mapping[key]
+    if not isinstance(value, (int, float, str, bool)):
+        raise ValueError(f"{context_name}.{key} must be a scalar value.")
+    if not _value_matches_spec(value, spec):
+        raise ValueError(
+            f"{context_name}.{key}={value} is not in current search space."
+        )
+    return value
+
+
 def _extract_sampled_params_from_best_config(
     *,
     raw: dict[str, object],
     search_space: dict[str, dict[str, object]],
     base_args: dict[str, ArgValue],
 ) -> dict[str, Scalar]:
-    """Validate and normalize sampled params loaded from best_config.json."""
+    """Validate and normalize sampled params loaded from best_config.json.
+
+    The loader accepts both the current split format and older payloads that
+    stored search-space keys under ``hparam_context.fixed_run_args``.
+    """
     sampled = raw.get("sampled_params")
     if not isinstance(sampled, dict):
         raise ValueError("Global best config missing sampled_params object.")
+
+    hparam_context = _extract_hparam_context(raw)
+    fixed_run_args: dict[str, object] = {}
+    if hparam_context is not None:
+        fixed_run_args_raw = hparam_context.get("fixed_run_args")
+        if fixed_run_args_raw is not None:
+            if not isinstance(fixed_run_args_raw, dict):
+                raise ValueError("Global best hparam_context.fixed_run_args must "
+                                 "be an object.")
+            fixed_run_args = fixed_run_args_raw
 
     normalized: dict[str, Scalar] = {}
     for key, value in sampled.items():
@@ -673,16 +710,44 @@ def _extract_sampled_params_from_best_config(
     for key, spec in search_space.items():
         if key in sampled:
             continue
-        if key not in base_args:
+        fixed_value = _extract_scalar_search_value(
+            mapping=fixed_run_args,
+            key=key,
+            spec=spec,
+            context_name="Global best hparam_context.fixed_run_args",
+        )
+        if fixed_value is not None:
+            normalized[key] = fixed_value
             continue
-        base_value = base_args[key]
-        if not isinstance(base_value, (int, float, str, bool)):
-            raise ValueError(f"Global best base_args.{key} must be a scalar value.")
-        if not _value_matches_spec(base_value, spec):
-            raise ValueError(
-                f"Global best base_args.{key}={base_value} is not in current "
-                "search space."
+        if key == "mask":
+            legacy_mask = _mask_hparam_from_sequence_transform(
+                sampled.get("sequence_transform")
             )
+            if legacy_mask is None:
+                legacy_mask = _mask_hparam_from_sequence_transform(
+                    fixed_run_args.get("sequence_transform")
+                )
+            if legacy_mask is None:
+                legacy_mask = _mask_hparam_from_sequence_transform(
+                    base_args.get("sequence_transform")
+                )
+            if legacy_mask is not None:
+                normalized["mask"] = legacy_mask
+                continue
+    if "mask" in search_space:
+        resolved_mask = _normalize_mask_hparam_value(normalized.get("mask"))
+        if resolved_mask is not None:
+            normalized["mask"] = resolved_mask
+        else:
+            legacy_mask = _mask_hparam_from_sequence_transform(
+                normalized.get("sequence_transform")
+            )
+            if legacy_mask is None:
+                raise ValueError(
+                    "Global best sampled_params.mask is missing or invalid."
+                )
+            normalized["mask"] = legacy_mask
+        normalized.pop("sequence_transform", None)
     return normalized
 
 
@@ -1257,6 +1322,63 @@ def _parse_bool_text(value: str) -> Optional[bool]:
     return None
 
 
+def _normalize_mask_hparam_value(raw_value: object) -> Optional[str]:
+    """Normalize a binary mask hparam value to ``on`` or ``off``."""
+    if isinstance(raw_value, bool):
+        return "on" if raw_value else "off"
+    if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+        if raw_value == 1:
+            return "on"
+        if raw_value == 0:
+            return "off"
+        return None
+    if not isinstance(raw_value, str):
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"on", "1", "true", "yes"}:
+        return "on"
+    if normalized in {"off", "0", "false", "no"}:
+        return "off"
+    if normalized in _MASK_HPARAM_VALUES:
+        return normalized
+    return None
+
+
+def _mask_hparam_from_sequence_transform(raw_value: object) -> Optional[str]:
+    """Map legacy sequence-transform values to the binary mask hparam.
+
+    ``truncate_outside_intron`` is treated as ``on`` because this project now
+    folds the legacy truncate behavior into the binary mask hparam.
+    """
+    if not isinstance(raw_value, str):
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized == _MASK_SEQUENCE_TRANSFORM_OFF:
+        return "off"
+    if normalized in {_MASK_SEQUENCE_TRANSFORM_ON, "truncate_outside_intron"}:
+        return "on"
+    return None
+
+
+def _materialize_mask_sequence_transform_args(
+    args: dict[str, ArgValue],
+) -> dict[str, ArgValue]:
+    """Translate ``mask`` into ``sequence_transform`` for model execution."""
+    materialized = dict(args)
+    mask_raw = materialized.pop("mask", None)
+    if mask_raw is None:
+        return materialized
+    mask_value = _normalize_mask_hparam_value(mask_raw)
+    if mask_value is None:
+        raise ValueError("mask must be on or off.")
+    materialized["sequence_transform"] = (
+        _MASK_SEQUENCE_TRANSFORM_ON
+        if mask_value == "on"
+        else _MASK_SEQUENCE_TRANSFORM_OFF
+    )
+    return materialized
+
+
 def _parse_history_param_value(
     *,
     raw_value: object,
@@ -1427,6 +1549,10 @@ def load_historical_trials(
                                 raw_value=row.get(key, ""),
                                 spec=spec,
                             )
+                            if parsed is None and key == "mask":
+                                parsed = _mask_hparam_from_sequence_transform(
+                                    row.get("sequence_transform")
+                                )
                             if parsed is None:
                                 fallback: Optional[Scalar] = None
                                 if base_args is not None:
@@ -1736,6 +1862,7 @@ def _build_run_model_command(
         "acceptor_channel_order",
         "donor_kernel_order",
         "acceptor_kernel_order",
+        "mask",
     }
     cmd = [sys.executable, "-u", str(project_root / "src" / "run_model.py")]
     for key in sorted(args):
@@ -2393,6 +2520,7 @@ def _run_trial_with_command_runner(
         merged_args[key] = value
     for key, value in overrides.items():
         merged_args[key] = value
+    merged_args = _materialize_mask_sequence_transform_args(merged_args)
     model_name = merged_args.get("model")
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("base_args.model must be a non-empty string.")

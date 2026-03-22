@@ -32,6 +32,18 @@ from typing import Mapping, Sequence
 TARGETS: tuple[str, str] = ("donor", "acceptor")
 
 
+def _mask_value_from_sequence_transform(value: object) -> str | None:
+    """Convert one legacy sequence-transform value into ``mask``."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized == "none":
+        return "off"
+    if normalized in {"mask_outside_intron_n", "truncate_outside_intron"}:
+        return "on"
+    return None
+
+
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Parse CLI args for split operation.
 
@@ -220,12 +232,22 @@ def _build_target_sampled_params(
     for key, value in sampled_params.items():
         if key == "train_target":
             continue
+        if key == "sequence_transform":
+            continue
         if key.startswith("donor_") or key.startswith("acceptor_"):
             continue
         result[key] = value
 
     result["train_target"] = target
     result["pair_mode"] = "independent"
+    if "mask" not in result:
+        legacy_mask = _mask_value_from_sequence_transform(
+            sampled_params.get("sequence_transform")
+        )
+        if legacy_mask is not None:
+            result["mask"] = legacy_mask
+        else:
+            result["mask"] = "off"
 
     conv_key = f"{target}_conv_channels"
     kernel_key = f"{target}_kernel_sizes"
@@ -303,6 +325,7 @@ def _build_target_payload(
         if isinstance(fixed_run_args_raw, Mapping):
             fixed_run_args: dict[str, object] = dict(fixed_run_args_raw)
             fixed_run_args["train_target"] = target
+            fixed_run_args.pop("sequence_transform", None)
             hparam_context["fixed_run_args"] = fixed_run_args
         payload["hparam_context"] = hparam_context
 

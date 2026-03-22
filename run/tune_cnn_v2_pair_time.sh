@@ -12,14 +12,11 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="200"
+TIME_BUDGET_MINUTES="500"
 
-
-# Optional output/data overrides for tagged or mask-data tuning runs.
-TAG=""
+# Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-MASK_MODE="off"
 CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -52,16 +49,9 @@ PERSISTENT_WORKERS="1"
 PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="5"
-MAX_MODEL_PARAMS="auto"
-MAX_MODEL_PARAMS_FALLBACK="30000000"
-MAX_MODEL_PARAMS_MEM_FRACTION="0.80"
-MAX_MODEL_PARAMS_RESERVE_MIB="2048"
-MAX_MODEL_PARAMS_BYTES_PER_PARAM="32"
-MAX_MODEL_PARAMS_MODEL_FACTOR="0.75"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
-SEQUENCE_TRANSFORM="none"
 UPDATE_DOUBLE_DESCENT_PLOT="0"
 
 SEARCH_ALGO="history_guided"
@@ -93,7 +83,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
 	"batch_size": {
 		"type": "categorical",
-		"values": [128, 256, 512, 1024, 2048, 4096]
+		"values": [64, 128, 256, 512, 1024, 2048, 4096, 8192]
 	},
   "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
@@ -105,44 +95,71 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 		"type": "categorical",
 		"values": ["late", "mid", "early"]
 	},
-	"sequence_transform": {
+	"mask": {
 		"type": "categorical",
-		"values": ["none", "mask_outside_intron_n", "truncate_outside_intron"]
+		"values": ["off", "on"]
 	},
 	"embedding_dim": {
 		"type": "categorical",
-		"values": [24, 32, 48, 64, 96, 128]
+		"values": [16, 24, 32, 48, 64, 96, 128, 192]
 	},
 	"fc_hidden": {
 		"type": "categorical",
-		"values": [96, 128, 192, 256, 384]
+		"values": [64, 96, 128, 192, 256, 384, 512, 768]
 	},
-	"conv_depth": {"type": "int", "min": 3, "max": 6, "step": 1},
+	"conv_depth": {"type": "int", "min": 2, "max": 7, "step": 1},
 	"channel_candidates": {
 		"type": "categorical",
-		"values": ["64,96,128,160,192,256,320,384,512,640,768"]
+		"values": [
+			"32,48,64,96,128,192,256,384",
+			"48,64,96,128,192,256,320,384,512",
+			"64,96,128,160,192,256,320,384,512,640,768",
+			"96,128,192,256,384,512,768,1024"
+		]
 	},
 	"kernel_candidates": {
 		"type": "categorical",
-		"values": ["3,5,7,9,11,13,15,17,19,21"]
+		"values": [
+			"3,5,7,9,11,13,15",
+			"5,7,9,11,13,15,17,19",
+			"7,9,11,13,15,17,19,21"
+		]
 	},
-	"donor_conv_depth": {"type": "int", "min": 3, "max": 6, "step": 1},
-	"acceptor_conv_depth": {"type": "int", "min": 3, "max": 6, "step": 1},
+	"donor_conv_depth": {"type": "int", "min": 2, "max": 7, "step": 1},
+	"acceptor_conv_depth": {"type": "int", "min": 2, "max": 7, "step": 1},
 	"donor_channel_candidates": {
 		"type": "categorical",
-		"values": ["64,96,128,160,192,256,320,384,512,640,768"]
+		"values": [
+			"32,48,64,96,128,192,256,384",
+			"48,64,96,128,192,256,320,384,512",
+			"64,96,128,160,192,256,320,384,512,640,768",
+			"96,128,192,256,384,512,768,1024"
+		]
 	},
 	"acceptor_channel_candidates": {
 		"type": "categorical",
-		"values": ["64,96,128,160,192,256,320,384,512,640,768"]
+		"values": [
+			"32,48,64,96,128,192,256,384",
+			"48,64,96,128,192,256,320,384,512",
+			"64,96,128,160,192,256,320,384,512,640,768",
+			"96,128,192,256,384,512,768,1024"
+		]
 	},
 	"donor_kernel_candidates": {
 		"type": "categorical",
-		"values": ["3,5,7,9,11,13,15,17,19,21"]
+		"values": [
+			"3,5,7,9,11,13,15",
+			"5,7,9,11,13,15,17,19",
+			"7,9,11,13,15,17,19,21"
+		]
 	},
 	"acceptor_kernel_candidates": {
 		"type": "categorical",
-		"values": ["3,5,7,9,11,13,15,17,19,21"]
+		"values": [
+			"3,5,7,9,11,13,15",
+			"5,7,9,11,13,15,17,19",
+			"7,9,11,13,15,17,19,21"
+		]
 	},
 	"donor_channel_order": {
 		"type": "categorical",
@@ -168,7 +185,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 	},
 	"max_pool_candidates": {
 		"type": "categorical",
-		"values": ["1,2,3,4"]
+		"values": ["1,2,3,4,5"]
 	},
 	"head_type": {"type": "categorical", "values": ["gap", "center"]},
   "loss": {
@@ -367,10 +384,6 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	echo "[tune_cnn_v2_pair_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
 	exit 1
 fi
-if [[ "${MASK_MODE}" != "off" && "${MASK_MODE}" != "on" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] MASK_MODE must be off|on." >&2
-	exit 1
-fi
 if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
 	echo "[tune_cnn_v2_pair_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
@@ -379,18 +392,6 @@ TUNING_MODEL_NAME="cnn_v2_pair"
 
 PYTHON_BIN="$(resolve_python_bin)"
 mapfile -t SEED_VALUES < <(resolve_seed_list)
-RESOLVED_MAX_MODEL_PARAMS="$(
-	intronmodel_resolve_max_model_params \
-		"tune_cnn_v2_pair_time.sh" \
-		"${MAX_MODEL_PARAMS}" \
-		"${GPU_IDS}" \
-		"${MAX_MODEL_PARAMS_FALLBACK}" \
-		"${MAX_MODEL_PARAMS_MEM_FRACTION}" \
-		"${MAX_MODEL_PARAMS_RESERVE_MIB}" \
-		"${MAX_MODEL_PARAMS_BYTES_PER_PARAM}" \
-		"${MAX_MODEL_PARAMS_MODEL_FACTOR}" \
-		"${PYTHON_BIN}"
-)"
 START_SECONDS="${SECONDS}"
 START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
@@ -464,7 +465,6 @@ while true; do
 	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
-	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
 	resolved_train_paths="$(
 		intronmodel_resolve_and_validate_train_paths \
 			"tune_cnn_v2_pair_time.sh" \
@@ -534,7 +534,6 @@ while true; do
   "guided_mutation_rate": ${GUIDED_MUTATION_RATE},
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
-  "max_model_params": ${RESOLVED_MAX_MODEL_PARAMS},
 	"base_args": {
 	"model": "cnn_v2_pair",
     "species": "${species}",
@@ -553,8 +552,6 @@ while true; do
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",
-    "tag": ${TAG_JSON},
-    "sequence_transform": "${SEQUENCE_TRANSFORM}",
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",
     "allow_tf32": ${ALLOW_TF32},

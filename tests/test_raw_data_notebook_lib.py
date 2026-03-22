@@ -15,6 +15,7 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     EvaluationTranscriptIntronCountRow,
     EvaluationTranscriptGroupIntronCountRow,
     FalseTranscriptIntronLabelRow,
+    TranscriptTrainingPositiveIntronOverlapRow,
     SiteLabelCountRow,
     BinaryLabelCountRow,
     TrainTestSiteLabelConsistencyRow,
@@ -22,6 +23,7 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     build_false_transcript_intron_label_rows,
     build_evaluation_transcript_intron_count_rows,
     build_evaluation_transcript_group_intron_count_rows,
+    build_evaluation_transcript_training_positive_intron_overlap_rows,
     build_intron_count_comparison_rows,
     build_site_label_count_rows,
     build_test_intron_label_count_rows,
@@ -37,6 +39,8 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     parse_training_pair_records,
     parse_training_intron_lengths,
     plot_false_transcript_false_intron_scatter,
+    plot_evaluation_transcript_training_positive_intron_ratio_by_count,
+    plot_evaluation_transcript_training_positive_intron_ratio_by_fraction,
     plot_site_label_count_comparison,
     plot_test_intron_label_ratio_pie,
     plot_test_site_label_ratio_pie,
@@ -432,6 +436,92 @@ def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
     ]
 
 
+def test_build_evaluation_transcript_training_positive_intron_overlap_rows(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    species_dir = data_root / "SpX"
+    raw_dir = species_dir / "raw"
+    processed_dir = species_dir / "processed"
+    raw_dir.mkdir(parents=True)
+    processed_dir.mkdir(parents=True)
+
+    (raw_dir / "transcript_class.txt").write_text(
+        "\n".join(
+            [
+                "tx_false_a j",
+                "tx_false_b u",
+                "tx_true =",
+                "tx_contained c",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "100bp.err").write_text(
+        "\n".join(
+            [
+                "DEBUG donor AAAA acceptor CCCC + TX1 10",
+                "DEBUG donor GGGG acceptor TTTT + TX2 20",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "transcripts.tsv").write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tsite_type\tseq",
+                "tx_false_a\t1\tdonor\tAAAA",
+                "tx_false_a\t1\tacceptor\tCCCC",
+                "tx_false_a\t2\tdonor\tCCCC",
+                "tx_false_a\t2\tacceptor\tAAAA",
+                "tx_false_b\t1\tdonor\tTTTT",
+                "tx_false_b\t1\tacceptor\tGGGG",
+                "tx_true\t1\tdonor\tAAAA",
+                "tx_true\t1\tacceptor\tCCCC",
+                "tx_true\t2\tdonor\tGGGG",
+                "tx_true\t2\tacceptor\tTTTT",
+                "tx_true\t3\tdonor\tACGT",
+                "tx_true\t3\tacceptor\tTGCA",
+                "tx_contained\t1\tdonor\tAAAA",
+                "tx_contained\t1\tacceptor\tCCCC",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = build_evaluation_transcript_training_positive_intron_overlap_rows(
+        data_root
+    )
+
+    assert rows[:2] == [
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_false_a",
+            transcript_group="false",
+            total_intron_count=2,
+            positive_training_intron_count=1,
+            positive_training_intron_fraction=0.5,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_false_b",
+            transcript_group="false",
+            total_intron_count=1,
+            positive_training_intron_count=0,
+            positive_training_intron_fraction=0.0,
+        ),
+    ]
+    assert rows[2].species == "SpX"
+    assert rows[2].transcript_id == "tx_true"
+    assert rows[2].transcript_group == "true"
+    assert rows[2].total_intron_count == 3
+    assert rows[2].positive_training_intron_count == 2
+    assert rows[2].positive_training_intron_fraction == pytest.approx(2.0 / 3.0)
+
+
 def test_plot_false_transcript_false_intron_scatter(tmp_path: Path) -> None:
     output_path = tmp_path / "false_transcript_false_intron_scatter.png"
     rows = [
@@ -466,6 +556,145 @@ def test_plot_false_transcript_false_intron_scatter_validation() -> None:
         match="No false-transcript intron-label rows were provided.",
     ):
         plot_false_transcript_false_intron_scatter([])
+
+
+def test_plot_evaluation_transcript_training_positive_intron_ratio_by_count(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "training_positive_intron_ratio_by_count.png"
+    rows = [
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_false_a",
+            transcript_group="false",
+            total_intron_count=2,
+            positive_training_intron_count=1,
+            positive_training_intron_fraction=0.5,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_false_b",
+            transcript_group="false",
+            total_intron_count=1,
+            positive_training_intron_count=0,
+            positive_training_intron_fraction=0.0,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_true_a",
+            transcript_group="true",
+            total_intron_count=3,
+            positive_training_intron_count=1,
+            positive_training_intron_fraction=1.0 / 3.0,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_true_b",
+            transcript_group="true",
+            total_intron_count=4,
+            positive_training_intron_count=2,
+            positive_training_intron_fraction=0.5,
+        ),
+    ]
+
+    plot_evaluation_transcript_training_positive_intron_ratio_by_count(
+        rows,
+        max_positive_training_intron_count=2,
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
+
+
+def test_plot_evaluation_transcript_training_positive_intron_ratio_by_fraction(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "training_positive_intron_ratio_by_fraction.png"
+    rows = [
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_false_a",
+            transcript_group="false",
+            total_intron_count=2,
+            positive_training_intron_count=1,
+            positive_training_intron_fraction=0.5,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_false_b",
+            transcript_group="false",
+            total_intron_count=1,
+            positive_training_intron_count=0,
+            positive_training_intron_fraction=0.0,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_true_a",
+            transcript_group="true",
+            total_intron_count=3,
+            positive_training_intron_count=1,
+            positive_training_intron_fraction=1.0 / 3.0,
+        ),
+        TranscriptTrainingPositiveIntronOverlapRow(
+            species="SpX",
+            transcript_id="tx_true_b",
+            transcript_group="true",
+            total_intron_count=4,
+            positive_training_intron_count=2,
+            positive_training_intron_fraction=0.5,
+        ),
+    ]
+
+    plot_evaluation_transcript_training_positive_intron_ratio_by_fraction(
+        rows,
+        fraction_bin_width=0.5,
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
+
+
+def test_plot_evaluation_transcript_training_positive_intron_ratio_validation() -> None:
+    with pytest.raises(ValueError, match="No transcript overlap rows were provided."):
+        plot_evaluation_transcript_training_positive_intron_ratio_by_count([])
+
+    with pytest.raises(
+        ValueError,
+        match="max_positive_training_intron_count must be positive.",
+    ):
+        plot_evaluation_transcript_training_positive_intron_ratio_by_count(
+            [
+                TranscriptTrainingPositiveIntronOverlapRow(
+                    species="SpX",
+                    transcript_id="tx_true",
+                    transcript_group="true",
+                    total_intron_count=1,
+                    positive_training_intron_count=1,
+                    positive_training_intron_fraction=1.0,
+                )
+            ],
+            max_positive_training_intron_count=0,
+        )
+
+    with pytest.raises(ValueError, match="No transcript overlap rows were provided."):
+        plot_evaluation_transcript_training_positive_intron_ratio_by_fraction([])
+
+    with pytest.raises(ValueError, match="fraction_bin_width must be positive."):
+        plot_evaluation_transcript_training_positive_intron_ratio_by_fraction(
+            [
+                TranscriptTrainingPositiveIntronOverlapRow(
+                    species="SpX",
+                    transcript_id="tx_true",
+                    transcript_group="true",
+                    total_intron_count=1,
+                    positive_training_intron_count=1,
+                    positive_training_intron_fraction=1.0,
+                )
+            ],
+            fraction_bin_width=0.0,
+        )
 
 
 def test_build_test_intron_label_count_rows(tmp_path: Path) -> None:

@@ -12,9 +12,12 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 import os
 import re
 from typing import Dict, List, Literal, Optional, Sequence, Tuple
+
+from util.unique_intron import UNIQUE_MAP_TSV_NAME, load_unique_half_lengths
 
 NAME_FIELD_CHOICES: tuple[str, ...] = (
     "bp_avg",
@@ -660,6 +663,15 @@ def resolve_test_tsv(species: str, test_tsv: Optional[str]) -> str:
         "Generate it with run/make_unique_intron_assets.sh "
         "or pass --test_tsv explicitly."
     )
+
+
+@lru_cache(maxsize=8)
+def _load_test_half_length_map(test_tsv: str) -> dict[tuple[str, int], int]:
+    """Load half lengths from a sibling unique map file when available."""
+    map_path = Path(test_tsv).with_name(UNIQUE_MAP_TSV_NAME)
+    if not map_path.is_file():
+        return {}
+    return load_unique_half_lengths(map_path)
 
 
 def resolve_effective_window_lengths(
@@ -1382,7 +1394,9 @@ def read_test_site_rows(
     """Read inference-time site rows from one transcript TSV.
 
     Short mask-mode windows are padded with ``N`` to the requested fixed length
-    instead of being dropped.
+    instead of being dropped. If the TSV omits ``intron_half_length``, this
+    function backfills it from a sibling ``transcripts.unique.map.tsv`` when
+    available.
 
     Parameters
     ----------
@@ -1407,6 +1421,7 @@ def read_test_site_rows(
             return rows, skipped_short
         idx = _parse_test_header_indices(header_line)
         required_max_index = max(idx.values())
+        half_length_map = _load_test_half_length_map(test_tsv)
         for line in f:
             parts = line.rstrip("\n").split("\t")
             if len(parts) <= required_max_index:
@@ -1434,6 +1449,10 @@ def read_test_site_rows(
                             "Invalid intron_half_length value in test TSV: "
                             f"{raw_value}"
                         )
+            if intron_half_length is None:
+                intron_half_length = half_length_map.get(
+                    (parts[idx["transcript_id"]], int(parts[idx["intron_index"]]))
+                )
 
             rows.append(
                 {
@@ -1454,6 +1473,9 @@ def read_test_pair_rows(
     acceptor_len: Optional[int],
 ) -> Tuple[List[Dict[str, object]], int, int]:
     """Read and pair donor/acceptor test rows into pair-task records.
+
+    If the TSV omits ``intron_half_length``, this function backfills it from a
+    sibling ``transcripts.unique.map.tsv`` when available.
 
     Parameters
     ----------
@@ -1480,6 +1502,7 @@ def read_test_pair_rows(
             return [], 0, 0
         idx = _parse_test_header_indices(header_line)
         required_max_index = max(idx.values())
+        half_length_map = _load_test_half_length_map(test_tsv)
 
         for raw_line in handle:
             parts = raw_line.rstrip("\n").split("\t")
@@ -1528,6 +1551,10 @@ def read_test_pair_rows(
                             f"{existing} != {parsed_half}"
                         )
                     bucket["intron_half_length"] = parsed_half
+            if "intron_half_length" not in bucket:
+                bucket["intron_half_length"] = half_length_map.get(
+                    (transcript_id, intron_index)
+                )
 
     rows: List[Dict[str, object]] = []
     skipped_unpaired = 0

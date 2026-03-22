@@ -59,6 +59,18 @@ _INDEPENDENT_GLOBAL_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _mask_value_from_sequence_transform(value: object) -> str | None:
+    """Convert a legacy sequence-transform value into ``mask``."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized == "none":
+        return "off"
+    if normalized in {"mask_outside_intron_n", "truncate_outside_intron"}:
+        return "on"
+    return None
+
+
 @dataclass(frozen=True)
 class BestCandidate:
     """One loaded best_config candidate."""
@@ -217,7 +229,7 @@ def _build_non_pair_sampled_params(
         "input_mode": "onehot",
         "pair_mode": "independent",
         "train_target": "both",
-        "sequence_transform": "none",
+        "mask": "off",
     }
     donor_len = donor_params.get("donor_len")
     acceptor_len = donor_params.get("acceptor_len")
@@ -334,6 +346,17 @@ def _split_one_species(
     pair_shared_path = species_tuning_root / "cnn_v2_pair" / "best_config.json"
 
     pair_payload = dict(pair_best.payload)
+    pair_sampled = pair_payload.get("sampled_params")
+    if isinstance(pair_sampled, dict):
+        normalized_pair_sampled = dict(pair_sampled)
+        if "mask" not in normalized_pair_sampled:
+            legacy_mask = _mask_value_from_sequence_transform(
+                normalized_pair_sampled.get("sequence_transform")
+            )
+            if legacy_mask is not None:
+                normalized_pair_sampled["mask"] = legacy_mask
+                normalized_pair_sampled.pop("sequence_transform", None)
+        pair_payload["sampled_params"] = normalized_pair_sampled
     pair_payload["source_model"] = pair_best.source_model
     pair_payload["source_best_config"] = str(pair_best.path)
     pair_payload["generated_by"] = "split_cnn_v2_best.py"

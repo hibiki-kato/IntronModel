@@ -53,6 +53,7 @@ ASYM_ALPHA_POS=""
 
 SEED="1337"
 DEVICE="auto"
+GPU_IDS="auto"  # auto: pin the single cross-species run to the first GPU.
 USE_AMP="1"
 AMP_DTYPE="auto"
 COMPILE_MODE="off"
@@ -465,6 +466,14 @@ if [[ -z "${CROSS_TRAIN_POS_PATH}" || -z "${CROSS_TRAIN_NEG_PATH}" ]]; then
 	exit 1
 fi
 
+mapfile -t GPU_ID_LIST < <(
+	intronmodel_resolve_gpu_ids "cnn_v3.sh" "${GPU_IDS}" "${DEVICE}"
+)
+ASSIGNED_GPU_ID=""
+if [[ ${#GPU_ID_LIST[@]} -gt 0 ]]; then
+	ASSIGNED_GPU_ID="${GPU_ID_LIST[0]}"
+fi
+
 args=(
 	--model cnn_v3
 	--species "${ARTIFACT_SPECIES_RESOLVED}"
@@ -543,5 +552,11 @@ fi
 
 echo "[cnn_v3.sh] train_species=${TRAIN_SPECIES_RESOLVED_CSV} artifact_species=${ARTIFACT_SPECIES_RESOLVED} train_only=${TRAIN_ONLY}"
 echo "[cnn_v3.sh] base_pair_checkpoints=${RESOLVED_BASE_PAIR_CHECKPOINTS}"
-PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-	python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
+if [[ -n "${ASSIGNED_GPU_ID}" ]]; then
+	CUDA_VISIBLE_DEVICES="${ASSIGNED_GPU_ID}" \
+		PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+		python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
+else
+	PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+		python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
+fi

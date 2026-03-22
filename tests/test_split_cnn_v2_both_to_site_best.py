@@ -52,11 +52,13 @@ def test_build_target_payload_converts_branch_specific_params() -> None:
     assert donor_payload["acceptor_pr_auc"] is None
     assert donor_payload["mean_pr_auc"] is None
     assert sampled["train_target"] == "donor"
+    assert sampled["mask"] == "off"
     assert sampled["conv_channels"] == "256,512,256"
     assert sampled["kernel_sizes"] == "15,11,7"
     assert sampled["pair_mode"] == "independent"
     assert "donor_conv_channels" not in sampled
     assert "acceptor_conv_channels" not in sampled
+    assert "sequence_transform" not in sampled
 
 
 def test_split_species_writes_donor_and_acceptor_best_configs(tmp_path: Path) -> None:
@@ -107,3 +109,38 @@ def test_split_species_writes_donor_and_acceptor_best_configs(tmp_path: Path) ->
     assert acceptor_payload["objective_score"] == 0.81
     assert acceptor_payload["sampled_params"]["train_target"] == "acceptor"
     assert acceptor_payload["sampled_params"]["conv_channels"] == "96,192,384"
+
+
+def test_build_target_payload_converts_legacy_truncate_to_mask_on() -> None:
+    source_payload: dict[str, object] = {
+        "status": "ok",
+        "donor_pr_auc": 0.91,
+        "acceptor_pr_auc": 0.82,
+        "mean_pr_auc": 0.865,
+        "objective_metric": "mean_pr_auc",
+        "objective_score": 0.865,
+        "selection_score": 0.865,
+        "sampled_params": {
+            "train_target": "both",
+            "pair_mode": "independent",
+            "sequence_transform": "truncate_outside_intron",
+            "donor_len": 100,
+            "acceptor_len": 80,
+            "batch_size": 256,
+        },
+        "hparam_context": {
+            "objective_metric": "mean_pr_auc",
+            "fixed_run_args": {"train_target": "both"},
+        },
+    }
+
+    donor_payload = splitter._build_target_payload(
+        source_payload=source_payload,
+        source_path=Path("/tmp/source.json"),
+        target="donor",
+    )
+
+    sampled = donor_payload["sampled_params"]
+    assert isinstance(sampled, dict)
+    assert sampled["mask"] == "on"
+    assert "sequence_transform" not in sampled

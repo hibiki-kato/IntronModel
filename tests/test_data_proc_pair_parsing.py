@@ -452,3 +452,122 @@ def test_read_test_site_rows_pads_short_mask_windows(tmp_path: Path) -> None:
         },
     ]
     assert skipped_short == 0
+
+
+def test_read_test_site_rows_backfills_half_length_from_unique_map(
+    tmp_path: Path,
+) -> None:
+    """Derive missing half lengths from the sibling unique map TSV."""
+    tsv_path = tmp_path / "transcripts.unique.tsv"
+    map_path = tmp_path / "transcripts.unique.map.tsv"
+    _write_text(
+        tsv_path,
+        "\n".join(
+            [
+                "transcript_id\tsite_type\tintron_index\tseq\tintron_half_length",
+                "tx1\tdonor\t1\tAAAACCCC\t",
+                "tx1\tacceptor\t1\tGGGGTTTT\t",
+                "tx2\tdonor\t2\tCCCCAAAA\t",
+                "",
+            ]
+        ),
+    )
+    _write_text(
+        map_path,
+        "\n".join(
+            [
+                "unique_transcript_id\tunique_intron_index\ttranscript_id\tintron_index\tchrom\tstrand\tintron_start\tintron_end",
+                "tx1\t1\ttx1\t1\tchr1\t+\t100\t109",
+                "tx2\t2\ttx2\t2\tchr1\t+\t200\t205",
+                "",
+            ]
+        ),
+    )
+
+    rows, skipped_short = read_test_site_rows(
+        test_tsv=str(tsv_path),
+        donor_len=4,
+        acceptor_len=4,
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "site_type": "donor",
+            "intron_index": 1,
+            "seq": "AAAA",
+            "intron_half_length": 5,
+        },
+        {
+            "transcript_id": "tx1",
+            "site_type": "acceptor",
+            "intron_index": 1,
+            "seq": "TTTT",
+            "intron_half_length": 5,
+        },
+        {
+            "transcript_id": "tx2",
+            "site_type": "donor",
+            "intron_index": 2,
+            "seq": "CCCC",
+            "intron_half_length": 3,
+        },
+    ]
+    assert skipped_short == 0
+
+
+def test_read_test_pair_rows_backfills_half_length_from_unique_map(
+    tmp_path: Path,
+) -> None:
+    """Derive missing pair half lengths from the sibling unique map TSV."""
+    tsv_path = tmp_path / "transcripts.unique.tsv"
+    map_path = tmp_path / "transcripts.unique.map.tsv"
+    _write_text(
+        tsv_path,
+        "\n".join(
+            [
+                "transcript_id\tsite_type\tintron_index\tseq\tintron_half_length",
+                "tx1\tdonor\t1\tAAAACCCC\t",
+                "tx1\tacceptor\t1\tGGGGTTTT\t",
+                "tx2\tdonor\t2\tCCCCAAAA\t",
+                "tx2\tacceptor\t2\tTTTTGGGG\t",
+                "",
+            ]
+        ),
+    )
+    _write_text(
+        map_path,
+        "\n".join(
+            [
+                "unique_transcript_id\tunique_intron_index\ttranscript_id\tintron_index\tchrom\tstrand\tintron_start\tintron_end",
+                "tx1\t1\ttx1\t1\tchr1\t+\t100\t109",
+                "tx2\t2\ttx2\t2\tchr1\t+\t200\t205",
+                "",
+            ]
+        ),
+    )
+
+    rows, skipped_short, skipped_unpaired = read_test_pair_rows(
+        test_tsv=str(tsv_path),
+        donor_len=4,
+        acceptor_len=4,
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "donor_seq": "AAAA",
+            "acceptor_seq": "TTTT",
+            "intron_half_length": 5,
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 2,
+            "donor_seq": "CCCC",
+            "acceptor_seq": "GGGG",
+            "intron_half_length": 3,
+        },
+    ]
+    assert skipped_short == 0
+    assert skipped_unpaired == 0

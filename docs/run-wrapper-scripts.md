@@ -87,10 +87,13 @@ CNN-family tuning search-space conventions:
   sequence length after conv/pool downsampling, or `cnn_pair` early/mid fusion
   with mismatched input lengths) are discarded and resampled before a trial is
   launched.
-- Generated tuning config can set `max_model_params`; over-cap samples are
-  resampled, and if all retries exceed the cap the lowest-complexity sample is
-  used as fallback.
-- `MAX_MODEL_PARAMS=auto` is supported in CNN-family tuning wrappers. The
+- `run/tune_cnn_v2_time.sh` and `run/tune_cnn_v2_pair_time.sh` intentionally
+  omit `max_model_params` and rely on OOM backoff instead. Their search spaces
+  now expose a binary `mask=off|on` hparam, which the wrappers translate to
+  `sequence_transform=none|mask_outside_intron_n` during model execution.
+  They are also widened to include more batch sizes and architecture
+  candidates.
+- Older CNN-family wrappers may still support `MAX_MODEL_PARAMS=auto`; those
   scripts estimate a conservative cap from selected GPU VRAM (`GPU_IDS`) and
   write the resolved integer into `hparam_search_config.json`.
 
@@ -110,6 +113,9 @@ Validation rules in wrappers:
 - `run/run_cnn_pair.sh` uses `TRAIN_TARGET=pair` and can run full pipeline.
 - `SEQUENCE_TRANSFORM=none|mask_outside_intron_n` is available in
   `run/run_cnn.sh` and `run/run_cnn_pair.sh`.
+- `run/run_cnn_v2.sh` and `run/run_cnn_v2_pair.sh` accept tuned configs that
+  store `mask=off|on`; the wrapper converts that back to
+  `sequence_transform=none|mask_outside_intron_n` when applying tuned values.
 - `MAX_POOL_SIZE>=1` is available in `run/run_cnn.sh`,
   `run/run_cnn_pair.sh`, `run/tune_cnn.sh`, `run/tune_cnn_time.sh`, and
   `run/tune_cnn_pair_time.sh`. `1` disables pooling.

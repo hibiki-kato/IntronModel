@@ -49,6 +49,11 @@ Optional sequence transforms (`cnn`, `cnn_pair`):
 - `none`: no masking (default)
 - `mask_outside_intron_n`: replace outside-boundary region with `N`
   using `intron_half_length + 3bp` boundary-local keep span
+- `cnn_v2` tuning wrappers expose the same behavior as a binary `mask`
+  hparam: `off` maps to `none`, `on` maps to `mask_outside_intron_n`
+- `truncate_outside_intron` is still implemented in
+  `src/util/sequence_transform.py`, but it is not part of the `cnn_v2`
+  binary mask search space
 
 ### 2.2 Transformer-family (`bert`, `dnabert*`)
 

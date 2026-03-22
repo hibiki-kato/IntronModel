@@ -512,6 +512,163 @@ def test_build_run_model_command_skips_architecture_helper_keys(
     assert "--max_pool_candidates" not in cmd
 
 
+def test_build_run_model_command_skips_mask_helper_key(tmp_path: Path) -> None:
+    cmd = hparam_search._build_run_model_command(
+        tmp_path,
+        {
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 256,
+            "mask": "on",
+            "sequence_transform": "none",
+        },
+    )
+
+    assert "--mask" not in cmd
+    assert cmd.count("--sequence_transform") == 1
+
+
+def test_extract_sampled_params_from_best_config_converts_legacy_sequence_transform_value(
+) -> None:
+    params = hparam_search._extract_sampled_params_from_best_config(
+        raw={
+            "sampled_params": {
+                "batch_size": 128,
+                "sequence_transform": "truncate_outside_intron",
+            }
+        },
+        search_space={
+            "batch_size": {
+                "type": "categorical",
+                "values": [128],
+            },
+            "mask": {
+                "type": "categorical",
+                "values": ["off", "on"],
+            },
+        },
+        base_args={},
+    )
+
+    assert params == {"batch_size": 128, "mask": "on"}
+
+
+def test_extract_sampled_params_from_best_config_falls_back_to_fixed_run_args(
+) -> None:
+    params = hparam_search._extract_sampled_params_from_best_config(
+        raw={
+            "sampled_params": {
+                "batch_size": 128,
+                "lr": 2e-4,
+            },
+            "hparam_context": {
+                "fixed_run_args": {
+                    "input_mode": "onehot",
+                }
+            },
+        },
+        search_space={
+            "batch_size": {
+                "type": "categorical",
+                "values": [128],
+            },
+            "input_mode": {
+                "type": "categorical",
+                "values": ["onehot", "kmer3", "bpe"],
+            },
+            "lr": {
+                "type": "float",
+                "min": 1e-5,
+                "max": 1e-3,
+                "scale": "log",
+            },
+        },
+        base_args={
+            "input_mode": "bpe",
+        },
+    )
+
+    assert params == {
+        "batch_size": 128,
+        "input_mode": "onehot",
+        "lr": pytest.approx(2e-4),
+    }
+
+
+def test_run_trial_translates_mask_to_sequence_transform(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_dict = _base_config_dict(tmp_path)
+    config_dict["base_args"] = {
+        "model": "cnn",
+        "species": "Dmel",
+        "batch_size": 128,
+        "epochs": 1,
+    }
+    config_dict["search_space"] = {
+        "batch_size": {
+            "type": "categorical",
+            "values": [128],
+        },
+        "mask": {
+            "type": "categorical",
+            "values": ["off", "on"],
+        },
+    }
+    config_path.write_text(json.dumps(config_dict), encoding="utf-8")
+    config = hparam_search.load_config(config_path)
+
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "donor": {
+                    "best_metric": "pr_auc",
+                    "best_score": 0.8,
+                },
+                "acceptor": {
+                    "best_metric": "pr_auc",
+                    "best_score": 0.7,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "trial.log"
+    captured_cmd: dict[str, list[str]] = {}
+
+    def _fake_command_runner(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        captured_cmd["cmd"] = cmd
+        return 0, ""
+
+    result = hparam_search._run_trial_with_command_runner(
+        config=config,
+        phase="quick",
+        trial_id=0,
+        sampled_params={"batch_size": 128, "mask": "on"},
+        overrides={},
+        assigned_gpu_id=None,
+        metrics_json=metrics_path,
+        log_file=log_path,
+        command_runner=_fake_command_runner,
+    )
+
+    assert result.status == "success"
+    assert result.sampled_params["mask"] == "on"
+    assert "--mask" not in captured_cmd["cmd"]
+    assert "--sequence_transform" in captured_cmd["cmd"]
+    assert "mask_outside_intron_n" in captured_cmd["cmd"]
+
+
 def test_rank_successful_trials_prefers_high_mean_pr_auc() -> None:
     rows = [
         hparam_search.TrialResult(
@@ -1667,6 +1824,7 @@ def test_build_fixed_run_args_context_excludes_search_and_runtime_keys() -> None
             "species": "Dmel",
             "donor_len": 100,
             "sequence_transform": "none",
+            "input_mode": "onehot",
             "batch_size": 512,
             "visualize": "none",
             "num_workers": "auto",
@@ -1677,6 +1835,10 @@ def test_build_fixed_run_args_context_excludes_search_and_runtime_keys() -> None
             "sequence_transform": "mask_sites",
         },
         search_space={
+            "input_mode": {
+                "type": "categorical",
+                "values": ["onehot", "kmer3", "bpe"],
+            },
             "batch_size": {
                 "type": "categorical",
                 "values": [512, 1024],

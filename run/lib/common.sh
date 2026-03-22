@@ -493,6 +493,119 @@ PY
 }
 
 
+intronmodel_resolve_gpu_ids() {
+	local script_tag="$1"
+	local gpu_ids_setting="$2"
+	local device_setting="${3:-auto}"
+	local py_bin="${4:-python3}"
+
+	"${py_bin}" - \
+		"${script_tag}" \
+		"${gpu_ids_setting}" \
+		"${device_setting}" <<'PY'
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+
+
+def _fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+script_tag = sys.argv[1]
+raw_setting = sys.argv[2].strip()
+device_setting = sys.argv[3].strip().lower()
+
+if device_setting not in {"", "auto", "cuda", "cpu", "mps"}:
+    _fail(f"[{script_tag}] DEVICE must be auto|cuda|cpu|mps.")
+if device_setting in {"cpu", "mps"}:
+    raise SystemExit(0)
+
+if raw_setting == "" or raw_setting.lower() == "auto":
+    env_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if env_visible != "":
+        selected = [part.strip() for part in env_visible.split(",") if part.strip()]
+        print("\n".join(selected))
+        raise SystemExit(0)
+
+    command = [
+        "nvidia-smi",
+        "--query-gpu=index",
+        "--format=csv,noheader",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise SystemExit(0)
+    if result.returncode != 0:
+        raise SystemExit(0)
+    selected = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    print("\n".join(selected))
+    raise SystemExit(0)
+
+selected: list[str] = []
+for token in raw_setting.split(","):
+    item = token.strip()
+    if item == "":
+        continue
+    if not re.fullmatch(r"\d+", item):
+        _fail(f"[{script_tag}] GPU_IDS must be auto or comma-separated integers.")
+    selected.append(str(int(item)))
+
+if not selected:
+    _fail(f"[{script_tag}] GPU_IDS resolved to an empty set.")
+
+print("\n".join(selected))
+PY
+}
+
+
+intronmodel_resolve_parallel_slots() {
+	local script_tag="$1"
+	local parallel_setting="$2"
+	local available_slots="$3"
+
+	if [[ ! "${available_slots}" =~ ^[0-9]+$ ]]; then
+		echo "[${script_tag}] available slot count must be an integer." >&2
+		return 1
+	fi
+	if (( available_slots <= 0 )); then
+		printf '0\n'
+		return 0
+	fi
+
+	local normalized
+	normalized="$(printf '%s' "${parallel_setting}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	if [[ -z "${normalized}" || "${normalized}" == "auto" ]]; then
+		printf '%s\n' "${available_slots}"
+		return 0
+	fi
+	if ! [[ "${normalized}" =~ ^[0-9]+$ ]]; then
+		echo "[${script_tag}] MAX_PARALLEL_TRIALS must be auto or a positive integer." >&2
+		return 1
+	fi
+
+	local resolved="${normalized}"
+	if (( resolved <= 0 )); then
+		echo "[${script_tag}] MAX_PARALLEL_TRIALS must be > 0." >&2
+		return 1
+	fi
+	if (( resolved > available_slots )); then
+		resolved="${available_slots}"
+	fi
+	printf '%s\n' "${resolved}"
+}
+
+
 intronmodel_resolve_max_model_params() {
 	local script_tag="$1"
 	local setting="$2"
