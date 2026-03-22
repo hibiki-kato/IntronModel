@@ -14,7 +14,6 @@ set -a
 SPECIES="Mmus,Athal,Dmel,Hsap"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
-MASK="off"  # off | on
 TRAIN_TARGET="pair"
 
 EPOCHS="10"
@@ -163,9 +162,6 @@ run_species_once() {
 		--early_stop_patience "${EARLY_STOP_PATIENCE}"
 		--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
 		--train_target "${TRAIN_TARGET}"
-		--sequence_transform "$(
-			mask_to_sequence_transform "${MASK}"
-		)"
 		--batch_size "${BATCH_SIZE}"
 		--lr "${LR}"
 		--loss "${LOSS}"
@@ -297,25 +293,7 @@ run_species_once() {
 		return $?
 	fi
 	PYTHONPATH="${pythonpath}" \
-		python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-}
-
-mask_to_sequence_transform() {
-	local raw_value="$1"
-	local normalized
-	normalized="$(echo "${raw_value}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	case "${normalized}" in
-		on | 1 | true | yes)
-			printf '%s\n' "mask_outside_intron_n"
-			;;
-		off | 0 | false | no | "")
-			printf '%s\n' "none"
-			;;
-		*)
-			echo "[cnn_v2_pair.sh] MASK must be on or off." >&2
-			exit 1
-			;;
-	esac
+	python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 }
 
 load_tuned_overrides() {

@@ -2482,7 +2482,7 @@ def infer_site(
     common_args: argparse.Namespace,
     model_args: argparse.Namespace,
 ) -> List[Dict[str, object]]:
-    """Run pair-level site inference and return rows with fixed schema."""
+    """Run site inference and return rows with the model's score schema."""
     requested_pair_mode = _normalize_pair_mode(
         getattr(model_args, "pair_mode", "pair"),
         arg_name="--pair_mode",
@@ -2490,31 +2490,7 @@ def infer_site(
     if requested_pair_mode == "independent":
         from models import cnn as cnn_site_module
 
-        site_rows = cnn_site_module.infer_site(common_args, model_args)
-        donor_scores: dict[tuple[str, int], float] = {}
-        acceptor_scores: dict[tuple[str, int], float] = {}
-        for row in site_rows:
-            row_site_type = str(row.get("site_type", "")).strip().lower()
-            key = (str(row["transcript_id"]), int(row["intron_index"]))
-            score = float(row["score"])
-            if row_site_type == "donor":
-                donor_scores[key] = score
-            elif row_site_type == "acceptor":
-                acceptor_scores[key] = score
-
-        pair_rows: list[dict[str, object]] = []
-        for key in sorted(set(donor_scores) & set(acceptor_scores)):
-            donor_score = donor_scores[key]
-            acceptor_score = acceptor_scores[key]
-            pair_rows.append(
-                {
-                    "transcript_id": key[0],
-                    "intron_index": key[1],
-                    "site_type": "pair",
-                    "score": donor_score * acceptor_score,
-                }
-            )
-        return pair_rows
+        return cnn_site_module.infer_site(common_args, model_args)
 
     requested_input_mode = _normalize_input_mode(
         getattr(model_args, "input_mode", "onehot"),

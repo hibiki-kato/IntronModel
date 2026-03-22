@@ -91,12 +91,12 @@ def test_run_cnn_v2_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_run_cnn_v2_sh_uses_mask_config() -> None:
+def test_run_cnn_v2_sh_leaves_mask_to_best_config() -> None:
     content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
         encoding="utf-8"
     )
-    assert 'MASK="off"' in content
-    assert "SEQUENCE_TRANSFORM=" not in content
+    assert 'MASK="off"' not in content
+    assert "--sequence_transform" not in content
 
 
 def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
@@ -111,12 +111,12 @@ def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_run_cnn_v2_pair_sh_uses_mask_config() -> None:
+def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
         encoding="utf-8"
     )
-    assert 'MASK="off"' in content
-    assert "SEQUENCE_TRANSFORM=" not in content
+    assert 'MASK="off"' not in content
+    assert "--sequence_transform" not in content
 
 
 def test_run_cnn_v3_sh_rejects_cli_arguments() -> None:

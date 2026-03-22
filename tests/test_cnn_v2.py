@@ -257,7 +257,7 @@ def test_bpe_encoder_uses_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert encoder.vocab_size == 321
 
 
-def test_infer_site_independent_multiplies_donor_acceptor(
+def test_infer_site_independent_returns_site_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeCnnModule:
@@ -299,15 +299,32 @@ def test_infer_site_independent_multiplies_donor_acceptor(
     common_args = argparse.Namespace(species="Hsap")
     model_args = argparse.Namespace(pair_mode="independent")
     out = cnn_v2.infer_site(common_args, model_args)
-    assert len(out) == 2
-    assert out[0]["transcript_id"] == "tx1"
-    assert out[0]["intron_index"] == 1
-    assert out[0]["site_type"] == "pair"
-    assert out[0]["score"] == pytest.approx(0.1)
-    assert out[1]["transcript_id"] == "tx2"
-    assert out[1]["intron_index"] == 3
-    assert out[1]["site_type"] == "pair"
-    assert out[1]["score"] == pytest.approx(0.28)
+    assert out == [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": 0.2,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": 0.5,
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 3,
+            "site_type": "donor",
+            "score": 0.7,
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 3,
+            "site_type": "acceptor",
+            "score": 0.4,
+        },
+    ]
 
 
 def test_train_independent_fills_cnn_defaults(
