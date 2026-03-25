@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="1400"
+TIME_BUDGET_MINUTES="1300"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional explicit training-data overrides.

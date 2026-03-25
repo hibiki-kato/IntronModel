@@ -259,6 +259,12 @@ def test_cnn_resdil_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_sync_sh_uses_checksum_for_rclone_push() -> None:
+    content = (_project_root() / "sync.sh").read_text(encoding="utf-8")
+    assert "--checksum" in content
+    assert "--size-only" not in content
+
+
 def test_tcn_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "run_tcn.sh"
     run = subprocess.run(
