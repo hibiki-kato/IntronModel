@@ -159,8 +159,11 @@ def test_compile_model_with_fallback_applies_runtime_config(
     calls: list[str] = []
     model = torch.nn.Linear(4, 2)
 
+    def _fake_configure_triton() -> None:
+        calls.append("triton")
+
     def _fake_configure() -> None:
-        calls.append("configured")
+        calls.append("compile")
 
     def _fake_compile(
         module: torch.nn.Module,
@@ -171,12 +174,17 @@ def test_compile_model_with_fallback_applies_runtime_config(
 
     monkeypatch.setattr(
         model_runtime,
+        "configure_triton_tool_paths",
+        _fake_configure_triton,
+    )
+    monkeypatch.setattr(
+        model_runtime,
         "configure_torch_compile_runtime",
         _fake_configure,
     )
     monkeypatch.setattr(torch, "compile", _fake_compile)
     _ = compile_model_with_fallback(model)
-    assert calls == ["configured"]
+    assert calls == ["triton", "compile"]
 
 
 def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
@@ -279,6 +287,37 @@ def test_configure_triton_tool_paths_sets_cuda_env_for_conda_targets(
 
     assert os.environ["TRITON_PTXAS_PATH"] == str(ptxas_path)
     assert os.environ["TRITON_PTXAS_BLACKWELL_PATH"] == str(ptxas_path)
+    assert os.environ["CUDA_HOME"] == str(env_root.resolve())
+    assert os.environ["CUDA_PATH"] == str(env_root.resolve())
+    assert os.environ["CPATH"] == str(cuda_header.parent.resolve())
+
+
+def test_configure_triton_tool_paths_finds_ptxas_without_path_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_root = tmp_path / "env"
+    ptxas_path = env_root / "bin" / "ptxas"
+    ptxas_path.parent.mkdir(parents=True, exist_ok=True)
+    ptxas_path.write_text("", encoding="utf-8")
+    cuda_header = env_root / "targets" / "x86_64-linux" / "include" / "cuda.h"
+    cuda_header.parent.mkdir(parents=True, exist_ok=True)
+    cuda_header.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("util.model_runtime.shutil.which", lambda _name: None)
+    monkeypatch.delenv("TRITON_PTXAS_PATH", raising=False)
+    monkeypatch.delenv("TRITON_PTXAS_BLACKWELL_PATH", raising=False)
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.delenv("CPATH", raising=False)
+    monkeypatch.setenv("CONDA_PREFIX", str(env_root))
+
+    configure_triton_tool_paths()
+
+    assert os.environ["TRITON_PTXAS_PATH"] == str(ptxas_path.resolve())
+    assert os.environ["TRITON_PTXAS_BLACKWELL_PATH"] == str(
+        ptxas_path.resolve()
+    )
     assert os.environ["CUDA_HOME"] == str(env_root.resolve())
     assert os.environ["CUDA_PATH"] == str(env_root.resolve())
     assert os.environ["CPATH"] == str(cuda_header.parent.resolve())

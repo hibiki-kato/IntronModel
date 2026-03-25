@@ -379,7 +379,9 @@ def compile_model_with_fallback(
         return model, False, None, None
 
     # Apply shared runtime guards once per compile attempt so models that call
-    # this helper directly also inherit the same stable inductor settings.
+    # this helper directly also inherit the same stable Triton/Inductor
+    # settings even when callers do not preconfigure tool paths.
+    configure_triton_tool_paths()
     configure_torch_compile_runtime()
 
     _load_compile_runtime_cache_from_env()
@@ -553,15 +555,43 @@ def _prepend_env_path(key: str, new_path: Path) -> None:
     os.environ[key] = os.pathsep.join([resolved_new, *parts])
 
 
+def _find_ptxas_path() -> Path | None:
+    """Return first existing ``ptxas`` binary from known CUDA locations."""
+    explicit_env = (
+        os.environ.get("TRITON_PTXAS_PATH"),
+        os.environ.get("TRITON_PTXAS_BLACKWELL_PATH"),
+    )
+    for path_text in explicit_env:
+        if path_text is None or not path_text.strip():
+            continue
+        candidate = Path(path_text.strip()).expanduser().resolve()
+        if candidate.exists():
+            return candidate
+
+    which_path = shutil.which("ptxas")
+    if which_path is not None:
+        return Path(which_path).expanduser().resolve()
+
+    for root in _iter_cuda_root_candidates():
+        for candidate in (
+            root / "bin" / "ptxas",
+            root / "targets" / "x86_64-linux" / "bin" / "ptxas",
+        ):
+            resolved = candidate.expanduser().resolve()
+            if resolved.exists():
+                return resolved
+    return None
+
+
 def configure_triton_tool_paths() -> None:
     """Configure Triton/CUDA tool paths for ``torch.compile`` stability."""
-    ptxas_path = shutil.which("ptxas")
+    ptxas_path = _find_ptxas_path()
     if ptxas_path is None:
         pass
     elif "TRITON_PTXAS_PATH" not in os.environ:
-        os.environ["TRITON_PTXAS_PATH"] = ptxas_path
+        os.environ["TRITON_PTXAS_PATH"] = str(ptxas_path)
     if ptxas_path is not None and "TRITON_PTXAS_BLACKWELL_PATH" not in os.environ:
-        os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_path
+        os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = str(ptxas_path)
 
     cuda_header = _find_cuda_header()
     if cuda_header is None:

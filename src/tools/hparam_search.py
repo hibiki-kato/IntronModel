@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -490,7 +490,10 @@ def load_config(path: Path) -> SearchConfig:
     if not isinstance(full_overrides, dict):
         raise ValueError("full_overrides must be an object.")
     skip_full_phase = _to_bool(raw.get("skip_full_phase", False))
-    enable_visualization = _to_bool(raw.get("enable_visualization", True))
+    enable_visualization = _resolve_enable_visualization(
+        raw.get("enable_visualization"),
+        base_args=normalized_base_args,
+    )
 
     return SearchConfig(
         project_root=project_root,
@@ -548,6 +551,25 @@ def _value_matches_spec(value: Scalar, spec: dict[str, object]) -> bool:
             return False
         return (value - min_value) % step == 0
     return False
+
+
+def _resolve_enable_visualization(
+    raw_enable_visualization: object | None,
+    *,
+    base_args: Mapping[str, object],
+) -> bool:
+    """Resolve whether the tuning summary plot should be generated."""
+    if raw_enable_visualization is not None:
+        return _to_bool(raw_enable_visualization)
+
+    disabled_tokens = {"0", "off", "false", "none", "no"}
+    for key in ("visualize", "plot_mode"):
+        raw_value = base_args.get(key)
+        if not isinstance(raw_value, str):
+            continue
+        if raw_value.strip().lower() in disabled_tokens:
+            return False
+    return True
 
 
 def _normalize_context_object(value: object) -> object:

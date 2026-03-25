@@ -227,6 +227,37 @@ def test_load_config_parses_skip_full_and_visualization_flags(
     assert loaded.enable_visualization is False
 
 
+def test_load_config_disables_visualization_when_base_visualize_is_none(
+    tmp_path: Path,
+) -> None:
+    config = _base_config_dict(tmp_path)
+    base_args = dict(config["base_args"])
+    base_args["visualize"] = "none"
+    config["base_args"] = base_args
+    config_path = tmp_path / "visualize_none.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.enable_visualization is False
+
+
+def test_load_config_explicit_visualization_flag_overrides_base_visualize(
+    tmp_path: Path,
+) -> None:
+    config = _base_config_dict(tmp_path)
+    base_args = dict(config["base_args"])
+    base_args["visualize"] = "none"
+    config["base_args"] = base_args
+    config["enable_visualization"] = "on"
+    config_path = tmp_path / "visualize_override.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.enable_visualization is True
+
+
 def test_prewarm_persistent_trial_worker_calls_model_hook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -519,14 +519,7 @@ def plot_eval_scores(
         zorder=0,
     )
     ax.clabel(_cs, fmt="F1=%.1f", fontsize=9, inline=True)
-    legend = ax.legend(
-        markerscale=7,
-        fontsize=LEGEND_FONT_SIZE,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
-        borderaxespad=0.0,
-    )
-    fig.subplots_adjust(right=0.78)
+    legend = ax.legend(markerscale=7, fontsize=LEGEND_FONT_SIZE, loc="lower left")
     if interactive:
         _connect_interactive_legend_toggle(
             fig=fig,
@@ -538,7 +531,7 @@ def plot_eval_scores(
     out_dir = os.path.dirname(final_output)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    fig.savefig(final_output, bbox_inches="tight", pad_inches=0.25)
+    plt.savefig(final_output)
     print(f"Saved plot to {final_output}")
     if interactive:
         plt.show(block=True)
