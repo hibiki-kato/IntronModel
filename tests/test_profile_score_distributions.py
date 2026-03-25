@@ -75,7 +75,7 @@ def test_load_transcript_score_distribution_uses_class_file_and_column(
         "\n".join(
             [
                 "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor"
-                "\tmin_donor_plus_acceptor",
+                "\ttrans_score",
                 "tx1\t1\t0.1\t0.1\t0.90",
                 "tx2\t1\t0.2\t0.2\t0.10",
                 "tx3\t1\t0.3\t0.3\t0.50",
@@ -92,7 +92,7 @@ def test_load_transcript_score_distribution_uses_class_file_and_column(
     )
 
     assert result.score_kind == "transcript_score"
-    assert result.score_column_used == "min_donor_plus_acceptor"
+    assert result.score_column_used == "trans_score"
     assert result.positive_scores == (0.9,)
     assert result.negative_scores == (0.1,)
     assert result.total_rows == 3
@@ -120,7 +120,7 @@ def test_build_score_distribution_figure_writes_png(tmp_path: Path) -> None:
         model_name="model",
         score_kind="transcript_score",
         source_file=tmp_path / "trans.tsv",
-        score_column_used="min_donor_plus_acceptor",
+        score_column_used="trans_score",
         positive_scores=(0.7, 0.6),
         negative_scores=(0.3, 0.4),
         total_rows=4,

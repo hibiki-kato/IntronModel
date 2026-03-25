@@ -516,7 +516,7 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
         "min_intron_index",
         "Score_donor",
         "Score_acceptor",
-        "min_donor_plus_acceptor",
+        "trans_score",
     ]
     assert len(lines[1].split("\t")) == 5
 
@@ -629,7 +629,7 @@ def test_run_pipeline_cnn_v2_pair_rows_aggregate_from_pair_scores(
         "min_intron_index",
         "Score_donor",
         "Score_acceptor",
-        "min_donor_plus_acceptor",
+        "trans_score",
     ]
     assert transcript_lines[1].split("\t") == [
         "tx1",

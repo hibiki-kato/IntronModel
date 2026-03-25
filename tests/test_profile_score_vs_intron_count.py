@@ -61,7 +61,7 @@ def test_collect_records_from_trans_score_counts_missing_transcripts(
     score_tsv.write_text(
         "\n".join(
             [
-                "transcript_id\tmin_donor_plus_acceptor",
+                "transcript_id\ttrans_score",
                 "tx1\t0.9",
                 "tx_missing\t0.1",
                 "tx2\tnan_text",
@@ -76,7 +76,7 @@ def test_collect_records_from_trans_score_counts_missing_transcripts(
         species="SpX",
         trans_score_tsv=score_tsv,
         intron_count_by_transcript=intron_counts,
-        score_column="min_donor_plus_acceptor",
+        score_column="trans_score",
     )
 
     assert result.total_rows == 3
@@ -107,7 +107,7 @@ def test_collect_records_from_trans_score_supports_legacy_score_column(
         species="SpX",
         trans_score_tsv=score_tsv,
         intron_count_by_transcript=intron_counts,
-        score_column="min_donor_plus_acceptor",
+        score_column="trans_score",
     )
 
     assert result.used_rows == 2
@@ -142,7 +142,7 @@ def test_build_correlation_row_and_bins_capture_negative_association() -> None:
         species="SpX",
         model_name="cnn",
         file_path=Path("data/SpX/trans_score/cnn.tsv"),
-        score_column_used="min_donor_plus_acceptor",
+        score_column_used="trans_score",
         total_rows=4,
         used_rows=4,
         invalid_score_count=0,

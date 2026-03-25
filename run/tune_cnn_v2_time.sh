@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="10"
+TIME_BUDGET_MINUTES="1440"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional explicit training-data overrides.
@@ -27,14 +27,14 @@ BASE_SEED="1337"
 SEED_LIST=""
 PROCESS_TITLE="ETA"
 
-QUICK_TRIALS="12"
+QUICK_TRIALS="16"
 QUICK_EPOCHS="2"
-TOP_K="3"
+TOP_K="4"
 FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
-FULL_COMPILE_MODE="off"
+FULL_COMPILE_MODE="on"
 
-GPU_IDS="2,3,4,5"
+GPU_IDS="2,3"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -70,7 +70,10 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
+	"Athal"
+	"Dmel"
 	"Hsap"
+	"Mmus"
 )
 
 # Tune site tasks independently.

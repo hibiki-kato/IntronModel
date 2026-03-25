@@ -14,6 +14,11 @@ from statistics import median
 from typing import Dict, Iterable, List, Sequence
 
 INTRON_SCORE_OP_CHOICES: tuple[str, ...] = ("+", "*", "harmonic", "min")
+TRANSCRIPT_SCORE_COLUMN: str = "trans_score"
+LEGACY_TRANSCRIPT_SCORE_COLUMNS: tuple[str, ...] = (
+    "min_donor_plus_acceptor",
+    "min_donor_times_acceptor",
+)
 TRANSCRIPT_SCORE_AGG_CHOICES: tuple[str, ...] = (
     "min",
     "softmin",
@@ -160,7 +165,7 @@ def aggregate_transcript_scores(
     list[dict[str, object]]
         Transcript-level rows. For compatibility, output schema stays:
         ``transcript_id``, ``min_intron_index``, ``Score_donor``,
-        ``Score_acceptor``, ``min_donor_plus_acceptor``.
+        ``Score_acceptor``, ``trans_score``.
     """
     if intron_score_op not in INTRON_SCORE_OP_CHOICES:
         raise ValueError(
@@ -227,7 +232,7 @@ def aggregate_transcript_scores(
                 "min_intron_index": min_iidx,
                 "Score_donor": donor_score,
                 "Score_acceptor": acceptor_score,
-                "min_donor_plus_acceptor": transcript_score,
+                TRANSCRIPT_SCORE_COLUMN: transcript_score,
             }
         )
 
@@ -268,7 +273,7 @@ def aggregate_pair_transcript_scores(
     list[dict[str, object]]
         Compatibility schema:
         ``transcript_id``, ``min_intron_index``, ``Score_donor``,
-        ``Score_acceptor``, ``min_donor_plus_acceptor``.
+        ``Score_acceptor``, ``trans_score``.
         ``Score_donor`` and ``Score_acceptor`` are identical for pair mode.
     """
     if transcript_score_agg not in TRANSCRIPT_SCORE_AGG_CHOICES:
@@ -303,7 +308,7 @@ def aggregate_pair_transcript_scores(
                 "min_intron_index": min_iidx,
                 "Score_donor": min_score,
                 "Score_acceptor": min_score,
-                "min_donor_plus_acceptor": transcript_score,
+                TRANSCRIPT_SCORE_COLUMN: transcript_score,
             }
         )
 
@@ -406,16 +411,52 @@ def write_intron_scores(
             )
 
 
-def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
-    """Write transcript-level score rows to a 5-column TSV file."""
+def _get_transcript_score(row: Dict[str, object]) -> float:
+    """Return the transcript score value from new or legacy row keys."""
+
+    value = row.get(TRANSCRIPT_SCORE_COLUMN)
+    if value is None:
+        for legacy_key in LEGACY_TRANSCRIPT_SCORE_COLUMNS:
+            value = row.get(legacy_key)
+            if value is not None:
+                break
+    if value is None:
+        raise KeyError(
+            "Transcript score row is missing the trans_score column."
+        )
+    return float(value)
+
+
+def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]) -> None:
+    """Write transcript-level score rows to a 5-column TSV file.
+
+    Parameters
+    ----------
+    output_tsv : str
+        Output TSV path.
+    rows : list[dict[str, object]]
+        Transcript-score rows containing ``transcript_id``,
+        ``min_intron_index``, ``Score_donor``, ``Score_acceptor``, and
+        ``trans_score`` or a legacy transcript-score key.
+
+    Returns
+    -------
+    None
+        This function writes a TSV file in place.
+
+    Raises
+    ------
+    KeyError
+        If a row does not include any transcript-score field.
+    """
     outdir = os.path.dirname(output_tsv)
     if outdir:
         os.makedirs(outdir, exist_ok=True)
 
-    with open(output_tsv, "w") as f:
+    with open(output_tsv, "w", encoding="utf-8", newline="") as f:
         f.write(
             "transcript_id\tmin_intron_index\tScore_donor\t"
-            "Score_acceptor\tmin_donor_plus_acceptor\n"
+            f"Score_acceptor\t{TRANSCRIPT_SCORE_COLUMN}\n"
         )
         for r in rows:
             f.write(
@@ -423,7 +464,7 @@ def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]):
                 f"{r['min_intron_index']}\t"
                 f"{float(r['Score_donor']):.6f}\t"
                 f"{float(r['Score_acceptor']):.6f}\t"
-                f"{float(r['min_donor_plus_acceptor']):.6f}\n"
+                f"{_get_transcript_score(r):.6f}\n"
             )
 
 

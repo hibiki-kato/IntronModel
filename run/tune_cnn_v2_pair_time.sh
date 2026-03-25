@@ -12,28 +12,28 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="500"
+TIME_BUDGET_MINUTES="1440"
 
+INTRONMODEL_AUTO_TMUX=on
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
-VAL_FRAC="0.2"
-BASE_SEED="1337"
-# Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
+VAL_FRAC="0.25"
+BASE_SEED="0"
 SEED_LIST=""
 PROCESS_TITLE="ETA"
 
-QUICK_TRIALS="12"
+QUICK_TRIALS="16"
 QUICK_EPOCHS="2"
-TOP_K="3"
+TOP_K="4"
 FULL_EPOCHS="10"
 QUICK_COMPILE_MODE="off"
-FULL_COMPILE_MODE="off"
+FULL_COMPILE_MODE="on"
 
-GPU_IDS="2,3,4"
+GPU_IDS="4, 5"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 

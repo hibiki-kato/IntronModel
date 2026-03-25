@@ -108,6 +108,41 @@ def test_write_interactive_html_requires_plotly_or_writes_file(
         assert "plotly" in content.lower()
 
 
+def test_write_interactive_html_places_legend_outside_right(
+    tmp_path: Path,
+) -> None:
+    """The Plotly SN-PR legend should be rendered outside the plot area."""
+
+    if go is None:
+        pytest.skip("plotly is not available")
+
+    labels = np.asarray([0, 1, 1, 0], dtype=np.int64)
+    model_to_scores = {
+        "baseline_min": np.asarray([0.1, 0.7, 0.8, 0.2], dtype=np.float64)
+    }
+    summaries, curves = _compute_species_curves(
+        eval_species="Hsap",
+        model_to_scores=model_to_scores,
+        labels=labels,
+        sensitivity_denominator=10,
+    )
+    output_html = tmp_path / "snpr.html"
+
+    _write_interactive_html(
+        curves=curves,
+        summaries=summaries,
+        output_html=output_html,
+        title="test",
+    )
+
+    content = output_html.read_text(encoding="utf-8").replace(" ", "")
+    assert '"legend":{"x":1.02' in content
+    assert '"xanchor":"left"' in content
+    assert '"yanchor":"top"' in content
+    assert '"orientation":"v"' in content
+    assert '"r":220' in content
+
+
 def test_build_arg_parser_includes_logreg_c() -> None:
     """The SN-PR CLI should forward the L1 logistic regularization strength."""
 

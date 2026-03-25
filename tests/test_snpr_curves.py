@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import pytest
 import matplotlib
 
 matplotlib.use("Agg")
@@ -90,6 +91,54 @@ def test_build_transcript_score_snpr_uses_test_positive_denominator(
     assert curve.point_count == 3
     assert curve.sensitivities == (50.0, 50.0, 50.0)
     assert curve.precisions == (33.33, 50.0, 100.0)
+
+    figure.clf()
+
+
+def test_build_transcript_score_snpr_places_legend_outside_right(
+    tmp_path: Path,
+) -> None:
+    """The SN-PR legend should be anchored outside the plotting area."""
+
+    _write_transcript_inputs(tmp_path)
+
+    figure, _, _ = build_transcript_score_snpr_figure(
+        repo_root=tmp_path,
+        species="SpX",
+        pattern="*.tsv",
+    )
+
+    legend = figure.axes[0].get_legend()
+    assert legend is not None
+    assert legend._loc == 2
+
+    bbox = legend.get_bbox_to_anchor()._bbox
+    assert bbox.x0 == pytest.approx(1.02)
+    assert bbox.y0 == pytest.approx(1.0)
+
+    figure.clf()
+
+
+def test_build_transcript_score_roc_places_legend_outside_right(
+    tmp_path: Path,
+) -> None:
+    """The ROC legend should be anchored outside the plotting area."""
+
+    _write_transcript_inputs(tmp_path)
+
+    figure, _, _ = build_transcript_score_roc_figure(
+        repo_root=tmp_path,
+        species="SpX",
+        pattern="*.tsv",
+    )
+
+    legend = figure.axes[0].get_legend()
+    assert legend is not None
+    assert legend._loc == 2
+
+    bbox = legend.get_bbox_to_anchor()._bbox
+    assert bbox.x0 == pytest.approx(1.02)
+    assert bbox.y0 == pytest.approx(1.0)
 
     figure.clf()
 

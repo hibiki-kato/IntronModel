@@ -132,7 +132,7 @@ Transcript score TSV compatibility:
 
 - Output schema is fixed to 5 columns:
   `transcript_id`, `min_intron_index`, `Score_donor`,
-  `Score_acceptor`, `min_donor_plus_acceptor`.
+  `Score_acceptor`, `trans_score`.
 - `cnn_pair` keeps this schema by writing the same pair score into both
   `Score_donor` and `Score_acceptor`.
 

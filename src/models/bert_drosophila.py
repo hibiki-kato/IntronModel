@@ -709,7 +709,7 @@ def score_test_sites(
                 "min_intron_index": min_iidx,
                 "Score_donor": donor_score,
                 "Score_acceptor": acceptor_score,
-                "min_donor_plus_acceptor": total_score,
+                "trans_score": total_score,
             }
         )
 
@@ -721,11 +721,11 @@ def score_test_sites(
         os.makedirs(outdir, exist_ok=True)
     with open(output_tsv, "w") as f:
         f.write(
-            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\tmin_donor_plus_acceptor\n"
+            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\ttrans_score\n"
         )
         for r in results:
             f.write(
-                f"{r['transcript_id']}\t{r['min_intron_index']}\t{r['Score_donor']:.6f}\t{r['Score_acceptor']:.6f}\t{r['min_donor_plus_acceptor']:.6f}\n"
+                f"{r['transcript_id']}\t{r['min_intron_index']}\t{r['Score_donor']:.6f}\t{r['Score_acceptor']:.6f}\t{r['trans_score']:.6f}\n"
             )
 
     print(f"✅ Done! Results saved to {output_tsv}")

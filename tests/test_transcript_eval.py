@@ -10,6 +10,7 @@ from util.transcript_eval import (
     aggregate_transcript_scores,
     build_intron_scores,
     read_site_scores,
+    write_transcript_scores,
     write_site_scores,
 )
 
@@ -54,7 +55,7 @@ def test_aggregate_transcript_scores_softmin_exp_sum() -> None:
     expected = math.exp(-1.0) + math.exp(-3.0)
 
     assert result["min_intron_index"] == 1
-    assert float(result["min_donor_plus_acceptor"]) == pytest.approx(expected)
+    assert float(result["trans_score"]) == pytest.approx(expected)
 
 
 def test_aggregate_transcript_scores_softmin_wavg() -> None:
@@ -101,7 +102,7 @@ def test_aggregate_transcript_scores_softmin_wavg() -> None:
     ) / sum(weights)
 
     assert result["min_intron_index"] == 1
-    assert float(result["min_donor_plus_acceptor"]) == pytest.approx(expected)
+    assert float(result["trans_score"]) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("tau", [0.0, -0.5])
@@ -158,7 +159,7 @@ def test_aggregate_pair_transcript_scores_keeps_5col_compatibility() -> None:
             "min_intron_index": 1,
             "Score_donor": 0.3,
             "Score_acceptor": 0.3,
-            "min_donor_plus_acceptor": 0.3,
+            "trans_score": 0.3,
         }
     ]
 
@@ -190,7 +191,7 @@ def test_aggregate_pair_transcript_scores_softmin_wavg() -> None:
     expected = (weights[0] * scores[0] + weights[1] * scores[1]) / sum(weights)
 
     assert rows[0]["min_intron_index"] == 1
-    assert float(rows[0]["min_donor_plus_acceptor"]) == pytest.approx(expected)
+    assert float(rows[0]["trans_score"]) == pytest.approx(expected)
 
 
 def test_aggregate_transcript_scores_uses_pair_rows_when_available() -> None:
@@ -222,9 +223,33 @@ def test_aggregate_transcript_scores_uses_pair_rows_when_available() -> None:
             "min_intron_index": 1,
             "Score_donor": 0.25,
             "Score_acceptor": 0.25,
-            "min_donor_plus_acceptor": 0.25,
+            "trans_score": 0.25,
         }
     ]
+
+
+def test_write_transcript_scores_outputs_trans_score_header(
+    tmp_path: Path,
+) -> None:
+    """Write transcript-score TSV with the renamed score column."""
+
+    output_tsv = tmp_path / "transcript.tsv"
+    rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "min_intron_index": 1,
+            "Score_donor": 0.3,
+            "Score_acceptor": 0.3,
+            "trans_score": 0.3,
+        }
+    ]
+    write_transcript_scores(str(output_tsv), rows)
+    lines = output_tsv.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0] == (
+        "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\t"
+        "trans_score"
+    )
+    assert lines[1] == "tx1\t1\t0.300000\t0.300000\t0.300000"
 
 
 def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:

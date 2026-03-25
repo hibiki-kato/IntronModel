@@ -365,6 +365,7 @@ Pair model compatibility:
 - Pair site scores are aggregated directly per intron.
 - Output TSV keeps the same 5-column schema as independent models.
 - `Score_donor` and `Score_acceptor` are both filled with the pair score.
+- The final transcript-score column is named `trans_score`.
 
 ## 11. Evaluation Sweep (`src/evaluate_scores.py`)
 
