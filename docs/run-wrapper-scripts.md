@@ -70,6 +70,11 @@ Tuning wrappers:
 - `run/tune_dnabert.sh`, `run/tune_dnabert_time.sh`
 - `run/tune_reservoir.sh`
 
+Archived wrappers:
+
+- `archive/cnn_v3_20260325_183046/run/run_cnn_v3.sh`
+- `archive/cnn_v3_20260325_183046/run/tune_cnn_v3_time.sh`
+
 CNN-family tuning search-space conventions:
 
 - `cnn` / `cnn_resdil` tune scripts sample architecture from independent keys:
@@ -93,6 +98,18 @@ CNN-family tuning search-space conventions:
   `sequence_transform=none|mask_outside_intron_n` during model execution.
   They are also widened to include more batch sizes and architecture
   candidates.
+- `run/run_cnn_v2_pair.sh` and `run/tune_cnn_v2_pair_time.sh` also expose
+  `SYNTHESIZE_MODE=off|on`. When enabled, the pair pipeline defaults the
+  negative training file to `processed/100bp_mixed_one_side.neg.err` and
+  appends a `synth` suffix through `tag`-based naming. Synth runs also move to
+  the `cnn_v2_pair_synth` tuning subtree and use a separate
+  `best_synth_config.json` there, while the run wrapper keeps its own `TAG`
+  control authoritative so tuned-config tags do not leak into an `off` run.
+- `run/run_dnabert_pair.sh`, `run/tune_dnabert_pair.sh`, and
+  `run/tune_dnabert_pair_time.sh` also expose `SYNTHESIZE_MODE=off|on`. When
+  enabled, they use the same pair synth defaults for training inputs, append a
+  `synth` suffix to output naming, and switch tuned-config lookups to the
+  `dnabert_pair_synth` tuning subtree with `best_synth_config.json`.
 - Older CNN-family wrappers may still support `MAX_MODEL_PARAMS=auto`; those
   scripts estimate a conservative cap from selected GPU VRAM (`GPU_IDS`) and
   write the resolved integer into `hparam_search_config.json`.

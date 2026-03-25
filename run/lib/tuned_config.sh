@@ -37,13 +37,14 @@ intronmodel_resolve_tuned_config_path() {
 	local tuned_target="$4"
 	local explicit_path="$5"
 	local shared_path="$6"
+	local best_config_filename="${7:-best_config.json}"
 
 	if [[ -n "${explicit_path}" ]]; then
 		printf '%s\n' "${explicit_path}"
 		return 0
 	fi
 
-	local task_path="${data_root}/${species}/tuning/${tuned_model_name}/${tuned_target}/best_config.json"
+	local task_path="${data_root}/${species}/tuning/${tuned_model_name}/${tuned_target}/${best_config_filename}"
 	if [[ -f "${task_path}" ]]; then
 		printf '%s\n' "${task_path}"
 		return 0
@@ -57,10 +58,12 @@ intronmodel_resolve_tuned_config_path() {
 		fi
 	fi
 
-	local legacy_path="${data_root}/${species}/tuning/${tuned_model_name}/best_config.json"
-	if [[ -f "${legacy_path}" ]]; then
-		printf '%s\n' "${legacy_path}"
-		return 0
+	if [[ "${best_config_filename}" == "best_config.json" ]]; then
+		local legacy_path="${data_root}/${species}/tuning/${tuned_model_name}/best_config.json"
+		if [[ -f "${legacy_path}" ]]; then
+			printf '%s\n' "${legacy_path}"
+			return 0
+		fi
 	fi
 
 	return 0

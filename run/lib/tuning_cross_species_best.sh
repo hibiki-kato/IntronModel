@@ -46,8 +46,14 @@ collect_best_candidates() {
 	local model_name="$3"
 	local target="$4"
 	local species="$5"
+	local best_config_filename="${6:-best_config.json}"
 
-	"${python_bin}" - "${data_root}" "${model_name}" "${target}" "${species}" <<'PY'
+	"${python_bin}" - \
+		"${data_root}" \
+		"${model_name}" \
+		"${target}" \
+		"${species}" \
+		"${best_config_filename}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -76,6 +82,7 @@ data_root = Path(sys.argv[1])
 model_name = sys.argv[2]
 target = sys.argv[3]
 excluded_species = sys.argv[4]
+best_config_filename = sys.argv[5]
 
 rows: list[tuple[float, str, Path]] = []
 candidate_species_dirs: list[tuple[str, Path]] = []
@@ -95,7 +102,9 @@ for first_level in sorted(data_root.iterdir()):
 for species, species_dir in candidate_species_dirs:
     if species == excluded_species:
         continue
-    candidate = species_dir / "tuning" / model_name / target / "best_config.json"
+    candidate = (
+        species_dir / "tuning" / model_name / target / best_config_filename
+    )
     if not candidate.exists():
         continue
     score = read_score(candidate)
@@ -128,6 +137,7 @@ resolve_cross_species_best_seed() {
 	local fallback_mode="$8"
 	local override_map="$9"
 	local preferred_species_csv="${10}"
+	local best_config_filename="${11:-best_config.json}"
 
 	local mode
 	mode="$(printf '%s' "${fallback_mode}" | tr '[:upper:]' '[:lower:]')"
@@ -159,7 +169,8 @@ resolve_cross_species_best_seed() {
 			"${data_root}" \
 			"${model_name}" \
 			"${target}" \
-			"${species}"
+			"${species}" \
+			"${best_config_filename}"
 	); then
 		:
 	else
@@ -187,8 +198,8 @@ resolve_cross_species_best_seed() {
 	if [[ -n "${manual_selector}" ]]; then
 		if [[ -f "${manual_selector}" ]]; then
 			resolved_path="${manual_selector}"
-		elif [[ -f "${data_root}/${manual_selector}/tuning/${model_name}/${target}/best_config.json" ]]; then
-			resolved_path="${data_root}/${manual_selector}/tuning/${model_name}/${target}/best_config.json"
+		elif [[ -f "${data_root}/${manual_selector}/tuning/${model_name}/${target}/${best_config_filename}" ]]; then
+			resolved_path="${data_root}/${manual_selector}/tuning/${model_name}/${target}/${best_config_filename}"
 		else
 			echo "[${script_tag}] invalid CROSS_SPECIES_BEST_OVERRIDE for ${target}: ${manual_selector}" >&2
 			return 2

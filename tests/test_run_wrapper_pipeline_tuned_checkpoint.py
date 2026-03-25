@@ -213,6 +213,16 @@ def test_resolve_tuned_model_name_appends_cheat_suffix_for_dnabert_pair() -> Non
     assert resolved == "dnabert2_pair_cheat"
 
 
+def test_resolve_tuned_model_name_appends_synth_suffix_for_dnabert_pair() -> None:
+    resolved = _resolve_tuned_model_name(
+        spec=SPECS["dnabert_pair.sh"],
+        model_name="dnabert2_pair",
+        mask_mode="off",
+        synthesize_mode="on",
+    )
+    assert resolved == "dnabert2_pair_synth"
+
+
 def test_resolve_tuned_model_name_combines_trunc_and_cheat_for_dnabert() -> None:
     resolved = _resolve_tuned_model_name(
         spec=SPECS["dnabert.sh"],
@@ -421,6 +431,54 @@ def test_apply_tuned_overrides_reads_trunc_tuning_dir_for_dnabert_pair(
     assert env["LR"] == "1.3e-05"
     assert env["BATCH_SIZE"] == "24"
     assert env["HEAD_LAYER_NORM"] == "1"
+    assert env["READOUT_TYPE"] == "linear"
+
+
+def test_apply_tuned_overrides_reads_synth_tuning_dir_for_dnabert_pair(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    tuned_config = (
+        tmp_path
+        / species
+        / "tuning"
+        / "dnabert2_pair_synth"
+        / "pair"
+        / "best_synth_config.json"
+    )
+    tuned_config.parent.mkdir(parents=True, exist_ok=True)
+    tuned_config.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "lr": 1.3e-5,
+                    "batch_size": 24,
+                    "readout_type": "linear",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env: dict[str, str] = {
+        "MODEL": "dnabert2_pair",
+        "SPECIES": species,
+        "TRAIN_TARGET": "pair",
+        "USE_TUNED_HPARAMS": "required",
+        "SYNTHESIZE_MODE": "on",
+        "MASK_MODE": "off",
+        "PAIR_TUNED_CONFIG_PATH": "",
+        "SHARED_TUNED_CONFIG_PATH": "",
+        "LR": "",
+        "BATCH_SIZE": "",
+        "READOUT_TYPE": "",
+    }
+    resolved = _apply_tuned_overrides(SPECS["dnabert_pair.sh"], env, tmp_path)
+
+    assert resolved["pair"] == tuned_config.resolve()
+    assert env["LR"] == "1.3e-05"
+    assert env["BATCH_SIZE"] == "24"
     assert env["READOUT_TYPE"] == "linear"
 
 

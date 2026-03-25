@@ -8,7 +8,8 @@ This utility creates/updates:
 Selection policy:
 
 - Non-pair donor/acceptor bests are selected independently from legacy sources.
-- Pair best is selected from existing pair-capable sources.
+- Pair best is selected from existing pair-capable sources, including
+  ``cnn_v2_pair_synth`` when present.
 """
 
 from __future__ import annotations
@@ -25,7 +26,13 @@ from typing import Mapping, Sequence
 
 
 NON_PAIR_SOURCES: tuple[str, ...] = ("cnn_v2", "cnn", "cnn_mask")
-PAIR_SOURCES: tuple[str, ...] = ("cnn_v2_pair", "cnn_v2", "cnn_pair", "cnn_pair_mask")
+PAIR_SOURCES: tuple[str, ...] = (
+    "cnn_v2_pair_synth",
+    "cnn_v2_pair",
+    "cnn_v2",
+    "cnn_pair",
+    "cnn_pair_mask",
+)
 NON_PAIR_TASKS: tuple[str, ...] = ("donor", "acceptor")
 
 _INDEPENDENT_TASK_KEYS: frozenset[str] = frozenset(

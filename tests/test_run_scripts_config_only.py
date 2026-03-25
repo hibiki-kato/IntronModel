@@ -192,24 +192,20 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     assert "--sequence_transform" not in content
 
 
-def test_run_cnn_v3_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "run_cnn_v3.sh"
-    run = subprocess.run(
-        ["bash", str(script_path), "--dummy"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert run.returncode != 0
-    assert "config-only" in run.stderr
-
-
-def test_run_cnn_v3_sh_includes_auto_tmux() -> None:
-    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(
+def test_run_cnn_v2_pair_sh_exposes_synthesize_mode() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
         encoding="utf-8"
     )
-    assert 'INTRONMODEL_AUTO_TMUX="on"' in content
-    assert "intronmodel_enable_auto_tmux" in content
+    assert 'SYNTHESIZE_MODE="off"' in content
+    assert 'TAG=""' in content
+    assert "intronmodel_resolve_pair_tuning_model_name" in content
+    assert "--tag" in content
+    assert "--train_pos_path" in content
+    assert "--train_neg_path" in content
+    assert 'if [[ "${tuned_key}" == "tag" ]]; then' in content
+    assert "intronmodel_resolve_pair_best_config_filename" in content
+    assert 'best_config_filename="$(' in content
+    assert "intronmodel_resolve_tuned_config_path" in content
 
 
 def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
@@ -232,7 +228,21 @@ def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
     assert '"mask": {' in content
     assert '"sequence_transform": {' not in content
     assert "MASK_MODE" not in content
-    assert "TAG=" not in content
+
+
+def test_tune_cnn_v2_pair_time_exposes_synthesize_mode() -> None:
+    content = (_project_root() / "run" / "tune_cnn_v2_pair_time.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'SYNTHESIZE_MODE="off"' in content
+    assert 'TAG=""' in content
+    assert "intronmodel_resolve_pair_tuning_model_name" in content
+    assert 'TUNING_MODEL_NAME="$(' in content
+    assert "cnn_v2_pair_synth" in content
+    assert '"tag": "${resolved_tag}"' in content
+    assert "intronmodel_resolve_pair_best_config_filename" in content
+    assert "intronmodel_resolve_pair_best_config_path" in content
+    assert "best_config_filename" in content
 
 
 def test_tune_bilstm_pair_time_sh_rejects_cli_arguments() -> None:
@@ -311,6 +321,24 @@ def test_dnabert_pair_sh_rejects_cli_arguments() -> None:
     )
     assert run.returncode != 0
     assert "config-only" in run.stderr
+
+
+def test_run_dnabert_pair_sh_exposes_synthesize_mode() -> None:
+    content = (_project_root() / "run" / "run_dnabert_pair.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'SYNTHESIZE_MODE="off"' in content
+    assert 'TAG=""' in content
+
+
+def test_tune_dnabert_pair_scripts_expose_synthesize_mode() -> None:
+    for script_name in ("tune_dnabert_pair.sh", "tune_dnabert_pair_time.sh"):
+        content = (_project_root() / "run" / script_name).read_text(
+            encoding="utf-8"
+        )
+        assert 'SYNTHESIZE_MODE="off"' in content
+        assert "intronmodel_resolve_synth_tuning_model_name" in content
+        assert "intronmodel_resolve_pair_best_config_filename" in content
 
 
 def test_reservoir_sh_rejects_cli_arguments() -> None:
@@ -479,13 +507,6 @@ def test_run_cnn_v2_pair_sh_includes_gpu_parallel_config() -> None:
     assert 'MAX_PARALLEL_TRIALS="auto"' in content
 
 
-def test_run_cnn_v3_sh_includes_gpu_config() -> None:
-    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(
-        encoding="utf-8"
-    )
-    assert 'GPU_IDS="auto"' in content
-
-
 def test_run_dnabert_sh_sets_default_process_title() -> None:
     content = (_project_root() / "run" / "run_dnabert.sh").read_text(encoding="utf-8")
     assert 'PROCESS_TITLE="use? email me"' in content
@@ -555,12 +576,6 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     )
     cnn_v2_pair = subprocess.run(
         ["bash", "-n", str(root / "run" / "run_cnn_v2_pair.sh")],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    cnn_v3 = subprocess.run(
-        ["bash", "-n", str(root / "run" / "run_cnn_v3.sh")],
         capture_output=True,
         text=True,
         check=False,
@@ -702,7 +717,6 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert bilstm_pair.returncode == 0, bilstm_pair.stderr
     assert cnn_v2.returncode == 0, cnn_v2.stderr
     assert cnn_v2_pair.returncode == 0, cnn_v2_pair.stderr
-    assert cnn_v3.returncode == 0, cnn_v3.stderr
     assert tcn.returncode == 0, tcn.stderr
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr

@@ -33,6 +33,7 @@ NAME_FIELDS=""
 PROCESS_TITLE="ETA"
 # Optional output/data overrides for trunc-data runs.
 TAG=""
+SYNTHESIZE_MODE="off"
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_TEST_TSV_PATH=""

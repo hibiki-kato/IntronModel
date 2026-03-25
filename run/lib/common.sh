@@ -476,6 +476,90 @@ intronmodel_resolve_and_validate_train_paths() {
 }
 
 
+intronmodel_resolve_pair_synthesize_defaults() {
+	local species="$1"
+	local synthesize_mode="$2"
+	local tag_value="${3-}"
+	local train_pos_path="${4-}"
+	local train_neg_path="${5-}"
+	local normalized_mode
+
+	normalized_mode="$(printf '%s' "${synthesize_mode}" | tr '[:upper:]' '[:lower:]' \
+		| xargs)"
+	if [[ "${normalized_mode}" != "on" ]]; then
+		printf '%s\t%s\t%s\n' "${tag_value}" "${train_pos_path}" "${train_neg_path}"
+		return 0
+	fi
+
+	local resolved_tag="${tag_value}"
+	if [[ -z "${resolved_tag}" ]]; then
+		resolved_tag="synth"
+	elif [[ "${resolved_tag}" != *"synth"* ]]; then
+		resolved_tag="${resolved_tag}_synth"
+	fi
+
+	local resolved_pos="${train_pos_path}"
+	local resolved_neg="${train_neg_path}"
+	if [[ -z "${resolved_pos}" ]]; then
+		resolved_pos="${DATA_ROOT}/${species}/raw/100bp.err"
+	fi
+	if [[ -z "${resolved_neg}" ]]; then
+		resolved_neg="${DATA_ROOT}/${species}/processed/100bp_mixed_one_side.neg.err"
+	fi
+
+	printf '%s\t%s\t%s\n' "${resolved_tag}" "${resolved_pos}" "${resolved_neg}"
+}
+
+
+intronmodel_resolve_pair_best_config_filename() {
+	local synthesize_mode="${1-}"
+	local normalized_mode
+
+	normalized_mode="$(printf '%s' "${synthesize_mode}" | tr '[:upper:]' '[:lower:]' \
+		| xargs)"
+	if [[ "${normalized_mode}" == "on" ]]; then
+		printf '%s\n' "best_synth_config.json"
+		return 0
+	fi
+	printf '%s\n' "best_config.json"
+}
+
+
+intronmodel_resolve_synth_tuning_model_name() {
+	local base_model_name="$1"
+	local synthesize_mode="${2-}"
+	local normalized_mode
+
+	normalized_mode="$(printf '%s' "${synthesize_mode}" | tr '[:upper:]' '[:lower:]' \
+		| xargs)"
+	if [[ "${normalized_mode}" == "on" ]]; then
+		printf '%s_synth\n' "${base_model_name}"
+		return 0
+	fi
+	printf '%s\n' "${base_model_name}"
+}
+
+
+intronmodel_resolve_pair_tuning_model_name() {
+	intronmodel_resolve_synth_tuning_model_name "cnn_v2_pair" "${1-}"
+}
+
+
+intronmodel_resolve_pair_best_config_path() {
+	local data_root="$1"
+	local species="$2"
+	local tuning_model_name="$3"
+	local synthesize_mode="${4-}"
+	local best_config_filename
+
+	best_config_filename="$(
+		intronmodel_resolve_pair_best_config_filename "${synthesize_mode}"
+	)"
+	printf '%s\n' \
+		"${data_root}/${species}/tuning/${tuning_model_name}/pair/${best_config_filename}"
+}
+
+
 intronmodel_resolve_seed_list() {
 	local script_tag="$1"
 	local base_seed="$2"

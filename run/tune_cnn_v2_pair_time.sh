@@ -12,13 +12,15 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="1300"
+TIME_BUDGET_MINUTES="1200"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 CHEAT_MODE="off"
+TAG=""
+SYNTHESIZE_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 VAL_FRAC="0.25"
@@ -270,6 +272,18 @@ resolve_search_space_file() {
 		printf '%s\n' "${species_file}"
 		return 0
 	fi
+	if [[ "${tuning_model_name}" == "cnn_v2_pair_synth" ]]; then
+		local base_pair_target_file="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/pair/search_space.json"
+		if [[ -f "${base_pair_target_file}" ]]; then
+			printf '%s\n' "${base_pair_target_file}"
+			return 0
+		fi
+		local base_pair_species_file="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/search_space.json"
+		if [[ -f "${base_pair_species_file}" ]]; then
+			printf '%s\n' "${base_pair_species_file}"
+			return 0
+		fi
+	fi
 	if [[ "${tuning_model_name}" != "cnn_pair" ]]; then
 		local base_target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
 		if [[ -f "${base_target_file}" ]]; then
@@ -284,6 +298,25 @@ resolve_search_space_file() {
 	fi
 
 	return 1
+}
+
+resolve_synthesize_defaults() {
+	local species="$1"
+	local synthesize_mode="$2"
+	local tag_value="$3"
+	local train_pos_path="$4"
+	local train_neg_path="$5"
+	local resolved
+
+	resolved="$(
+		intronmodel_resolve_pair_synthesize_defaults \
+			"${species}" \
+			"${synthesize_mode}" \
+			"${tag_value}" \
+			"${train_pos_path}" \
+			"${train_neg_path}"
+	)"
+	printf '%s\n' "${resolved}"
 }
 
 normalize_json_object_file() {
@@ -388,7 +421,9 @@ if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
 	echo "[tune_cnn_v2_pair_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
-TUNING_MODEL_NAME="cnn_v2_pair"
+TUNING_MODEL_NAME="$(
+	intronmodel_resolve_pair_tuning_model_name "${SYNTHESIZE_MODE}"
+)"
 
 PYTHON_BIN="$(resolve_python_bin)"
 mapfile -t SEED_VALUES < <(resolve_seed_list)
@@ -434,10 +469,38 @@ while true; do
 	raw_species="${JOB_ORDER[${species_index}]}"
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
 	base_seed="${SEED_VALUES[${seed_index}]}"
+	best_config_filename="$(
+		intronmodel_resolve_pair_best_config_filename "${SYNTHESIZE_MODE}"
+	)"
+	synthesize_resolved="$(
+		resolve_synthesize_defaults \
+			"${species}" \
+			"${SYNTHESIZE_MODE}" \
+			"${TAG}" \
+			"${TRAIN_POS_PATH}" \
+			"${TRAIN_NEG_PATH}"
+	)"
+	IFS=$'\t' read -r resolved_tag resolved_train_pos_path \
+		resolved_train_neg_path <<<"${synthesize_resolved}"
+	resolved_train_paths="$(
+		intronmodel_resolve_and_validate_train_paths \
+			"tune_cnn_v2_pair_time.sh" \
+			"${species}" \
+			"${resolved_train_pos_path}" \
+			"${resolved_train_neg_path}"
+	)" || exit 1
+	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+		"${resolved_train_paths}"
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_seed${base_seed}_c$(printf '%03d' "${job_index}")"
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/best_config.json"
+	global_best_path="$(
+		intronmodel_resolve_pair_best_config_path \
+			"${DATA_ROOT}" \
+			"${species}" \
+			"${TUNING_MODEL_NAME}" \
+			"${SYNTHESIZE_MODE}"
+	)"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
@@ -450,7 +513,8 @@ while true; do
 			"${global_best_path}" \
 			"${CROSS_SPECIES_BEST_MODE}" \
 			"${CROSS_SPECIES_BEST_OVERRIDE}" \
-			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
+			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}" \
+			"${best_config_filename}"
 	)"; then
 		exit 1
 	fi
@@ -465,15 +529,6 @@ while true; do
 	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
-	resolved_train_paths="$(
-		intronmodel_resolve_and_validate_train_paths \
-			"tune_cnn_v2_pair_time.sh" \
-			"${species}" \
-			"${TRAIN_POS_PATH}" \
-			"${TRAIN_NEG_PATH}"
-	)" || exit 1
-	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
-		"${resolved_train_paths}"
 	TRAIN_POS_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
@@ -547,10 +602,11 @@ while true; do
 	"fusion_mode": "${FUSION_MODE}",
 	"head_type": "${HEAD_TYPE}",
 	"embedding_dim": 32,
-	"bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
-	"bpe_trust_remote_code": 0,
+    "bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
+    "bpe_trust_remote_code": 0,
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
+    "tag": "${resolved_tag}",
     "name_fields": "${NAME_FIELDS}",
     "use_amp": ${USE_AMP},
     "amp_dtype": "${AMP_DTYPE}",

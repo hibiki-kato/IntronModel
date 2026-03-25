@@ -151,13 +151,16 @@ def _resolve_tuned_config_path(
     data_root: Path,
     model_name: str,
     shared_path: str,
+    best_config_filename: str = "best_config.json",
 ) -> Path | None:
     """Resolve tuned config path using wrapper compatibility order."""
 
     if explicit_path.strip() != "":
         return Path(explicit_path)
 
-    task_path = data_root / species / "tuning" / model_name / task / "best_config.json"
+    task_path = (
+        data_root / species / "tuning" / model_name / task / best_config_filename
+    )
     if task_path.is_file():
         return task_path
 
@@ -166,9 +169,10 @@ def _resolve_tuned_config_path(
         if shared.is_file():
             return shared
 
-    legacy = data_root / species / "tuning" / model_name / "best_config.json"
-    if legacy.is_file():
-        return legacy
+    if best_config_filename == "best_config.json":
+        legacy = data_root / species / "tuning" / model_name / "best_config.json"
+        if legacy.is_file():
+            return legacy
 
     return None
 
@@ -324,16 +328,27 @@ def _apply_tuned_overrides(
 
     species = env["SPECIES"]
     model_name = env.get("MODEL", "").strip() or spec.model_env_name
+    synthesize_mode = env.get("SYNTHESIZE_MODE", "off")
+    synth_enabled = spec.script_name == "dnabert_pair.sh"
     tuned_model_name = _resolve_tuned_model_name(
         spec=spec,
         model_name=model_name,
         mask_mode=env.get("MASK_MODE", "off"),
+        synthesize_mode=synthesize_mode,
         tuned_hparams_mode=env.get("TUNED_HPARAMS_MODE", "normal"),
+    )
+    best_config_filename = _resolve_best_config_filename(
+        synthesize_mode,
+        synth_enabled=synth_enabled,
     )
 
     if env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == "":
         env["SHARED_TUNED_CONFIG_PATH"] = str(
-            data_root / species / "tuning" / tuned_model_name / "best_config.json"
+            data_root
+            / species
+            / "tuning"
+            / tuned_model_name
+            / best_config_filename
         )
 
     model_tasks = checkpoint_tasks_for_model(model_name)
@@ -358,6 +373,7 @@ def _apply_tuned_overrides(
             data_root=data_root,
             model_name=tuned_model_name,
             shared_path=env.get("SHARED_TUNED_CONFIG_PATH", ""),
+            best_config_filename=best_config_filename,
         )
         if resolved is None:
             if use_mode == "required":
@@ -423,10 +439,15 @@ def _resolve_tuned_model_name(
     spec: WrapperSpec,
     model_name: str,
     mask_mode: str,
+    synthesize_mode: str = "off",
     tuned_hparams_mode: str = "normal",
 ) -> str:
     """Resolve tuning directory model name with mask/cheat-mode separation."""
     normalized_mode = _normalize_on_off_mode(mask_mode, "MASK_MODE")
+    normalized_synthesize_mode = _normalize_on_off_mode(
+        synthesize_mode,
+        "SYNTHESIZE_MODE",
+    )
     normalized_tuned_mode = _normalize_tuned_hparams_mode(
         tuned_hparams_mode,
         "TUNED_HPARAMS_MODE",
@@ -435,6 +456,8 @@ def _resolve_tuned_model_name(
         resolved = model_name
         if normalized_mode == "on":
             resolved = f"{model_name}_trunc"
+        if spec.script_name == "dnabert_pair.sh" and normalized_synthesize_mode == "on":
+            resolved = f"{resolved}_synth"
         if normalized_tuned_mode == "cheat":
             resolved = f"{resolved}_cheat"
         return resolved
@@ -452,6 +475,19 @@ def _resolve_tuned_model_name(
     if normalized_tuned_mode == "cheat" and model_name in mask_enabled_models:
         resolved = f"{resolved}_cheat"
     return resolved
+
+
+def _resolve_best_config_filename(
+    synthesize_mode: str,
+    *,
+    synth_enabled: bool,
+) -> str:
+    """Resolve best-config filename for synth-aware pair wrappers."""
+
+    normalized = _normalize_on_off_mode(synthesize_mode, "SYNTHESIZE_MODE")
+    if synth_enabled and normalized == "on":
+        return "best_synth_config.json"
+    return "best_config.json"
 
 
 def _resolve_expected_checkpoint_paths_for_run(
@@ -1127,6 +1163,37 @@ def _apply_mask_mode_defaults(
     )
 
 
+def _apply_synthesize_mode_defaults(
+    *,
+    env: dict[str, str],
+    data_root: Path,
+    species: str,
+) -> None:
+    """Apply automatic defaults when ``SYNTHESIZE_MODE=on``."""
+
+    mode = _normalize_on_off_mode(env.get("SYNTHESIZE_MODE", "off"), "SYNTHESIZE_MODE")
+    if mode == "off":
+        return
+
+    model_name = str(env.get("MODEL", "")).strip().lower()
+    if not (model_name.startswith("dnabert") and model_name.endswith("_pair")):
+        return
+
+    if env.get("TRAIN_POS_PATH", "").strip() == "":
+        env["TRAIN_POS_PATH"] = str(data_root / species / "raw" / "100bp.err")
+    if env.get("TRAIN_NEG_PATH", "").strip() == "":
+        env["TRAIN_NEG_PATH"] = str(
+            data_root / species / "processed" / "100bp_mixed_one_side.neg.err"
+        )
+
+    raw_tag = env.get("TAG", "").strip()
+    if raw_tag == "":
+        env["TAG"] = "synth"
+    elif "synth" not in raw_tag.lower():
+        env["TAG"] = f"{raw_tag}_synth"
+    _ensure_tag_name_field(env)
+
+
 def _apply_cheat_mode_defaults(env: dict[str, str]) -> None:
     """Apply output naming defaults when cheat tuned-hparams mode is enabled."""
     mode = _normalize_tuned_hparams_mode(
@@ -1276,6 +1343,7 @@ def _run_single_species(
         species=species,
         process_env=process_env,
     )
+    _apply_synthesize_mode_defaults(env=env, data_root=data_root, species=species)
     _apply_cheat_mode_defaults(env)
 
     tuned_config_paths: dict[TaskName, Path] = {}

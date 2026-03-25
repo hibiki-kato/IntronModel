@@ -74,6 +74,7 @@ VISUALIZE="none"
 NAME_FIELDS="none"
 # Optional output/data overrides for trunc/cheat-data tuning runs.
 TAG=""
+SYNTHESIZE_MODE="off"
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 UPDATE_DOUBLE_DESCENT_PLOT="0"
@@ -259,6 +260,21 @@ resolve_search_space_file() {
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
+	fi
+
+	if [[ "${model_name}" == *_synth ]]; then
+		local base_model_name="${model_name%_synth}"
+		local synth_target_file="${DATA_ROOT}/${species}/tuning/${base_model_name}/${target}/search_space.json"
+		if [[ -f "${synth_target_file}" ]]; then
+			printf '%s\n' "${synth_target_file}"
+			return 0
+		fi
+
+		local synth_species_file="${DATA_ROOT}/${species}/tuning/${base_model_name}/search_space.json"
+		if [[ -f "${synth_species_file}" ]]; then
+			printf '%s\n' "${synth_species_file}"
+			return 0
+		fi
 	fi
 
 	return 1
@@ -455,6 +471,22 @@ if [[ "${TRUNC_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
+if [[ "${SYNTHESIZE_MODE}" == "on" ]]; then
+	synthesize_resolved="$(
+		intronmodel_resolve_pair_synthesize_defaults \
+			"${SPECIES}" \
+			"${SYNTHESIZE_MODE}" \
+			"${TAG}" \
+			"${TRAIN_POS_PATH}" \
+			"${TRAIN_NEG_PATH}"
+	)"
+	IFS=$'\t' read -r TAG TRAIN_POS_PATH TRAIN_NEG_PATH <<< "${synthesize_resolved}"
+	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
+		NAME_FIELDS="tag"
+	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
+		NAME_FIELDS="${NAME_FIELDS},tag"
+	fi
+fi
 if [[ "${CHEAT_MODE}" == "on" ]]; then
 	if [[ -z "${TAG}" ]]; then
 		TAG="cheat"
@@ -482,9 +514,17 @@ TUNING_MODEL_NAME="${MODEL_NAME}_pair"
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_trunc"
 fi
+TUNING_MODEL_NAME="$(
+	intronmodel_resolve_synth_tuning_model_name \
+		"${TUNING_MODEL_NAME}" \
+		"${SYNTHESIZE_MODE}"
+)"
 if [[ "${CHEAT_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
 fi
+BEST_CONFIG_FILENAME="$(
+	intronmodel_resolve_pair_best_config_filename "${SYNTHESIZE_MODE}"
+)"
 if [[ "${TRUST_REMOTE_CODE}" != "0" && "${TRUST_REMOTE_CODE}" != "1" ]]; then
 	echo "[tune_dnabert_pair_time.sh] TRUST_REMOTE_CODE must be 0 or 1." >&2
 	exit 1
@@ -544,7 +584,7 @@ while true; do
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/best_config.json"
+	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${BEST_CONFIG_FILENAME}"
 	SEED_BEST_CONFIG_PATH=""
 	if ! SEED_BEST_CONFIG_PATH="$(
 		resolve_cross_species_best_seed \
@@ -557,7 +597,8 @@ while true; do
 			"${global_best_path}" \
 			"${CROSS_SPECIES_BEST_MODE}" \
 			"${CROSS_SPECIES_BEST_OVERRIDE}" \
-			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
+			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}" \
+			"${BEST_CONFIG_FILENAME}"
 	)"; then
 		exit 1
 	fi

@@ -36,6 +36,10 @@ MAX_OOM_RETRIES="8"
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
 REF_GFF_PATH=""
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+TAG=""
+SYNTHESIZE_MODE="off"
 NAME_FIELDS="none"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
@@ -67,6 +71,39 @@ trap 'intronmodel_abort_parallel_run' INT TERM HUP
 run_species_once() {
 	local species="$1"
 	local assigned_gpu_id="${2-}"
+	local tuned_model_name
+	local best_config_filename
+	local synthesize_resolved
+	local resolved_tag
+	local resolved_train_pos_path
+	local resolved_train_neg_path
+
+	tuned_model_name="$(
+		intronmodel_resolve_pair_tuning_model_name "${SYNTHESIZE_MODE}"
+	)"
+	best_config_filename="$(
+		intronmodel_resolve_pair_best_config_filename "${SYNTHESIZE_MODE}"
+	)"
+
+	synthesize_resolved="$(
+		intronmodel_resolve_pair_synthesize_defaults \
+			"${species}" \
+			"${SYNTHESIZE_MODE}" \
+			"${TAG}" \
+			"${TRAIN_POS_PATH}" \
+			"${TRAIN_NEG_PATH}"
+	)"
+	IFS=$'\t' read -r resolved_tag resolved_train_pos_path \
+		resolved_train_neg_path <<<"${synthesize_resolved}"
+	resolved_train_paths="$(
+		intronmodel_resolve_and_validate_train_paths \
+			"run_cnn_v2_pair.sh" \
+			"${species}" \
+			"${resolved_train_pos_path}" \
+			"${resolved_train_neg_path}"
+	)"
+	IFS=$'\t' read -r resolved_train_pos_path resolved_train_neg_path \
+		<<<"${resolved_train_paths}"
 
 	args=(
 		--model cnn_v2_pair
@@ -88,6 +125,15 @@ run_species_once() {
 		--transcript_score_agg "${TRANSCRIPT_SCORE_AGG}"
 		--softmin_tau "${SOFTMIN_TAU}"
 	)
+	if [[ -n "${resolved_tag}" ]]; then
+		args+=(--tag "${resolved_tag}")
+	fi
+	if [[ -n "${resolved_train_pos_path}" ]]; then
+		args+=(--train_pos_path "${resolved_train_pos_path}")
+	fi
+	if [[ -n "${resolved_train_neg_path}" ]]; then
+		args+=(--train_neg_path "${resolved_train_neg_path}")
+	fi
 
 	tuned_path=""
 	tuned_output=""
@@ -97,10 +143,11 @@ run_species_once() {
 			intronmodel_resolve_tuned_config_path \
 				"${DATA_ROOT}" \
 				"${species}" \
-				"cnn_v2_pair" \
+				"${tuned_model_name}" \
 				"${RESOLVED_TUNED_TARGET}" \
 				"${TUNED_CONFIG_PATH}" \
-				"${SHARED_TUNED_CONFIG_PATH}"
+				"${SHARED_TUNED_CONFIG_PATH}" \
+				"${best_config_filename}"
 		)"
 		if [[ -z "${tuned_path}" ]]; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
@@ -138,6 +185,10 @@ run_species_once() {
 				fi
 				IFS=$'\t' read -r tuned_key tuned_value <<<"${line}"
 				if [[ -z "${tuned_key}" || -z "${tuned_value}" ]]; then
+					continue
+				fi
+				# Keep wrapper-controlled tag handling so synth does not leak in.
+				if [[ "${tuned_key}" == "tag" ]]; then
 					continue
 				fi
 				tuned_args+=(--"${tuned_key}" "${tuned_value}")
