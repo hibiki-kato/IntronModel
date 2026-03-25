@@ -171,15 +171,42 @@ intronmodel_configure_compile_defaults() {
 
 intronmodel_configure_hf_cache() {
 	local default_cache_root
+	local default_config_root
 	default_cache_root="${TMPDIR:-/tmp}/intronmodel-cache-${USER}"
+	default_config_root="${default_cache_root}/config"
 
 	# Use one writable cache root for Hugging Face artifacts when callers do not
-	# set explicit cache paths. This avoids permission issues on shared HOME/AFS.
+	# set explicit cache paths. This avoids permission issues on shared HOME/AFS
+	# for Hugging Face, Matplotlib, and torch.compile artifact caches.
 	if [[ -z "${XDG_CACHE_HOME:-}" ]]; then
 		XDG_CACHE_HOME="${default_cache_root}"
 	fi
 	mkdir -p "${XDG_CACHE_HOME}"
 	export XDG_CACHE_HOME
+
+	if [[ -z "${XDG_CONFIG_HOME:-}" ]]; then
+		XDG_CONFIG_HOME="${default_config_root}"
+	fi
+	mkdir -p "${XDG_CONFIG_HOME}"
+	export XDG_CONFIG_HOME
+
+	if [[ -z "${MPLCONFIGDIR:-}" ]]; then
+		MPLCONFIGDIR="${XDG_CONFIG_HOME}/matplotlib"
+	fi
+	mkdir -p "${MPLCONFIGDIR}"
+	export MPLCONFIGDIR
+
+	if [[ -z "${TORCHINDUCTOR_CACHE_DIR:-}" ]]; then
+		TORCHINDUCTOR_CACHE_DIR="${XDG_CACHE_HOME}/torchinductor"
+	fi
+	mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
+	export TORCHINDUCTOR_CACHE_DIR
+
+	if [[ -z "${TRITON_CACHE_DIR:-}" ]]; then
+		TRITON_CACHE_DIR="${XDG_CACHE_HOME}/triton"
+	fi
+	mkdir -p "${TRITON_CACHE_DIR}"
+	export TRITON_CACHE_DIR
 
 	if [[ -z "${HF_HOME:-}" ]]; then
 		HF_HOME="${XDG_CACHE_HOME}/huggingface"

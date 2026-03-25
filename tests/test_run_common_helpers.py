@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -106,3 +107,37 @@ def test_common_run_with_process_title_preserves_python_executable() -> None:
 
     assert run.returncode == 0
     assert run.stdout.strip() != ""
+
+
+def test_common_init_paths_configures_runtime_cache_dirs(
+    tmp_path: Path,
+) -> None:
+    user_name = os.environ.get("USER", "unknown")
+    tmpdir = tmp_path / "tmp"
+    script_path = _project_root() / "run" / "tune_cnn_v2_time.sh"
+    run = _run_common_shell(
+        f'export TMPDIR={shlex.quote(str(tmpdir))}\n'
+        "unset XDG_CACHE_HOME XDG_CONFIG_HOME HF_HOME TRANSFORMERS_CACHE\n"
+        "unset HF_MODULES_CACHE MPLCONFIGDIR TORCHINDUCTOR_CACHE_DIR\n"
+        "unset TRITON_CACHE_DIR\n"
+        f'intronmodel_init_paths {shlex.quote(str(script_path))}\n'
+        'printf "%s\\n" '
+        '"${XDG_CACHE_HOME}" '
+        '"${XDG_CONFIG_HOME}" '
+        '"${MPLCONFIGDIR}" '
+        '"${TORCHINDUCTOR_CACHE_DIR}" '
+        '"${TRITON_CACHE_DIR}"\n'
+    )
+
+    assert run.returncode == 0
+    lines = run.stdout.strip().splitlines()
+    expected_root = tmpdir / f"intronmodel-cache-{user_name}"
+    assert lines == [
+        str(expected_root),
+        str(expected_root / "config"),
+        str(expected_root / "config" / "matplotlib"),
+        str(expected_root / "torchinductor"),
+        str(expected_root / "triton"),
+    ]
+    for resolved_path in lines:
+        assert Path(resolved_path).is_dir()
