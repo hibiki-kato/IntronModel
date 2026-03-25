@@ -144,7 +144,8 @@ def aggregate_transcript_scores(
     ----------
     site_score_rows : Iterable[dict[str, object]]
         Input row format:
-        ``transcript_id``, ``intron_index``, ``site_type`` (donor/acceptor), ``score``.
+        ``transcript_id``, ``intron_index``, ``site_type``
+        (``donor``, ``acceptor``, or ``pair``), ``score``.
     intron_score_op : str, default="+"
         Intron score operation. Supported: ``+``, ``*``, ``harmonic``, ``min``.
     transcript_score_agg : str, default="min"
@@ -189,13 +190,25 @@ def aggregate_transcript_scores(
     for tid, introns in transcript_introns.items():
         intron_scores: dict[int, tuple[float, float, float]] = {}
         for iidx, per_site in introns.items():
-            donor_score = float(per_site.get("donor", 0.0))
-            acceptor_score = float(per_site.get("acceptor", 0.0))
-            intron_score = _combine_intron_score(
-                donor_score=donor_score,
-                acceptor_score=acceptor_score,
-                op=intron_score_op,
-            )
+            donor_raw = per_site.get("donor")
+            acceptor_raw = per_site.get("acceptor")
+            pair_raw = per_site.get("pair")
+
+            if donor_raw is not None and acceptor_raw is not None:
+                donor_score = float(donor_raw)
+                acceptor_score = float(acceptor_raw)
+                intron_score = _combine_intron_score(
+                    donor_score=donor_score,
+                    acceptor_score=acceptor_score,
+                    op=intron_score_op,
+                )
+            elif pair_raw is not None:
+                intron_score = float(pair_raw)
+                donor_score = intron_score
+                acceptor_score = intron_score
+            else:
+                continue
+
             intron_scores[iidx] = (donor_score, acceptor_score, intron_score)
 
         if not intron_scores:

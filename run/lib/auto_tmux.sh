@@ -17,9 +17,46 @@ _intronmodel_tmux_sync_env() {
     if [[ -n "${CONDA_EXE:-}" ]]; then
         _intronmodel_tmux_set_env_var "CONDA_EXE" "${CONDA_EXE}"
     fi
+    if [[ -n "${CONDA_PREFIX:-}" ]]; then
+        _intronmodel_tmux_set_env_var "CONDA_PREFIX" "${CONDA_PREFIX}"
+    fi
+    if [[ -n "${CONDA_DEFAULT_ENV:-}" ]]; then
+        _intronmodel_tmux_set_env_var "CONDA_DEFAULT_ENV" "${CONDA_DEFAULT_ENV}"
+    fi
+    if [[ -n "${CONDA_SHLVL:-}" ]]; then
+        _intronmodel_tmux_set_env_var "CONDA_SHLVL" "${CONDA_SHLVL}"
+    fi
     if [[ -n "${INTRONMODEL_CONDA_SH:-}" ]]; then
         _intronmodel_tmux_set_env_var "INTRONMODEL_CONDA_SH" \
             "${INTRONMODEL_CONDA_SH}"
+    fi
+    if [[ -n "${INTRONMODEL_DATA_ROOT:-}" ]]; then
+        _intronmodel_tmux_set_env_var "INTRONMODEL_DATA_ROOT" \
+            "${INTRONMODEL_DATA_ROOT}"
+    fi
+    if [[ -n "${INTRONMODEL_MODEL_ROOT:-}" ]]; then
+        _intronmodel_tmux_set_env_var "INTRONMODEL_MODEL_ROOT" \
+            "${INTRONMODEL_MODEL_ROOT}"
+    fi
+    if [[ -n "${PYTHONPATH:-}" ]]; then
+        _intronmodel_tmux_set_env_var "PYTHONPATH" "${PYTHONPATH}"
+    fi
+    if [[ -n "${TMPDIR:-}" ]]; then
+        _intronmodel_tmux_set_env_var "TMPDIR" "${TMPDIR}"
+    fi
+    if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+        _intronmodel_tmux_set_env_var "XDG_CACHE_HOME" "${XDG_CACHE_HOME}"
+    fi
+    if [[ -n "${HF_HOME:-}" ]]; then
+        _intronmodel_tmux_set_env_var "HF_HOME" "${HF_HOME}"
+    fi
+    if [[ -n "${TRANSFORMERS_CACHE:-}" ]]; then
+        _intronmodel_tmux_set_env_var "TRANSFORMERS_CACHE" \
+            "${TRANSFORMERS_CACHE}"
+    fi
+    if [[ -n "${HF_MODULES_CACHE:-}" ]]; then
+        _intronmodel_tmux_set_env_var "HF_MODULES_CACHE" \
+            "${HF_MODULES_CACHE}"
     fi
 
     if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then

@@ -52,7 +52,7 @@ def test_build_target_payload_converts_branch_specific_params() -> None:
     assert donor_payload["acceptor_pr_auc"] is None
     assert donor_payload["mean_pr_auc"] is None
     assert sampled["train_target"] == "donor"
-    assert sampled["mask"] == "off"
+    assert "mask" not in sampled
     assert sampled["conv_channels"] == "256,512,256"
     assert sampled["kernel_sizes"] == "15,11,7"
     assert sampled["pair_mode"] == "independent"
@@ -142,5 +142,5 @@ def test_build_target_payload_converts_legacy_truncate_to_mask_on() -> None:
 
     sampled = donor_payload["sampled_params"]
     assert isinstance(sampled, dict)
-    assert sampled["mask"] == "on"
+    assert "mask" not in sampled
     assert "sequence_transform" not in sampled

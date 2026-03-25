@@ -103,6 +103,7 @@ def test_run_cnn_v2_sh_leaves_mask_to_best_config() -> None:
     )
     assert 'INTRONMODEL_AUTO_TMUX="on"' in content
     assert "intronmodel_enable_auto_tmux" in content
+    assert 'source "${SCRIPT_DIR}/lib/tuned_config.sh"' in content
     for unwanted in (
         "DONOR_LEN",
         "ACCEPTOR_LEN",
@@ -150,6 +151,7 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     )
     assert 'INTRONMODEL_AUTO_TMUX="on"' in content
     assert "intronmodel_enable_auto_tmux" in content
+    assert 'source "${SCRIPT_DIR}/lib/tuned_config.sh"' in content
     for unwanted in (
         "DONOR_LEN",
         "ACCEPTOR_LEN",
@@ -202,13 +204,21 @@ def test_run_cnn_v3_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_run_cnn_v3_sh_includes_auto_tmux() -> None:
+    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'INTRONMODEL_AUTO_TMUX="on"' in content
+    assert "intronmodel_enable_auto_tmux" in content
+
+
 def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     content = (_project_root() / "run" / "tune_cnn_v2_time.sh").read_text(
         encoding="utf-8"
     )
     assert "MAX_MODEL_PARAMS" not in content
     assert '"input_mode": {' in content
-    assert '"mask": {' in content
+    assert '"mask": {' not in content
     assert '"sequence_transform": {' not in content
     assert "MASK_MODE" not in content
     assert "TAG=" not in content

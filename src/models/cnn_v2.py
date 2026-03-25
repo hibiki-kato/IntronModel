@@ -138,6 +138,29 @@ def _normalize_pair_mode(raw_mode: object, *, arg_name: str) -> str:
     return mode
 
 
+def _prepare_independent_site_args(
+    model_args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Return a site-model namespace with masking disabled.
+
+    Parameters
+    ----------
+    model_args : argparse.Namespace
+        Site-model arguments forwarded from ``cnn_v2`` independent mode.
+
+    Returns
+    -------
+    argparse.Namespace
+        A copy of ``model_args`` with ``mask`` removed and
+        ``sequence_transform`` forced to ``"none"``.
+    """
+    site_model_args = argparse.Namespace(**vars(model_args))
+    if hasattr(site_model_args, "mask"):
+        delattr(site_model_args, "mask")
+    site_model_args.sequence_transform = "none"
+    return site_model_args
+
+
 def _build_kmer3_vocab() -> dict[str, int]:
     """Build fixed k=3 vocabulary over A/C/G/T."""
     return {
@@ -2261,10 +2284,10 @@ def train(
             print(
                 "[cnn_v2] pair_mode=independent does not support "
                 "--train_target=pair; using both."
-            )
+                )
             effective_train_target = "both"
 
-        site_model_args = argparse.Namespace(**vars(model_args))
+        site_model_args = _prepare_independent_site_args(model_args)
         site_train_arg_parser = argparse.ArgumentParser(add_help=False)
         cnn_site_module.add_train_args(site_train_arg_parser)
         site_train_default_args = site_train_arg_parser.parse_args([])
@@ -2277,15 +2300,6 @@ def train(
         for key, value in site_default_values.items():
             if not hasattr(site_model_args, key):
                 setattr(site_model_args, key, value)
-        sequence_transform_value = str(
-            getattr(site_model_args, "sequence_transform", "none")
-        )
-        if sequence_transform_value != "none":
-            print(
-                "[cnn_v2] pair_mode=independent uses site-level training; "
-                f"overriding sequence_transform={sequence_transform_value} -> none."
-            )
-            site_model_args.sequence_transform = "none"
         site_model_args.train_target = effective_train_target
         summary = cnn_site_module.train(common_args, site_model_args)
         summary["model"] = reported_model_name
@@ -2490,7 +2504,8 @@ def infer_site(
     if requested_pair_mode == "independent":
         from models import cnn as cnn_site_module
 
-        return cnn_site_module.infer_site(common_args, model_args)
+        site_model_args = _prepare_independent_site_args(model_args)
+        return cnn_site_module.infer_site(common_args, site_model_args)
 
     requested_input_mode = _normalize_input_mode(
         getattr(model_args, "input_mode", "onehot"),

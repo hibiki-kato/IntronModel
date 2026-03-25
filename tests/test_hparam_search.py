@@ -669,6 +669,83 @@ def test_run_trial_translates_mask_to_sequence_transform(
     assert "mask_outside_intron_n" in captured_cmd["cmd"]
 
 
+def test_run_trial_drops_mask_for_independent_cnn_v2(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_dict = _base_config_dict(tmp_path)
+    config_dict["base_args"] = {
+        "model": "cnn_v2",
+        "species": "Hsap",
+        "pair_mode": "independent",
+        "train_target": "both",
+        "batch_size": 128,
+        "epochs": 1,
+    }
+    config_dict["search_space"] = {
+        "batch_size": {
+            "type": "categorical",
+            "values": [128],
+        },
+        "mask": {
+            "type": "categorical",
+            "values": ["off", "on"],
+        },
+    }
+    config_path.write_text(json.dumps(config_dict), encoding="utf-8")
+    config = hparam_search.load_config(config_path)
+
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "donor": {
+                    "best_metric": "pr_auc",
+                    "best_score": 0.8,
+                },
+                "acceptor": {
+                    "best_metric": "pr_auc",
+                    "best_score": 0.7,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "trial.log"
+    captured_cmd: dict[str, list[str]] = {}
+
+    def _fake_command_runner(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        captured_cmd["cmd"] = cmd
+        return 0, ""
+
+    result = hparam_search._run_trial_with_command_runner(
+        config=config,
+        phase="quick",
+        trial_id=0,
+        sampled_params={"batch_size": 128, "mask": "on"},
+        overrides={},
+        assigned_gpu_id=None,
+        metrics_json=metrics_path,
+        log_file=log_path,
+        command_runner=_fake_command_runner,
+    )
+
+    assert result.status == "success"
+    assert "mask" not in result.sampled_params
+    assert result.sampled_params["batch_size"] == 128
+    assert "--mask" not in captured_cmd["cmd"]
+    assert "--sequence_transform" in captured_cmd["cmd"]
+    assert "none" in captured_cmd["cmd"]
+
+
 def test_rank_successful_trials_prefers_high_mean_pr_auc() -> None:
     rows = [
         hparam_search.TrialResult(

@@ -17,6 +17,7 @@ TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 BASE_PAIR_CHECKPOINTS=""
 TRAIN_ONLY="1"
+INTRONMODEL_AUTO_TMUX="on"
 
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -84,6 +85,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
+# Auto-run inside tmux on SSH so jobs survive disconnects.
+# Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
+intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 resolve_species_case() {
 	intronmodel_resolve_species_case "$1" "$2" "cnn_v3.sh"

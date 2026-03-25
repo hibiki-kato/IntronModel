@@ -267,7 +267,8 @@ def test_infer_site_independent_returns_site_rows(
             model_args: argparse.Namespace,
         ) -> list[dict[str, object]]:
             _ = common_args
-            _ = model_args
+            assert model_args.sequence_transform == "none"
+            assert not hasattr(model_args, "mask")
             return [
                 {
                     "transcript_id": "tx1",
@@ -297,7 +298,11 @@ def test_infer_site_independent_returns_site_rows(
 
     monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
     common_args = argparse.Namespace(species="Hsap")
-    model_args = argparse.Namespace(pair_mode="independent")
+    model_args = argparse.Namespace(
+        pair_mode="independent",
+        sequence_transform="mask_outside_intron_n",
+        mask="on",
+    )
     out = cnn_v2.infer_site(common_args, model_args)
     assert out == [
         {
@@ -348,11 +353,18 @@ def test_train_independent_fills_cnn_defaults(
             assert hasattr(model_args, "report_train_metrics")
             assert int(model_args.report_train_metrics) == 1
             assert model_args.train_target == "both"
+            assert model_args.sequence_transform == "none"
+            assert not hasattr(model_args, "mask")
             return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
 
     monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
     common_args = argparse.Namespace(species="Hsap")
-    model_args = argparse.Namespace(pair_mode="independent", train_target="both")
+    model_args = argparse.Namespace(
+        pair_mode="independent",
+        train_target="both",
+        sequence_transform="mask_outside_intron_n",
+        mask="on",
+    )
     summary = cnn_v2.train(common_args, model_args)
     assert summary["model"] == "cnn_v2"
     assert summary["pair_mode"] == "independent"
@@ -379,11 +391,18 @@ def test_train_independent_preserves_single_site_target(
         ) -> dict[str, object]:
             _ = common_args
             assert model_args.train_target == "donor"
+            assert model_args.sequence_transform == "none"
+            assert not hasattr(model_args, "mask")
             return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
 
     monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
     common_args = argparse.Namespace(species="Hsap")
-    model_args = argparse.Namespace(pair_mode="independent", train_target="donor")
+    model_args = argparse.Namespace(
+        pair_mode="independent",
+        train_target="donor",
+        sequence_transform="mask_outside_intron_n",
+        mask="on",
+    )
 
     summary = cnn_v2.train(common_args, model_args)
 
@@ -412,11 +431,18 @@ def test_train_independent_maps_pair_target_to_both(
         ) -> dict[str, object]:
             _ = common_args
             assert model_args.train_target == "both"
+            assert model_args.sequence_transform == "none"
+            assert not hasattr(model_args, "mask")
             return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
 
     monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
     common_args = argparse.Namespace(species="Hsap")
-    model_args = argparse.Namespace(pair_mode="independent", train_target="pair")
+    model_args = argparse.Namespace(
+        pair_mode="independent",
+        train_target="pair",
+        sequence_transform="mask_outside_intron_n",
+        mask="on",
+    )
 
     summary = cnn_v2.train(common_args, model_args)
 
@@ -461,7 +487,7 @@ def test_train_independent_tolerates_duplicate_parser_options(
     assert summary["train_target"] == "both"
 
 
-def test_train_independent_forces_sequence_transform_none(
+def test_train_independent_disables_sequence_transform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeCnnModule:
@@ -488,6 +514,7 @@ def test_train_independent_forces_sequence_transform_none(
         ) -> dict[str, object]:
             _ = common_args
             assert model_args.sequence_transform == "none"
+            assert not hasattr(model_args, "mask")
             return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
 
     monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
@@ -496,6 +523,7 @@ def test_train_independent_forces_sequence_transform_none(
         pair_mode="independent",
         train_target="both",
         sequence_transform="mask_outside_intron_n",
+        mask="on",
     )
 
     summary = cnn_v2.train(common_args, model_args)

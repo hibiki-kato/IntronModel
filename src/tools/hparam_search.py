@@ -734,6 +734,15 @@ def _extract_sampled_params_from_best_config(
             if legacy_mask is not None:
                 normalized["mask"] = legacy_mask
                 continue
+    model_name = fixed_run_args.get("model", base_args.get("model"))
+    pair_mode = fixed_run_args.get("pair_mode", base_args.get("pair_mode"))
+    if _is_cnn_v2_independent_mode(
+        model_name=model_name,
+        pair_mode=pair_mode,
+    ):
+        normalized.pop("mask", None)
+        normalized.pop("sequence_transform", None)
+        return normalized
     if "mask" in search_space:
         resolved_mask = _normalize_mask_hparam_value(normalized.get("mask"))
         if resolved_mask is not None:
@@ -1377,6 +1386,54 @@ def _materialize_mask_sequence_transform_args(
         else _MASK_SEQUENCE_TRANSFORM_OFF
     )
     return materialized
+
+
+def _is_cnn_v2_independent_mode(
+    *,
+    model_name: object,
+    pair_mode: object,
+) -> bool:
+    """Return whether the current config targets ``cnn_v2`` independent mode."""
+    if not isinstance(model_name, str):
+        return False
+    if model_name.strip().lower() != "cnn_v2":
+        return False
+    if not isinstance(pair_mode, str):
+        return False
+    return pair_mode.strip().lower() == "independent"
+
+
+def _normalize_cnn_v2_independent_sampled_params(
+    sampled_params: dict[str, Scalar],
+    *,
+    model_name: object,
+    pair_mode: object,
+) -> dict[str, Scalar]:
+    """Drop legacy mask fields from sampled params for independent ``cnn_v2``."""
+    normalized = dict(sampled_params)
+    if not _is_cnn_v2_independent_mode(
+        model_name=model_name,
+        pair_mode=pair_mode,
+    ):
+        return normalized
+    normalized.pop("mask", None)
+    normalized.pop("sequence_transform", None)
+    return normalized
+
+
+def _normalize_cnn_v2_independent_runtime_args(
+    args: dict[str, ArgValue],
+) -> dict[str, ArgValue]:
+    """Force runtime args for independent ``cnn_v2`` to use no mask."""
+    normalized = dict(args)
+    if not _is_cnn_v2_independent_mode(
+        model_name=normalized.get("model"),
+        pair_mode=normalized.get("pair_mode"),
+    ):
+        return normalized
+    normalized.pop("mask", None)
+    normalized["sequence_transform"] = _MASK_SEQUENCE_TRANSFORM_OFF
+    return normalized
 
 
 def _parse_history_param_value(
@@ -2510,10 +2567,16 @@ def _run_trial_with_command_runner(
     """Run one trial with the provided command runner backend."""
     base_model_name_obj = config.base_args.get("model", "")
     base_model_name = str(base_model_name_obj)
+    base_pair_mode_obj = config.base_args.get("pair_mode", "")
     sampled_params = _materialize_dnabert_readout_params(
         model_name=base_model_name,
         sampled_params=sampled_params,
         base_args=config.base_args,
+    )
+    sampled_params = _normalize_cnn_v2_independent_sampled_params(
+        sampled_params,
+        model_name=base_model_name,
+        pair_mode=base_pair_mode_obj,
     )
     merged_args: dict[str, ArgValue] = dict(config.base_args)
     for key, value in sampled_params.items():
@@ -2521,6 +2584,7 @@ def _run_trial_with_command_runner(
     for key, value in overrides.items():
         merged_args[key] = value
     merged_args = _materialize_mask_sequence_transform_args(merged_args)
+    merged_args = _normalize_cnn_v2_independent_runtime_args(merged_args)
     model_name = merged_args.get("model")
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("base_args.model must be a non-empty string.")

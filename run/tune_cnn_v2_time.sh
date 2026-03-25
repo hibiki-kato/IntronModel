@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="500"
+TIME_BUDGET_MINUTES="10"
 
 INTRONMODEL_AUTO_TMUX=on
 # Optional explicit training-data overrides.
@@ -34,7 +34,7 @@ FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="off"
 
-GPU_IDS="5,6,7"
+GPU_IDS="2,3,4,5"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -70,10 +70,7 @@ CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
-	"Athal"
-	"Dmel"
 	"Hsap"
-	"Mmus"
 )
 
 # Tune site tasks independently.
@@ -126,10 +123,6 @@ DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 		"values": ["1,2,3"]
 	},
 	"head_type": {"type": "categorical", "values": ["gap", "center"]},
-	"mask": {
-		"type": "categorical",
-		"values": ["off", "on"]
-	},
   "loss": {
     "type": "categorical",
     "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]

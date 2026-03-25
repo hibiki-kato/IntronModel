@@ -12,6 +12,7 @@ if str(ANALYSIS_SCRIPT) not in sys.path:
 
 from score.general_model_snpr import (  # noqa: E402
     _compute_species_curves,
+    _build_arg_parser,
     _resolve_eval_species,
     _write_interactive_html,
     go,
@@ -105,3 +106,21 @@ def test_write_interactive_html_requires_plotly_or_writes_file(
         assert output_html.is_file()
         content = output_html.read_text(encoding="utf-8")
         assert "plotly" in content.lower()
+
+
+def test_build_arg_parser_includes_logreg_c() -> None:
+    """The SN-PR CLI should forward the L1 logistic regularization strength."""
+
+    parser = _build_arg_parser()
+    args = parser.parse_args(
+        [
+            "--train-species",
+            "Mmus",
+            "--eval-species",
+            "Hsap",
+            "--logreg-c",
+            "0.25",
+        ]
+    )
+
+    assert args.logreg_c == 0.25

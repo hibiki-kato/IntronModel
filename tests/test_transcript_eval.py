@@ -193,6 +193,40 @@ def test_aggregate_pair_transcript_scores_softmin_wavg() -> None:
     assert float(rows[0]["min_donor_plus_acceptor"]) == pytest.approx(expected)
 
 
+def test_aggregate_transcript_scores_uses_pair_rows_when_available() -> None:
+    """Aggregate pair-only site rows without collapsing them to zero."""
+    site_rows: list[dict[str, object]] = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "pair",
+            "score": 0.25,
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 2,
+            "site_type": "pair",
+            "score": 0.75,
+        },
+    ]
+
+    rows = aggregate_transcript_scores(
+        site_score_rows=site_rows,
+        intron_score_op="*",
+        transcript_score_agg="min",
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "min_intron_index": 1,
+            "Score_donor": 0.25,
+            "Score_acceptor": 0.25,
+            "min_donor_plus_acceptor": 0.25,
+        }
+    ]
+
+
 def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
     """Write wide-format site_score TSV with one row per intron."""
     output_tsv = tmp_path / "site.tsv"

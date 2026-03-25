@@ -51,6 +51,7 @@ set +a
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/tuned_config.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
@@ -62,56 +63,6 @@ intronmodel_abort_parallel_run() {
 }
 
 trap 'intronmodel_abort_parallel_run' INT TERM HUP
-
-normalize_use_tuned_mode() {
-	local raw_mode="$1"
-	local normalized
-	normalized="$(echo "${raw_mode}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	case "${normalized}" in
-		off | auto | required)
-			printf '%s\n' "${normalized}"
-			;;
-		*)
-			echo "[cnn_v2_pair.sh] USE_TUNED_HPARAMS must be off|auto|required." >&2
-			exit 1
-			;;
-	esac
-}
-
-resolve_tuned_target() {
-	local configured_target="$1"
-	local normalized
-	normalized="$(echo "${configured_target}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	if [[ "${normalized}" != "auto" && "${normalized}" != "" ]]; then
-		printf '%s\n' "${normalized}"
-		return 0
-	fi
-	printf 'pair\n'
-}
-
-resolve_tuned_config_path() {
-	local species="$1"
-	local tuned_target="$2"
-	if [[ -n "${TUNED_CONFIG_PATH}" ]]; then
-		printf '%s\n' "${TUNED_CONFIG_PATH}"
-		return 0
-	fi
-	local task_path="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/${tuned_target}/best_config.json"
-	if [[ -f "${task_path}" ]]; then
-		printf '%s\n' "${task_path}"
-		return 0
-	fi
-	if [[ -n "${SHARED_TUNED_CONFIG_PATH}" ]]; then
-		printf '%s\n' "${SHARED_TUNED_CONFIG_PATH}"
-		return 0
-	fi
-	local shared_path="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/best_config.json"
-	if [[ -f "${shared_path}" ]]; then
-		printf '%s\n' "${shared_path}"
-		return 0
-	fi
-	printf ''
-}
 
 run_species_once() {
 	local species="$1"
@@ -143,9 +94,13 @@ run_species_once() {
 	tuned_args=()
 	if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
 		tuned_path="$(
-			resolve_tuned_config_path \
+			intronmodel_resolve_tuned_config_path \
+				"${DATA_ROOT}" \
 				"${species}" \
-				"${RESOLVED_TUNED_TARGET}"
+				"cnn_v2_pair" \
+				"${RESOLVED_TUNED_TARGET}" \
+				"${TUNED_CONFIG_PATH}" \
+				"${SHARED_TUNED_CONFIG_PATH}"
 		)"
 		if [[ -z "${tuned_path}" ]]; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
@@ -167,7 +122,7 @@ run_species_once() {
 	fi
 
 	if [[ -n "${tuned_path}" ]]; then
-		if ! tuned_output="$(load_tuned_overrides "${tuned_path}" 2>&1)"; then
+		if ! tuned_output="$(intronmodel_load_tuned_overrides "${tuned_path}" 2>&1)"; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
 				echo "[cnn_v2_pair.sh] failed to load tuned config: ${tuned_path}" >&2
 				echo "[cnn_v2_pair.sh] detail: ${tuned_output}" >&2
@@ -218,81 +173,13 @@ run_species_once() {
 	python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 }
 
-load_tuned_overrides() {
-	local config_path="$1"
-	python3 - "${config_path}" <<'PY'
-from __future__ import annotations
-
-import json
-import math
-import sys
-from pathlib import Path
-
-
-def _scalar_to_text(value: object) -> str:
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("Non-finite float value in sampled_params.")
-        return format(value, ".15g")
-    return str(value)
-
-
-def _mask_to_sequence_transform(value: object) -> str:
-    if isinstance(value, bool):
-        normalized = "on" if value else "off"
-    else:
-        normalized = str(value).strip().lower()
-    if normalized in {"on", "1", "true", "yes"}:
-        return "mask_outside_intron_n"
-    if normalized in {"off", "0", "false", "no"}:
-        return "none"
-    raise ValueError("mask must be on or off.")
-
-
-config_path = Path(sys.argv[1]).resolve()
-payload = json.loads(config_path.read_text(encoding="utf-8"))
-if not isinstance(payload, dict):
-    raise ValueError("best_config payload must be an object.")
-status = str(payload.get("status", "")).strip().lower()
-if status != "ok":
-    raise ValueError(f"Expected status='ok', got: {status or '<missing>'}")
-sampled_params = payload.get("sampled_params")
-if not isinstance(sampled_params, dict):
-    raise ValueError("sampled_params is missing or invalid.")
-context = payload.get("hparam_context")
-fixed_run_args = None
-if isinstance(context, dict):
-    fixed_run_args = context.get("fixed_run_args")
-if isinstance(fixed_run_args, dict):
-    for key in sorted(fixed_run_args):
-        value = fixed_run_args[key]
-        if value is None:
-            continue
-        print(f"{key}\t{_scalar_to_text(value)}")
-sequence_transform_value = sampled_params.pop("sequence_transform", None)
-mask_value = sampled_params.pop("mask", None)
-if mask_value is not None:
-    print(f"sequence_transform\t{_mask_to_sequence_transform(mask_value)}")
-elif sequence_transform_value is not None:
-    print(
-        "sequence_transform\t"
-        f"{_scalar_to_text(sequence_transform_value)}"
-    )
-for key in sorted(sampled_params):
-    value = sampled_params[key]
-    if value is None:
-        continue
-    print(f"{key}\t{_scalar_to_text(value)}")
-PY
-}
-
-USE_TUNED_HPARAMS_MODE="$(normalize_use_tuned_mode "${USE_TUNED_HPARAMS}")"
+USE_TUNED_HPARAMS_MODE="$(
+	intronmodel_normalize_use_tuned_mode "${USE_TUNED_HPARAMS}" "cnn_v2_pair.sh"
+)"
 if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
-	RESOLVED_TUNED_TARGET="$(resolve_tuned_target "${TUNED_TARGET}")"
+	RESOLVED_TUNED_TARGET="$(
+		intronmodel_resolve_tuned_target "${TUNED_TARGET}" "pair"
+	)"
 fi
 
 IFS=',' read -r -a SPECIES_LIST_RESOLVED <<<"${SPECIES}"

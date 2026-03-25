@@ -15,6 +15,7 @@ from score.transcript_truth_simple_models import (  # noqa: E402
     build_transcript_features,
     build_transcript_features_with_report,
     evaluate_model,
+    train_logistic_regression,
     split_train_valid_test,
 )
 
@@ -45,12 +46,22 @@ def test_build_transcript_features_list_format_padding_rules() -> None:
     assert tx1.third_smallest_score == 0.25
     assert np.isclose(tx1.log_score_sum, np.log(0.25))
     assert np.isclose(tx1.geometric_mean_score, 0.25)
+    assert np.isclose(tx1.harmonic_mean_score, 0.25)
+    assert tx1.variance_score == 0.0
+    assert tx1.count_above_0_8 == 0
 
     tx2 = by_tx["tx2"]
     assert tx2.n_introns == 2
     assert tx2.min_score == 0.10
     assert tx2.second_smallest_score == 0.30
     assert tx2.third_smallest_score == 0.30
+    assert np.isclose(tx2.variance_score, 0.01)
+    assert np.isclose(tx2.coefficient_of_variation_score, 0.5)
+    assert np.isclose(tx2.harmonic_mean_score, 0.15)
+    assert np.isclose(tx2.lower_10_mean, 0.20)
+    assert np.isclose(tx2.upper_2_mean, 0.20)
+    assert np.isclose(tx2.mean_minus_min, 0.10)
+    assert np.isclose(tx2.max_minus_median, 0.10)
 
 
 def test_build_transcript_features_long_format_nan_report() -> None:
@@ -116,6 +127,30 @@ def test_evaluate_model_returns_confusion_and_auc() -> None:
     assert result.fp == 0
     assert result.fn == 0
     assert result.auroc == 1.0
+
+
+def test_train_logistic_regression_uses_l1_with_standard_scaling() -> None:
+    x = np.asarray(
+        [
+            [0.0, 1.0, 0.2],
+            [1.0, 0.0, 0.8],
+            [0.1, 0.9, 0.3],
+            [0.9, 0.1, 0.7],
+        ],
+        dtype=np.float64,
+    )
+    y = np.asarray([0, 1, 0, 1], dtype=np.int64)
+
+    model = train_logistic_regression(x, y, random_state=7, C=0.5)
+
+    scaler = model.named_steps["scaler"]
+    logreg = model.named_steps["logreg"]
+
+    assert scaler.__class__.__name__ == "StandardScaler"
+    assert logreg.solver == "saga"
+    assert logreg.l1_ratio == 1.0
+    assert logreg.C == 0.5
+    assert logreg.coef_.shape == (1, x.shape[1])
 
 
 def test_build_species_feature_rows_from_unique_map(tmp_path: Path) -> None:

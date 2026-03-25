@@ -229,7 +229,6 @@ def _build_non_pair_sampled_params(
         "input_mode": "onehot",
         "pair_mode": "independent",
         "train_target": "both",
-        "mask": "off",
     }
     donor_len = donor_params.get("donor_len")
     acceptor_len = donor_params.get("acceptor_len")

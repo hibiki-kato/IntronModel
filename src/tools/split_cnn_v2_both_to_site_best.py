@@ -240,14 +240,6 @@ def _build_target_sampled_params(
 
     result["train_target"] = target
     result["pair_mode"] = "independent"
-    if "mask" not in result:
-        legacy_mask = _mask_value_from_sequence_transform(
-            sampled_params.get("sequence_transform")
-        )
-        if legacy_mask is not None:
-            result["mask"] = legacy_mask
-        else:
-            result["mask"] = "off"
 
     conv_key = f"{target}_conv_channels"
     kernel_key = f"{target}_kernel_sizes"
