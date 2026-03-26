@@ -87,9 +87,6 @@ GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
 
-CROSS_SPECIES_BEST_MODE="auto"
-CROSS_SPECIES_BEST_OVERRIDE=""
-CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
@@ -166,9 +163,6 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
-
-# shellcheck source=/dev/null
-source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 # Keep process title fixed during tune_time runs.
 export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
@@ -585,27 +579,6 @@ while true; do
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
 	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${BEST_CONFIG_FILENAME}"
-	SEED_BEST_CONFIG_PATH=""
-	if ! SEED_BEST_CONFIG_PATH="$(
-		resolve_cross_species_best_seed \
-			"tune_dnabert_pair_time.sh" \
-			"${PYTHON_BIN}" \
-			"${DATA_ROOT}" \
-			"${TUNING_MODEL_NAME}" \
-			"${species}" \
-			"${target}" \
-			"${global_best_path}" \
-			"${CROSS_SPECIES_BEST_MODE}" \
-			"${CROSS_SPECIES_BEST_OVERRIDE}" \
-			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}" \
-			"${BEST_CONFIG_FILENAME}"
-	)"; then
-		exit 1
-	fi
-	SEED_BEST_CONFIG_JSON="null"
-	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
-		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
-	fi
 	resolved_objective_metric="pair_${OBJECTIVE_METRIC}"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
 		resolved_objective_metric="test_${OBJECTIVE_METRIC}"
@@ -678,7 +651,7 @@ while true; do
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
   "objective_metric": "${resolved_objective_metric}",
   "global_best_config_path": "${global_best_path}",
-  "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
+  "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
   "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},

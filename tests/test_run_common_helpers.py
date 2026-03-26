@@ -21,26 +21,6 @@ def _run_common_shell(command: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run_cross_species_best_shell(
-    command: str,
-) -> subprocess.CompletedProcess[str]:
-    common_path = _project_root() / "run" / "lib" / "common.sh"
-    cross_species_path = (
-        _project_root() / "run" / "lib" / "tuning_cross_species_best.sh"
-    )
-    shell_command = (
-        f"source {shlex.quote(str(common_path))}\n"
-        f"source {shlex.quote(str(cross_species_path))}\n"
-        f"{command}"
-    )
-    return subprocess.run(
-        ["bash", "-lc", shell_command],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
 def test_common_resolve_species_template_replaces_supported_patterns() -> None:
     run = _run_common_shell(
         "intronmodel_resolve_species_template "
@@ -238,50 +218,3 @@ def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:
         "dnabert2_pair",
         "dnabert2_pair_synth",
     ]
-
-
-def test_cross_species_best_seed_uses_synth_specific_filename(
-    tmp_path: Path,
-) -> None:
-    data_root = tmp_path / "data"
-    local_species = "Alpha"
-    remote_species = "Beta"
-    for species, score in ((local_species, 0.5), (remote_species, 0.9)):
-        config_path = (
-            data_root
-            / species
-            / "tuning"
-            / "cnn_v2_pair"
-            / "pair"
-            / "best_synth_config.json"
-        )
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(
-            "{\"status\": \"ok\", \"objective_score\": %s}" % score,
-            encoding="utf-8",
-        )
-
-    missing_local_best = (
-        data_root
-        / local_species
-        / "tuning"
-        / "cnn_v2_pair"
-        / "pair"
-        / "best_synth_config.json.missing"
-    )
-    run = _run_cross_species_best_shell(
-        f'PY_BIN="$(intronmodel_resolve_python_bin test_cross_species.sh)"\n'
-        f'resolve_cross_species_best_seed "test_cross_species.sh" '
-        f'"${{PY_BIN}}" "{data_root}" "cnn_v2_pair" "{local_species}" "pair" '
-        f'"{missing_local_best}" "auto" "" "" "best_synth_config.json"'
-    )
-
-    assert run.returncode == 0, run.stderr
-    assert run.stdout.strip() == str(
-        data_root
-        / remote_species
-        / "tuning"
-        / "cnn_v2_pair"
-        / "pair"
-        / "best_synth_config.json"
-    )

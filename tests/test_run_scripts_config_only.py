@@ -213,6 +213,8 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
         encoding="utf-8"
     )
     assert "MAX_MODEL_PARAMS" not in content
+    assert "CROSS_SPECIES_BEST_MODE" not in content
+    assert "resolve_cross_species_best_seed" not in content
     assert '"input_mode": {' in content
     assert '"mask": {' not in content
     assert '"sequence_transform": {' not in content
@@ -237,12 +239,38 @@ def test_tune_cnn_v2_pair_time_exposes_synthesize_mode() -> None:
     assert 'SYNTHESIZE_MODE="off"' in content
     assert 'TAG=""' in content
     assert "intronmodel_resolve_pair_tuning_model_name" in content
+    assert "intronmodel_resolve_pair_best_config_path" in content
     assert 'TUNING_MODEL_NAME="$(' in content
     assert "cnn_v2_pair_synth" in content
     assert '"tag": "${resolved_tag}"' in content
-    assert "intronmodel_resolve_pair_best_config_filename" in content
-    assert "intronmodel_resolve_pair_best_config_path" in content
-    assert "best_config_filename" in content
+    assert "CROSS_SPECIES_BEST_MODE" not in content
+    assert "resolve_cross_species_best_seed" not in content
+
+
+def test_modified_tuning_scripts_do_not_use_cross_species_seed_fallback() -> None:
+    root = _project_root()
+    script_names = (
+        "tune_bert.sh",
+        "tune_bert_time.sh",
+        "tune_bilstm_pair_time.sh",
+        "tune_cnn_resdil.sh",
+        "tune_cnn_resdil_time.sh",
+        "tune_cnn_v2_pair_time.sh",
+        "tune_cnn_v2_time.sh",
+        "tune_dnabert.sh",
+        "tune_dnabert_pair.sh",
+        "tune_dnabert_pair_time.sh",
+        "tune_dnabert_time.sh",
+        "tune_reservoir.sh",
+        "tune_reservoir_time.sh",
+        "tune_tcn.sh",
+        "tune_tcn_time.sh",
+    )
+    for script_name in script_names:
+        content = (root / "run" / script_name).read_text(encoding="utf-8")
+        assert "CROSS_SPECIES_BEST_MODE" not in content
+        assert "resolve_cross_species_best_seed" not in content
+        assert "tuning_cross_species_best" not in content
 
 
 def test_tune_bilstm_pair_time_sh_rejects_cli_arguments() -> None:

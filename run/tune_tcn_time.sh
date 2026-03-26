@@ -57,9 +57,6 @@ GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
 
-CROSS_SPECIES_BEST_MODE="auto"
-CROSS_SPECIES_BEST_OVERRIDE=""
-CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 # Hsap-priority scheduling with acceptor-heavy target mix.
 # Keep Hsap:others around 3:1.
@@ -175,9 +172,6 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
-
-# shellcheck source=/dev/null
-source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 # Keep process title fixed during tune_time runs.
 export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
@@ -413,75 +407,55 @@ while true; do
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}/${run_id}"
 	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}"\
 "/best_config.json"
-	SEED_BEST_CONFIG_PATH=""
-	if ! SEED_BEST_CONFIG_PATH="$(
-		resolve_cross_species_best_seed \
-			"tune_tcn_time.sh" \
-			"${PYTHON_BIN}" \
-			"${DATA_ROOT}" \
-			"${TUNING_MODEL_NAME}" \
+	objective_metric="${target}_pr_auc"
+	config_path="${output_dir}/hparam_search_config.json"
+	mkdir -p "${output_dir}"
+	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
+	if [[ "${target}" == "acceptor" ]]; then
+		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
+	fi
+	search_space_path=""
+	if search_space_resolved="$(
+		resolve_search_space_file \
+			"${SEARCH_SPACE_FILE}" \
+			"${PROJECT_ROOT}" \
 			"${species}" \
 			"${target}" \
-			"${global_best_path}" \
-			"${CROSS_SPECIES_BEST_MODE}" \
-			"${CROSS_SPECIES_BEST_OVERRIDE}" \
-			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
+			"${TUNING_MODEL_NAME}"
 	)"; then
-		exit 1
-	fi
-	SEED_BEST_CONFIG_JSON="null"
-	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
-		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
-	fi
-		objective_metric="${target}_pr_auc"
-		config_path="${output_dir}/hparam_search_config.json"
-		mkdir -p "${output_dir}"
-		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_DONOR}"
-		if [[ "${target}" == "acceptor" ]]; then
-			target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_ACCEPTOR}"
-		fi
-		search_space_path=""
-		if search_space_resolved="$(
-			resolve_search_space_file \
-				"${SEARCH_SPACE_FILE}" \
-				"${PROJECT_ROOT}" \
-				"${species}" \
-				"${target}" \
-				"${TUNING_MODEL_NAME}"
+		search_space_path="${search_space_resolved}"
+		if ! target_space_json="$(
+			normalize_json_object_file \
+				"${PYTHON_BIN}" \
+				"${search_space_path}" 2>&1
 		)"; then
-			search_space_path="${search_space_resolved}"
-			if ! target_space_json="$(
-				normalize_json_object_file \
-					"${PYTHON_BIN}" \
-					"${search_space_path}" 2>&1
-			)"; then
-				echo "[tune_tcn_time.sh] failed to parse search-space file: "\
-					"${search_space_path}" >&2
-				echo "[tune_tcn_time.sh] parse detail: ${target_space_json}" >&2
-				exit 1
-			fi
-			target_search_space_json="${target_space_json}"
-			echo "[tune_tcn_time.sh] using search space: ${search_space_path}"
-		else
-			search_space_status=$?
-			if [[ "${search_space_status}" -eq 2 ]]; then
-				exit 1
-			fi
-			echo "[tune_tcn_time.sh] using embedded ${target} search space."
+			echo "[tune_tcn_time.sh] failed to parse search-space file: "\
+				"${search_space_path}" >&2
+			echo "[tune_tcn_time.sh] parse detail: ${target_space_json}" >&2
+			exit 1
 		fi
+		target_search_space_json="${target_space_json}"
+		echo "[tune_tcn_time.sh] using search space: ${search_space_path}"
+	else
+		search_space_status=$?
+		if [[ "${search_space_status}" -eq 2 ]]; then
+			exit 1
+		fi
+		echo "[tune_tcn_time.sh] using embedded ${target} search space."
+	fi
 
-		TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
-		TRAIN_POS_PATH_JSON="$(
-			intronmodel_json_string_or_null \
-				"${PYTHON_BIN}" \
-				"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${species}")"
-		)"
-		TRAIN_NEG_PATH_JSON="$(
-			intronmodel_json_string_or_null \
-				"${PYTHON_BIN}" \
-				"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${species}")"
-		)"
-		cat > "${config_path}" <<JSON
+	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
+	TRAIN_POS_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_POS_PATH}" "${species}")"
+	)"
+	TRAIN_NEG_PATH_JSON="$(
+		intronmodel_json_string_or_null \
+			"${PYTHON_BIN}" \
+			"$(intronmodel_resolve_species_template "${TRAIN_NEG_PATH}" "${species}")"
+	)"
+	cat > "${config_path}" <<JSON
 {
   "project_root": "${PROJECT_ROOT}",
   "species": "${species}",
@@ -495,7 +469,7 @@ while true; do
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
-  "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
+  "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
   "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},

@@ -50,9 +50,6 @@ MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="5"
 SEARCH_SPACE_FILE="auto"
 
-CROSS_SPECIES_BEST_MODE="auto"
-CROSS_SPECIES_BEST_OVERRIDE=""
-CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
 
 VISUALIZE="none"
 NAME_FIELDS="none"
@@ -162,9 +159,6 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
-
-# shellcheck source=/dev/null
-source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 format_elapsed() {
 	intronmodel_format_elapsed "$1"
@@ -452,26 +446,6 @@ for TARGET in "${TARGET_LIST[@]}"; do
 	OBJECTIVE_METRIC="${TARGET}_pr_auc"
 	OUTPUT_DIR="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/${RUN_TIMESTAMP}"
 	GLOBAL_BEST_CONFIG_PATH="${DATA_ROOT}/${SPECIES}/tuning/${TUNING_MODEL_NAME}/${TARGET}/best_config.json"
-	SEED_BEST_CONFIG_PATH=""
-	if ! SEED_BEST_CONFIG_PATH="$(
-		resolve_cross_species_best_seed \
-			"tune_tcn.sh" \
-			"${PYTHON_BIN}" \
-			"${DATA_ROOT}" \
-			"${TUNING_MODEL_NAME}" \
-			"${SPECIES}" \
-			"${TARGET}" \
-			"${GLOBAL_BEST_CONFIG_PATH}" \
-			"${CROSS_SPECIES_BEST_MODE}" \
-			"${CROSS_SPECIES_BEST_OVERRIDE}" \
-			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
-	)"; then
-		exit 1
-	fi
-	SEED_BEST_CONFIG_JSON="null"
-	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
-		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
-	fi
 	mkdir -p "${OUTPUT_DIR}"
 	TARGET_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	TARGET_START_SECONDS="${SECONDS}"
@@ -579,7 +553,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "objective_metric": "${OBJECTIVE_METRIC}",
   "global_best_config_path": "${GLOBAL_BEST_CONFIG_PATH}",
-  "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
+  "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
   "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},

@@ -53,10 +53,6 @@ GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
 
-CROSS_SPECIES_BEST_MODE="auto"
-CROSS_SPECIES_BEST_OVERRIDE=""
-CROSS_SPECIES_BEST_PREFERRED_SPECIES=""
-
 # Hsap-priority scheduling with acceptor-heavy target mix.
 # Keep Hsap:others around 3:1.
 JOB_ORDER=(
@@ -161,9 +157,6 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 # Auto-run inside tmux on SSH so jobs survive disconnects.
 # Set INTRONMODEL_AUTO_TMUX=off|on|auto (default: auto).
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
-
-# shellcheck source=/dev/null
-source "${SCRIPT_DIR}/lib/tuning_cross_species_best.sh"
 
 # Keep process title fixed during tune_time runs.
 export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
@@ -374,27 +367,6 @@ while true; do
 "/${run_id}"
 	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target}"\
 "/best_config.json"
-	SEED_BEST_CONFIG_PATH=""
-	if ! SEED_BEST_CONFIG_PATH="$(
-		resolve_cross_species_best_seed \
-			"tune_bert_time.sh" \
-			"${PYTHON_BIN}" \
-			"${DATA_ROOT}" \
-			"${TUNING_MODEL_NAME}" \
-			"${species}" \
-			"${target}" \
-			"${global_best_path}" \
-			"${CROSS_SPECIES_BEST_MODE}" \
-			"${CROSS_SPECIES_BEST_OVERRIDE}" \
-			"${CROSS_SPECIES_BEST_PREFERRED_SPECIES}"
-	)"; then
-		exit 1
-	fi
-	SEED_BEST_CONFIG_JSON="null"
-	if [[ -n "${SEED_BEST_CONFIG_PATH}" ]]; then
-		SEED_BEST_CONFIG_JSON="\"${SEED_BEST_CONFIG_PATH}\""
-	fi
-
 	objective_metric="${target}_pr_auc"
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
@@ -446,7 +418,7 @@ while true; do
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
-  "seed_best_config_path": ${SEED_BEST_CONFIG_JSON},
+  "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
   "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},
