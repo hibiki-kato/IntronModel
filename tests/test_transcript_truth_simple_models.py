@@ -21,6 +21,7 @@ from score.transcript_truth_simple_models import (  # noqa: E402
     evaluate_model,
     plot_baseline_min_distribution,
     plot_feature_score_distributions,
+    plot_min_vs_selected_feature_snpr_curves,
     plot_logreg_coefficients_grid,
     plot_train_test_score_distributions,
     _select_best_logreg_run,
@@ -99,6 +100,53 @@ def test_log_score_feature_columns_are_trimmed() -> None:
 
     assert all(name not in FEATURE_COLUMNS for name in removed_features)
     assert len(FEATURE_COLUMNS) == 24
+
+
+def test_plot_min_vs_selected_feature_snpr_curves_writes_png(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SN-PR comparison helper should save a comparison figure."""
+
+    rows: list[dict[str, str]] = []
+    for gene_index in range(20):
+        gene_id = f"g{gene_index}"
+        rows.append(
+            {
+                "transcript_id": f"{gene_id}_pos",
+                "gene_id": gene_id,
+                "transcript_label": "1",
+                "intron_scores": (
+                    f"[{np.log(0.8 - 0.01 * gene_index)},"
+                    f"{np.log(0.5 - 0.01 * gene_index)}]"
+                ),
+            }
+        )
+        rows.append(
+            {
+                "transcript_id": f"{gene_id}_neg",
+                "gene_id": gene_id,
+                "transcript_label": "0",
+                "intron_scores": (
+                    f"[{np.log(0.2 + 0.01 * gene_index)},"
+                    f"{np.log(0.4 + 0.01 * gene_index)}]"
+                ),
+            }
+        )
+
+    feature_rows = build_transcript_features(rows)
+    monkeypatch.setattr(plt, "show", lambda: None)
+
+    plot_min_vs_selected_feature_snpr_curves(
+        feature_rows=feature_rows,
+        output_dir=tmp_path,
+        selected_feature_name="mean_score",
+        random_state=7,
+        test_size=0.25,
+        show_plots=False,
+    )
+
+    assert (tmp_path / "figures" / "snpr_min_vs_mean_score.png").is_file()
 
 
 def test_build_transcript_features_long_format_nan_report() -> None:
