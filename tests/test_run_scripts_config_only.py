@@ -102,35 +102,33 @@ def test_run_cnn_v2_sh_leaves_mask_to_best_config() -> None:
         encoding="utf-8"
     )
     assert 'INTRONMODEL_AUTO_TMUX="on"' in content
+    assert 'DEVICE="auto"' in content
+    assert 'GPU_IDS="auto"' in content
+    assert 'MAX_PARALLEL_TRIALS="auto"' in content
+    assert 'MODEL="cnn_v2"' in content
+    assert 'DONOR_LEN="100"' in content
+    assert 'ACCEPTOR_LEN="100"' in content
+    assert 'TRAIN_TARGET="both"' in content
+    assert 'VAL_FRAC="0.2"' in content
+    assert 'SEED="1337"' in content
+    assert 'INTRON_SCORE_OP="*"' in content
+    assert 'VISUALIZE="true"' in content
+    assert 'SKIP_TRAINING="0"' in content
+    assert 'CONTINUE_TRAINING="0"' in content
+    assert 'TRAIN_ONLY="0"' in content
+    assert 'CHECKPOINT_TOP_K="3"' in content
+    assert 'CHECKPOINT_PRUNE_DRY_RUN="0"' in content
+    assert 'INFER_COMPILE="0"' in content
+    assert 'INFER_COMPILE_MODE="auto"' in content
     assert "intronmodel_enable_auto_tmux" in content
     assert 'source "${SCRIPT_DIR}/lib/tuned_config.sh"' in content
-    for unwanted in (
-        "DONOR_LEN",
-        "ACCEPTOR_LEN",
-        "TRAIN_TARGET",
-        "EPOCHS",
-        "MAX_EPOCHS",
-        "BATCH_SIZE",
-        "LR",
-        "LOSS",
-        "INPUT_MODE",
-        "PAIR_MODE",
-        "EMBEDDING_DIM",
-        "BPE_PRETRAINED_MODEL_NAME",
-        "DROPOUT",
-        "WEIGHT_DECAY",
-        "ETA_MIN_RATIO",
-        "VAL_FRAC",
-        "GRAD_CLIP",
-        "POS_WEIGHT_CAP",
-        "FOCAL_GAMMA",
-        "F1_LAMBDA",
-        "ASYM_GAMMA_POS",
-        "ASYM_GAMMA_NEG",
-        "SEED",
-    ):
-        assert not _has_top_level_assignment(content, unwanted)
     assert "--sequence_transform" not in content
+    assert "--intron_score_op" in content
+    assert "--visualize" in content
+    assert "--train_target" in content
+    assert "--val_frac" in content
+    assert "--seed" in content
+    assert "--checkpoint_top_k" in content
 
 
 def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
@@ -149,47 +147,31 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
         encoding="utf-8"
     )
-    assert 'INTRONMODEL_AUTO_TMUX="on"' in content
+    assert "INTRONMODEL_AUTO_TMUX" in content
+    assert 'MODEL="cnn_v2_pair"' in content
+    assert 'DONOR_LEN="100"' in content
+    assert 'ACCEPTOR_LEN="100"' in content
+    assert 'TRAIN_TARGET="pair"' in content
+    assert 'VAL_FRAC="0.25"' in content
+    assert 'SEED="1337"' in content
+    assert 'INTRON_SCORE_OP="*"' in content
+    assert 'VISUALIZE="true"' in content
+    assert 'SKIP_TRAINING="0"' in content
+    assert 'CONTINUE_TRAINING="0"' in content
+    assert 'TRAIN_ONLY="0"' in content
+    assert 'CHECKPOINT_TOP_K="3"' in content
+    assert 'CHECKPOINT_PRUNE_DRY_RUN="0"' in content
+    assert 'INFER_COMPILE="0"' in content
+    assert 'INFER_COMPILE_MODE="auto"' in content
     assert "intronmodel_enable_auto_tmux" in content
     assert 'source "${SCRIPT_DIR}/lib/tuned_config.sh"' in content
-    for unwanted in (
-        "DONOR_LEN",
-        "ACCEPTOR_LEN",
-        "TRAIN_TARGET",
-        "EPOCHS",
-        "MAX_EPOCHS",
-        "BATCH_SIZE",
-        "LR",
-        "LOSS",
-        "INPUT_MODE",
-        "PAIR_MODE",
-        "FUSION_MODE",
-        "EMBEDDING_DIM",
-        "BPE_PRETRAINED_MODEL_NAME",
-        "CONV_CHANNELS",
-        "KERNEL_SIZES",
-        "DONOR_CONV_CHANNELS",
-        "ACCEPTOR_CONV_CHANNELS",
-        "DONOR_KERNEL_SIZES",
-        "ACCEPTOR_KERNEL_SIZES",
-        "MAX_POOL_SIZE",
-        "CONV_STRIDE",
-        "HEAD_TYPE",
-        "FC_HIDDEN",
-        "DROPOUT",
-        "WEIGHT_DECAY",
-        "ETA_MIN_RATIO",
-        "VAL_FRAC",
-        "GRAD_CLIP",
-        "POS_WEIGHT_CAP",
-        "FOCAL_GAMMA",
-        "F1_LAMBDA",
-        "ASYM_GAMMA_POS",
-        "ASYM_GAMMA_NEG",
-        "SEED",
-    ):
-        assert not _has_top_level_assignment(content, unwanted)
     assert "--sequence_transform" not in content
+    assert "--intron_score_op" in content
+    assert "--visualize" in content
+    assert "--train_target" in content
+    assert "--val_frac" in content
+    assert "--seed" in content
+    assert "--checkpoint_top_k" in content
 
 
 def test_run_cnn_v2_pair_sh_exposes_synthesize_mode() -> None:
@@ -199,9 +181,9 @@ def test_run_cnn_v2_pair_sh_exposes_synthesize_mode() -> None:
     assert 'SYNTHESIZE_MODE="off"' in content
     assert 'TAG=""' in content
     assert "intronmodel_resolve_pair_tuning_model_name" in content
-    assert "--tag" in content
-    assert "--train_pos_path" in content
-    assert "--train_neg_path" in content
+    assert 'append_arg_if_set "tag" "${resolved_tag}"' in content
+    assert 'append_arg_if_set "train_pos_path" "${resolved_train_pos_path}"' in content
+    assert 'append_arg_if_set "train_neg_path" "${resolved_train_neg_path}"' in content
     assert 'if [[ "${tuned_key}" == "tag" ]]; then' in content
     assert "intronmodel_resolve_pair_best_config_filename" in content
     assert 'best_config_filename="$(' in content
@@ -212,6 +194,7 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     content = (_project_root() / "run" / "tune_cnn_v2_time.sh").read_text(
         encoding="utf-8"
     )
+    assert 'OBJECTIVE_METRIC="pr_auc"' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
@@ -226,6 +209,7 @@ def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
     content = (_project_root() / "run" / "tune_cnn_v2_pair_time.sh").read_text(
         encoding="utf-8"
     )
+    assert 'OBJECTIVE_METRIC="pr_auc"' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert '"mask": {' in content
     assert '"sequence_transform": {' not in content

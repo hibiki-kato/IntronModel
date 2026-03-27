@@ -15,6 +15,9 @@ fi
 TIME_BUDGET_MINUTES="1200"
 
 INTRONMODEL_AUTO_TMUX=on
+# Validation / objective controls.
+VAL_FRAC="0.25"
+OBJECTIVE_METRIC="pr_auc"
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
@@ -23,7 +26,6 @@ TAG=""
 SYNTHESIZE_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
-VAL_FRAC="0.25"
 BASE_SEED="0"
 SEED_LIST=""
 PROCESS_TITLE="ETA"
@@ -414,6 +416,11 @@ if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
 	echo "[tune_cnn_v2_pair_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
+	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
+	echo "[tune_cnn_v2_pair_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
+	exit 1
+fi
 TUNING_MODEL_NAME="$(
 	intronmodel_resolve_pair_tuning_model_name "${SYNTHESIZE_MODE}"
 )"
@@ -426,6 +433,14 @@ BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
 ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
 ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
 RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
+ETA_SCOPE="$(intronmodel_resolve_eta_scope \
+	"tune_cnn_v2_pair_time.sh" \
+	"${GPU_IDS}" \
+	"${MAX_PARALLEL_TRIALS}" \
+	"${DEVICE}" \
+	"${#JOB_ORDER[@]}" \
+	"${PYTHON_BIN}")"
+ETA_PREFIX="$(intronmodel_eta_prefix "${ETA_SCOPE}")"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
@@ -492,9 +507,9 @@ while true; do
 			"${SYNTHESIZE_MODE}"
 	)"
 
-	objective_metric="pair_pr_auc"
+	objective_metric="pair_${OBJECTIVE_METRIC}"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
-		objective_metric="test_pr_auc"
+		objective_metric="test_${OBJECTIVE_METRIC}"
 	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
@@ -608,8 +623,10 @@ JSON
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
 	printf '[tune_cnn_v2_pair_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-	printf 'ETA_remaining=%s species=%s target=pair seed=%s\n' \
-		"${remaining_hms}" "${species}" "${base_seed}"
+	printf 'ETA:%s species=%s target=pair seed=%s\n' \
+		"${remaining_hms}" \
+		"${species}" \
+		"${base_seed}"
 	if ! intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \

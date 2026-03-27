@@ -12,11 +12,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import sys
 
 import numpy as np
+from util.transcript_eval import SCORE_OUTPUT_PRECISION
 from util.unique_intron import UNIQUE_MAP_TSV_NAME, invert_unique_map, load_unique_map
 
 try:
@@ -34,6 +36,25 @@ SCORE_SOURCE_CHOICES: tuple[str, ...] = (
     "acceptor",
 )
 SCORE_COLLAPSE_TOLERANCE: float = 2e-4
+
+
+def _format_log10_score(value: float) -> str:
+    """Format a log10 score for TSV output."""
+    if math.isinf(value) and value < 0.0:
+        return "-inf"
+    return f"{value:.{SCORE_OUTPUT_PRECISION}f}"
+
+
+def _log10_sum(values: list[float]) -> float:
+    """Return log10(sum(10**value for value in values)) in a stable way."""
+    if not values:
+        raise ValueError("values must not be empty")
+    finite_values = [value for value in values if not math.isinf(value)]
+    if not finite_values:
+        return -math.inf
+    max_value = max(finite_values)
+    total = math.fsum(10.0 ** (value - max_value) for value in finite_values)
+    return max_value + math.log10(total)
 
 
 def _set_csv_field_limit_max() -> None:
@@ -534,16 +555,19 @@ def _collapse_site_scores_to_unique(
 
 
 def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
-    """Combine donor/acceptor scores into one intron score."""
+    """Combine donor/acceptor log10 scores into one intron score."""
     if op == "+":
-        return donor_score + acceptor_score
+        return _log10_sum([donor_score, acceptor_score])
     if op == "*":
-        return donor_score * acceptor_score
+        return donor_score + acceptor_score
     if op == "harmonic":
-        denom = donor_score + acceptor_score
-        if denom == 0.0:
-            return 0.0
-        return 2.0 * donor_score * acceptor_score / denom
+        # log10(2ab / (a + b)) = log10(2) + log10(a) + log10(b) - log10(a + b)
+        return (
+            math.log10(2.0)
+            + donor_score
+            + acceptor_score
+            - _log10_sum([donor_score, acceptor_score])
+        )
     if op == "min":
         return float(min(donor_score, acceptor_score))
     raise ValueError(
@@ -797,17 +821,21 @@ def _write_eval_rows_tsv(path: Path, rows: list[IntronEvalRow]) -> None:
                     "transcript_id": row.transcript_id,
                     "intron_index": row.intron_index,
                     "label": row.label,
-                    "intron_score": f"{row.intron_score:.8f}",
+                    "intron_score": _format_log10_score(row.intron_score),
                     "donor_score": (
-                        "" if row.donor_score is None else f"{row.donor_score:.8f}"
+                        ""
+                        if row.donor_score is None
+                        else _format_log10_score(row.donor_score)
                     ),
                     "acceptor_score": (
                         ""
                         if row.acceptor_score is None
-                        else f"{row.acceptor_score:.8f}"
+                        else _format_log10_score(row.acceptor_score)
                     ),
                     "pair_score": (
-                        "" if row.pair_score is None else f"{row.pair_score:.8f}"
+                        ""
+                        if row.pair_score is None
+                        else _format_log10_score(row.pair_score)
                     ),
                     "seen_train_pos_coord": row.seen_train_pos_coord,
                     "seen_train_neg_seq": row.seen_train_neg_seq,

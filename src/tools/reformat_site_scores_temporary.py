@@ -17,6 +17,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from util.transcript_eval import (
+    SCORE_OUTPUT_PRECISION,
+    probability_to_log10_score,
+)
+
+
+def _format_score(value: float) -> str:
+    """Format a probability score in log10 space for TSV output."""
+    log_score = probability_to_log10_score(value)
+    if log_score == float("-inf"):
+        return "-inf"
+    return f"{log_score:.{SCORE_OUTPUT_PRECISION}f}"
+
 
 @dataclass(frozen=True)
 class ParsedSiteScores:
@@ -185,9 +198,13 @@ def _write_wide_site_scores(
                 and pair_score is None
             ):
                 continue
-            donor_text = "" if donor_score is None else f"{float(donor_score):.6f}"
+            donor_text = "" if donor_score is None else _format_score(
+                float(donor_score)
+            )
             acceptor_text = (
-                "" if acceptor_score is None else f"{float(acceptor_score):.6f}"
+                ""
+                if acceptor_score is None
+                else _format_score(float(acceptor_score))
             )
             label = labels.get(key)
             label_text = "" if label is None else str(label)

@@ -49,7 +49,7 @@ def test_build_donor_acceptor_figure_adds_heatmap_axes_by_default(
     assert len(summaries) == 2
     assert summaries[0].plotted_label == 0
     assert summaries[1].plotted_label == 1
-    assert len(figure.axes) == 4
+    assert len(figure.axes) == 6
     assert figure.axes[1].get_title() == "2D histogram"
     assert figure.axes[3].get_title() == "2D histogram"
 

@@ -6,6 +6,7 @@ import pytest
 
 _ = pytest.importorskip("torch")
 import torch
+import torch.nn.functional as F
 
 from models import cnn_pair
 
@@ -187,6 +188,70 @@ def test_pair_splice_cnn_supports_late_fusion_without_max_pool() -> None:
     acceptor_x = torch.rand(4, 4, 100)
     logits = model(donor_x, acceptor_x)
     assert logits.shape == (4,)
+
+
+def test_readout_sequence_features_gap_matches_mean_pooling() -> None:
+    x = torch.tensor(
+        [[[1.0, 100.0, 2.0], [3.0, 30.0, 6.0]]],
+        dtype=torch.float32,
+    )
+
+    gap_features = cnn_pair._readout_sequence_features(x, "gap")
+    center_features = cnn_pair._readout_sequence_features(x, "center")
+
+    assert torch.allclose(
+        gap_features,
+        torch.tensor([[103.0 / 3.0, 13.0]], dtype=torch.float32),
+    )
+    assert torch.allclose(
+        center_features,
+        torch.tensor([[100.0, 30.0]], dtype=torch.float32),
+    )
+
+
+def test_late_fusion_head_matches_manual_split_linear() -> None:
+    torch.manual_seed(0)
+    model = cnn_pair.PairSpliceCNN(
+        donor_conv_channels=[3],
+        acceptor_conv_channels=[5],
+        kernel_size=1,
+        donor_kernel_sizes=[1],
+        acceptor_kernel_sizes=[1],
+        max_pool_size=1,
+        head_type="gap",
+        fusion_mode="late",
+        dropout=0.0,
+        fc_hidden=8,
+    )
+    model.eval()
+
+    donor_x = torch.rand(3, 4, 11)
+    acceptor_x = torch.rand(3, 4, 11)
+
+    logits = model(donor_x, acceptor_x)
+    donor_features = cnn_pair._encode_cnn_features(model.donor_encoder, donor_x)
+    acceptor_features = cnn_pair._encode_cnn_features(
+        model.acceptor_encoder,
+        acceptor_x,
+    )
+    first_layer = model.fc[0]
+    assert isinstance(first_layer, torch.nn.Linear)
+
+    expected = F.linear(
+        donor_features,
+        first_layer.weight[:, : donor_features.shape[1]],
+    )
+    expected = expected + F.linear(
+        acceptor_features,
+        first_layer.weight[:, donor_features.shape[1] :],
+    )
+    if first_layer.bias is not None:
+        expected = expected + first_layer.bias
+
+    for layer in list(model.fc.children())[1:]:
+        expected = layer(expected)
+
+    assert torch.allclose(logits, expected[:, 0])
 
 
 def test_pair_splice_cnn_supports_center_readout_with_stride() -> None:

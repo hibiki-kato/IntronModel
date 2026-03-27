@@ -91,6 +91,27 @@ class GroupAccumulator:
     score_stats: dict[str, ScoreDriftAccumulator]
 
 
+def _build_output_fieldnames(
+    fieldnames: list[str],
+    *,
+    label: str,
+) -> list[str]:
+    """Build output TSV field names for one score file type."""
+    if label == "intron":
+        output = ["intron_id"]
+        for column in fieldnames:
+            if column in {"transcript_id", "intron_index", "intron_id"}:
+                continue
+            if column not in output:
+                output.append(column)
+    else:
+        output = list(fieldnames)
+    for column in ADDED_COLUMNS:
+        if column not in output:
+            output.append(column)
+    return output
+
+
 def _parse_species_csv(raw_species: Optional[str]) -> list[str]:
     """Parse one optional comma-separated species list."""
     if raw_species is None:
@@ -405,18 +426,10 @@ def _validate_score_stats(
             )
 
 
-def _build_output_fieldnames(fieldnames: list[str]) -> list[str]:
-    """Return output field names with required metadata columns appended."""
-    output = list(fieldnames)
-    for column in ADDED_COLUMNS:
-        if column not in output:
-            output.append(column)
-    return output
-
-
 def _transform_one_file(
     *,
     path: Path,
+    label: str,
     original_to_unique: dict[OriginalKey, UniqueKey],
     representative_map: dict[UniqueKey, OriginalKey],
     catalog: dict[UniqueKey, CatalogRecord],
@@ -430,6 +443,8 @@ def _transform_one_file(
     ----------
     path : Path
         Input/output TSV path.
+    label : str
+        Score file type: ``site`` or ``intron``.
     original_to_unique : dict[tuple[str, int], tuple[str, int]]
         Reverse mapping from original to unique intron keys.
     representative_map : dict[tuple[str, int], tuple[str, int]]
@@ -457,8 +472,18 @@ def _transform_one_file(
         if reader.fieldnames is None:
             raise ValueError(f"Missing header row in TSV: {path}")
         fieldnames = [str(name) for name in reader.fieldnames]
-        required = {"transcript_id", "intron_index"}
-        if not required.issubset(set(fieldnames)):
+        fieldname_set = set(fieldnames)
+        if label == "intron":
+            has_new_schema = "intron_id" in fieldname_set
+            has_legacy_schema = {"transcript_id", "intron_index"}.issubset(
+                fieldname_set
+            )
+            if not has_new_schema and not has_legacy_schema:
+                raise ValueError(
+                    "Score TSV must include intron_id or transcript_id and "
+                    f"intron_index: {path}"
+                )
+        elif not {"transcript_id", "intron_index"}.issubset(fieldname_set):
             raise ValueError(
                 "Score TSV must include transcript_id and intron_index: "
                 f"{path}"
@@ -470,15 +495,21 @@ def _transform_one_file(
         for line_no, raw in enumerate(reader, start=2):
             total_rows += 1
             row = {name: str(raw.get(name, "")) for name in fieldnames}
-            transcript_id = row["transcript_id"].strip()
-            if transcript_id == "":
-                raise ValueError(f"Empty transcript_id at {path}:{line_no}")
-            intron_index = _parse_required_int(
-                raw=row,
-                key="intron_index",
-                path=path,
-                line_no=line_no,
-            )
+            if label == "intron" and "intron_id" in fieldname_set:
+                transcript_id = row["intron_id"].strip()
+                if transcript_id == "":
+                    raise ValueError(f"Empty intron_id at {path}:{line_no}")
+                intron_index = 1
+            else:
+                transcript_id = row["transcript_id"].strip()
+                if transcript_id == "":
+                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
+                intron_index = _parse_required_int(
+                    raw=row,
+                    key="intron_index",
+                    path=path,
+                    line_no=line_no,
+                )
             original_key = (transcript_id, intron_index)
             unique_key = original_to_unique.get(original_key)
             if unique_key is None:
@@ -519,7 +550,7 @@ def _transform_one_file(
                 score_stats=group.score_stats,
             )
 
-    output_fieldnames = _build_output_fieldnames(fieldnames)
+    output_fieldnames = _build_output_fieldnames(fieldnames, label=label)
     output_rows: list[dict[str, str]] = []
     for unique_key in sorted(grouped_rows.keys()):
         group = grouped_rows[unique_key]
@@ -548,8 +579,13 @@ def _transform_one_file(
         )
 
         output_row = {name: representative_row.get(name, "") for name in fieldnames}
-        output_row["transcript_id"] = unique_key[0]
-        output_row["intron_index"] = str(unique_key[1])
+        if label == "intron":
+            output_row.pop("transcript_id", None)
+            output_row.pop("intron_index", None)
+            output_row["intron_id"] = unique_key[0]
+        else:
+            output_row["transcript_id"] = unique_key[0]
+            output_row["intron_index"] = str(unique_key[1])
         if "label" in output_row:
             output_row["label"] = label_value
         output_row["train_leak"] = str(catalog_record.train_leak)
@@ -597,6 +633,7 @@ def _transform_path_group(
         file_count += 1
         result = _transform_one_file(
             path=path,
+            label=label,
             original_to_unique=original_to_unique,
             representative_map=representative_map,
             catalog=catalog,

@@ -11,18 +11,73 @@ fi
 # CONFIG (edit here)
 # --------------------------
 set -a
-SPECIES="Hsap"
-INTRONMODEL_AUTO_TMUX="off"  # off | on | auto
+MODEL="cnn_v2"
+SPECIES="Mmus"
+INTRONMODEL_AUTO_TMUX="on"
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+TEST_TSV_PATH=""
+CLASS_FILE_PATH=""
+REF_GFF_PATH=""
+EPOCHS="20"
+MAX_EPOCHS="200"
+EARLY_STOP_PATIENCE="12"
+EARLY_STOP_MIN_DELTA="0.0"
+BATCH_SIZE="512"
+LR="5e-4"
+LOSS="focal"
+CONV_CHANNELS="64,128,256"
+KERNEL_SIZES="7,7,7"
+MAX_POOL_SIZE="2"
+HEAD_TYPE="gap"
+DROPOUT="0.3"
+FC_HIDDEN="128"
+WEIGHT_DECAY="0.01"
+ETA_MIN_RATIO="0.01"
+VAL_FRAC="0.2"
+GRAD_CLIP="5.0"
+POS_WEIGHT_CAP="20.0"
+FOCAL_GAMMA="2.0"
+FOCAL_ALPHA_POS=""
+ASYM_GAMMA_POS="0.0"
+ASYM_GAMMA_NEG="4.0"
+ASYM_ALPHA_POS=""
+TRAIN_TARGET="both"
+USE_TUNED_HPARAMS="required"   # off | auto | required
+TUNED_CONFIG_PATH=""
+DONOR_TUNED_CONFIG_PATH=""
+ACCEPTOR_TUNED_CONFIG_PATH=""
+SHARED_TUNED_CONFIG_PATH=""
+INTRON_SCORE_OP="*"
+NAME_FIELDS="none"
+TRANSCRIPT_SCORE_AGG="min"
+SOFTMIN_TAU="1.0"
+SEED="1337"
+TAG=""
+VISUALIZE="true"
+SKIP_TRAINING="0"
+CONTINUE_TRAINING="0"
+TRAIN_ONLY="0"
+CHECKPOINT_TOP_K="3"
+CHECKPOINT_PRUNE_DRY_RUN="0"
+TUNED_TARGET="auto"        # auto | both | donor | acceptor
 USE_AMP="1"
 AMP_DTYPE="auto"
-COMPILE_MODE="off"
+COMPILE_MODE="on"
 INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"  # reduce-overhead only
 INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
 INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
+INFER_BATCH_SIZE="2048"
+INFER_USE_AMP="1"
+INFER_AMP_DTYPE="auto"
+INFER_COMPILE="0"
+INFER_COMPILE_MODE="auto"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -32,17 +87,7 @@ PERSISTENT_WORKERS="1"
 PIN_MEMORY="1"
 MIN_BATCH_SIZE="64"
 MAX_OOM_RETRIES="8"
-
-TEST_TSV_PATH=""
-CLASS_FILE_PATH=""
-REF_GFF_PATH=""
-NAME_FIELDS="none"
-TRANSCRIPT_SCORE_AGG="min"
-SOFTMIN_TAU="1.0"
-USE_TUNED_HPARAMS="required"   # off | auto | required
-TUNED_CONFIG_PATH=""
-SHARED_TUNED_CONFIG_PATH=""
-TUNED_TARGET="auto"        # auto | both | donor | acceptor
+MPS_MAX_BATCH_SIZE="2048"
 set +a
 
 # --------------------------
@@ -64,14 +109,37 @@ intronmodel_abort_parallel_run() {
 
 trap 'intronmodel_abort_parallel_run' INT TERM HUP
 
+append_arg_if_set() {
+	local flag="$1"
+	local value="$2"
+	if [[ -n "${value}" ]]; then
+		args+=("--${flag}" "${value}")
+	fi
+}
+
+append_flag_if_truthy() {
+	local flag="$1"
+	local value="$2"
+	local normalized
+	normalized="$(echo "${value}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	case "${normalized}" in
+		1 | true | on | yes)
+			args+=("--${flag}")
+			;;
+	esac
+}
+
 run_species_once() {
 	local species="$1"
 	local assigned_gpu_id="${2-}"
 
 	args=(
-		--model cnn_v2
+		--model "${MODEL}"
 		--species "${species}"
+		--donor_len "${DONOR_LEN}"
+		--acceptor_len "${ACCEPTOR_LEN}"
 		--device "${DEVICE}"
+		--seed "${SEED}"
 		--name_fields "${NAME_FIELDS}"
 		--use_amp "${USE_AMP}"
 		--amp_dtype "${AMP_DTYPE}"
@@ -85,9 +153,50 @@ run_species_once() {
 		--pin_memory "${PIN_MEMORY}"
 		--min_batch_size "${MIN_BATCH_SIZE}"
 		--max_oom_retries "${MAX_OOM_RETRIES}"
+		--val_frac "${VAL_FRAC}"
+		--epochs "${EPOCHS}"
+		--max_epochs "${MAX_EPOCHS}"
+		--early_stop_patience "${EARLY_STOP_PATIENCE}"
+		--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
+		--batch_size "${BATCH_SIZE}"
+		--lr "${LR}"
+		--loss "${LOSS}"
+		--conv_channels "${CONV_CHANNELS}"
+		--kernel_sizes "${KERNEL_SIZES}"
+		--max_pool_size "${MAX_POOL_SIZE}"
+		--head_type "${HEAD_TYPE}"
+		--dropout "${DROPOUT}"
+		--fc_hidden "${FC_HIDDEN}"
+		--weight_decay "${WEIGHT_DECAY}"
+		--eta_min_ratio "${ETA_MIN_RATIO}"
+		--grad_clip "${GRAD_CLIP}"
+		--pos_weight_cap "${POS_WEIGHT_CAP}"
+		--focal_gamma "${FOCAL_GAMMA}"
+		--focal_alpha_pos "${FOCAL_ALPHA_POS}"
+		--asym_gamma_pos "${ASYM_GAMMA_POS}"
+		--asym_gamma_neg "${ASYM_GAMMA_NEG}"
+		--asym_alpha_pos "${ASYM_ALPHA_POS}"
 		--transcript_score_agg "${TRANSCRIPT_SCORE_AGG}"
 		--softmin_tau "${SOFTMIN_TAU}"
+		--train_target "${TRAIN_TARGET}"
+		--intron_score_op "${INTRON_SCORE_OP}"
+		--visualize "${VISUALIZE}"
+		--checkpoint_top_k "${CHECKPOINT_TOP_K}"
+		--checkpoint_prune_dry_run "${CHECKPOINT_PRUNE_DRY_RUN}"
+		--infer_batch_size "${INFER_BATCH_SIZE}"
+		--infer_use_amp "${INFER_USE_AMP}"
+		--infer_amp_dtype "${INFER_AMP_DTYPE}"
+		--infer_compile "${INFER_COMPILE}"
+		--infer_compile_mode "${INFER_COMPILE_MODE}"
 	)
+	append_flag_if_truthy "skip_train" "${SKIP_TRAINING}"
+	append_flag_if_truthy "continue_train" "${CONTINUE_TRAINING}"
+	append_flag_if_truthy "train_only" "${TRAIN_ONLY}"
+	append_arg_if_set "train_pos_path" "${TRAIN_POS_PATH}"
+	append_arg_if_set "train_neg_path" "${TRAIN_NEG_PATH}"
+	append_arg_if_set "test_tsv" "${TEST_TSV_PATH}"
+	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
+	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
 
 	tuned_path=""
 	tuned_output=""
@@ -148,15 +257,6 @@ run_species_once() {
 		fi
 	fi
 
-	if [[ -n "${TEST_TSV_PATH}" ]]; then
-		args+=(--test_tsv "${TEST_TSV_PATH}")
-	fi
-	if [[ -n "${CLASS_FILE_PATH}" ]]; then
-		args+=(--class_file "${CLASS_FILE_PATH}")
-	fi
-	if [[ -n "${REF_GFF_PATH}" ]]; then
-		args+=(--ref_gff "${REF_GFF_PATH}")
-	fi
 	if [[ ${#tuned_args[@]} -gt 0 ]]; then
 		args+=("${tuned_args[@]}")
 	fi

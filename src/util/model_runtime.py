@@ -140,8 +140,82 @@ def bool_from_flag(flag: bool | int) -> bool:
     return int(flag) != 0
 
 
+def resolve_auto_num_workers(
+    *,
+    cpu_count: int | None = None,
+    max_parallel_trials: int = 1,
+) -> int:
+    """Resolve a conservative default ``num_workers`` value for ``auto``.
+
+    Parameters
+    ----------
+    cpu_count : int | None, default=None
+        Logical CPU count used for budgeting. When ``None``, the function uses
+        ``os.cpu_count()`` and falls back to ``4`` if the platform cannot
+        report a count.
+    max_parallel_trials : int, default=1
+        Number of concurrent GPU trials sharing the CPU budget.
+
+    Returns
+    -------
+    int
+        Conservative worker count per trial. The result is capped at ``8`` and
+        never exceeds the per-trial CPU budget.
+
+    Raises
+    ------
+    ValueError
+        If ``cpu_count`` or ``max_parallel_trials`` is not positive.
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
+
+    if cpu_count is None:
+        resolved_cpu_count = os.cpu_count() or 4
+    else:
+        resolved_cpu_count = int(cpu_count)
+    if resolved_cpu_count <= 0:
+        raise ValueError("cpu_count must be > 0.")
+
+    parallel = int(max_parallel_trials)
+    if parallel < 1:
+        raise ValueError("max_parallel_trials must be >= 1.")
+
+    per_trial_cpu_budget = max(1, resolved_cpu_count // parallel)
+    workers = max(1, per_trial_cpu_budget // 4)
+    if resolved_cpu_count >= 64 and parallel >= 4:
+        workers = max(workers, 4)
+    current_default = min(8, workers)
+    return min(current_default, per_trial_cpu_budget)
+
+
 def resolve_num_workers(raw: str | int, device: str) -> int:
-    """Resolve DataLoader worker count from int or ``auto``."""
+    """Resolve DataLoader worker count from int or ``auto``.
+
+    Parameters
+    ----------
+    raw : str | int
+        User-supplied ``--num_workers`` value.
+    device : str
+        Runtime device name.
+
+    Returns
+    -------
+    int
+        Concrete worker count. ``auto`` resolves to zero on non-CUDA devices
+        and to a conservative shared default on CUDA.
+
+    Raises
+    ------
+    ValueError
+        If ``raw`` is invalid or negative.
+
+    Complexity
+    ----------
+    O(1) time and O(1) memory.
+    """
     if isinstance(raw, int):
         if raw < 0:
             raise ValueError("--num_workers must be >= 0.")
@@ -151,8 +225,7 @@ def resolve_num_workers(raw: str | int, device: str) -> int:
     if text == "auto":
         if device != "cuda":
             return 0
-        cpu_count = os.cpu_count() or 4
-        return max(0, cpu_count // 2)
+        return resolve_auto_num_workers()
 
     try:
         parsed = int(text)

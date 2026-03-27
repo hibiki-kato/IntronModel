@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,6 +17,7 @@ from score.general_model_snpr import (  # noqa: E402
     _build_arg_parser,
     _resolve_eval_species,
     _write_interactive_html,
+    run_snpr_experiment,
     go,
 )
 
@@ -159,3 +162,100 @@ def test_build_arg_parser_includes_logreg_c() -> None:
     )
 
     assert args.logreg_c == 0.25
+
+
+def test_run_snpr_experiment_uses_l1_training_return_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SN-PR flow should accept the two-value L1 training return."""
+
+    _create_species_like_directory(tmp_path, "SpX")
+
+    train_rows = [object()] * 30
+    features = np.asarray(
+        [
+            [0.1, 0.2],
+            [0.3, 0.4],
+            [0.5, 0.6],
+            [0.7, 0.8],
+        ],
+        dtype=np.float64,
+    )
+    labels = np.asarray([0, 1, 0, 1], dtype=np.int64)
+    split = SimpleNamespace(
+        train_indices=(0, 1),
+        valid_indices=(2,),
+        test_indices=(3,),
+    )
+    trained_run = SimpleNamespace(
+        model_name="logreg",
+        test_scores=np.asarray([0.2, 0.8], dtype=np.float64),
+    )
+    summary = SimpleNamespace(to_row=lambda: {"model_name": "logreg"})
+    curve = SimpleNamespace(
+        eval_species="SpX",
+        model_name="logreg",
+        sensitivities=np.asarray([10.0], dtype=np.float64),
+        precisions=np.asarray([20.0], dtype=np.float64),
+        f1_scores=np.asarray([30.0], dtype=np.float64),
+    )
+
+    monkeypatch.setattr(
+        "score.general_model_snpr.build_species_feature_rows",
+        lambda **kwargs: (
+            train_rows,
+            SimpleNamespace(transcript_count=30, nan_score_count=0),
+        ),
+    )
+    monkeypatch.setattr(
+        "score.general_model_snpr._to_model_arrays",
+        lambda rows: (
+            features,
+            labels,
+            np.asarray(["tx1", "tx2", "tx3", "tx4"], dtype=np.str_),
+            np.asarray(["g1", "g1", "g2", "g2"], dtype=np.str_),
+            np.asarray([1, 1, 1, 1], dtype=np.int64),
+            np.asarray([10.0, 20.0, 30.0, 40.0], dtype=np.float64),
+        ),
+    )
+    monkeypatch.setattr(
+        "score.general_model_snpr.split_train_valid_test",
+        lambda **kwargs: split,
+    )
+    monkeypatch.setattr(
+        "score.general_model_snpr._train_model_suite",
+        lambda *args, **kwargs: ([trained_run], object()),
+    )
+    monkeypatch.setattr(
+        "score.general_model_snpr.evaluate_models_on_dataset",
+        lambda **kwargs: [trained_run],
+    )
+    monkeypatch.setattr(
+        "score.general_model_snpr._compute_species_curves",
+        lambda **kwargs: ([summary], [curve]),
+    )
+    monkeypatch.setattr("score.general_model_snpr._plot_snpr", lambda **kwargs: None)
+    monkeypatch.setattr("score.general_model_snpr.ensure_dir", lambda path: None)
+    monkeypatch.setattr("score.general_model_snpr.write_tsv", lambda *args, **kwargs: None)
+
+    args = argparse.Namespace(
+        data_root=tmp_path,
+        train_species="SpX",
+        eval_species="SpX",
+        score_model="cnn",
+        max_transcripts=None,
+        random_state=42,
+        test_size=0.2,
+        valid_size=0.2,
+        precision_target=0.85,
+        recall_target=0.85,
+        logreg_c=1.0,
+        output_png=tmp_path / "snpr.png",
+        output_summary_tsv=tmp_path / "snpr.tsv",
+        output_interactive_html=None,
+        sn_denominator="eval_positive",
+        reference_gff=None,
+    )
+
+    assert run_snpr_experiment(args) == 0

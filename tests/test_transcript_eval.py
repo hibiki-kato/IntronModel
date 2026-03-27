@@ -10,6 +10,7 @@ from util.transcript_eval import (
     aggregate_transcript_scores,
     build_intron_scores,
     read_site_scores,
+    write_intron_scores,
     write_transcript_scores,
     write_site_scores,
 )
@@ -33,13 +34,13 @@ def test_aggregate_transcript_scores_softmin_exp_sum() -> None:
             "transcript_id": "tx1",
             "intron_index": 2,
             "site_type": "donor",
-            "score": 1.5,
+            "score": 0.3,
         },
         {
             "transcript_id": "tx1",
             "intron_index": 2,
             "site_type": "acceptor",
-            "score": 1.5,
+            "score": 0.3,
         },
     ]
     rows = aggregate_transcript_scores(
@@ -51,10 +52,12 @@ def test_aggregate_transcript_scores_softmin_exp_sum() -> None:
 
     assert len(rows) == 1
     result = rows[0]
-    intron_scores = [1.0, 3.0]
-    expected = math.exp(-1.0) + math.exp(-3.0)
+    intron_scores = [math.log10(1.0), math.log10(0.6)]
+    min_score = min(intron_scores)
+    shifted_sum = sum(math.exp(-(score - min_score)) for score in intron_scores)
+    expected = min_score - math.log(shifted_sum)
 
-    assert result["min_intron_index"] == 1
+    assert result["min_intron_index"] == 2
     assert float(result["trans_score"]) == pytest.approx(expected)
 
 
@@ -64,25 +67,25 @@ def test_aggregate_transcript_scores_softmin_wavg() -> None:
             "transcript_id": "tx1",
             "intron_index": 1,
             "site_type": "donor",
-            "score": 0.5,
+            "score": 0.25,
         },
         {
             "transcript_id": "tx1",
             "intron_index": 1,
             "site_type": "acceptor",
-            "score": 0.5,
+            "score": 0.25,
         },
         {
             "transcript_id": "tx1",
             "intron_index": 2,
             "site_type": "donor",
-            "score": 1.5,
+            "score": 0.75,
         },
         {
             "transcript_id": "tx1",
             "intron_index": 2,
             "site_type": "acceptor",
-            "score": 1.5,
+            "score": 0.75,
         },
     ]
     rows = aggregate_transcript_scores(
@@ -94,7 +97,7 @@ def test_aggregate_transcript_scores_softmin_wavg() -> None:
 
     assert len(rows) == 1
     result = rows[0]
-    intron_scores = [1.0, 3.0]
+    intron_scores = [math.log10(0.5), math.log10(1.5)]
     min_score = min(intron_scores)
     weights = [math.exp(-(score - min_score)) for score in intron_scores]
     expected = (
@@ -157,9 +160,9 @@ def test_aggregate_pair_transcript_scores_keeps_5col_compatibility() -> None:
         {
             "transcript_id": "tx1",
             "min_intron_index": 1,
-            "Score_donor": 0.3,
-            "Score_acceptor": 0.3,
-            "trans_score": 0.3,
+            "Score_donor": pytest.approx(math.log10(0.3)),
+            "Score_acceptor": pytest.approx(math.log10(0.3)),
+            "trans_score": pytest.approx(math.log10(0.3)),
         }
     ]
 
@@ -221,9 +224,9 @@ def test_aggregate_transcript_scores_uses_pair_rows_when_available() -> None:
         {
             "transcript_id": "tx1",
             "min_intron_index": 1,
-            "Score_donor": 0.25,
-            "Score_acceptor": 0.25,
-            "trans_score": 0.25,
+            "Score_donor": pytest.approx(math.log10(0.25)),
+            "Score_acceptor": pytest.approx(math.log10(0.25)),
+            "trans_score": pytest.approx(math.log10(0.25)),
         }
     ]
 
@@ -249,7 +252,24 @@ def test_write_transcript_scores_outputs_trans_score_header(
         "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\t"
         "trans_score"
     )
-    assert lines[1] == "tx1\t1\t0.300000\t0.300000\t0.300000"
+    assert lines[1] == "tx1\t1\t-0.522879\t-0.522879\t-0.522879"
+
+
+def test_write_intron_scores_outputs_eight_decimal_places(
+    tmp_path: Path,
+) -> None:
+    """Write intron-score TSV with fixed eight-decimal precision."""
+    output_tsv = tmp_path / "intron.tsv"
+    rows: list[dict[str, object]] = [
+        {
+            "intron_id": "uintron_00000001",
+            "score": 0.12345678,
+        }
+    ]
+    write_intron_scores(str(output_tsv), rows)
+    lines = output_tsv.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "intron_id\tscore\tlabel"
+    assert lines[1] == "uintron_00000001\t-0.908485\t"
 
 
 def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
@@ -275,7 +295,7 @@ def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
         lines[0]
         == "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel"
     )
-    assert lines[1] == "tx1\t1\t0.910000\t0.820000"
+    assert lines[1] == "tx1\t1\t-0.040959\t-0.086186"
 
 
 def test_write_site_scores_fills_label_from_mapping(tmp_path: Path) -> None:
@@ -302,7 +322,7 @@ def test_write_site_scores_fills_label_from_mapping(tmp_path: Path) -> None:
     )
     lines = output_tsv.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
-    assert lines[1] == "tx1\t1\t0.910000\t0.820000\t1"
+    assert lines[1] == "tx1\t1\t-0.040959\t-0.086186\t1"
 
 
 def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
@@ -325,13 +345,13 @@ def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
             "transcript_id": "tx1",
             "intron_index": 1,
             "site_type": "donor",
-            "score": 0.9,
+            "score": pytest.approx(math.log10(0.9)),
         },
         {
             "transcript_id": "tx1",
             "intron_index": 1,
             "site_type": "acceptor",
-            "score": 0.8,
+            "score": pytest.approx(math.log10(0.8)),
         },
     ]
 
@@ -377,6 +397,14 @@ def test_build_intron_scores_uses_pair_or_donor_acceptor() -> None:
     ]
     rows = build_intron_scores(site_score_rows=site_rows, intron_score_op="+")
     assert rows == [
-        {"transcript_id": "tx1", "intron_index": 1, "score": 0.7},
-        {"transcript_id": "tx2", "intron_index": 2, "score": 0.7},
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "score": pytest.approx(math.log10(0.7)),
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 2,
+            "score": pytest.approx(math.log10(0.7)),
+        },
     ]

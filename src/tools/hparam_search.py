@@ -45,6 +45,7 @@ from util.validation_protocol import (
 )
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
 from util.process_title import apply_process_title_from_env
+from util.model_runtime import resolve_auto_num_workers
 
 _ = apply_process_title_from_env()
 
@@ -953,10 +954,10 @@ def _resolve_test_pr_auc_score_source(train_target: str) -> str:
     return "donor_acceptor"
 
 
-def _multiply_donor_acceptor_rows(
+def _combine_donor_acceptor_rows(
     rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Convert donor/acceptor rows into pair rows by score multiplication."""
+    """Convert donor/acceptor log10 rows into pair rows by addition."""
     donor_scores: dict[tuple[str, int], float] = {}
     acceptor_scores: dict[tuple[str, int], float] = {}
     for row in rows:
@@ -975,7 +976,7 @@ def _multiply_donor_acceptor_rows(
                 "transcript_id": key[0],
                 "intron_index": key[1],
                 "site_type": "pair",
-                "score": donor_scores[key] * acceptor_scores[key],
+                "score": donor_scores[key] + acceptor_scores[key],
             }
         )
     return pair_rows
@@ -1179,7 +1180,7 @@ def _compute_test_pr_auc_objective(
             scored_rows.extend(task_rows)
 
     if model_name == "cnn_v2" and cnn_v2_pair_mode != "pair":
-        scored_rows = _multiply_donor_acceptor_rows(scored_rows)
+        scored_rows = _combine_donor_acceptor_rows(scored_rows)
         train_target = "pair"
 
     if not scored_rows:
@@ -1793,20 +1794,11 @@ def _resolve_hparam_auto_num_workers(max_parallel_trials: int) -> int:
     """Resolve conservative per-trial workers for parallel HPO workloads.
 
     The hparam sweep launches many trials concurrently, and each model trial may
-    create multiple DataLoaders. A direct ``cpu_count // 2`` per trial often
-    oversubscribes CPU resources heavily. This resolver keeps the existing
-    conservative default, then additionally caps it by ``cpu_count // parallel``
-    so per-trial workers never exceed the CPU budget implied by GPU-run
-    parallelism.
+    create multiple DataLoaders. The shared runtime helper keeps this budget
+    conservative, caps the default at ``8``, and ensures the per-trial worker
+    count never exceeds the CPU budget implied by GPU-run parallelism.
     """
-    cpu_count = os.cpu_count() or 4
-    parallel = max(1, int(max_parallel_trials))
-    per_trial_cpu_budget = max(1, cpu_count // parallel)
-    workers = max(1, per_trial_cpu_budget // 4)
-    if cpu_count >= 64 and parallel >= 4:
-        workers = max(workers, 4)
-    current_default = min(8, workers)
-    return min(current_default, per_trial_cpu_budget)
+    return resolve_auto_num_workers(max_parallel_trials=max_parallel_trials)
 
 
 def _resolve_trial_num_workers(num_workers_value: ArgValue) -> Optional[int]:

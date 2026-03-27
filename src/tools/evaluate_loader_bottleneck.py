@@ -11,7 +11,6 @@ bottleneck in the current training setup.
 from __future__ import annotations
 
 import argparse
-import os
 import random
 import sys
 import time
@@ -32,6 +31,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from models.tcn import DNADataset  # noqa: E402
 from util.data_proc import read_examples_single_task, resolve_train_paths  # noqa: E402
+from util.model_runtime import resolve_auto_num_workers  # noqa: E402
 
 try:
     from nvidia.dali.plugin.pytorch.loader_evaluator import LoaderEvaluator
@@ -217,8 +217,7 @@ def resolve_num_workers(raw: str, device: str) -> int:
     if text == "auto":
         if device != "cuda":
             return 0
-        cpu_count = os.cpu_count() or 1
-        return max(1, cpu_count)
+        return resolve_auto_num_workers()
     parsed = int(text)
     if parsed < 0:
         raise ValueError("--num_workers must be >= 0.")

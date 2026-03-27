@@ -25,6 +25,10 @@ from models.cnn_common import (
     CNN_HEAD_TYPE_CHOICES,
     CnnFeatureReadout,
     CnnGapEncoder,
+    _apply_split_fusion_head,
+    _encode_cnn_features,
+    _pad_batch_to_fixed_size,
+    _readout_sequence_features,
     normalize_cnn_head_type,
     one_hot_encode_dna,
     parse_conv_channels,
@@ -850,7 +854,10 @@ class PairSpliceCNN(nn.Module):
         """Convert model input to channel-first float tensor."""
         if self.embedding is None:
             if x.ndim != 3:
-                raise ValueError("One-hot inputs must have shape (batch, channels, length).")
+                raise ValueError(
+                    "One-hot inputs must have shape "
+                    "(batch, channels, length)."
+                )
             return x.float()
         if x.ndim != 2:
             raise ValueError("Token inputs must have shape (batch, length).")
@@ -876,12 +883,10 @@ class PairSpliceCNN(nn.Module):
         if self.fusion_mode == "late":
             if self.donor_encoder is None or self.acceptor_encoder is None:
                 raise RuntimeError("late fusion encoders are not initialized.")
-            mixed = torch.cat(
-                [
-                    self.donor_encoder(donor_features),
-                    self.acceptor_encoder(acceptor_features),
-                ],
-                dim=1,
+            return _apply_split_fusion_head(
+                self.fc,
+                _encode_cnn_features(self.donor_encoder, donor_features),
+                _encode_cnn_features(self.acceptor_encoder, acceptor_features),
             )
         elif self.fusion_mode == "early":
             if self.fused_encoder is None:
@@ -890,8 +895,9 @@ class PairSpliceCNN(nn.Module):
                 raise ValueError(
                     "early fusion requires donor and acceptor lengths to match."
                 )
-            mixed = self.fused_encoder(
-                torch.cat([donor_features, acceptor_features], dim=1)
+            mixed = _encode_cnn_features(
+                self.fused_encoder,
+                torch.cat([donor_features, acceptor_features], dim=1),
             )
         else:
             if self.mid_donor_prefix is None or self.mid_acceptor_prefix is None:
@@ -904,12 +910,15 @@ class PairSpliceCNN(nn.Module):
             acceptor_mid = self.mid_acceptor_prefix(acceptor_features)
             fused_mid = torch.cat([donor_mid, acceptor_mid], dim=1)
             if self.mid_fused_tail is not None:
-                mixed = self.mid_fused_tail(fused_mid)
+                mixed = _encode_cnn_features(self.mid_fused_tail, fused_mid)
             else:
                 if self.mid_readout is None:
                     raise RuntimeError("mid fusion readout is not initialized.")
-                mixed = self.mid_readout(fused_mid)
-        return self.fc(mixed).squeeze(-1)
+                mixed = _readout_sequence_features(
+                    fused_mid,
+                    head_type=self.mid_readout.head_type,
+                )
+        return self.fc(mixed)[:, 0]
 
 
 def stratified_split_pair(
@@ -1859,7 +1868,13 @@ def score_pair_sequences(
     use_amp: bool = False,
     amp_dtype: Optional[torch.dtype] = None,
 ) -> np.ndarray:
-    """Score donor/acceptor sequence pairs."""
+    """Score donor/acceptor sequence pairs.
+
+    Notes
+    -----
+    The final batch is zero-padded to keep the leading batch dimension static
+    for ``torch.compile`` / cudagraph inference.
+    """
     if not pairs:
         return np.array([])
 
@@ -1901,8 +1916,14 @@ def score_pair_sequences(
 
     outputs: list[np.ndarray] = []
     for index in range(0, len(donor_x), batch_size):
-        batch_donor = donor_x[index : index + batch_size]
-        batch_acceptor = acceptor_x[index : index + batch_size]
+        batch_donor, valid_batch_size = _pad_batch_to_fixed_size(
+            donor_x[index : index + batch_size],
+            batch_size,
+        )
+        batch_acceptor, _ = _pad_batch_to_fixed_size(
+            acceptor_x[index : index + batch_size],
+            batch_size,
+        )
         if use_amp and device == "cuda" and amp_dtype is not None:
             amp_context: ContextManager[object] = torch.autocast(
                 device_type="cuda",
@@ -1913,7 +1934,9 @@ def score_pair_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(batch_donor, batch_acceptor)
-        probs = torch.sigmoid(logits).float().detach().cpu().numpy()
+        probs = torch.sigmoid(logits).float().detach().cpu().numpy()[
+            :valid_batch_size
+        ]
         outputs.append(probs)
     return np.concatenate(outputs)
 

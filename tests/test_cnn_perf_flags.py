@@ -10,6 +10,8 @@ torch = pytest.importorskip("torch")
 from torch.utils.data import DataLoader, TensorDataset
 
 from models import cnn
+from models import cnn_common
+from models import cnn_pair
 
 
 def test_add_train_args_includes_perf_flags() -> None:
@@ -92,6 +94,89 @@ def test_basic_splice_cnn_supports_center_readout_with_stride() -> None:
     batch = torch.randn(4, 4, 101)
     logits = model(batch)
     assert logits.shape == (4,)
+
+
+def test_cnn_feature_readout_gap_uses_mean_pooling() -> None:
+    readout = cnn_common.CnnFeatureReadout(output_channels=2, head_type="gap")
+    x = torch.tensor(
+        [[[1.0, 100.0, 2.0], [3.0, 30.0, 6.0]]],
+        dtype=torch.float32,
+    )
+
+    features = readout(x)
+
+    assert torch.allclose(
+        features,
+        torch.tensor([[103.0 / 3.0, 13.0]], dtype=torch.float32),
+    )
+
+
+def test_score_sequences_pads_final_batch_to_fixed_size() -> None:
+    class RecordingModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            self.batch_sizes.append(int(x.shape[0]))
+            return torch.arange(x.shape[0], device=x.device, dtype=torch.float32)
+
+    model = RecordingModel()
+    probs = cnn_common.score_sequences(
+        model=model,
+        sequences=["AAAAA", "CCCCC", "GGGGG"],
+        window_len=5,
+        device="cpu",
+        batch_size=2,
+    )
+
+    assert model.batch_sizes == [2, 2]
+    assert probs.shape == (3,)
+    assert np.allclose(
+        probs,
+        torch.sigmoid(torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)).numpy(),
+    )
+
+
+def test_score_pair_sequences_pads_final_batch_to_fixed_size() -> None:
+    class RecordingPairModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+
+        def forward(
+            self,
+            donor_x: torch.Tensor,
+            acceptor_x: torch.Tensor,
+        ) -> torch.Tensor:
+            del acceptor_x
+            self.batch_sizes.append(int(donor_x.shape[0]))
+            return torch.arange(
+                donor_x.shape[0],
+                device=donor_x.device,
+                dtype=torch.float32,
+            )
+
+    model = RecordingPairModel()
+    probs = cnn_pair.score_pair_sequences(
+        model=model,
+        pairs=[
+            ("AAAAA", "TTTTT"),
+            ("CCCCC", "GGGGG"),
+            ("GGGGG", "CCCCC"),
+        ],
+        donor_window_len=5,
+        acceptor_window_len=5,
+        device="cpu",
+        batch_size=2,
+    )
+
+    assert model.batch_sizes == [2, 2]
+    assert probs.shape == (3,)
+    assert np.allclose(
+        probs,
+        torch.sigmoid(torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)).numpy(),
+    )
 
 
 def test_resolve_task_train_params_prefers_task_overrides() -> None:

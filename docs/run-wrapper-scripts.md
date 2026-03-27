@@ -1,12 +1,13 @@
 # Wrapper Script Configuration Guide
 
-This page documents the config-only shell wrappers under `run/` and how they
-map to `src/run_model.py`.
+This page documents the config-only shell wrappers that remain under `run/`
+and the archived wrappers under `archive/run/`, and how they map to
+`src/run_model.py`.
 
 Runtime logic for the main training/inference wrappers is centralized in
-`src/tools/run_wrapper_pipeline.py`. Each `run/*.sh` keeps only the editable
-`CONFIG` block and delegates validation/argument assembly/execution to this
-Python backend.
+`src/tools/run_wrapper_pipeline.py`. Each active `run/*.sh` keeps only the
+editable `CONFIG` block and delegates validation/argument
+assembly/execution to this Python backend.
 
 ## 0. Editing Workflow (Top-First)
 
@@ -14,25 +15,33 @@ Wrapper scripts are intentionally organized so you can edit settings in one
 place before reading implementation details.
 
 - Edit only the top `CONFIG (edit here)` block.
-- Run the wrapper without CLI arguments (for example, `bash run/tune_bert.sh`).
+- Run the wrapper without CLI arguments (for example,
+  `bash archive/run/bert/tune_bert.sh`).
 - For tuning wrappers, frequently changed knobs are placed first in `CONFIG`
   (for example: species, bp lengths, trial/epoch budget, target selection).
 - The same top-first layout is applied to training/inference wrappers
-  (`run/run_cnn.sh`, `run/run_bert.sh`, etc.).
+  (`run/run_cnn_v2.sh`, `archive/run/bert/run_bert.sh`, etc.).
 - Embedded fallback search-space JSON is in the same `CONFIG` block but should
   be treated as an advanced/default section.
 
 ## 1. Pipeline Wrapper Inventory
 
-Training/inference wrappers (edit CONFIG block, run without CLI args):
+Active training/inference wrappers (edit CONFIG block, run without CLI args):
 
-- `run/run_cnn.sh`
-- `run/run_cnn_pair.sh`
-- `run/run_cnn_resdil.sh`
-- `run/run_tcn.sh`
-- `run/run_bert.sh`
-- `run/run_dnabert.sh`
-- `run/reservoir.sh`
+- `run/run_cnn_v2.sh`
+- `run/run_cnn_v2_pair.sh`
+- `run/run_isolated_mmus_rna60_pipeline.sh`
+
+Archived training/inference wrappers:
+
+- `archive/run/bert/run_bert.sh`
+- `archive/run/bilstm_pair/run_bilstm_pair.sh`
+- `archive/run/cnn/run_cnn_resdil.sh`
+- `archive/run/dnabert/run_dnabert.sh`
+- `archive/run/dnabert/run_dnabert_pair.sh`
+- `archive/run/markov_xgboost/run_markov_xgboost.sh`
+- `archive/run/reservoir/run_reservoir.sh`
+- `archive/run/tcn/run_tcn.sh`
 
 Utility wrappers:
 
@@ -60,15 +69,27 @@ Data-generation notes:
 - `run/eval_intron_pr_auc.sh` evaluates intron-level PR-AUC by joining
   `intron_eval_flank10.tsv` labels with `site_score/*.tsv` outputs.
 
-Tuning wrappers:
+Active tuning wrappers:
 
-- `run/tune_cnn.sh`, `run/tune_cnn_time.sh`
-- `run/tune_cnn_pair_time.sh`
-- `run/tune_cnn_resdil.sh`, `run/tune_cnn_resdil_time.sh`
-- `run/tune_tcn.sh`, `run/tune_tcn_time.sh`
-- `run/tune_bert.sh`
-- `run/tune_dnabert.sh`, `run/tune_dnabert_time.sh`
-- `run/tune_reservoir.sh`
+- `run/tune_cnn_v2_time.sh`
+- `run/tune_cnn_v2_pair_time.sh`
+
+Archived tuning wrappers:
+
+- `archive/run/bert/tune_bert.sh`
+- `archive/run/bert/tune_bert_time.sh`
+- `archive/run/bilstm_pair/tune_bilstm_pair_time.sh`
+- `archive/run/cnn/tune_cnn_resdil.sh`
+- `archive/run/cnn/tune_cnn_resdil_time.sh`
+- `archive/run/dnabert/tune_dnabert.sh`
+- `archive/run/dnabert/tune_dnabert_time.sh`
+- `archive/run/dnabert/tune_dnabert_pair.sh`
+- `archive/run/dnabert/tune_dnabert_pair_time.sh`
+- `archive/run/markov_xgboost/tune_markov_xgboost.sh`
+- `archive/run/reservoir/tune_reservoir.sh`
+- `archive/run/reservoir/tune_reservoir_time.sh`
+- `archive/run/tcn/tune_tcn.sh`
+- `archive/run/tcn/tune_tcn_time.sh`
 
 Archived wrappers:
 
@@ -105,8 +126,10 @@ CNN-family tuning search-space conventions:
   the `cnn_v2_pair_synth` tuning subtree and use a separate
   `best_synth_config.json` there, while the run wrapper keeps its own `TAG`
   control authoritative so tuned-config tags do not leak into an `off` run.
-- `run/run_dnabert_pair.sh`, `run/tune_dnabert_pair.sh`, and
-  `run/tune_dnabert_pair_time.sh` also expose `SYNTHESIZE_MODE=off|on`. When
+- `archive/run/dnabert/run_dnabert_pair.sh`,
+  `archive/run/dnabert/tune_dnabert_pair.sh`, and
+  `archive/run/dnabert/tune_dnabert_pair_time.sh` also expose
+  `SYNTHESIZE_MODE=off|on`. When
   enabled, they use the same pair synth defaults for training inputs, append a
   `synth` suffix to output naming, and switch tuned-config lookups to the
   `dnabert_pair_synth` tuning subtree with `best_synth_config.json`.
@@ -127,17 +150,8 @@ Validation rules in wrappers:
 
 - `SKIP_TRAINING=1` and `CONTINUE_TRAINING=1` cannot be combined.
 - For multi-task models, `TRAIN_TARGET=<single task>` requires `TRAIN_ONLY=1`.
-- `run/run_cnn_pair.sh` uses `TRAIN_TARGET=pair` and can run full pipeline.
-- `SEQUENCE_TRANSFORM=none|mask_outside_intron_n` is available in
-  `run/run_cnn.sh` and `run/run_cnn_pair.sh`.
-- `run/run_cnn_v2.sh` and `run/run_cnn_v2_pair.sh` accept tuned configs that
-  store `mask=off|on`; the wrapper converts that back to
-  `sequence_transform=none|mask_outside_intron_n` when applying tuned values.
-- `MAX_POOL_SIZE>=1` is available in `run/run_cnn.sh`,
-  `run/run_cnn_pair.sh`, `run/tune_cnn.sh`, `run/tune_cnn_time.sh`, and
-  `run/tune_cnn_pair_time.sh`. `1` disables pooling.
-- `CONV_STRIDE>=1` and `HEAD_TYPE=gap|center` are available in the same CNN /
-  CNN-pair wrappers and tune scripts.
+- The archived wrappers under `archive/run/` keep their legacy model-specific
+  flags; consult the individual scripts there for details.
 
 ## 3. Continue Learning Behavior
 
@@ -191,7 +205,7 @@ when strict checkpoint naming differs between tuning and normal runs.
 
 ### 4.1 Reservoir practical overrides
 
-`run/reservoir.sh` also exposes:
+`archive/run/reservoir/run_reservoir.sh` also exposes:
 
 - `INTRONMODEL_RC_STATE_BUDGET_GB=auto|<float>`
 - `MTS_REP=auto|last|mean|output|reservoir`
@@ -201,12 +215,12 @@ when strict checkpoint naming differs between tuning and normal runs.
 For one-hot-only operation with tuned configs:
 
 - Set `DONOR_INPUT_MODE="onehot"` and `ACCEPTOR_INPUT_MODE="onehot"` in
-  `run/reservoir.sh`.
+  `archive/run/reservoir/run_reservoir.sh`.
 - Or disable tuned injection with `USE_TUNED_HPARAMS=off`.
 
 ## 5. DNABERT Variant Switching
 
-`run/run_dnabert.sh` supports:
+`archive/run/dnabert/run_dnabert.sh` supports:
 
 - `DNABERT_VARIANT="2"` -> `--model dnabert2`
 - `DNABERT_VARIANT="6"` -> `--model dnabert6`

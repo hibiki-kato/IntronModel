@@ -209,13 +209,14 @@ def test_uniqueify_scores_temporary_rewrites_site_and_intron(tmp_path: Path) -> 
     assert first_site["label"] == "1"
 
     first_intron = intron_rows[0]
-    assert first_intron["transcript_id"] == "uintron_00000001"
-    assert first_intron["intron_index"] == "1"
+    assert first_intron["intron_id"] == "uintron_00000001"
     assert first_intron["source_transcript_id"] == "txA"
     assert first_intron["source_intron_index"] == "1"
     assert first_intron["member_count"] == "2"
     assert first_intron["train_leak"] == "1"
     assert first_intron["label"] == "1"
+    assert "transcript_id" not in first_intron
+    assert "intron_index" not in first_intron
 
 
 def test_uniqueify_scores_temporary_tolerance_exceeded_raises(
@@ -264,6 +265,8 @@ def test_uniqueify_scores_temporary_tolerance_exceeded_raises(
                 "__none__.tsv",
                 "--tolerance",
                 "1e-4",
+                "--strict-score-drift",
+                "1",
             ]
         )
 
@@ -364,17 +367,15 @@ def test_uniqueify_scores_temporary_label_conflict_raises(tmp_path: Path) -> Non
     intron_path = species_dir / "intron_score" / "model.tsv"
     _write_tsv(
         intron_path,
-        fieldnames=["transcript_id", "intron_index", "score", "label"],
+        fieldnames=["intron_id", "score", "label"],
         rows=[
             {
-                "transcript_id": "txA",
-                "intron_index": "1",
+                "intron_id": "uintron_00000001",
                 "score": "0.7",
                 "label": "1",
             },
             {
-                "transcript_id": "txB",
-                "intron_index": "2",
+                "intron_id": "uintron_00000001",
                 "score": "0.7",
                 "label": "0",
             },

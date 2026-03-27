@@ -73,6 +73,30 @@ def test_common_build_eta_process_title_formats_eta_prefix() -> None:
     assert run.stdout.strip() == "ETA:01/01 1:31"
 
 
+def test_common_resolve_eta_scope_uses_gpu_when_slots_are_short(
+) -> None:
+    run = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        'intronmodel_resolve_eta_scope '
+        '"test_common.sh" "0,1" "auto" "cuda" "4" "${PY_BIN}"'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "gpu"
+
+
+def test_common_resolve_eta_scope_uses_species_when_gpus_cover_jobs(
+) -> None:
+    run = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        'intronmodel_resolve_eta_scope '
+        '"test_common.sh" "0,1,2,3" "auto" "cuda" "2" "${PY_BIN}"'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "species"
+
+
 def test_common_resolve_seed_list_defaults_to_base_seed() -> None:
     run = _run_common_shell(
         'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'

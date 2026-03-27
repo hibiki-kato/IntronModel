@@ -23,11 +23,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from util.transcript_eval import probability_to_log10_score
+
 try:
     from sklearn.metrics import roc_auc_score, average_precision_score
 except ImportError:
     roc_auc_score = None
     average_precision_score = None
+
+SCORE_OUTPUT_PRECISION = 6
 
 
 # --------------------------
@@ -42,6 +46,14 @@ def set_seed(seed: int = 1337):
 
 def sigmoid_np(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
+
+
+def _format_score(value: float) -> str:
+    """Format a probability score in log10 space for TSV output."""
+    log_score = probability_to_log10_score(value)
+    if log_score == float("-inf"):
+        return "-inf"
+    return f"{log_score:.{SCORE_OUTPUT_PRECISION}f}"
 
 
 # --------------------------
@@ -266,8 +278,7 @@ class SingleTaskSpliceModel(nn.Module):
     def forward(self, input_ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         x = self.encoder(input_ids, attn_mask)  # (B, L, D)
         cls = x[:, 0, :]  # (B, D) [CLS] token
-        logits = self.head(cls).squeeze(-1)  # (B,)
-        return logits
+        return self.head(cls)[:, 0]  # (B,)
 
 
 # --------------------------
@@ -322,7 +333,8 @@ def stratified_split_by_label(examples: List[Tuple[str, int]], val_frac=0.1, see
     """
     Stratify by label (0/1) so train/val both have positives and negatives.
 
-    val_frac: fraction of examples to put in validation set (e.g. 0.1 for 90% train, 10% val)
+    val_frac: fraction of examples to put in validation set (e.g. 0.1 for
+        90% train, 10% val)
     seed: random seed for shuffling
     """
     rng = random.Random(seed)
@@ -721,11 +733,15 @@ def score_test_sites(
         os.makedirs(outdir, exist_ok=True)
     with open(output_tsv, "w") as f:
         f.write(
-            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\ttrans_score\n"
+            "transcript_id\tmin_intron_index\tScore_donor\tScore_acceptor\t"
+            "trans_score\n"
         )
         for r in results:
             f.write(
-                f"{r['transcript_id']}\t{r['min_intron_index']}\t{r['Score_donor']:.6f}\t{r['Score_acceptor']:.6f}\t{r['trans_score']:.6f}\n"
+                f"{r['transcript_id']}\t{r['min_intron_index']}\t"
+                f"{_format_score(float(r['Score_donor']))}\t"
+                f"{_format_score(float(r['Score_acceptor']))}\t"
+                f"{_format_score(float(r['trans_score']))}\n"
             )
 
     print(f"✅ Done! Results saved to {output_tsv}")

@@ -89,7 +89,7 @@ class _MetaPairMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network(x).squeeze(-1)
+        return self.network(x)[:, 0]
 
 
 def _parse_checkpoint_csv(raw_value: str, *, arg_name: str) -> list[str]:

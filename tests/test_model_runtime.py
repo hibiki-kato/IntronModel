@@ -20,6 +20,7 @@ from util.model_runtime import (
     is_compile_runtime_error,
     normalize_checkpoint_state_dict,
     resolve_compile_enabled,
+    resolve_auto_num_workers,
     resolve_mps_max_batch_size,
     resolve_num_workers,
     sigmoid_np,
@@ -75,6 +76,22 @@ def test_bool_from_flag_supports_int_and_bool() -> None:
 def test_resolve_num_workers_auto_for_cpu_is_zero() -> None:
     resolved = resolve_num_workers("auto", device="cpu")
     assert resolved == 0
+
+
+def test_resolve_num_workers_auto_for_cuda_caps_at_eight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_runtime.os, "cpu_count", lambda: 64)
+    resolved = resolve_num_workers("auto", device="cuda")
+    assert resolved == 8
+
+
+def test_resolve_auto_num_workers_respects_parallel_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_runtime.os, "cpu_count", lambda: 32)
+    assert resolve_auto_num_workers(max_parallel_trials=1) == 8
+    assert resolve_auto_num_workers(max_parallel_trials=4) == 2
 
 
 def test_resolve_num_workers_rejects_invalid_text() -> None:

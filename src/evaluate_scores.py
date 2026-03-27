@@ -31,6 +31,8 @@ AXIS_LABEL_FONT_SIZE = 18
 TITLE_FONT_SIZE = 20
 LEGEND_HIDDEN_ALPHA = 0.2
 LEGEND_VISIBLE_ALPHA = 1.0
+LEGEND_LOCATION = "upper left"
+LEGEND_BBOX_ANCHOR: tuple[float, float] = (1.02, 1.0)
 NON_GUI_BACKENDS: set[str] = {"agg", "cairo", "pdf", "pgf", "ps", "svg", "template"}
 
 
@@ -404,7 +406,40 @@ def plot_eval_scores(
     y_min: float | None = None,
     y_max: float | None = None,
 ) -> None:
-    """Plot sensitivity/precision points from all eval text files."""
+    """Plot sensitivity/precision points from evaluation score text files.
+
+    Parameters
+    ----------
+    species : str
+        Species name used to resolve the evaluation directory and default
+        output path.
+    output_png : str | None, optional
+        Output PNG path. If omitted, a species-specific default path is used.
+    interactive : bool, optional
+        If ``True``, validate that the active Matplotlib backend supports GUI
+        interaction and enable clickable legend toggles.
+    x_min : float | None, optional
+        Minimum x-axis value in sensitivity units.
+    x_max : float | None, optional
+        Maximum x-axis value in sensitivity units.
+    y_min : float | None, optional
+        Minimum y-axis value in precision units.
+    y_max : float | None, optional
+        Maximum y-axis value in precision units.
+
+    Returns
+    -------
+    None
+        This function writes the plot to disk and optionally shows it.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the evaluation directory does not exist or contains no score files.
+    ValueError
+        If the interactive backend is invalid, plot bounds are invalid, or
+        duplicate legend labels are detected.
+    """
 
     if interactive:
         _validate_interactive_backend()
@@ -519,7 +554,14 @@ def plot_eval_scores(
         zorder=0,
     )
     ax.clabel(_cs, fmt="F1=%.1f", fontsize=9, inline=True)
-    legend = ax.legend(markerscale=7, fontsize=LEGEND_FONT_SIZE, loc="lower left")
+    fig.subplots_adjust(right=0.78)
+    legend = ax.legend(
+        markerscale=7,
+        fontsize=LEGEND_FONT_SIZE,
+        loc=LEGEND_LOCATION,
+        bbox_to_anchor=LEGEND_BBOX_ANCHOR,
+        borderaxespad=0.0,
+    )
     if interactive:
         _connect_interactive_legend_toggle(
             fig=fig,
@@ -531,7 +573,7 @@ def plot_eval_scores(
     out_dir = os.path.dirname(final_output)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    plt.savefig(final_output)
+    fig.savefig(final_output, bbox_inches="tight")
     print(f"Saved plot to {final_output}")
     if interactive:
         plt.show(block=True)

@@ -11,6 +11,7 @@ ANALYSIS_SCRIPT = Path(__file__).resolve().parents[1] / "analysis" / "script"
 if str(ANALYSIS_SCRIPT) not in sys.path:
     sys.path.insert(0, str(ANALYSIS_SCRIPT))
 
+from common.stats import format_numeric_summary, summarize_numeric  # noqa: E402
 from score.profile_score_distributions import (  # noqa: E402
     ScoreDistributionResult,
     build_score_distribution_figure,
@@ -29,10 +30,10 @@ def test_load_intron_score_distribution_reads_labels(tmp_path: Path) -> None:
     score_file.write_text(
         "\n".join(
             [
-                "transcript_id\tintron_index\tscore\tlabel",
-                "tx1\t1\t0.90\t1",
-                "tx2\t1\t0.10\t0",
-                "tx3\t1\t0.80\t1",
+                "intron_id\tscore\tlabel",
+                "uintron_00000001\t0.90\t1",
+                "uintron_00000002\t0.10\t0",
+                "uintron_00000003\t0.80\t1",
             ]
         )
         + "\n",
@@ -48,6 +49,18 @@ def test_load_intron_score_distribution_reads_labels(tmp_path: Path) -> None:
     assert result.total_rows == 3
     assert result.used_rows == 3
     assert result.skipped_rows == 0
+
+
+def test_format_numeric_summary_matches_notebook_output() -> None:
+    """Format the score summary line used by the notebooks."""
+
+    summary = summarize_numeric([1.0, 3.0])
+
+    assert (
+        format_numeric_summary("negative", summary)
+        == "negative: n=2, mean=2.000000, min=1.000000, "
+        "max=3.000000, median=2.000000, std=1.000000"
+    )
 
 
 def test_load_transcript_score_distribution_uses_class_file_and_column(
@@ -195,9 +208,9 @@ def test_load_intron_score_distribution_rejects_single_label_group(
     score_file.write_text(
         "\n".join(
             [
-                "transcript_id\tintron_index\tscore\tlabel",
-                "tx1\t1\t0.90\t1",
-                "tx2\t1\t0.80\t1",
+                "intron_id\tscore\tlabel",
+                "uintron_00000001\t0.90\t1",
+                "uintron_00000002\t0.80\t1",
             ]
         )
         + "\n",

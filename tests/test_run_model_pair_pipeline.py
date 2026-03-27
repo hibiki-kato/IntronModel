@@ -634,9 +634,9 @@ def test_run_pipeline_cnn_v2_pair_rows_aggregate_from_pair_scores(
     assert transcript_lines[1].split("\t") == [
         "tx1",
         "1",
-        "0.250000",
-        "0.250000",
-        "0.250000",
+        "-0.602060",
+        "-0.602060",
+        "-0.602060",
     ]
 
 

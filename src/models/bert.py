@@ -422,8 +422,7 @@ class SingleTaskSpliceBert(nn.Module):
     ) -> torch.Tensor:
         hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
         cls_hidden = hidden[:, 0, :]
-        logits = self.classifier(cls_hidden).squeeze(-1)
-        return logits
+        return self.classifier(cls_hidden)[:, 0]
 
 
 @dataclass(frozen=True)
@@ -1231,7 +1230,8 @@ def train_task_model(
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
-                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                        f"(patience={early_stop_patience}, "
+                        f"min_delta={early_stop_min_delta:g})"
                     )
                     break
 

@@ -776,8 +776,8 @@ log "infer_models=${INFER_MODELS}"
 
 if model_is_selected "cnn"; then
 	if all_tuned_configs_exist "${CNN_DONOR_CFG}" "${CNN_ACCEPTOR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn.sh" "cnn.sh" \
-			"MODEL=cnn" \
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_v2.sh" "cnn_v2.sh" \
+			"MODEL=cnn_v2" \
 			"MASK_MODE=on" \
 			"DONOR_TUNED_CONFIG_PATH=${CNN_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_ACCEPTOR_CFG}"
@@ -787,8 +787,8 @@ if model_is_selected "cnn"; then
 		)"
 		action="$(missing_action_for_model "cnn" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn.sh" "cnn.sh" \
-				"MODEL=cnn" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_v2.sh" "cnn_v2.sh" \
+				"MODEL=cnn_v2" \
 				"MASK_MODE=on" \
 				"DONOR_TUNED_CONFIG_PATH=${CNN_DONOR_CFG}" \
 				"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_ACCEPTOR_CFG}"
@@ -800,14 +800,16 @@ fi
 
 if model_is_selected "cnn_pair"; then
 	if all_tuned_configs_exist "${CNN_PAIR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_pair.sh" "cnn_pair.sh" \
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_v2_pair.sh" "cnn_v2_pair.sh" \
+			"MODEL=cnn_v2_pair" \
 			"MASK_MODE=on" \
 			"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
 	else
 		missing_text="$(missing_tuned_configs_text "${CNN_PAIR_CFG}")"
 		action="$(missing_action_for_model "cnn_pair" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_pair.sh" "cnn_pair.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_v2_pair.sh" "cnn_v2_pair.sh" \
+				"MODEL=cnn_v2_pair" \
 				"MASK_MODE=on" \
 				"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
 		fi
@@ -818,14 +820,14 @@ fi
 
 if model_is_selected "bilstm_pair"; then
 	if all_tuned_configs_exist "${BILSTM_PAIR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_bilstm_pair.sh" "bilstm_pair.sh" \
+		run_wrapper_infer "${PROJECT_ROOT}/archive/run/bilstm_pair/run_bilstm_pair.sh" "bilstm_pair.sh" \
 			"MASK_MODE=on" \
 			"PAIR_TUNED_CONFIG_PATH=${BILSTM_PAIR_CFG}"
 	else
 		missing_text="$(missing_tuned_configs_text "${BILSTM_PAIR_CFG}")"
 		action="$(missing_action_for_model "bilstm_pair" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_bilstm_pair.sh" "bilstm_pair.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/bilstm_pair/run_bilstm_pair.sh" "bilstm_pair.sh" \
 				"MASK_MODE=on" \
 				"PAIR_TUNED_CONFIG_PATH=${BILSTM_PAIR_CFG}"
 		fi
@@ -836,14 +838,14 @@ fi
 
 if model_is_selected "cnn_resdil"; then
 	if all_tuned_configs_exist "${CNN_RESDIL_DONOR_CFG}" "${CNN_RESDIL_ACCEPTOR_CFG}"; then
-		if ! run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
+		if ! run_wrapper_infer "${PROJECT_ROOT}/archive/run/cnn/run_cnn_resdil.sh" "cnn_resdil.sh" \
 			"MODEL=cnn_resdil" \
 			"MASK_MODE=on" \
 			"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
 			"ACCEPTOR_TUNED_CONFIG_PATH=${CNN_RESDIL_ACCEPTOR_CFG}"; then
 			if [[ "${TRAIN_ON_MISSING}" == "1" ]]; then
 				log "cnn_resdil infer failed; retry with train fallback."
-				run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
+				run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/cnn/run_cnn_resdil.sh" "cnn_resdil.sh" \
 					"MODEL=cnn_resdil" \
 					"MASK_MODE=on" \
 					"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
@@ -860,7 +862,7 @@ if model_is_selected "cnn_resdil"; then
 		)"
 		action="$(missing_action_for_model "cnn_resdil" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_resdil.sh" "cnn_resdil.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/cnn/run_cnn_resdil.sh" "cnn_resdil.sh" \
 				"MODEL=cnn_resdil" \
 				"MASK_MODE=on" \
 				"DONOR_TUNED_CONFIG_PATH=${CNN_RESDIL_DONOR_CFG}" \
@@ -873,7 +875,7 @@ fi
 
 if model_is_selected "tcn"; then
 	if all_tuned_configs_exist "${TCN_DONOR_CFG}" "${TCN_ACCEPTOR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_tcn.sh" "tcn.sh" \
+		run_wrapper_infer "${PROJECT_ROOT}/archive/run/tcn/run_tcn.sh" "tcn.sh" \
 			"MODEL=tcn" \
 			"MASK_MODE=off" \
 			"DONOR_TUNED_CONFIG_PATH=${TCN_DONOR_CFG}" \
@@ -882,7 +884,7 @@ if model_is_selected "tcn"; then
 		missing_text="$(missing_tuned_configs_text "${TCN_DONOR_CFG}" "${TCN_ACCEPTOR_CFG}")"
 		action="$(missing_action_for_model "tcn" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_tcn.sh" "tcn.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/tcn/run_tcn.sh" "tcn.sh" \
 				"MODEL=tcn" \
 				"MASK_MODE=off" \
 				"DONOR_TUNED_CONFIG_PATH=${TCN_DONOR_CFG}" \
@@ -895,7 +897,7 @@ fi
 
 if model_is_selected "bert"; then
 	if all_tuned_configs_exist "${BERT_DONOR_CFG}" "${BERT_ACCEPTOR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_bert.sh" "bert.sh" \
+		run_wrapper_infer "${PROJECT_ROOT}/archive/run/bert/run_bert.sh" "bert.sh" \
 			"MODEL=bert" \
 			"MASK_MODE=off" \
 			"DONOR_TUNED_CONFIG_PATH=${BERT_DONOR_CFG}" \
@@ -906,7 +908,7 @@ if model_is_selected "bert"; then
 		)"
 		action="$(missing_action_for_model "bert" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_bert.sh" "bert.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/bert/run_bert.sh" "bert.sh" \
 				"MODEL=bert" \
 				"MASK_MODE=off" \
 				"DONOR_TUNED_CONFIG_PATH=${BERT_DONOR_CFG}" \
@@ -919,7 +921,7 @@ fi
 
 if model_is_selected "reservoir"; then
 	if all_tuned_configs_exist "${RESERVOIR_DONOR_CFG}" "${RESERVOIR_ACCEPTOR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_reservoir.sh" "reservoir.sh" \
+		run_wrapper_infer "${PROJECT_ROOT}/archive/run/reservoir/run_reservoir.sh" "reservoir.sh" \
 			"MODEL=reservoir" \
 			"MASK_MODE=off" \
 			"DONOR_TUNED_CONFIG_PATH=${RESERVOIR_DONOR_CFG}" \
@@ -932,7 +934,7 @@ if model_is_selected "reservoir"; then
 		)"
 		action="$(missing_action_for_model "reservoir" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_reservoir.sh" "reservoir.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/reservoir/run_reservoir.sh" "reservoir.sh" \
 				"MODEL=reservoir" \
 				"MASK_MODE=off" \
 				"DONOR_TUNED_CONFIG_PATH=${RESERVOIR_DONOR_CFG}" \
@@ -945,7 +947,7 @@ fi
 
 if model_is_selected "dnabert6"; then
 	if all_tuned_configs_exist "${DNABERT6_DONOR_CFG}" "${DNABERT6_ACCEPTOR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_dnabert.sh" "dnabert.sh" \
+		run_wrapper_infer "${PROJECT_ROOT}/archive/run/dnabert/run_dnabert.sh" "dnabert.sh" \
 			"DNABERT_VARIANT=6" \
 			"TRUST_REMOTE_CODE=1" \
 			"MASK_MODE=off" \
@@ -960,7 +962,7 @@ if model_is_selected "dnabert6"; then
 		)"
 		action="$(missing_action_for_model "dnabert6" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert.sh" "dnabert.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/dnabert/run_dnabert.sh" "dnabert.sh" \
 				"DNABERT_VARIANT=6" \
 				"TRUST_REMOTE_CODE=1" \
 				"MASK_MODE=off" \
@@ -975,7 +977,7 @@ fi
 
 if model_is_selected "dnabert2_pair"; then
 	if all_tuned_configs_exist "${DNABERT2_PAIR_TRUNC_CFG}"; then
-		if ! run_wrapper_infer "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
+		if ! run_wrapper_infer "${PROJECT_ROOT}/archive/run/dnabert/run_dnabert_pair.sh" "dnabert_pair.sh" \
 			"DNABERT_VARIANT=2" \
 			"TRUST_REMOTE_CODE=1" \
 			"TRUNC_MODE=on" \
@@ -984,7 +986,7 @@ if model_is_selected "dnabert2_pair"; then
 			"PAIR_TUNED_CONFIG_PATH=${DNABERT2_PAIR_TRUNC_CFG}"; then
 			if [[ "${TRAIN_ON_MISSING}" == "1" ]]; then
 				log "dnabert2_pair infer failed; retry with train fallback."
-				run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
+				run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/dnabert/run_dnabert_pair.sh" "dnabert_pair.sh" \
 					"DNABERT_VARIANT=2" \
 					"TRUST_REMOTE_CODE=1" \
 					"TRUNC_MODE=on" \
@@ -999,7 +1001,7 @@ if model_is_selected "dnabert2_pair"; then
 		missing_text="$(missing_tuned_configs_text "${DNABERT2_PAIR_TRUNC_CFG}")"
 		action="$(missing_action_for_model "dnabert2_pair_trunc" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_dnabert_pair.sh" "dnabert_pair.sh" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/archive/run/dnabert/run_dnabert_pair.sh" "dnabert_pair.sh" \
 				"DNABERT_VARIANT=2" \
 				"TRUST_REMOTE_CODE=1" \
 				"TRUNC_MODE=on" \

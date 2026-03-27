@@ -269,6 +269,59 @@ intronmodel_build_eta_process_title() {
 }
 
 
+intronmodel_eta_prefix() {
+	local eta_scope="$1"
+
+	if [[ "${eta_scope}" == "gpu" ]]; then
+		printf '%s\n' "GPU_free_in"
+		return 0
+	fi
+	printf '%s\n' "ETA_remaining"
+}
+
+
+intronmodel_resolve_eta_scope() {
+	local script_tag="$1"
+	local gpu_ids_setting="$2"
+	local parallel_setting="$3"
+	local device_setting="$4"
+	local job_count="$5"
+	local py_bin="${6:-python3}"
+
+	if [[ ! "${job_count}" =~ ^[0-9]+$ ]]; then
+		echo "[${script_tag}] job count must be an integer." >&2
+		return 1
+	fi
+
+	local -a gpu_ids=()
+	mapfile -t gpu_ids < <(
+		intronmodel_resolve_gpu_ids \
+			"${script_tag}" \
+			"${gpu_ids_setting}" \
+			"${device_setting}" \
+			"${py_bin}"
+	)
+	local gpu_slot_count="${#gpu_ids[@]}"
+	local parallel_slot_count
+	parallel_slot_count="$(
+		intronmodel_resolve_parallel_slots \
+			"${script_tag}" \
+			"${parallel_setting}" \
+			"${gpu_slot_count}"
+	)" || return 1
+
+	if (( gpu_slot_count <= 0 )); then
+		printf '%s\n' "species"
+		return 0
+	fi
+	if (( parallel_slot_count < job_count )); then
+		printf '%s\n' "gpu"
+		return 0
+	fi
+	printf '%s\n' "species"
+}
+
+
 intronmodel_start_timer() {
 	INTRONMODEL_SCRIPT_TAG="$1"
 	INTRONMODEL_SCRIPT_START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

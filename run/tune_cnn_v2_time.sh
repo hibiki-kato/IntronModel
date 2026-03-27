@@ -12,16 +12,18 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="1200"
+TIME_BUDGET_MINUTES="30"
 
 INTRONMODEL_AUTO_TMUX=on
+# Validation / objective controls.
+VAL_FRAC="0.2"
+OBJECTIVE_METRIC="max_f1"
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 CHEAT_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
-VAL_FRAC="0.2"
 BASE_SEED="1337"
 # Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
 SEED_LIST=""
@@ -34,7 +36,7 @@ FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 
-GPU_IDS="2,3"
+GPU_IDS="4,5,6,7"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -66,9 +68,6 @@ HEAD_TYPE="gap"
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
-	"Athal"
-	"Dmel"
-	"Hsap"
 	"Mmus"
 )
 
@@ -329,6 +328,11 @@ if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
 	echo "[tune_cnn_v2_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
+if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
+	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
+	echo "[tune_cnn_v2_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
+	exit 1
+fi
 TUNING_MODEL_NAME="cnn_v2"
 
 PYTHON_BIN="$(resolve_python_bin)"
@@ -339,6 +343,14 @@ BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
 ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
 ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
 RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
+ETA_SCOPE="$(intronmodel_resolve_eta_scope \
+	"tune_cnn_v2_time.sh" \
+	"${GPU_IDS}" \
+	"${MAX_PARALLEL_TRIALS}" \
+	"${DEVICE}" \
+	"${#JOB_ORDER[@]}" \
+	"${PYTHON_BIN}")"
+ETA_PREFIX="$(intronmodel_eta_prefix "${ETA_SCOPE}")"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
@@ -380,9 +392,9 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target_name}/${run_id}"
 	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/${target_name}/best_config.json"
 
-	objective_metric="${target_name}_pr_auc"
+	objective_metric="${target_name}_${OBJECTIVE_METRIC}"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
-		objective_metric="test_pr_auc"
+		objective_metric="test_${OBJECTIVE_METRIC}"
 	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
@@ -503,8 +515,11 @@ JSON
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
 	printf '[tune_cnn_v2_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
-	printf 'ETA_remaining=%s species=%s target=%s seed=%s\n' \
-		"${remaining_hms}" "${species}" "${target_name}" "${base_seed}"
+	printf 'ETA:%s species=%s target=%s seed=%s\n' \
+		"${remaining_hms}" \
+		"${species}" \
+		"${target_name}" \
+		"${base_seed}"
 	run_status=0
 	intronmodel_run_with_process_title \
 		"${RUNTIME_PROCESS_TITLE}" \

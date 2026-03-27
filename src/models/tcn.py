@@ -561,8 +561,7 @@ class TCNSpliceCNN(nn.Module):
         for block in self.blocks:
             x = block(x)
         x = self.readout(x)
-        logits = self.fc(x).squeeze(-1)
-        return logits
+        return self.fc(x)[:, 0]
 
 
 def stratified_split(
@@ -1263,7 +1262,8 @@ def train_task_model(
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
-                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                        f"(patience={early_stop_patience}, "
+                        f"min_delta={early_stop_min_delta:g})"
                     )
                     break
 

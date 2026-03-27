@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Optional, cast
 
 import pytest
 
+import util.model_runtime as model_runtime
 from tools import hparam_search
 
 
@@ -191,6 +193,37 @@ def test_derive_validation_protocol_marks_cnn_v2_pair_as_pair_mode() -> None:
     assert protocol["include_pair_mixed_negatives"] is True
 
 
+def test_combine_donor_acceptor_rows_adds_log10_scores() -> None:
+    rows = [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": math.log10(0.25),
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": math.log10(0.5),
+        },
+        {
+            "transcript_id": "tx2",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": math.log10(0.1),
+        },
+    ]
+
+    combined = hparam_search._combine_donor_acceptor_rows(rows)
+
+    assert len(combined) == 1
+    assert combined[0]["transcript_id"] == "tx1"
+    assert combined[0]["intron_index"] == 1
+    assert combined[0]["site_type"] == "pair"
+    assert combined[0]["score"] == pytest.approx(math.log10(0.125))
+
+
 def test_load_config_accepts_trial_process_mode(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     config["trial_process_mode"] = "persistent_quick"
@@ -200,6 +233,15 @@ def test_load_config_accepts_trial_process_mode(tmp_path: Path) -> None:
     loaded = hparam_search.load_config(config_path)
 
     assert loaded.trial_process_mode == "persistent_quick"
+
+
+def test_resolve_hparam_auto_num_workers_caps_at_eight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_runtime.os, "cpu_count", lambda: 64)
+
+    assert hparam_search._resolve_hparam_auto_num_workers(1) == 8
+    assert hparam_search._resolve_hparam_auto_num_workers(4) == 4
 
 
 def test_load_config_rejects_invalid_trial_process_mode(tmp_path: Path) -> None:

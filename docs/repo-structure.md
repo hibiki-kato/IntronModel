@@ -21,22 +21,39 @@
 
 Unified pipeline wrappers (config-only):
 
-- `run/run_cnn.sh`
-- `run/run_cnn_pair.sh`
-- `run/run_cnn_resdil.sh`
-- `run/run_tcn.sh`
-- `run/run_bert.sh`
-- `run/run_dnabert.sh`
-- `run/reservoir.sh`
+- `run/run_cnn_v2.sh`
+- `run/run_cnn_v2_pair.sh`
+- `run/run_isolated_mmus_rna60_pipeline.sh`
 
-Tuning wrappers:
+Archived wrappers:
 
-- `run/tune_cnn.sh`, `run/tune_cnn_time.sh`
-- `run/tune_cnn_pair_time.sh`
-- `run/tune_cnn_resdil.sh`, `run/tune_cnn_resdil_time.sh`
-- `run/tune_tcn.sh`, `run/tune_tcn_time.sh`
-- `run/tune_bert.sh`
-- `run/tune_reservoir.sh`
+- `archive/run/bert/run_bert.sh`
+- `archive/run/bert/tune_bert.sh`
+- `archive/run/bert/tune_bert_time.sh`
+- `archive/run/bilstm_pair/run_bilstm_pair.sh`
+- `archive/run/bilstm_pair/tune_bilstm_pair_time.sh`
+- `archive/run/cnn/run_cnn_resdil.sh`
+- `archive/run/cnn/tune_cnn_resdil.sh`
+- `archive/run/cnn/tune_cnn_resdil_time.sh`
+- `archive/run/dnabert/run_dnabert.sh`
+- `archive/run/dnabert/run_dnabert_pair.sh`
+- `archive/run/dnabert/tune_dnabert.sh`
+- `archive/run/dnabert/tune_dnabert_time.sh`
+- `archive/run/dnabert/tune_dnabert_pair.sh`
+- `archive/run/dnabert/tune_dnabert_pair_time.sh`
+- `archive/run/markov_xgboost/run_markov_xgboost.sh`
+- `archive/run/markov_xgboost/tune_markov_xgboost.sh`
+- `archive/run/reservoir/run_reservoir.sh`
+- `archive/run/reservoir/tune_reservoir.sh`
+- `archive/run/reservoir/tune_reservoir_time.sh`
+- `archive/run/tcn/run_tcn.sh`
+- `archive/run/tcn/tune_tcn.sh`
+- `archive/run/tcn/tune_tcn_time.sh`
+
+Active tuning wrappers:
+
+- `run/tune_cnn_v2_time.sh`
+- `run/tune_cnn_v2_pair_time.sh`
 
 Utilities:
 

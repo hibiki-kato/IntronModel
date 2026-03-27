@@ -16,6 +16,7 @@ from typing import ContextManager, List, Optional, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 CNN_HEAD_TYPE_CHOICES: tuple[str, ...] = ("gap", "center")
 
@@ -145,6 +146,123 @@ def normalize_cnn_head_type(raw: object, *, arg_name: str) -> str:
     raise ValueError(f"{arg_name} must be one of: {choices_text}.")
 
 
+def _readout_sequence_features(
+    x: torch.Tensor,
+    head_type: str,
+) -> torch.Tensor:
+    """Reduce one convolution feature map to one feature vector per sample.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Feature map with shape ``(batch, channels, length)``.
+    head_type : str
+        Readout type. ``"gap"`` uses mean pooling over the length dimension
+        and ``"center"`` selects the center position.
+
+    Returns
+    -------
+    torch.Tensor
+        Feature tensor with shape ``(batch, channels)``.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` does not have rank 3 or if the length dimension is empty.
+    """
+    if x.ndim != 3:
+        raise ValueError("x must have shape (batch, channels, length).")
+    if x.shape[2] <= 0:
+        raise ValueError("x length dimension must be positive.")
+    if head_type == "gap":
+        return x.mean(dim=-1)
+
+    center_right = x.shape[2] // 2
+    if x.shape[2] % 2 == 1:
+        return x[:, :, center_right]
+    center_left = center_right - 1
+    return 0.5 * (x[:, :, center_left] + x[:, :, center_right])
+
+
+def _encode_cnn_features(encoder: "CnnGapEncoder", x: torch.Tensor) -> torch.Tensor:
+    """Encode one input tensor with a CNN encoder without final pooling."""
+    return _readout_sequence_features(
+        encoder.conv_layers(x),
+        head_type=encoder.readout.head_type,
+    )
+
+
+def _pad_batch_to_fixed_size(
+    batch: torch.Tensor,
+    batch_size: int,
+) -> tuple[torch.Tensor, int]:
+    """Pad one batch to a fixed leading dimension for static inference."""
+    actual_batch_size = int(batch.shape[0])
+    if actual_batch_size <= 0:
+        raise ValueError("batch must contain at least one sample.")
+    if actual_batch_size > batch_size:
+        raise ValueError("actual batch size cannot exceed target batch size.")
+    if actual_batch_size == batch_size:
+        return batch, actual_batch_size
+
+    pad_shape = (batch_size - actual_batch_size, *batch.shape[1:])
+    padding = batch.new_zeros(pad_shape)
+    return torch.cat((batch, padding), dim=0), actual_batch_size
+
+
+def _apply_split_fusion_head(
+    head: nn.Sequential,
+    left_features: torch.Tensor,
+    right_features: torch.Tensor,
+) -> torch.Tensor:
+    """Apply a binary head without concatenating the branch features.
+
+    Parameters
+    ----------
+    head : nn.Sequential
+        Head beginning with a linear layer and ending with one output unit.
+    left_features : torch.Tensor
+        Left branch features with shape ``(batch, left_dim)``.
+    right_features : torch.Tensor
+        Right branch features with shape ``(batch, right_dim)``.
+
+    Returns
+    -------
+    torch.Tensor
+        Logits with shape ``(batch,)``.
+
+    Raises
+    ------
+    RuntimeError
+        If the head layout is unexpected.
+    """
+    if len(head) == 0:
+        raise RuntimeError("fusion head must not be empty.")
+    first_layer = head[0]
+    if not isinstance(first_layer, nn.Linear):
+        raise RuntimeError("fusion head must start with a linear layer.")
+
+    left_dim = left_features.shape[1]
+    right_dim = right_features.shape[1]
+    expected_in_features = int(first_layer.in_features)
+    if left_dim + right_dim != expected_in_features:
+        raise RuntimeError("fusion features do not match the head input width.")
+
+    left_weight = first_layer.weight[:, :left_dim]
+    right_weight = first_layer.weight[:, left_dim:]
+    mixed = F.linear(left_features, left_weight)
+    mixed = mixed + F.linear(right_features, right_weight)
+    if first_layer.bias is not None:
+        mixed = mixed + first_layer.bias
+
+    for layer in list(head.children())[1:]:
+        mixed = layer(mixed)
+
+    if mixed.ndim != 2 or mixed.shape[1] != 1:
+        raise RuntimeError("fusion head must end with output width 1.")
+    return mixed[:, 0]
+
+
 class CnnFeatureReadout(nn.Module):
     """Readout over Conv1D features with position-sensitive options.
 
@@ -153,9 +271,9 @@ class CnnFeatureReadout(nn.Module):
     output_channels : int
         Channel width of the convolution stack output.
     head_type : str, default="gap"
-        Readout mode. ``"gap"`` uses global average pooling and ``"center"``
-        reads the center position, averaging the two middle positions for
-        even-length feature maps.
+        Readout mode. ``"gap"`` uses mean pooling over the length dimension
+        and ``"center"`` reads the center position, averaging the two middle
+        positions for even-length feature maps.
     """
 
     def __init__(
@@ -195,9 +313,7 @@ class CnnFeatureReadout(nn.Module):
         if x.shape[2] <= 0:
             raise ValueError("x length dimension must be positive.")
         if self.head_type == "gap":
-            if self.gap is None:
-                raise RuntimeError("GAP readout is not initialized.")
-            return self.gap(x).squeeze(-1)
+            return x.mean(dim=-1)
 
         center_right = x.shape[2] // 2
         if x.shape[2] % 2 == 1:
@@ -371,7 +487,7 @@ class BasicSpliceCNN(nn.Module):
         """
         y = self.conv_layers(x)
         features = self.readout(y)
-        return self.fc(features).squeeze(-1)
+        return self.fc(features)[:, 0]
 
 
 @torch.no_grad()
@@ -407,6 +523,11 @@ def score_sequences(
     -------
     np.ndarray
         Probability vector with shape ``(n_sequences,)``.
+
+    Notes
+    -----
+    The final batch is zero-padded to keep the leading batch dimension static
+    for ``torch.compile`` / cudagraph inference.
     """
     if not sequences:
         return np.array([])
@@ -417,7 +538,10 @@ def score_sequences(
 
     all_probs: list[np.ndarray] = []
     for index in range(0, len(x), batch_size):
-        batch_x = x[index : index + batch_size]
+        batch_x, valid_batch_size = _pad_batch_to_fixed_size(
+            x[index : index + batch_size],
+            batch_size,
+        )
         if use_amp and device == "cuda" and amp_dtype is not None:
             amp_context: ContextManager[object] = torch.autocast(
                 device_type="cuda",
@@ -428,7 +552,9 @@ def score_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(batch_x)
-        probs = torch.sigmoid(logits).float().detach().cpu().numpy()
+        probs = torch.sigmoid(logits).float().detach().cpu().numpy()[
+            :valid_batch_size
+        ]
         all_probs.append(probs)
 
     return np.concatenate(all_probs)

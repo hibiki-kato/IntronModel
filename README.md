@@ -37,10 +37,10 @@ python src/run_model.py \
   --acceptor_len 100
 ```
 
-Wrapper run (config-only; edit `run/run_cnn.sh` CONFIG first):
+Wrapper run (config-only; edit `run/run_cnn_v2.sh` CONFIG first):
 
 ```bash
-bash run/run_cnn.sh
+bash run/run_cnn_v2.sh
 ```
 
 Optional data preparation helper:
@@ -107,26 +107,47 @@ Registered in `src/models/registry.py`:
 
 Config-only training/inference wrappers:
 
-- `run/run_cnn.sh`
-- `run/run_cnn_pair.sh`
-- `run/run_cnn_resdil.sh`
-- `run/run_tcn.sh`
-- `run/run_bert.sh`
-- `run/run_dnabert.sh`
-- `run/reservoir.sh`
+- `run/run_cnn_v2.sh`
+- `run/run_cnn_v2_pair.sh`
+- `run/run_isolated_mmus_rna60_pipeline.sh`
+- `run/tune_cnn_v2_time.sh`
+- `run/tune_cnn_v2_pair_time.sh`
+
+Archived wrappers:
+
+- `archive/run/bert/run_bert.sh`
+- `archive/run/bert/tune_bert.sh`
+- `archive/run/bert/tune_bert_time.sh`
+- `archive/run/bilstm_pair/run_bilstm_pair.sh`
+- `archive/run/bilstm_pair/tune_bilstm_pair_time.sh`
+- `archive/run/cnn/run_cnn_resdil.sh`
+- `archive/run/cnn/tune_cnn_resdil.sh`
+- `archive/run/cnn/tune_cnn_resdil_time.sh`
+- `archive/run/dnabert/run_dnabert.sh`
+- `archive/run/dnabert/run_dnabert_pair.sh`
+- `archive/run/dnabert/tune_dnabert.sh`
+- `archive/run/dnabert/tune_dnabert_pair.sh`
+- `archive/run/dnabert/tune_dnabert_pair_time.sh`
+- `archive/run/dnabert/tune_dnabert_time.sh`
+- `archive/run/markov_xgboost/run_markov_xgboost.sh`
+- `archive/run/markov_xgboost/tune_markov_xgboost.sh`
+- `archive/run/reservoir/run_reservoir.sh`
+- `archive/run/reservoir/tune_reservoir.sh`
+- `archive/run/reservoir/tune_reservoir_time.sh`
+- `archive/run/tcn/run_tcn.sh`
+- `archive/run/tcn/tune_tcn.sh`
+- `archive/run/tcn/tune_tcn_time.sh`
 
 Common wrapper controls:
 
 - `SKIP_TRAINING=1`
 - `CONTINUE_TRAINING=1`
 - `TRAIN_ONLY=1`
-- `USE_TUNED_HPARAMS=off|auto|required` (except `run/run_dnabert.sh`)
+- `USE_TUNED_HPARAMS=off|auto|required` (except `archive/run/dnabert/run_dnabert.sh`)
 - `EPOCHS=<int|auto>` with `MAX_EPOCHS`, `EARLY_STOP_PATIENCE`,
   `EARLY_STOP_MIN_DELTA`
-- `SEQUENCE_TRANSFORM=none|mask_outside_intron_n` (`run/run_cnn.sh`,
-  `run/run_cnn_pair.sh`)
-- CNN-family kernel config uses layer-wise lists:
-  `KERNEL_SIZES`, `DONOR_KERNEL_SIZES`, `ACCEPTOR_KERNEL_SIZES`
+- Archived wrappers keep model-specific controls in their own scripts under
+  `archive/run/`.
 
 Transcript score TSV compatibility:
 
@@ -138,7 +159,8 @@ Transcript score TSV compatibility:
 
 Reservoir-specific notes:
 
-- `run/reservoir.sh` defaults to `INTRONMODEL_RC_STATE_BUDGET_GB="auto"`.
+- `archive/run/reservoir/run_reservoir.sh` defaults to
+  `INTRONMODEL_RC_STATE_BUDGET_GB="auto"`.
 - `auto` resolves a state-memory budget from detected system RAM.
 - Reservoir training uses a Torch ESN state generator and a scikit-learn
   readout (`lin|mlp|svm`).
@@ -155,7 +177,7 @@ Data utility wrappers:
 - `run/make_labeled_intron_eval_data.sh`
 - `run/eval_intron_pr_auc.sh`
 
-`run/run_dnabert.sh` variant switch:
+`archive/run/dnabert/run_dnabert.sh` variant switch:
 
 - `DNABERT_VARIANT="2"` -> `--model dnabert2`
 - `DNABERT_VARIANT="6"` -> `--model dnabert6`
@@ -168,16 +190,13 @@ DNABERT tokenizer input mode is selected automatically in `src/models/dnabert.py
 Training/inference wrappers follow a top-first workflow:
 
 - edit the top `CONFIG (edit here)` block first
-- then run without arguments (`bash run/run_cnn.sh`, etc.)
+- then run without arguments (`bash run/run_cnn_v2.sh`, etc.)
 
 Tuning wrappers (`run/tune_*.sh`) follow the same pattern:
 
 - edit the top `CONFIG (edit here)` block first
-- then run without arguments (`bash run/tune_cnn.sh`, etc.)
-- pair time-budget tuning: `bash run/tune_cnn_pair_time.sh`
-- CNN-family tuning now samples architecture with independent pools:
-  `conv_depth` (layer count), `channel_candidates`, and `kernel_candidates`
-  (`donor_*` / `acceptor_*` variants for `cnn_pair`)
+- then run without arguments (`bash run/tune_cnn_v2_time.sh`, etc.)
+- pair time-budget tuning: `bash run/tune_cnn_v2_pair_time.sh`
 - OOM protection in tuning uses both batch-size backoff and
   `max_model_params` pre-filtering in the generated search config
 - CNN-family tuning supports `MAX_MODEL_PARAMS=auto`; it estimates a safe

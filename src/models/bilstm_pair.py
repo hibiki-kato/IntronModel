@@ -65,6 +65,7 @@ from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
 )
+from models.cnn_common import _apply_split_fusion_head
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -604,13 +605,20 @@ class PairBiLSTMClassifier(nn.Module):
             if self.donor_encoder is None or self.acceptor_encoder is None:
                 raise RuntimeError("separate encoders are not initialized.")
             donor_features = self.donor_encoder(donor_ids, donor_lengths)
-            acceptor_features = self.acceptor_encoder(acceptor_ids, acceptor_lengths)
-            features = torch.cat([donor_features, acceptor_features], dim=1)
+            acceptor_features = self.acceptor_encoder(
+                acceptor_ids,
+                acceptor_lengths,
+            )
+            return _apply_split_fusion_head(
+                self.mlp,
+                donor_features,
+                acceptor_features,
+            )
         else:
             if self.concat_encoder is None:
                 raise RuntimeError("concat encoder is not initialized.")
             features = self.concat_encoder(concat_ids, concat_lengths)
-        return self.mlp(features).squeeze(-1)
+        return self.mlp(features)[:, 0]
 
 
 def _resolve_pair_train_params(model_args: argparse.Namespace) -> PairTrainParams:

@@ -627,7 +627,7 @@ class ReservoirReadout(nn.Module):
             if running_logit_sum is not None:
                 if self.step_head is None:
                     raise RuntimeError("logit_sum pooling requires step_head.")
-                step_logits = self.step_head(state).squeeze(-1)
+                step_logits = self.step_head(state)[:, 0]
                 running_logit_sum = running_logit_sum + (
                     step_logits * keep_mask[:, step]
                 )
@@ -636,8 +636,8 @@ class ReservoirReadout(nn.Module):
                     raise RuntimeError(
                         "weighted_logit_sum requires step_head and attn_proj."
                     )
-                weighted_scores[:, step] = self.attn_proj(state).squeeze(-1)
-                weighted_logits[:, step] = self.step_head(state).squeeze(-1)
+                weighted_scores[:, step] = self.attn_proj(state)[:, 0]
+                weighted_logits[:, step] = self.step_head(state)[:, 0]
 
         keep_mask_3d = keep_mask.unsqueeze(2)
 
@@ -645,23 +645,20 @@ class ReservoirReadout(nn.Module):
             if running_last is None:
                 raise RuntimeError("last pooling state was not initialized.")
             pooled = running_last
-            logits = self.readout(pooled).squeeze(-1)
-            return logits
+            return self.readout(pooled)[:, 0]
 
         if self.pooling == "mean":
             if running_sum is None:
                 raise RuntimeError("mean pooling state was not initialized.")
             denom = keep_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
             pooled = running_sum / denom
-            logits = self.readout(pooled).squeeze(-1)
-            return logits
+            return self.readout(pooled)[:, 0]
 
         if self.pooling == "max":
             if running_max is None:
                 raise RuntimeError("max pooling state was not initialized.")
             pooled = running_max
-            logits = self.readout(pooled).squeeze(-1)
-            return logits
+            return self.readout(pooled)[:, 0]
 
         if self.pooling == "mean_max":
             if running_sum is None or running_max is None:
@@ -670,20 +667,18 @@ class ReservoirReadout(nn.Module):
             avg = running_sum / denom
             mx = running_max
             pooled = torch.cat([avg, mx], dim=1)
-            logits = self.readout(pooled).squeeze(-1)
-            return logits
+            return self.readout(pooled)[:, 0]
 
         if self.pooling == "attention":
             if self.attn_proj is None:
                 raise RuntimeError("attention pooling requires attn_proj.")
             if states is None:
                 raise RuntimeError("attention pooling requires intermediate states.")
-            scores = self.attn_proj(states).squeeze(-1)
+            scores = self.attn_proj(states)[:, 0]
             scores = scores.masked_fill(keep_mask == 0.0, -1e9)
             weights = torch.softmax(scores, dim=1)
             pooled = (weights.unsqueeze(2) * states).sum(dim=1)
-            logits = self.readout(pooled).squeeze(-1)
-            return logits
+            return self.readout(pooled)[:, 0]
 
         if self.pooling == "logit_sum":
             if running_logit_sum is None:
@@ -1448,7 +1443,8 @@ def train_task_model(
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
-                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                        f"(patience={early_stop_patience}, "
+                        f"min_delta={early_stop_min_delta:g})"
                     )
                     break
 
