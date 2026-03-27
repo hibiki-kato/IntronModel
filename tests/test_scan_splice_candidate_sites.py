@@ -61,6 +61,10 @@ def test_load_best_checkpoint_paths_follows_source_configs(
     acceptor_best = tmp_path / "acceptor" / "best_config.json"
     donor_ckpt = tmp_path / "model" / "donor.pt"
     acceptor_ckpt = tmp_path / "model" / "acceptor.pt"
+    donor_ckpt.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_ckpt.parent.mkdir(parents=True, exist_ok=True)
+    donor_ckpt.write_bytes(b"donor")
+    acceptor_ckpt.write_bytes(b"acceptor")
 
     _write_json(
         donor_best,
@@ -90,6 +94,49 @@ def test_load_best_checkpoint_paths_follows_source_configs(
     resolved = scan.load_best_checkpoint_paths(summary_best)
 
     assert resolved == (donor_ckpt.resolve(), acceptor_ckpt.resolve())
+
+
+def test_load_best_checkpoint_paths_falls_back_to_local_model_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve missing absolute checkpoint paths via the local model root."""
+    local_root = tmp_path / "model"
+    donor_checkpoint = (
+        local_root
+        / "Dmel"
+        / "donor"
+        / "cnn_v2_test_donor.pt"
+    )
+    acceptor_checkpoint = (
+        local_root
+        / "Dmel"
+        / "acceptor"
+        / "cnn_v2_test_acceptor.pt"
+    )
+    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    donor_checkpoint.write_bytes(b"donor")
+    acceptor_checkpoint.write_bytes(b"acceptor")
+
+    payload = {
+        "status": "ok",
+        "donor_checkpoint_path": (
+            "/export/hibiki/intronmodel/model/Dmel/donor/cnn_v2_test_donor.pt"
+        ),
+        "acceptor_checkpoint_path": (
+            "/export/hibiki/intronmodel/model/Dmel/acceptor/"
+            "cnn_v2_test_acceptor.pt"
+        ),
+    }
+    best_config = tmp_path / "best_config.json"
+    _write_json(best_config, payload)
+
+    monkeypatch.setattr(scan, "model_root", lambda: str(local_root))
+
+    resolved = scan.load_best_checkpoint_paths(best_config)
+
+    assert resolved == (donor_checkpoint.resolve(), acceptor_checkpoint.resolve())
 
 
 def test_main_writes_output_files_and_skips_edges(

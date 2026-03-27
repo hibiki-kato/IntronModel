@@ -163,6 +163,7 @@ def test_aggregate_pair_transcript_scores_keeps_5col_compatibility() -> None:
             "Score_donor": pytest.approx(math.log10(0.3)),
             "Score_acceptor": pytest.approx(math.log10(0.3)),
             "trans_score": pytest.approx(math.log10(0.3)),
+            "_score_space": "log10",
         }
     ]
 
@@ -227,6 +228,7 @@ def test_aggregate_transcript_scores_uses_pair_rows_when_available() -> None:
             "Score_donor": pytest.approx(math.log10(0.25)),
             "Score_acceptor": pytest.approx(math.log10(0.25)),
             "trans_score": pytest.approx(math.log10(0.25)),
+            "_score_space": "log10",
         }
     ]
 
@@ -270,6 +272,41 @@ def test_write_intron_scores_outputs_eight_decimal_places(
     lines = output_tsv.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "intron_id\tscore\tlabel"
     assert lines[1] == "uintron_00000001\t-0.908485\t"
+
+
+def test_write_intron_scores_preserves_zero_log10_scores(
+    tmp_path: Path,
+) -> None:
+    """Keep zero-valued log10 intron scores as ``0.000000``."""
+    output_tsv = tmp_path / "intron_zero.tsv"
+    rows = build_intron_scores(
+        site_score_rows=[
+            {
+                "transcript_id": "tx1",
+                "intron_index": 1,
+                "site_type": "donor",
+                "score": 0.5,
+            },
+            {
+                "transcript_id": "tx1",
+                "intron_index": 1,
+                "site_type": "acceptor",
+                "score": 0.5,
+            },
+        ],
+        intron_score_op="+",
+    )
+
+    assert rows[0]["score"] == pytest.approx(0.0)
+    assert rows[0]["_score_space"] == "log10"
+
+    write_intron_scores(
+        str(output_tsv),
+        rows,
+        labels={("tx1", 1): 1},
+    )
+    lines = output_tsv.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "tx1\t0.000000\t1"
 
 
 def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
@@ -373,6 +410,33 @@ def test_write_site_scores_keeps_pair_rows_as_blank_scores(tmp_path: Path) -> No
     assert lines[1] == "tx_pair\t3\t\t\t"
 
 
+def test_write_transcript_scores_preserves_zero_log10_scores(
+    tmp_path: Path,
+) -> None:
+    """Keep zero-valued log10 transcript scores as ``0.000000``."""
+    output_tsv = tmp_path / "transcript_zero.tsv"
+    rows = aggregate_pair_transcript_scores(
+        site_score_rows=[
+            {
+                "transcript_id": "tx1",
+                "intron_index": 1,
+                "site_type": "pair",
+                "score": 1.0,
+            }
+        ],
+        transcript_score_agg="min",
+    )
+
+    assert rows[0]["Score_donor"] == pytest.approx(0.0)
+    assert rows[0]["Score_acceptor"] == pytest.approx(0.0)
+    assert rows[0]["trans_score"] == pytest.approx(0.0)
+    assert rows[0]["_score_space"] == "log10"
+
+    write_transcript_scores(str(output_tsv), rows)
+    lines = output_tsv.read_text(encoding="utf-8").splitlines()
+    assert lines[1] == "tx1\t1\t0.000000\t0.000000\t0.000000"
+
+
 def test_build_intron_scores_uses_pair_or_donor_acceptor() -> None:
     """Build intron scores from mixed donor/acceptor and pair rows."""
     site_rows: list[dict[str, object]] = [
@@ -401,10 +465,12 @@ def test_build_intron_scores_uses_pair_or_donor_acceptor() -> None:
             "transcript_id": "tx1",
             "intron_index": 1,
             "score": pytest.approx(math.log10(0.7)),
+            "_score_space": "log10",
         },
         {
             "transcript_id": "tx2",
             "intron_index": 2,
             "score": pytest.approx(math.log10(0.7)),
+            "_score_space": "log10",
         },
     ]

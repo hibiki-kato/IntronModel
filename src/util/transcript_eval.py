@@ -16,6 +16,8 @@ from typing import Dict, Iterable, List, Mapping, Sequence
 INTRON_SCORE_OP_CHOICES: tuple[str, ...] = ("+", "*", "harmonic", "min")
 TRANSCRIPT_SCORE_COLUMN: str = "trans_score"
 SCORE_OUTPUT_PRECISION: int = 6
+SCORE_SPACE_LOG10: str = "log10"
+SCORE_SPACE_FIELD: str = "_score_space"
 LEGACY_TRANSCRIPT_SCORE_COLUMNS: tuple[str, ...] = (
     "min_donor_plus_acceptor",
     "min_donor_times_acceptor",
@@ -103,6 +105,11 @@ def _row_scores_look_like_log10(scores: Sequence[float]) -> bool:
     if not scores:
         return False
     return any(score < 0.0 or score > 1.0 for score in scores)
+
+
+def _row_has_log10_score_space(row: Mapping[str, object]) -> bool:
+    """Return whether one row is explicitly marked as log10-valued."""
+    return str(row.get(SCORE_SPACE_FIELD, "")).strip().lower() == SCORE_SPACE_LOG10
 
 
 def _normalize_scores_to_log10(scores: Sequence[float]) -> list[float]:
@@ -302,6 +309,7 @@ def aggregate_transcript_scores(
                 "Score_donor": donor_score,
                 "Score_acceptor": acceptor_score,
                 TRANSCRIPT_SCORE_COLUMN: transcript_score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
 
@@ -380,6 +388,7 @@ def aggregate_pair_transcript_scores(
                 "Score_donor": min_score,
                 "Score_acceptor": min_score,
                 TRANSCRIPT_SCORE_COLUMN: transcript_score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
 
@@ -444,6 +453,7 @@ def build_intron_scores(
                 "transcript_id": transcript_id,
                 "intron_index": intron_index,
                 "score": intron_score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return results
@@ -490,6 +500,7 @@ def write_intron_scores(
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(["intron_id", "score", "label"])
         for row in rows:
+            log10_score_space = _row_has_log10_score_space(row)
             intron_id = str(row.get("intron_id", "")).strip()
             transcript_id = str(row.get("transcript_id", "")).strip()
             intron_index_text = str(row.get("intron_index", "")).strip()
@@ -505,7 +516,7 @@ def write_intron_scores(
                 label = label_map.get((transcript_id, int(intron_index_text)))
             score = float(row["score"])
             label_text = "" if label is None else str(int(label))
-            if _row_scores_look_like_log10([score]):
+            if log10_score_space or _row_scores_look_like_log10([score]):
                 score_text = _format_log10_score(score)
             else:
                 score_text = _format_log10_score(probability_to_log10_score(score))
@@ -560,12 +571,13 @@ def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]) -> N
             f"Score_acceptor\t{TRANSCRIPT_SCORE_COLUMN}\n"
         )
         for r in rows:
+            log10_score_space = _row_has_log10_score_space(r)
             raw_scores = [
                 float(r["Score_donor"]),
                 float(r["Score_acceptor"]),
                 _get_transcript_score(r),
             ]
-            if _row_scores_look_like_log10(raw_scores):
+            if log10_score_space or _row_scores_look_like_log10(raw_scores):
                 donor_text = _format_log10_score(float(r["Score_donor"]))
                 acceptor_text = _format_log10_score(float(r["Score_acceptor"]))
                 transcript_text = _format_log10_score(_get_transcript_score(r))
@@ -598,7 +610,8 @@ def write_site_scores(
     Output schema:
     ``transcript_id``, ``intron_index``, ``donor_score``,
     ``acceptor_score``, ``label``.
-    Donor/acceptor columns contain per-site probabilities directly. When
+    Donor/acceptor columns are written in log10 space. Probability inputs are
+    converted to log10 values, while log10 inputs are preserved. When
     `labels` is provided, `label` is filled from
     ``(transcript_id, intron_index) -> {0,1}`` mapping.
     """

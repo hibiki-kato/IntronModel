@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from models.cnn import load_task_model, score_sequences
+from util.data_proc import model_root
 from util.checkpoint_io import extract_task_checkpoint_path, read_json_object
 from util.model_runtime import pick_device
 
@@ -253,6 +254,37 @@ def _resolve_json_path(raw_path: str, base_dir: Path) -> Path:
     return (base_dir / path).resolve()
 
 
+def _resolve_existing_checkpoint_path(
+    checkpoint_path: Path,
+    *,
+    model_root_dir: Path,
+) -> Path:
+    """Resolve one checkpoint path, falling back to the local model root."""
+    if checkpoint_path.is_file():
+        return checkpoint_path.resolve()
+
+    path_parts = checkpoint_path.parts
+    if "model" in path_parts:
+        model_index = path_parts.index("model")
+        relative_parts = path_parts[model_index + 1 :]
+        if relative_parts:
+            candidate = model_root_dir.joinpath(*relative_parts)
+            if candidate.is_file():
+                return candidate.resolve()
+
+    basename = checkpoint_path.name
+    if basename != "":
+        candidates = sorted(
+            model_root_dir.rglob(basename),
+            key=lambda path: (len(path.parts), str(path)),
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+
+    raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+
 def load_best_checkpoint_paths(best_config_path: Path) -> tuple[Path, Path]:
     """Load donor and acceptor checkpoint paths from one best-config payload.
 
@@ -293,7 +325,17 @@ def load_best_checkpoint_paths(best_config_path: Path) -> tuple[Path, Path]:
         base_dir=best_config_path.parent,
     )
     if donor_checkpoint is not None and acceptor_checkpoint is not None:
-        return donor_checkpoint, acceptor_checkpoint
+        root_dir = Path(model_root()).resolve()
+        return (
+            _resolve_existing_checkpoint_path(
+                donor_checkpoint,
+                model_root_dir=root_dir,
+            ),
+            _resolve_existing_checkpoint_path(
+                acceptor_checkpoint,
+                model_root_dir=root_dir,
+            ),
+        )
 
     source_donor_best_config = payload.get("source_donor_best_config")
     source_acceptor_best_config = payload.get("source_acceptor_best_config")
@@ -336,7 +378,17 @@ def load_best_checkpoint_paths(best_config_path: Path) -> tuple[Path, Path]:
             "Unable to resolve donor and acceptor checkpoint paths from "
             f"{best_config_path}."
         )
-    return donor_checkpoint, acceptor_checkpoint
+    root_dir = Path(model_root()).resolve()
+    return (
+        _resolve_existing_checkpoint_path(
+            donor_checkpoint,
+            model_root_dir=root_dir,
+        ),
+        _resolve_existing_checkpoint_path(
+            acceptor_checkpoint,
+            model_root_dir=root_dir,
+        ),
+    )
 
 
 def _load_window_len_from_checkpoint(

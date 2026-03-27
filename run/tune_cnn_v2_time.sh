@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="10"
+TIME_BUDGET_MINUTES="60"
 
 INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
@@ -65,6 +65,9 @@ HEAD_TYPE="gap"
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
+	"Athal"
+	"Dmel"
+	"Hsap"
 	"Mmus"
 )
 

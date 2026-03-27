@@ -1967,6 +1967,52 @@ def test_write_best_config_includes_hparam_context_and_objective_best_epoch(
     assert payload["objective_best_epoch"] == 6
 
 
+def test_maybe_update_global_best_logs_score_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "best_config.json"
+    row = hparam_search.TrialResult(
+        phase="full",
+        trial_id=1,
+        status="success",
+        gpu_id=None,
+        sampled_params={"batch_size": 512},
+        effective_batch_size=512,
+        oom_retries=0,
+        donor_pr_auc=0.95,
+        acceptor_pr_auc=None,
+        mean_pr_auc=0.95,
+        objective_metric="mean_pr_auc",
+        objective_score=0.95,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json=str(tmp_path / "metrics.json"),
+        log_file="trial.log",
+    )
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_read_best_objective_score",
+        lambda *args, **kwargs: 0.94,
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "write_best_config",
+        lambda *args, **kwargs: None,
+    )
+
+    hparam_search.maybe_update_global_best(
+        global_best_path=output_path,
+        best_row=row,
+    )
+
+    captured = capsys.readouterr()
+    assert "0.940000 -> 0.950000" in captured.out
+
+
 def test_build_fixed_run_args_context_excludes_search_and_runtime_keys() -> None:
     fixed_run_args = hparam_search._build_fixed_run_args_context(
         base_args={
@@ -4023,6 +4069,61 @@ def test_build_trial_params_materializes_stride_pool_without_arch_helper_keys(
             "max_pool_size": 2,
         }
     ]
+
+
+def test_build_trial_params_rejects_invalid_cnn_resdil_pool_schedule(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "conv_channels": {
+                "type": "categorical",
+                "values": ["64,128,256"],
+            },
+            "kernel_sizes": {
+                "type": "categorical",
+                "values": ["7,7,7"],
+            },
+            "max_pool_size": {"type": "categorical", "values": [2]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=23,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_resdil",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 3,
+            "acceptor_len": 3,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    with pytest.raises(ValueError, match="valid architecture"):
+        _ = hparam_search.build_trial_params(
+            config=config,
+            phase="quick",
+            count=1,
+            seed_offset=0,
+        )
 
 
 @pytest.mark.parametrize("fusion_mode", ["early", "mid"])

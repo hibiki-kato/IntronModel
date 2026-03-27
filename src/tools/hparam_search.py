@@ -3052,10 +3052,11 @@ def _resolve_cnn_architecture_validation_model_name(
     Returns
     -------
     str
-        One of ``"cnn"``, ``"cnn_pair"``, or ``""`` when no shape check applies.
+        One of ``"cnn"``, ``"cnn_pair"``, ``"cnn_resdil"``, or ``""`` when no
+        shape check applies.
     """
     normalized_model = model_name.strip().lower()
-    if normalized_model in {"cnn", "cnn_pair"}:
+    if normalized_model in {"cnn", "cnn_pair", "cnn_resdil"}:
         return normalized_model
     if normalized_model == "cnn_v2":
         pair_mode_raw = sampled_params.get("pair_mode")
@@ -3405,6 +3406,27 @@ def _apply_cnn_length_schedule(
     return current
 
 
+def _apply_cnn_resdil_length_schedule(
+    length: int,
+    kernel_sizes: Sequence[int],
+    max_pool_size: int,
+) -> int:
+    """Apply one ``cnn_resdil`` stack schedule and return the resulting length."""
+    current = length
+    if current <= 0:
+        return 0
+    if not kernel_sizes:
+        return current
+    for kernel_size in kernel_sizes:
+        if kernel_size <= 0 or kernel_size % 2 == 0:
+            return 0
+        if max_pool_size > 1:
+            current = current // max_pool_size
+            if current <= 0:
+                return 0
+    return current
+
+
 def _is_valid_cnn_architecture(
     *,
     model_name: str,
@@ -3443,7 +3465,7 @@ def _is_valid_cnn_architecture(
     donor_len = _to_positive_int(donor_len_raw)
     acceptor_len = _to_positive_int(acceptor_len_raw)
 
-    if validation_model_name == "cnn":
+    if validation_model_name in {"cnn", "cnn_resdil"}:
         train_target_raw = sampled_params.get("train_target")
         if train_target_raw is None:
             train_target_raw = base_args.get("train_target", "both")
@@ -3476,6 +3498,31 @@ def _is_valid_cnn_architecture(
         )
         if kernel_sizes is None:
             kernel_sizes = [7] * depth
+
+        if validation_model_name == "cnn_resdil":
+            if any(value % 2 == 0 for value in kernel_sizes):
+                return False
+            if train_target in {"both", "donor"} and donor_len is not None:
+                if (
+                    _apply_cnn_resdil_length_schedule(
+                        donor_len,
+                        kernel_sizes,
+                        max_pool_size,
+                    )
+                    <= 0
+                ):
+                    return False
+            if train_target in {"both", "acceptor"} and acceptor_len is not None:
+                if (
+                    _apply_cnn_resdil_length_schedule(
+                        acceptor_len,
+                        kernel_sizes,
+                        max_pool_size,
+                    )
+                    <= 0
+                ):
+                    return False
+            return True
 
         if train_target in {"both", "donor"} and donor_len is not None:
             if (
@@ -5334,10 +5381,14 @@ def maybe_update_global_best(
         fallback_validation_protocol=fallback_validation_protocol,
         hparam_context=hparam_context,
     )
+    previous_text = "n/a"
+    if previous_score is not None:
+        previous_text = f"{previous_score:.6f}"
     print(
         "[hparam_search] Updated global best config: "
         f"{global_best_path} "
-        f"({best_row.objective_metric}={best_row.objective_score:.6f})",
+        f"({best_row.objective_metric}: {previous_text} -> "
+        f"{best_row.objective_score:.6f})",
         flush=True,
     )
 
