@@ -19,14 +19,8 @@ INTRONMODEL_AUTO_TMUX=on
 VAL_FRAC="0.2"
 OBJECTIVE_METRIC="max_f1"
 # Optional explicit training-data overrides.
-TRAIN_POS_PATH=""
-TRAIN_NEG_PATH=""
 CHEAT_MODE="off"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
 BASE_SEED="1337"
-# Deprecated: SEED_LIST is ignored. Only BASE_SEED is used.
-SEED_LIST=""
 PROCESS_TITLE="ETA"
 
 QUICK_TRIALS="16"
