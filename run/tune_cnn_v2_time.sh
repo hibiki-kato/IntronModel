@@ -14,14 +14,17 @@ fi
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="30"
 
-INTRONMODEL_AUTO_TMUX=on
+INTRONMODEL_AUTO_TMUX="off"
 # Validation / objective controls.
 VAL_FRAC="0.2"
 OBJECTIVE_METRIC="max_f1"
-# Optional explicit training-data overrides.
 CHEAT_MODE="off"
 BASE_SEED="1337"
 PROCESS_TITLE="ETA"
+TRAIN_POS_PATH=""
+TRAIN_NEG_PATH=""
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
 
 QUICK_TRIALS="16"
 QUICK_EPOCHS="2"
@@ -165,7 +168,7 @@ resolve_seed_list() {
 	intronmodel_resolve_seed_list \
 		"tune_cnn_v2_time.sh" \
 		"${BASE_SEED}" \
-		"${SEED_LIST}" \
+		"" \
 		"${PYTHON_BIN}"
 }
 
