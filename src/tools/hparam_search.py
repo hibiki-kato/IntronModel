@@ -5243,6 +5243,19 @@ def build_trial_params(
     return sampled
 
 
+def _prepend_full_recheck_trial_params(
+    trial_params: list[dict[str, Scalar]],
+    priority_params: dict[str, Scalar],
+) -> list[dict[str, Scalar]]:
+    """Return trial params with one explicit full recheck prepended.
+
+    The returned list always contains one additional front-loaded trial for the
+    recheck. This intentionally keeps the recheck separate from the regular
+    top-k full set so the queue length increases by one.
+    """
+    return [dict(priority_params), *[dict(params) for params in trial_params]]
+
+
 def write_best_config(
     path: Path,
     row: Optional[TrialResult],
@@ -5598,6 +5611,49 @@ def run_search(config: SearchConfig) -> int:
                         flush=True,
                     )
 
+    global_best_recheck_params: Optional[dict[str, Scalar]] = None
+    global_best_recheck_context_mismatch = False
+    if config.seed_best_config_path is None and config.global_best_config_path is not None:
+        try:
+            global_best_config = load_seed_best_config(
+                path=config.global_best_config_path,
+                search_space=config.search_space,
+                base_args=config.base_args,
+                default_objective_metric=config.objective_metric,
+            )
+        except ValueError as exc:
+            print(
+                f"[hparam_search] Global best config ignored due to parse error: {exc}",
+                flush=True,
+            )
+        else:
+            if (
+                global_best_config is not None
+                and global_best_config.hparam_context is not None
+            ):
+                global_best_recheck_context_mismatch = not _contexts_match(
+                    global_best_config.hparam_context,
+                    current_hparam_context,
+                )
+                if global_best_recheck_context_mismatch:
+                    global_best_recheck_params = dict(global_best_config.sampled_params)
+                    score_text = (
+                        "-"
+                        if global_best_config.objective_score is None
+                        else f"{global_best_config.objective_score:.6f}"
+                    )
+                    epoch_text = (
+                        "-"
+                        if global_best_config.objective_best_epoch is None
+                        else str(global_best_config.objective_best_epoch)
+                    )
+                    print(
+                        "[hparam_search] Global best context changed. "
+                        "Schedule one full-phase recheck with stored best: "
+                        f"prev_score={score_text}, prev_best_epoch={epoch_text}.",
+                        flush=True,
+                    )
+
     quick_params = build_trial_params(
         config=config,
         phase="quick",
@@ -5696,15 +5752,23 @@ def run_search(config: SearchConfig) -> int:
             if len(selected_for_full) >= config.top_k:
                 break
         full_params = [dict(row.sampled_params) for row in selected_for_full]
-        injected_seed_full_recheck = False
+        base_full_count = len(full_params)
+        injected_best_full_recheck = False
         if seed_best_params is not None and seed_best_context_mismatch:
-            existing_param_keys = {
-                json.dumps(params, sort_keys=True, separators=(",", ":"))
-                for params in full_params
-            }
-            if seed_best_key not in existing_param_keys:
-                full_params.append(dict(seed_best_params))
-                injected_seed_full_recheck = True
+            full_params = _prepend_full_recheck_trial_params(
+                full_params,
+                seed_best_params,
+            )
+            injected_best_full_recheck = True
+        elif (
+            global_best_recheck_params is not None
+            and global_best_recheck_context_mismatch
+        ):
+            full_params = _prepend_full_recheck_trial_params(
+                full_params,
+                global_best_recheck_params,
+            )
+            injected_best_full_recheck = True
         full_count = len(full_params)
         full_execution_mode = _resolve_workload_execution_mode(
             phase_execution_mode=full_mode_policy,
@@ -5713,13 +5777,26 @@ def run_search(config: SearchConfig) -> int:
         )
         print(
             f"[hparam_search] Full phase: top_k={config.top_k}, "
-            f"selected={full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
+            f"selected={base_full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
             f"skipped_seed_context_match={skipped_seed_context_match}, "
-            f"injected_seed_full_recheck={injected_seed_full_recheck}, "
+            f"injected_best_full_recheck={injected_best_full_recheck}, "
             f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}, "
             f"execution_mode={full_execution_mode}.",
             flush=True,
         )
+        if injected_best_full_recheck:
+            recheck_source = (
+                "seed"
+                if seed_best_params is not None and seed_best_context_mismatch
+                else "global"
+            )
+            recheck_added = full_count - base_full_count
+            print(
+                "[hparam_search] Full recheck added! "
+                f"source={recheck_source}, base_full={base_full_count}, "
+                f"recheck=+{recheck_added}, full={full_count}.",
+                flush=True,
+            )
         if full_count > 0:
             full_rows = run_phase(
                 phase="full",

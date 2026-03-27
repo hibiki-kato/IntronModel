@@ -12,12 +12,12 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="1200"
+TIME_BUDGET_MINUTES="12"
 
-INTRONMODEL_AUTO_TMUX=on
+INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
 VAL_FRAC="0.25"
-OBJECTIVE_METRIC="pr_auc"
+OBJECTIVE_METRIC="f1_max"
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""

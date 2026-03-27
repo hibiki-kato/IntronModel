@@ -37,13 +37,13 @@ def test_build_transcript_features_list_format_padding_rules() -> None:
             "transcript_id": "tx1",
             "gene_id": "g1",
             "transcript_label": "1",
-            "intron_scores": "[0.25]",
+            "intron_scores": f"[{np.log(0.25)}]",
         },
         {
             "transcript_id": "tx2",
             "gene_id": "g2",
             "transcript_label": "0",
-            "intron_scores": "0.10,0.30",
+            "intron_scores": f"{np.log(0.10)},{np.log(0.30)}",
         },
     ]
 
@@ -52,27 +52,53 @@ def test_build_transcript_features_list_format_padding_rules() -> None:
 
     tx1 = by_tx["tx1"]
     assert tx1.n_introns == 1
-    assert tx1.min_score == 0.25
-    assert tx1.second_smallest_score == 0.25
-    assert tx1.third_smallest_score == 0.25
-    assert np.isclose(tx1.log_score_sum, np.log(0.25))
-    assert np.isclose(tx1.geometric_mean_score, 0.25)
-    assert np.isclose(tx1.harmonic_mean_score, 0.25)
+    assert np.isclose(tx1.min_score, np.log(0.25))
+    assert np.isclose(tx1.second_smallest_score, np.log(0.25))
+    assert np.isclose(tx1.third_smallest_score, np.log(0.25))
+    assert np.isclose(tx1.mean_score, np.log(0.25))
+    assert np.isclose(tx1.sum_score, np.log(0.25))
     assert tx1.variance_score == 0.0
-    assert tx1.count_above_0_8 == 0
 
     tx2 = by_tx["tx2"]
     assert tx2.n_introns == 2
-    assert tx2.min_score == 0.10
-    assert tx2.second_smallest_score == 0.30
-    assert tx2.third_smallest_score == 0.30
-    assert np.isclose(tx2.variance_score, 0.01)
-    assert np.isclose(tx2.coefficient_of_variation_score, 0.5)
-    assert np.isclose(tx2.harmonic_mean_score, 0.15)
-    assert np.isclose(tx2.lower_10_mean, 0.20)
-    assert np.isclose(tx2.upper_2_mean, 0.20)
-    assert np.isclose(tx2.mean_minus_min, 0.10)
-    assert np.isclose(tx2.max_minus_median, 0.10)
+    min_score = np.log(0.10)
+    max_score = np.log(0.30)
+    mean_score = (min_score + max_score) / 2.0
+    assert np.isclose(tx2.min_score, min_score)
+    assert np.isclose(tx2.second_smallest_score, max_score)
+    assert np.isclose(tx2.third_smallest_score, max_score)
+    assert np.isclose(tx2.mean_score, mean_score)
+    assert np.isclose(tx2.sum_score, min_score + max_score)
+    assert np.isclose(tx2.lower_2_mean, mean_score)
+    assert np.isclose(tx2.upper_2_mean, mean_score)
+    assert np.isclose(tx2.mean_minus_min, mean_score - min_score)
+    assert np.isclose(tx2.max_minus_median, max_score - mean_score)
+
+
+def test_log_score_feature_columns_are_trimmed() -> None:
+    removed_features = {
+        "coefficient_of_variation_score",
+        "fraction_below_0.1",
+        "fraction_below_0.2",
+        "fraction_below_0.3",
+        "fraction_below_0.5",
+        "fraction_above_0.8",
+        "fraction_above_0.9",
+        "log_score_sum",
+        "geometric_mean_score",
+        "harmonic_mean_score",
+        "lower_10_mean",
+        "lower_20_mean",
+        "count_below_0.1",
+        "count_below_0.2",
+        "count_below_0.3",
+        "count_below_0.5",
+        "count_above_0.8",
+        "count_above_0.9",
+    }
+
+    assert all(name not in FEATURE_COLUMNS for name in removed_features)
+    assert len(FEATURE_COLUMNS) == 24
 
 
 def test_build_transcript_features_long_format_nan_report() -> None:

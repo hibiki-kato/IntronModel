@@ -12,9 +12,9 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="30"
+TIME_BUDGET_MINUTES="10"
 
-INTRONMODEL_AUTO_TMUX="off"
+INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
 VAL_FRAC="0.2"
 OBJECTIVE_METRIC="max_f1"
@@ -70,8 +70,8 @@ JOB_ORDER=(
 
 # Tune site tasks independently.
 TARGET_ORDER=(
-	"donor"
 	"acceptor"
+	"donor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
