@@ -170,7 +170,7 @@ resolve_score_file() {
 	fi
 
 	case "${input_value}" in
-		cnn_v2 | cnn_pair_v2)
+		cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3)
 			latest_published="$(
 				intronmodel_resolve_latest_published_name \
 					"eval_trans_score.sh" \

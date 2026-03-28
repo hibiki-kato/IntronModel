@@ -83,6 +83,25 @@ def test_load_config_accepts_history_guided_settings(tmp_path: Path) -> None:
     assert loaded.guided_mutation_rate == pytest.approx(0.4)
 
 
+def test_load_config_accepts_reinforce_settings(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    config["search_algo"] = "reinforce"
+    config["history_top_n"] = 24
+    config["guided_random_fraction"] = 0.15
+    config["guided_mutation_rate"] = 0.45
+    config["reinforce_temperature"] = 0.5
+    config_path = tmp_path / "reinforce.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.search_algo == "reinforce"
+    assert loaded.history_top_n == 24
+    assert loaded.guided_random_fraction == pytest.approx(0.15)
+    assert loaded.guided_mutation_rate == pytest.approx(0.45)
+    assert loaded.reinforce_temperature == pytest.approx(0.5)
+
+
 def test_load_config_injects_site_window_len_defaults(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     base_args = dict(config["base_args"])
@@ -4106,6 +4125,93 @@ def test_build_trial_params_history_guided_is_reproducible(
         assert params in anchors
 
 
+def test_build_trial_params_reinforce_is_reproducible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    search_space = hparam_search._validate_search_space(config_dict["search_space"])
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=3,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=2026,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+        search_algo="reinforce",
+        history_top_n=8,
+        guided_random_fraction=0.0,
+        guided_mutation_rate=0.0,
+        reinforce_temperature=0.4,
+    )
+    history_trials = [
+        (0.83, {"batch_size": 512, "kernel_size": 7, "lr": 2e-4}),
+        (0.81, {"batch_size": 1024, "kernel_size": 9, "lr": 1.5e-4}),
+        (0.79, {"batch_size": 512, "kernel_size": 5, "lr": 1e-3}),
+    ]
+
+    reinforce_rows = [
+        {"batch_size": 512, "kernel_size": 7, "lr": 2e-4},
+        {"batch_size": 1024, "kernel_size": 9, "lr": 1.5e-4},
+        {"batch_size": 512, "kernel_size": 5, "lr": 1e-3},
+    ]
+    call_count = {"value": 0}
+
+    def _fake_reinforce(
+        *,
+        search_space: dict[str, hparam_search.SearchDimension],
+        seed: int,
+        history_trials: list[tuple[float, dict[str, hparam_search.Scalar]]],
+        random_fraction: float,
+        mutation_rate: float,
+        temperature: float,
+    ) -> dict[str, hparam_search.Scalar]:
+        del search_space, seed, history_trials, random_fraction, mutation_rate, temperature
+        index = call_count["value"] % len(reinforce_rows)
+        call_count["value"] += 1
+        return dict(reinforce_rows[index])
+
+    monkeypatch.setattr(
+        hparam_search,
+        "sample_trial_params_reinforce",
+        _fake_reinforce,
+    )
+
+    first = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=3,
+        seed_offset=0,
+        history_trials=history_trials,
+    )
+    second = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=3,
+        seed_offset=0,
+        history_trials=history_trials,
+    )
+
+    assert first == second
+    anchors = [row[1] for row in history_trials]
+    for params in first:
+        assert params in anchors
+
+
 def test_build_trial_params_skips_duplicate_quick_samples(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4380,6 +4486,92 @@ def test_build_trial_params_materializes_independent_cnn_architecture(
         assert len(kernels) == 3
         assert all(value in {64, 128, 256} for value in channels)
         assert all(value in {3, 5, 7} for value in kernels)
+
+
+def test_build_trial_params_materializes_cnn_v3_organic_architecture(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "arch_init_depth": {"type": "categorical", "values": [3]},
+            "arch_max_depth": {"type": "categorical", "values": [6]},
+            "arch_init_channels": {"type": "categorical", "values": [64]},
+            "arch_channel_step": {"type": "categorical", "values": [32]},
+            "arch_init_kernel_size": {"type": "categorical", "values": [9]},
+            "arch_min_kernel_size": {"type": "categorical", "values": [3]},
+            "arch_mutation_steps": {"type": "categorical", "values": [4]},
+            "arch_add_block_prob": {"type": "categorical", "values": [1.0]},
+            "arch_widen_prob": {"type": "categorical", "values": [0.0]},
+            "arch_dilation_prob": {"type": "categorical", "values": [0.0]},
+            "arch_residual_prob": {"type": "categorical", "values": [0.0]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=11,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_v3",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 100,
+            "acceptor_len": 100,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )[0]
+
+    for key in (
+        "donor_conv_channels",
+        "acceptor_conv_channels",
+        "donor_kernel_sizes",
+        "acceptor_kernel_sizes",
+        "donor_block_dilations",
+        "acceptor_block_dilations",
+        "donor_residual_channels",
+        "acceptor_residual_channels",
+    ):
+        assert key in params
+
+    donor_channels = [int(value) for value in str(params["donor_conv_channels"]).split(",")]
+    donor_kernels = [int(value) for value in str(params["donor_kernel_sizes"]).split(",")]
+    donor_dilations = [
+        int(value) for value in str(params["donor_block_dilations"]).split(",")
+    ]
+    donor_residuals = [
+        int(value) for value in str(params["donor_residual_channels"]).split(",")
+    ]
+
+    assert len(donor_channels) == 6
+    assert len(donor_channels) == len(donor_kernels)
+    assert len(donor_channels) == len(donor_dilations)
+    assert len(donor_channels) == len(donor_residuals)
+    assert all(value % 2 == 1 for value in donor_kernels)
+    assert all(value > 0 for value in donor_dilations)
+    assert all(value > 0 for value in donor_residuals)
+    assert "arch_init_depth" not in params
 
 
 def test_build_trial_params_materializes_cnn_v2_stride_pool_with_constraints(

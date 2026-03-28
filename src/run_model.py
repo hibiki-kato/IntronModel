@@ -595,6 +595,65 @@ def _add_cnn_pair_v2_fallback_train_args(parser: argparse.ArgumentParser) -> Non
 
 def _add_cnn_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     """Add cnn_v3 train args without importing torch-dependent modules."""
+    _add_cnn_fallback_train_args(parser)
+    parser.add_argument(
+        "--pair_mode",
+        choices=["pair", "independent"],
+        default="independent",
+    )
+    parser.add_argument(
+        "--block_dilations",
+        type=str,
+        default=None,
+        help="Shared residual-block dilations.",
+    )
+    parser.add_argument("--donor_block_dilations", type=str, default=None)
+    parser.add_argument("--acceptor_block_dilations", type=str, default=None)
+    parser.add_argument(
+        "--residual_channels",
+        type=str,
+        default=None,
+        help="Shared residual bottleneck channels.",
+    )
+    parser.add_argument("--donor_residual_channels", type=str, default=None)
+    parser.add_argument("--acceptor_residual_channels", type=str, default=None)
+    parser.add_argument(
+        "--pool_every",
+        type=int,
+        default=2,
+        help="Apply pooling after every N residual blocks.",
+    )
+
+
+def _add_cnn_pair_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_pair_v3 train args without importing torch-dependent modules."""
+    _add_cnn_pair_v2_fallback_train_args(parser)
+    parser.add_argument(
+        "--block_dilations",
+        type=str,
+        default=None,
+        help="Shared residual-block dilations.",
+    )
+    parser.add_argument("--donor_block_dilations", type=str, default=None)
+    parser.add_argument("--acceptor_block_dilations", type=str, default=None)
+    parser.add_argument(
+        "--residual_channels",
+        type=str,
+        default=None,
+        help="Shared residual bottleneck channels.",
+    )
+    parser.add_argument("--donor_residual_channels", type=str, default=None)
+    parser.add_argument("--acceptor_residual_channels", type=str, default=None)
+    parser.add_argument(
+        "--pool_every",
+        type=int,
+        default=2,
+        help="Apply pooling after every N residual blocks.",
+    )
+
+
+def _add_cnn_v3_meta_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add cnn_v3_meta train args without importing torch-dependent modules."""
     _add_cnn_pair_v2_fallback_train_args(parser)
     parser.add_argument(
         "--base_pair_checkpoints",
@@ -660,6 +719,12 @@ def _build_parser(
         _add_cnn_pair_fallback_infer_args(parser)
     elif selected_model == "cnn_v3":
         _add_cnn_v3_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
+    elif selected_model == "cnn_pair_v3":
+        _add_cnn_pair_v3_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
+    elif selected_model == "cnn_v3_meta":
+        _add_cnn_v3_meta_fallback_train_args(parser)
         _add_cnn_pair_fallback_infer_args(parser)
 
     return parser
@@ -1275,7 +1340,7 @@ def _attach_validation_metadata(
         include_pair_mixed_negatives = True
     elif model_name == "cnn_pair_v2":
         include_pair_mixed_negatives = True
-    elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
+    elif model_name in {"cnn_pair", "bilstm_pair", "cnn_pair_v3"}:
         include_pair_mixed_negatives = True
 
     protocol = build_validation_protocol(
@@ -1367,6 +1432,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     elif args.model == "cnn_pair_v2":
         args.pair_mode = "pair"
         model_tasks = ("pair",)
+    elif args.model == "cnn_pair_v3":
+        args.pair_mode = "pair"
+        model_tasks = ("pair",)
     default_train_target = (
         model_tasks[0]
         if args.model == "cnn_v2"
@@ -1375,7 +1443,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
-    if args.model == "cnn_pair_v2":
+    if args.model in {"cnn_pair_v2", "cnn_pair_v3"}:
         if train_target != "pair":
             train_target = "pair"
             args.train_target = "pair"

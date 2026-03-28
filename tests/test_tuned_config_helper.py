@@ -127,6 +127,32 @@ def test_resolve_tuned_config_path_ignores_legacy_root_for_cnn_v2(
     assert run.stdout.strip() == ""
 
 
+def test_resolve_tuned_config_path_ignores_legacy_root_for_cnn_v3(
+    tmp_path: Path,
+) -> None:
+    """cnn_v3 should resolve only task-scoped tuned configs."""
+
+    helper_path = _project_root() / "run" / "lib" / "tuned_config.sh"
+    species = "Dmel"
+    legacy_path = tmp_path / species / "tuning" / "cnn_v3" / "best_config.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("{}", encoding="utf-8")
+    command = (
+        f'source "{helper_path}" && '
+        f'intronmodel_resolve_tuned_config_path '
+        f'"{tmp_path}" "{species}" "cnn_v3" "pair" "" "{legacy_path}"'
+    )
+    run = subprocess.run(
+        ["bash", "-lc", command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == ""
+
+
 def test_load_tuned_overrides_accepts_legacy_sequence_transform(
     tmp_path: Path,
 ) -> None:

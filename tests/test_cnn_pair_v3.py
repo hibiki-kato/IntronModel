@@ -5,10 +5,10 @@ import argparse
 import pytest
 import torch
 
-from models import cnn, cnn_v3
+from models import cnn_pair_v3
 
 
-def test_resolve_task_arch_params_prefers_task_overrides() -> None:
+def test_resolve_pair_arch_params_prefers_branch_overrides() -> None:
     args = argparse.Namespace(
         conv_channels="64,128,256",
         donor_conv_channels="96,160,256,384",
@@ -28,26 +28,27 @@ def test_resolve_task_arch_params_prefers_task_overrides() -> None:
         fc_hidden=192,
     )
 
-    donor_arch = cnn_v3._resolve_task_arch_params("donor", args)
-    acceptor_arch = cnn_v3._resolve_task_arch_params("acceptor", args)
+    resolved = cnn_pair_v3._resolve_pair_arch_params(args)
 
-    assert donor_arch.layout.channels == [96, 160, 256, 384]
-    assert acceptor_arch.layout.channels == [64, 128, 256]
-    assert donor_arch.layout.kernel_sizes == [11, 9, 7, 5]
-    assert acceptor_arch.layout.kernel_sizes == [9, 7, 5]
-    assert donor_arch.layout.dilations == [1, 2, 4, 8]
-    assert acceptor_arch.layout.dilations == [1, 2, 4]
-    assert donor_arch.layout.residual_channels == [48, 80, 128, 160]
-    assert acceptor_arch.layout.residual_channels == [32, 64, 96]
-    assert donor_arch.max_pool_size == 2
-    assert donor_arch.pool_every == 2
-    assert donor_arch.head_type == "gap"
-    assert donor_arch.fc_hidden == 192
+    assert resolved.donor.channels == [96, 160, 256, 384]
+    assert resolved.acceptor.channels == [64, 128, 256]
+    assert resolved.donor.kernel_sizes == [11, 9, 7, 5]
+    assert resolved.acceptor.kernel_sizes == [9, 7, 5]
+    assert resolved.donor.dilations == [1, 2, 4, 8]
+    assert resolved.acceptor.dilations == [1, 2, 4]
+    assert resolved.donor.residual_channels == [48, 80, 128, 160]
+    assert resolved.acceptor.residual_channels == [32, 64, 96]
 
 
-def test_organic_site_cnn_forward_onehot() -> None:
-    arch = cnn_v3.TaskOrganicArchParams(
-        layout=cnn_v3.OrganicBranchLayout(
+def test_pair_organic_resdil_cnn_forward_onehot() -> None:
+    arch = cnn_pair_v3.PairOrganicArchParams(
+        donor=cnn_pair_v3.OrganicBranchLayout(
+            channels=[32, 64, 96],
+            kernel_sizes=[9, 7, 5],
+            dilations=[1, 2, 4],
+            residual_channels=[16, 32, 48],
+        ),
+        acceptor=cnn_pair_v3.OrganicBranchLayout(
             channels=[32, 64, 96],
             kernel_sizes=[9, 7, 5],
             dilations=[1, 2, 4],
@@ -58,64 +59,82 @@ def test_organic_site_cnn_forward_onehot() -> None:
         head_type="gap",
         fc_hidden=64,
     )
-    model = cnn_v3.OrganicSiteCNN(
+    model = cnn_pair_v3.PairOrganicResDilCNN(
+        input_mode="onehot",
+        pair_mode="pair",
+        embedding_dim=32,
+        vocab_size=None,
         arch_params=arch,
         dropout=0.1,
     )
 
-    x = torch.randn(3, 4, 100)
-    logits = model(x)
+    donor_x = torch.randn(3, 4, 100)
+    acceptor_x = torch.randn(3, 4, 100)
+
+    logits = model(donor_x, acceptor_x)
 
     assert logits.shape == (3,)
 
 
-def test_organic_site_cnn_rejects_invalid_rank() -> None:
-    arch = cnn_v3.TaskOrganicArchParams(
-        layout=cnn_v3.OrganicBranchLayout(
-            channels=[16, 32],
+def test_pair_organic_resdil_cnn_supports_token_input() -> None:
+    arch = cnn_pair_v3.PairOrganicArchParams(
+        donor=cnn_pair_v3.OrganicBranchLayout(
+            channels=[16, 24],
             kernel_sizes=[7, 5],
             dilations=[1, 2],
-            residual_channels=[8, 16],
+            residual_channels=[8, 12],
+        ),
+        acceptor=cnn_pair_v3.OrganicBranchLayout(
+            channels=[16, 32, 32],
+            kernel_sizes=[7, 5, 5],
+            dilations=[1, 2, 4],
+            residual_channels=[8, 16, 16],
         ),
         max_pool_size=2,
         pool_every=2,
         head_type="center",
-        fc_hidden=32,
+        fc_hidden=48,
     )
-    model = cnn_v3.OrganicSiteCNN(
+    model = cnn_pair_v3.PairOrganicResDilCNN(
+        input_mode="kmer3",
+        pair_mode="pair",
+        embedding_dim=12,
+        vocab_size=65,
         arch_params=arch,
         dropout=0.1,
     )
 
-    with pytest.raises(ValueError, match="shape"):
-        model(torch.randn(4, 100))
+    donor_x = torch.randint(0, 65, (2, 20))
+    acceptor_x = torch.randint(0, 65, (2, 20))
+
+    logits = model(donor_x, acceptor_x)
+
+    assert logits.shape == (2,)
 
 
-def test_train_task_model_forwards_requested_task_to_arch_resolution(
+def test_train_pair_model_forwards_model_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
 
     class _StopAfterArchResolution(Exception):
-        """Stop after architecture resolution to keep the test lightweight."""
+        """Stop the train path after architecture resolution."""
 
-    def _fake_resolve_task_arch_params(
-        task: str,
+    def _fake_resolve_pair_arch_params(
         model_args: argparse.Namespace,
         *,
         lightweight: bool = False,
-    ) -> cnn_v3.TaskOrganicArchParams:
-        captured["task"] = task
+    ) -> cnn_pair_v3.PairOrganicArchParams:
         captured["model_args"] = model_args
         captured["lightweight"] = lightweight
         raise _StopAfterArchResolution
 
     monkeypatch.setattr(
-        cnn_v3,
-        "_resolve_task_arch_params",
-        _fake_resolve_task_arch_params,
+        cnn_pair_v3,
+        "_resolve_pair_arch_params",
+        _fake_resolve_pair_arch_params,
     )
-    task_params = build_task_train_params()
+    train_params = cnn_v2_params()
     model_args = argparse.Namespace(
         conv_channels=None,
         donor_conv_channels="32,64,96",
@@ -136,19 +155,20 @@ def test_train_task_model_forwards_requested_task_to_arch_resolution(
     )
 
     with pytest.raises(_StopAfterArchResolution):
-        cnn_v3.train_task_model(
-            task="acceptor",
+        cnn_pair_v3.train_pair_model(
             pos_path="pos.tsv",
             neg_path="neg.tsv",
-            checkpoint_path="acceptor.pt",
-            window_len=100,
+            checkpoint_path="pair.pt",
+            donor_window_len=100,
+            acceptor_window_len=100,
             donor_len=100,
             acceptor_len=100,
             model_args=model_args,
-            task_params=task_params,
+            train_params=train_params,
             epochs=1,
             early_stop_patience=0,
             early_stop_min_delta=0.0,
+            sequence_transform="none",
             seed=1337,
             lightweight=False,
             compile_model=False,
@@ -168,24 +188,24 @@ def test_train_task_model_forwards_requested_task_to_arch_resolution(
             quick_phase=False,
         )
 
-    assert captured["task"] == "acceptor"
     assert captured["model_args"] is model_args
     assert captured["lightweight"] is False
 
 
-def build_task_train_params() -> cnn.TaskTrainParams:
-    """Build one site-train parameter object for shared training tests."""
-    return cnn.TaskTrainParams(
+def cnn_v2_params() -> cnn_pair_v3.cnn_v2.PairTrainParams:
+    """Build one pair-train parameter object for shared training tests."""
+    return cnn_pair_v3.cnn_v2.PairTrainParams(
         batch_size=4,
         lr=1e-3,
         loss_name="focal",
-        conv_channels=[32, 64, 96],
-        kernel_sizes=[9, 7, 5],
-        max_pool_size=2,
-        conv_stride=1,
-        head_type="gap",
+        input_mode="onehot",
+        pair_mode="pair",
+        fusion_mode="late",
+        embedding_dim=8,
+        bpe_pretrained_model_name=cnn_pair_v3.BPE_DEFAULT_MODEL_NAME,
+        bpe_pretrained_revision=None,
+        bpe_trust_remote_code=False,
         dropout=0.1,
-        fc_hidden=64,
         weight_decay=0.01,
         eta_min_ratio=0.01,
         val_frac=0.2,

@@ -98,6 +98,18 @@ def test_run_cnn_v2_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
+def test_run_cnn_v3_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_cnn_v3.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
 def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
         encoding="utf-8"
@@ -242,6 +254,53 @@ def test_run_cnn_pair_v2_sh_uses_single_pair_tuning_namespace() -> None:
     assert "cnn_pair_v2_synth" not in content
 
 
+def test_run_cnn_v3_sh_exposes_resdil_wrapper_knobs() -> None:
+    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'MODEL="cnn_v3"' in content
+    assert 'BLOCK_DILATIONS="1,2,4,8"' in content
+    assert 'RESIDUAL_CHANNELS="32,64,96,128"' in content
+    assert 'POOL_EVERY="2"' in content
+    assert '--block_dilations "${BLOCK_DILATIONS}"' in content
+    assert '--residual_channels "${RESIDUAL_CHANNELS}"' in content
+    assert '--pool_every "${POOL_EVERY}"' in content
+    assert 'task_tuned_path="${DATA_ROOT}/${species}/tuning/cnn_v3/${task_name}/best_config.json"' in content
+    assert 'mode=independent tasks=donor,acceptor' in content
+
+
+def test_run_cnn_pair_v3_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "run_cnn_pair_v3.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_run_cnn_pair_v3_sh_uses_single_pair_tuning_namespace() -> None:
+    content = (_project_root() / "run" / "run_cnn_pair_v3.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'MODEL="cnn_pair_v3"' in content
+    assert 'tuned_model_name="${MODEL}"' in content
+    assert "intronmodel_resolve_pair_best_config_filename" in content
+    assert "intronmodel_resolve_tuned_config_path" in content
+    assert 'append_versioned_output_args "cnn_pair_v3.sh" "${species}" "${MODEL}"' in content
+
+
+def test_run_cnn_pair_v3_sh_exposes_resdil_wrapper_knobs() -> None:
+    content = (_project_root() / "run" / "run_cnn_pair_v3.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'BLOCK_DILATIONS="1,2,4,8"' in content
+    assert 'RESIDUAL_CHANNELS="32,64,96,128"' in content
+    assert 'POOL_EVERY="2"' in content
+
+
 def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     content = (_project_root() / "run" / "tune_cnn_v2_time.sh").read_text(
         encoding="utf-8"
@@ -288,6 +347,50 @@ def test_tune_cnn_pair_v2_time_uses_single_pair_tuning_namespace() -> None:
     assert "resolve_cross_species_best_seed" not in content
     assert "SYNTHESIZE_MODE" not in content
     assert "cnn_pair_v2_synth" not in content
+
+
+def test_tune_cnn_v3_time_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "tune_cnn_v3_time.sh"
+    run = subprocess.run(
+        ["bash", str(script_path), "--dummy"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode != 0
+    assert "config-only" in run.stderr
+
+
+def test_tune_cnn_v3_time_sh_uses_reinforce_search_defaults() -> None:
+    content = (_project_root() / "run" / "tune_cnn_v3_time.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'SEARCH_ALGO="reinforce"' in content
+    assert 'REINFORCE_TEMPERATURE="0.75"' in content
+    assert 'POOL_EVERY="2"' in content
+    assert '"model": "cnn_v3"' in content
+    assert '"reinforce_temperature": ${REINFORCE_TEMPERATURE}' in content
+    assert '"arch_mutation_steps"' in content
+    assert '"arch_add_block_prob"' in content
+    assert '"pool_every": ${POOL_EVERY}' in content
+
+
+def test_cnn_v3_scripts_have_valid_bash_syntax() -> None:
+    root = _project_root()
+    run_result = subprocess.run(
+        ["bash", "-n", str(root / "run" / "run_cnn_v3.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tune_result = subprocess.run(
+        ["bash", "-n", str(root / "run" / "tune_cnn_v3_time.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert tune_result.returncode == 0, tune_result.stderr
 
 
 def test_common_run_with_deadline_times_out() -> None:

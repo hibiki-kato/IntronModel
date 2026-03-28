@@ -147,6 +147,29 @@ def test_resolve_tuned_config_path_ignores_legacy_root_for_cnn_v2(
     assert resolved is None
 
 
+def test_resolve_tuned_config_path_ignores_legacy_root_for_cnn_v3(
+    tmp_path: Path,
+) -> None:
+    species = "Dmel"
+    legacy_root = tmp_path / species / "tuning" / "cnn_v3" / "best_config.json"
+    legacy_root.parent.mkdir(parents=True, exist_ok=True)
+    legacy_root.write_text(
+        json.dumps({"status": "ok", "sampled_params": {"lr": 1e-5}}),
+        encoding="utf-8",
+    )
+
+    resolved = _resolve_tuned_config_path(
+        task="pair",
+        explicit_path="",
+        species=species,
+        data_root=tmp_path,
+        model_name="cnn_v3",
+        shared_path=str(legacy_root),
+    )
+
+    assert resolved is None
+
+
 def test_apply_tuned_overrides_uses_dnabert_variant_model_name(
     tmp_path: Path,
 ) -> None:

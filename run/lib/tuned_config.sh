@@ -52,7 +52,7 @@ intronmodel_resolve_tuned_config_path() {
 
 	local use_task_only_configs="0"
 	case "${tuned_model_name}" in
-		cnn_v2 | cnn_pair_v2)
+		cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3)
 			use_task_only_configs="1"
 			;;
 	esac

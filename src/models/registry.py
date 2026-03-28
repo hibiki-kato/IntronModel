@@ -43,6 +43,8 @@ _MODEL_TO_MODULE: dict[str, str] = {
     "cnn_v2": "models.cnn_v2",
     "cnn_pair_v2": "models.cnn_v2",
     "cnn_v3": "models.cnn_v3",
+    "cnn_pair_v3": "models.cnn_pair_v3",
+    "cnn_v3_meta": "models.cnn_v3_meta",
     "bilstm_pair": "models.bilstm_pair",
     "markov_xgboost": "models.markov_xgboost",
     "tcn": "models.tcn",

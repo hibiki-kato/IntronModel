@@ -8,10 +8,12 @@ Usage: bash run/rerun_active_best_scores_and_evals.sh
 This script reruns the saved best active models for all species using
 ``--skip_train``, then rebuilds the downstream eval outputs and plots:
   1) best cnn_v2 inference from saved checkpoints
-  2) best cnn_pair_v2 inference from saved checkpoints
-  3) run/plot_eval.sh
-  4) run/eval_trans_score.sh
-  5) run/eval_intron_pr_auc.sh
+  2) best cnn_v3 inference from saved checkpoints
+  3) best cnn_pair_v2 inference from saved checkpoints
+  4) best cnn_pair_v3 inference from saved checkpoints
+  5) run/plot_eval.sh
+  6) run/eval_trans_score.sh
+  7) run/eval_intron_pr_auc.sh
 
 Edit the CONFIG block below before running if you want to narrow the species
 set or disable any step.
@@ -29,7 +31,9 @@ fi
 CONDA_ENV="intronmodel"
 SPECIES="Athal,Dmel,Hsap,Mmus"
 RUN_CNN_V2="1"
+RUN_CNN_V3="1"
 RUN_CNN_V2_PAIR="1"
+RUN_CNN_V3_PAIR="1"
 RUN_PLOT_EVAL="1"
 RUN_TRANS_EVAL="1"
 RUN_INTRON_EVAL="1"
@@ -263,24 +267,42 @@ run_for_species() {
 		return 1
 	}
 
-		local cnn_v2_best=""
-		local cnn_pair_v2_best=""
-		cnn_v2_best="$(
-			resolve_best_config_path "cnn_v2" "donor" "acceptor" || true
-		)"
+	local cnn_v2_best=""
+	local cnn_v3_best=""
+	local cnn_pair_v2_best=""
+	local cnn_pair_v3_best=""
+	cnn_v2_best="$(
+		resolve_best_config_path "cnn_v2" "donor" "acceptor" || true
+	)"
+	cnn_v3_best="$(
+		resolve_best_config_path "cnn_v3" "donor" "acceptor" || true
+	)"
 	cnn_pair_v2_best="$(
 		resolve_best_config_path "cnn_pair_v2" "pair" || true
 	)"
+	cnn_pair_v3_best="$(
+		resolve_best_config_path "cnn_pair_v3" "pair" || true
+	)"
 
 	if [[ "${RUN_CNN_V2}" == "1" ]]; then
-			if [[ -n "${cnn_v2_best}" ]]; then
-				run_best_infer "cnn_v2" "${cnn_v2_best}" "${species}" \
-					"${species_label}: rerun cnn_v2 best"
-			else
-				echo "[rerun_active_best_scores_and_evals] skip cnn_v2 for ${species}:"
-				echo "  missing best_config under data/${species}/tuning/cnn_v2/{donor,acceptor}/best_config.json"
-			fi
+		if [[ -n "${cnn_v2_best}" ]]; then
+			run_best_infer "cnn_v2" "${cnn_v2_best}" "${species}" \
+				"${species_label}: rerun cnn_v2 best"
+		else
+			echo "[rerun_active_best_scores_and_evals] skip cnn_v2 for ${species}:"
+			echo "  missing best_config under data/${species}/tuning/cnn_v2/{donor,acceptor}/best_config.json"
 		fi
+	fi
+
+	if [[ "${RUN_CNN_V3}" == "1" ]]; then
+		if [[ -n "${cnn_v3_best}" ]]; then
+			run_best_infer "cnn_v3" "${cnn_v3_best}" "${species}" \
+				"${species_label}: rerun cnn_v3 best"
+		else
+			echo "[rerun_active_best_scores_and_evals] skip cnn_v3 for ${species}:"
+			echo "  missing best_config under data/${species}/tuning/cnn_v3/{donor,acceptor}/best_config.json"
+		fi
+	fi
 
 	if [[ "${RUN_CNN_V2_PAIR}" == "1" ]]; then
 		if [[ -n "${cnn_pair_v2_best}" ]]; then
@@ -289,6 +311,16 @@ run_for_species() {
 		else
 			echo "[rerun_active_best_scores_and_evals] skip cnn_pair_v2 for ${species}:"
 			echo "  missing best_config under data/${species}/tuning/cnn_pair_v2/pair/best_config.json"
+		fi
+	fi
+
+	if [[ "${RUN_CNN_V3_PAIR}" == "1" ]]; then
+		if [[ -n "${cnn_pair_v3_best}" ]]; then
+			run_best_infer "cnn_pair_v3" "${cnn_pair_v3_best}" "${species}" \
+				"${species_label}: rerun cnn_pair_v3 best"
+		else
+			echo "[rerun_active_best_scores_and_evals] skip cnn_pair_v3 for ${species}:"
+			echo "  missing best_config under data/${species}/tuning/cnn_pair_v3/pair/best_config.json"
 		fi
 	fi
 }

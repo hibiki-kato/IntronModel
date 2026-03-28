@@ -1,9 +1,11 @@
-"""Utilities for publishing versioned best artifacts for active CNN v2 models.
+"""Utilities for publishing versioned best artifacts for active models.
 
 This module manages a small public-artifact layer for the active wrappers:
 
 - ``cnn_v2`` (shared donor/acceptor publication)
-- ``cnn_pair_v2`` (public pair model alias)
+- ``cnn_v3`` (shared donor/acceptor publication)
+- ``cnn_pair_v2`` (public pair publication)
+- ``cnn_pair_v3`` (public pair publication)
 
 Publication happens when a canonical ``best_config.json`` improves. The latest
 and previous versions remain live under ``data/`` and ``model/`` while older
@@ -27,10 +29,12 @@ from util.checkpoint_io import (
     resolve_existing_checkpoint_path,
 )
 
-PAIR_PUBLIC_MODEL_NAME: str = "cnn_pair_v2"
-PAIR_MODEL_ALIASES: frozenset[str] = frozenset({PAIR_PUBLIC_MODEL_NAME})
+INDEPENDENT_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset({"cnn_v2", "cnn_v3"})
+PAIR_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
+    {"cnn_pair_v2", "cnn_pair_v3"}
+)
 ACTIVE_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
-    {"cnn_v2", PAIR_PUBLIC_MODEL_NAME}
+    {*INDEPENDENT_PUBLIC_MODEL_NAMES, *PAIR_PUBLIC_MODEL_NAMES}
 )
 VERSION_HISTORY_COLUMNS: tuple[str, ...] = (
     "version",
@@ -90,10 +94,7 @@ class VersionHistoryEntry:
 
 def normalize_public_model_name(model_name: str) -> str:
     """Normalize a runtime/public model name to the published public name."""
-    normalized = model_name.strip()
-    if normalized in PAIR_MODEL_ALIASES:
-        return PAIR_PUBLIC_MODEL_NAME
-    return normalized
+    return model_name.strip()
 
 
 def is_active_public_model(model_name: str) -> bool:
@@ -260,24 +261,26 @@ def publish_latest_best_version(
     published_name = format_published_name(public_model_name, next_version)
     published_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    if public_model_name == "cnn_v2":
-        entry = _publish_cnn_v2_version(
+    if public_model_name in INDEPENDENT_PUBLIC_MODEL_NAMES:
+        entry = _publish_independent_public_version(
             project_root=project_root,
             data_root=data_root,
             model_root=model_root,
             species=species,
             history=history,
+            public_model_name=public_model_name,
             published_name=published_name,
             published_at=published_at,
             updated_side=updated_side,
         )
     else:
-        entry = _publish_cnn_pair_v2_version(
+        entry = _publish_pair_public_version(
             project_root=project_root,
             data_root=data_root,
             model_root=model_root,
             species=species,
             history=history,
+            public_model_name=public_model_name,
             published_name=published_name,
             published_at=published_at,
             updated_side=updated_side,
@@ -297,20 +300,23 @@ def publish_latest_best_version(
     return updated_history[-1]
 
 
-def _publish_cnn_v2_version(
+def _publish_independent_public_version(
     *,
     project_root: Path,
     data_root: Path,
     model_root: Path,
     species: str,
     history: list[VersionHistoryEntry],
+    public_model_name: str,
     published_name: str,
     published_at: str,
     updated_side: str,
 ) -> VersionHistoryEntry | None:
-    donor_path = data_root / species / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    donor_path = (
+        data_root / species / "tuning" / public_model_name / "donor" / "best_config.json"
+    )
     acceptor_path = (
-        data_root / species / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
+        data_root / species / "tuning" / public_model_name / "acceptor" / "best_config.json"
     )
     donor_payload = read_json_object(donor_path)
     acceptor_payload = read_json_object(acceptor_path)
@@ -413,11 +419,11 @@ def _publish_cnn_v2_version(
     _seed_unversioned_outputs_if_needed(
         data_root=data_root,
         species=species,
-        public_model_name="cnn_v2",
+        public_model_name=public_model_name,
         published_name=published_name,
     )
     snapshot_payload = {
-        "public_model": "cnn_v2",
+        "public_model": public_model_name,
         "published_name": published_name,
         "published_at": published_at,
         "updated_side": updated_side_normalized,
@@ -430,12 +436,12 @@ def _publish_cnn_v2_version(
     _write_snapshot(
         data_root=data_root,
         species=species,
-        public_model_name="cnn_v2",
+        public_model_name=public_model_name,
         published_name=published_name,
         payload=snapshot_payload,
     )
     return VersionHistoryEntry(
-        version=_parse_version_number(published_name, "cnn_v2"),
+        version=_parse_version_number(published_name, public_model_name),
         published_name=published_name,
         published_at=published_at,
         source_best_config=source_best_config,
@@ -451,18 +457,23 @@ def _publish_cnn_v2_version(
     )
 
 
-def _publish_cnn_pair_v2_version(
+def _publish_pair_public_version(
     *,
     project_root: Path,
     data_root: Path,
     model_root: Path,
     species: str,
     history: list[VersionHistoryEntry],
+    public_model_name: str,
     published_name: str,
     published_at: str,
     updated_side: str,
 ) -> VersionHistoryEntry | None:
-    pair_path = _resolve_pair_best_config_path(data_root, species)
+    pair_path = _resolve_pair_best_config_path(
+        data_root=data_root,
+        species=species,
+        public_model_name=public_model_name,
+    )
     pair_payload = read_json_object(pair_path)
     if pair_payload is None or pair_payload.get("status") != "ok":
         return None
@@ -482,7 +493,12 @@ def _publish_cnn_pair_v2_version(
     pair_payload["published_name"] = published_name
     pair_payload["published_at"] = published_at
     public_pair_path = (
-        data_root / species / "tuning" / PAIR_PUBLIC_MODEL_NAME / "pair" / "best_config.json"
+        data_root
+        / species
+        / "tuning"
+        / public_model_name
+        / "pair"
+        / "best_config.json"
     )
     _write_json_object(public_pair_path, pair_payload)
     if pair_path != public_pair_path:
@@ -491,11 +507,11 @@ def _publish_cnn_pair_v2_version(
     _seed_unversioned_outputs_if_needed(
         data_root=data_root,
         species=species,
-        public_model_name=PAIR_PUBLIC_MODEL_NAME,
+        public_model_name=public_model_name,
         published_name=published_name,
     )
     snapshot_payload = {
-        "public_model": PAIR_PUBLIC_MODEL_NAME,
+        "public_model": public_model_name,
         "published_name": published_name,
         "published_at": published_at,
         "updated_side": updated_side.strip().lower(),
@@ -505,12 +521,12 @@ def _publish_cnn_pair_v2_version(
     _write_snapshot(
         data_root=data_root,
         species=species,
-        public_model_name=PAIR_PUBLIC_MODEL_NAME,
+        public_model_name=public_model_name,
         published_name=published_name,
         payload=snapshot_payload,
     )
     return VersionHistoryEntry(
-        version=_parse_version_number(published_name, PAIR_PUBLIC_MODEL_NAME),
+        version=_parse_version_number(published_name, public_model_name),
         published_name=published_name,
         published_at=published_at,
         source_best_config=str(pair_path.resolve()),
@@ -624,8 +640,6 @@ def _seed_unversioned_outputs_if_needed(
 
 
 def _iter_public_output_stem_candidates(public_model_name: str) -> tuple[str, ...]:
-    if public_model_name == PAIR_PUBLIC_MODEL_NAME:
-        return (PAIR_PUBLIC_MODEL_NAME,)
     return (public_model_name,)
 
 
@@ -680,14 +694,18 @@ def _write_snapshot(
     _write_json_object(snapshot_path, payload)
 
 
-def _resolve_pair_best_config_path(data_root: Path, species: str) -> Path:
-    new_path = (
-        data_root / species / "tuning" / PAIR_PUBLIC_MODEL_NAME / "pair" / "best_config.json"
-    )
-    if new_path.is_file():
-        return new_path
+def _resolve_pair_best_config_path(
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+) -> Path:
     return (
-        data_root / species / "tuning" / PAIR_PUBLIC_MODEL_NAME / "pair" / "best_config.json"
+        data_root
+        / species
+        / "tuning"
+        / normalize_public_model_name(public_model_name)
+        / "pair"
+        / "best_config.json"
     )
 
 
@@ -809,7 +827,7 @@ def _iter_public_artifact_paths(
     public_model_name: str,
     published_name: str,
 ) -> Iterable[tuple[Path, Path]]:
-    if public_model_name == "cnn_v2":
+    if public_model_name in INDEPENDENT_PUBLIC_MODEL_NAMES:
         yield (
             model_root / species / "donor" / f"{published_name}.pt",
             Path("model") / "donor" / f"{published_name}.pt",

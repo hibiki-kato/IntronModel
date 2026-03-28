@@ -180,6 +180,7 @@ class SearchConfig:
     history_top_n: int = 64
     guided_random_fraction: float = 0.35
     guided_mutation_rate: float = 0.25
+    reinforce_temperature: float = 0.75
     surrogate_warmup_trials: int = 8
     surrogate_candidates_per_step: int = 128
     surrogate_min_observations: int = 8
@@ -257,6 +258,16 @@ def _validate_unit_interval(value: object, name: str) -> float:
     parsed = float(value)
     if parsed < 0.0 or parsed > 1.0:
         raise ValueError(f"{name} must be in [0.0, 1.0].")
+    return parsed
+
+
+def _validate_positive_float(value: object, name: str) -> float:
+    """Validate that a value is numeric and strictly positive."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric and > 0.")
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise ValueError(f"{name} must be > 0.")
     return parsed
 
 
@@ -375,7 +386,7 @@ def _resolve_site_window_len_search_keys(
 ) -> tuple[str, ...]:
     """Resolve which site-window length keys should be searched."""
     model_name = str(base_args.get("model", "")).strip().lower()
-    default_train_target = "donor" if model_name == "cnn_v2" else "both"
+    default_train_target = "donor" if model_name in {"cnn_v2", "cnn_v3"} else "both"
     raw_train_target = base_args.get("train_target", default_train_target)
     train_target = str(raw_train_target).strip().lower()
     if train_target == "donor":
@@ -451,8 +462,10 @@ def load_config(path: Path) -> SearchConfig:
             "max_model_params",
         )
     search_algo = str(raw.get("search_algo", "random")).strip()
-    if search_algo not in {"random", "history_guided"}:
-        raise ValueError("search_algo must be one of: random, history_guided.")
+    if search_algo not in {"random", "history_guided", "reinforce"}:
+        raise ValueError(
+            "search_algo must be one of: random, history_guided, reinforce."
+        )
     history_top_n = _validate_positive_int(
         raw.get("history_top_n", 64),
         "history_top_n",
@@ -464,6 +477,10 @@ def load_config(path: Path) -> SearchConfig:
     guided_mutation_rate = _validate_unit_interval(
         raw.get("guided_mutation_rate", 0.25),
         "guided_mutation_rate",
+    )
+    reinforce_temperature = _validate_positive_float(
+        raw.get("reinforce_temperature", 0.75),
+        "reinforce_temperature",
     )
     trial_stream_mode = _validate_trial_stream_mode(
         raw.get("trial_stream_mode", "auto"),
@@ -486,19 +503,22 @@ def load_config(path: Path) -> SearchConfig:
     normalized_base_args.setdefault("donor_len", _SITE_WINDOW_LEN_DEFAULT)
     normalized_base_args.setdefault("acceptor_len", _SITE_WINDOW_LEN_DEFAULT)
     normalized_model_name = normalized_base_args["model"].strip().lower()
-    if normalized_model_name == "cnn_v2":
+    if normalized_model_name in {"cnn_v2", "cnn_v3"}:
         pair_mode_raw = normalized_base_args.get("pair_mode", "independent")
         if _normalize_cnn_pair_v2_mode(pair_mode_raw) != "independent":
-            raise ValueError("base_args.pair_mode must be independent for cnn_v2.")
+            raise ValueError(
+                f"base_args.pair_mode must be independent for {normalized_model_name}."
+            )
         train_target_raw = normalized_base_args.get("train_target", "donor")
         train_target = str(train_target_raw).strip().lower() or "donor"
         if train_target not in {"donor", "acceptor"}:
             raise ValueError(
-                "base_args.train_target must be donor or acceptor for cnn_v2."
+                "base_args.train_target must be donor or acceptor for "
+                f"{normalized_model_name}."
             )
         normalized_base_args["pair_mode"] = "independent"
         normalized_base_args["train_target"] = train_target
-    elif normalized_model_name == "cnn_pair_v2":
+    elif normalized_model_name in {"cnn_pair_v2", "cnn_pair_v3"}:
         normalized_base_args["pair_mode"] = "pair"
         normalized_base_args["train_target"] = "pair"
 
@@ -560,6 +580,7 @@ def load_config(path: Path) -> SearchConfig:
         history_top_n=history_top_n,
         guided_random_fraction=guided_random_fraction,
         guided_mutation_rate=guided_mutation_rate,
+        reinforce_temperature=reinforce_temperature,
         trial_stream_mode=trial_stream_mode,
         trial_process_mode=trial_process_mode,
         skip_full_phase=skip_full_phase,
@@ -1111,6 +1132,8 @@ def _score_site_rows_pair_model(
         from models import cnn_pair as pair_module
     elif model_name in {"cnn_v2", "cnn_pair_v2"}:
         from models import cnn_v2 as pair_module
+    elif model_name == "cnn_pair_v3":
+        from models import cnn_pair_v3 as pair_module
     else:
         raise ValueError(f"Unsupported pair model for scoring: {model_name}")
 
@@ -1144,18 +1167,22 @@ def _compute_test_pr_auc_objective(
     if model_name == "" or species == "":
         return None
 
-    default_train_target = "donor" if model_name == "cnn_v2" else "both"
+    default_train_target = (
+        "donor" if model_name in {"cnn_v2", "cnn_v3"} else "both"
+    )
     train_target_raw = merged_args.get("train_target", default_train_target)
     train_target = str(train_target_raw).strip().lower() or default_train_target
     if train_target not in {"both", "donor", "acceptor", "pair"}:
         return None
-    pair_mode_default = "independent" if model_name == "cnn_v2" else "pair"
+    pair_mode_default = (
+        "independent" if model_name in {"cnn_v2", "cnn_v3"} else "pair"
+    )
     cnn_pair_v2_mode = str(
         merged_args.get("pair_mode", pair_mode_default)
     ).strip().lower()
-    if model_name == "cnn_pair_v2":
+    if model_name in {"cnn_pair_v2", "cnn_pair_v3"}:
         cnn_pair_v2_mode = "pair"
-    if model_name == "cnn_v2":
+    if model_name in {"cnn_v2", "cnn_v3"}:
         if _normalize_cnn_pair_v2_mode(cnn_pair_v2_mode) != "independent":
             return None
         if train_target not in {"donor", "acceptor"}:
@@ -1179,7 +1206,7 @@ def _compute_test_pr_auc_objective(
 
     checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
     scored_rows: list[dict[str, object]] = []
-    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_pair_v2"}
+    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_pair_v2", "cnn_pair_v3"}
     if use_pair_model_scoring:
         pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
         if pair_checkpoint_raw is None:
@@ -1806,6 +1833,100 @@ def sample_trial_params_history_guided(
     return sampled
 
 
+def _mutate_scalar_near_anchor(
+    *,
+    spec: dict[str, object],
+    anchor_value: Scalar,
+    rng: random.Random,
+) -> Scalar:
+    """Mutate one scalar search value near a rewarded anchor."""
+    kind = str(spec["type"])
+    if kind == "categorical":
+        values_obj = spec.get("values")
+        if not isinstance(values_obj, list) or not values_obj:
+            raise ValueError("categorical mutation requires non-empty values.")
+        values = list(values_obj)
+        try:
+            anchor_index = values.index(anchor_value)
+        except ValueError:
+            return values[rng.randrange(len(values))]
+        if len(values) == 1:
+            return values[0]
+        move = rng.choice([-1, 1])
+        mutated_index = min(len(values) - 1, max(0, anchor_index + move))
+        return values[mutated_index]
+
+    if kind == "int":
+        step = int(spec["step"])
+        min_value = int(spec["min"])
+        max_value = int(spec["max"])
+        anchor_int = int(anchor_value)
+        max_step_count = max(1, min(3, (max_value - min_value) // step))
+        delta_steps = rng.randint(-max_step_count, max_step_count)
+        candidate = anchor_int + (delta_steps * step)
+        candidate = min(max_value, max(min_value, candidate))
+        offset = (candidate - min_value) % step
+        if offset != 0:
+            candidate -= offset
+        return candidate
+
+    assert kind == "float"
+    min_value = float(spec["min"])
+    max_value = float(spec["max"])
+    anchor_float = float(anchor_value)
+    scale = str(spec.get("scale", "linear"))
+    if scale == "log":
+        log_anchor = math.log(anchor_float)
+        log_min = math.log(min_value)
+        log_max = math.log(max_value)
+        span = max(1e-6, log_max - log_min)
+        candidate = math.exp(log_anchor + rng.uniform(-0.2, 0.2) * span)
+    else:
+        span = max_value - min_value
+        candidate = anchor_float + (rng.uniform(-0.2, 0.2) * span)
+    return min(max_value, max(min_value, candidate))
+
+
+def sample_trial_params_reinforce(
+    *,
+    search_space: dict[str, dict[str, object]],
+    seed: int,
+    history_trials: list[tuple[float, dict[str, Scalar]]],
+    random_fraction: float,
+    mutation_rate: float,
+    temperature: float,
+) -> dict[str, Scalar]:
+    """Sample one trial using reward-weighted anchor selection and mutation.
+
+    This is a lightweight REINFORCE-style policy search: stronger historical
+    trials are sampled more often as anchors, then local stochastic mutations
+    explore nearby architectures.
+    """
+    rng = random.Random(seed)
+    if not history_trials or rng.random() < random_fraction:
+        return _sample_trial_params_with_rng(search_space, rng)
+
+    raw_scores = [score for score, _ in history_trials]
+    max_score = max(raw_scores)
+    scaled_scores = [math.exp((score - max_score) / temperature) for score in raw_scores]
+    anchor_index = _sample_weighted_index(scaled_scores, rng)
+    sampled = dict(history_trials[anchor_index][1])
+
+    for key in sorted(search_space):
+        if rng.random() >= mutation_rate:
+            continue
+        anchor_value = sampled.get(key)
+        if anchor_value is None:
+            sampled[key] = _sample_value(search_space[key], rng)
+            continue
+        sampled[key] = _mutate_scalar_near_anchor(
+            spec=search_space[key],
+            anchor_value=anchor_value,
+            rng=rng,
+        )
+    return sampled
+
+
 def detect_gpu_ids(setting: object) -> list[str]:
     """Resolve GPU ids from config, CUDA_VISIBLE_DEVICES, or nvidia-smi."""
     if isinstance(setting, list):
@@ -2302,7 +2423,9 @@ def _write_tuning_leaderboard(
     model_obj = config.base_args.get("model")
     model_name = str(model_obj) if isinstance(model_obj, str) else "unknown"
     model_name_normalized = model_name.strip().lower()
-    default_train_target = "donor" if model_name_normalized == "cnn_v2" else "both"
+    default_train_target = (
+        "donor" if model_name_normalized in {"cnn_v2", "cnn_v3"} else "both"
+    )
     target = str(config.base_args.get("train_target", default_train_target))
     top_entries = _serialize_top_trials(ranked_rows, config.top_k)
     best_checkpoint_paths = (
@@ -2765,6 +2888,8 @@ def _run_trial_with_command_runner(
         "cnn_pair",
         "cnn_v2",
         "cnn_pair_v2",
+        "cnn_v3",
+        "cnn_pair_v3",
     }
     if (
         _ACTIVE_MAX_PARALLEL_TRIALS > 1
@@ -3264,22 +3389,22 @@ def _resolve_cnn_architecture_validation_model_name(
     Returns
     -------
     str
-        One of ``"cnn"``, ``"cnn_pair"``, ``"cnn_resdil"``, or ``""`` when no
-        shape check applies.
+        One of ``"cnn"``, ``"cnn_pair"``, ``"cnn_resdil"``, ``"cnn_v3"``, or
+        ``""`` when no shape check applies.
     """
     normalized_model = model_name.strip().lower()
     if normalized_model in {"cnn", "cnn_pair", "cnn_resdil"}:
         return normalized_model
-    if normalized_model == "cnn_v2":
+    if normalized_model in {"cnn_v2", "cnn_v3"}:
         pair_mode_raw = sampled_params.get("pair_mode")
         if pair_mode_raw is None:
-            pair_mode_raw = base_args.get("pair_mode", "pair")
+            pair_mode_raw = base_args.get("pair_mode", "independent")
         pair_mode = _normalize_cnn_pair_v2_mode(pair_mode_raw)
         if pair_mode == "independent":
-            return "cnn"
+            return "cnn_v3" if normalized_model == "cnn_v3" else "cnn"
         return "cnn_pair"
-    if normalized_model == "cnn_pair_v2":
-        return "cnn_pair"
+    if normalized_model in {"cnn_pair_v2", "cnn_pair_v3"}:
+        return "cnn_v3" if normalized_model == "cnn_pair_v3" else "cnn_pair"
     return ""
 
 
@@ -3325,7 +3450,7 @@ def _derive_validation_protocol_from_args(
         include_pair_mixed_negatives = True
     elif model_name == "cnn_pair_v2":
         include_pair_mixed_negatives = True
-    elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
+    elif model_name in {"cnn_pair", "bilstm_pair", "cnn_pair_v3"}:
         include_pair_mixed_negatives = True
     return build_validation_protocol(
         val_frac=val_frac,
@@ -3422,6 +3547,14 @@ def _default_conv_depth(
     if parsed is not None and parsed:
         return len(parsed)
     return 3
+
+
+def _default_cnn_v3_dilation_schedule(depth: int) -> list[int]:
+    """Return one default cyclic dilation schedule for ``cnn_v3`` blocks."""
+    if depth <= 0:
+        raise ValueError("depth must be > 0.")
+    base_cycle = [1, 2, 4, 8]
+    return [base_cycle[index % len(base_cycle)] for index in range(depth)]
 
 
 def _sample_list_by_depth(
@@ -3657,6 +3790,25 @@ def _apply_cnn_resdil_length_schedule(
     return current
 
 
+def _apply_cnn_v3_pool_schedule(
+    length: int,
+    *,
+    depth: int,
+    max_pool_size: int,
+    pool_every: int,
+) -> int:
+    """Apply the pooling schedule used by ``cnn_v3`` and return output length."""
+    if length <= 0 or depth <= 0 or max_pool_size <= 0 or pool_every <= 0:
+        return 0
+    current = length
+    for index in range(depth):
+        if max_pool_size > 1 and ((index + 1) % pool_every == 0):
+            current = current // max_pool_size
+            if current <= 0:
+                return 0
+    return current
+
+
 def _is_valid_cnn_architecture(
     *,
     model_name: str,
@@ -3777,6 +3929,156 @@ def _is_valid_cnn_architecture(
                     kernel_sizes,
                     conv_stride,
                     max_pool_size,
+                )
+                <= 0
+            ):
+                return False
+        return True
+
+    if validation_model_name == "cnn_v3":
+        pool_every_raw = sampled_params.get("pool_every")
+        if pool_every_raw is None:
+            pool_every_raw = base_args.get("pool_every", 2)
+        pool_every = _to_positive_int(pool_every_raw)
+        if pool_every is None or pool_every <= 0:
+            return False
+
+        donor_conv_channels_raw = sampled_params.get("donor_conv_channels")
+        if donor_conv_channels_raw is None:
+            donor_conv_channels_raw = base_args.get("donor_conv_channels")
+        acceptor_conv_channels_raw = sampled_params.get("acceptor_conv_channels")
+        if acceptor_conv_channels_raw is None:
+            acceptor_conv_channels_raw = base_args.get("acceptor_conv_channels")
+        shared_conv_channels_raw = sampled_params.get("conv_channels")
+        if shared_conv_channels_raw is None:
+            shared_conv_channels_raw = base_args.get("conv_channels")
+
+        donor_conv_channels = _parse_conv_channels(donor_conv_channels_raw)
+        if donor_conv_channels is None:
+            donor_conv_channels = _parse_conv_channels(shared_conv_channels_raw)
+        acceptor_conv_channels = _parse_conv_channels(acceptor_conv_channels_raw)
+        if acceptor_conv_channels is None:
+            acceptor_conv_channels = _parse_conv_channels(shared_conv_channels_raw)
+        if donor_conv_channels is None:
+            donor_conv_channels = [64, 128, 256, 384]
+        if acceptor_conv_channels is None:
+            acceptor_conv_channels = [64, 128, 256, 384]
+
+        donor_depth = len(donor_conv_channels)
+        acceptor_depth = len(acceptor_conv_channels)
+
+        donor_kernel_sizes = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="donor_kernel_sizes",
+            scalar_key="kernel_size",
+            depth=donor_depth,
+        )
+        if donor_kernel_sizes is None:
+            donor_kernel_sizes = _resolve_kernel_argument(
+                sampled_params=sampled_params,
+                base_args=base_args,
+                kernel_key="kernel_sizes",
+                scalar_key="kernel_size",
+                depth=donor_depth,
+            )
+        acceptor_kernel_sizes = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="acceptor_kernel_sizes",
+            scalar_key="kernel_size",
+            depth=acceptor_depth,
+        )
+        if acceptor_kernel_sizes is None:
+            acceptor_kernel_sizes = _resolve_kernel_argument(
+                sampled_params=sampled_params,
+                base_args=base_args,
+                kernel_key="kernel_sizes",
+                scalar_key="kernel_size",
+                depth=acceptor_depth,
+            )
+        if donor_kernel_sizes is None:
+            donor_kernel_sizes = [9, 7, 5, 5][:donor_depth]
+            if len(donor_kernel_sizes) < donor_depth:
+                donor_kernel_sizes += [donor_kernel_sizes[-1]] * (
+                    donor_depth - len(donor_kernel_sizes)
+                )
+        if acceptor_kernel_sizes is None:
+            acceptor_kernel_sizes = [9, 7, 5, 5][:acceptor_depth]
+            if len(acceptor_kernel_sizes) < acceptor_depth:
+                acceptor_kernel_sizes += [acceptor_kernel_sizes[-1]] * (
+                    acceptor_depth - len(acceptor_kernel_sizes)
+                )
+        if any(value <= 0 or value % 2 == 0 for value in donor_kernel_sizes):
+            return False
+        if any(value <= 0 or value % 2 == 0 for value in acceptor_kernel_sizes):
+            return False
+
+        donor_dilations = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="donor_block_dilations",
+            scalar_key="block_dilation",
+            depth=donor_depth,
+        )
+        if donor_dilations is None:
+            donor_dilations = _resolve_kernel_argument(
+                sampled_params=sampled_params,
+                base_args=base_args,
+                kernel_key="block_dilations",
+                scalar_key="block_dilation",
+                depth=donor_depth,
+            )
+        acceptor_dilations = _resolve_kernel_argument(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            kernel_key="acceptor_block_dilations",
+            scalar_key="block_dilation",
+            depth=acceptor_depth,
+        )
+        if acceptor_dilations is None:
+            acceptor_dilations = _resolve_kernel_argument(
+                sampled_params=sampled_params,
+                base_args=base_args,
+                kernel_key="block_dilations",
+                scalar_key="block_dilation",
+                depth=acceptor_depth,
+            )
+        if donor_dilations is None:
+            donor_dilations = _default_cnn_v3_dilation_schedule(donor_depth)
+        if acceptor_dilations is None:
+            acceptor_dilations = _default_cnn_v3_dilation_schedule(acceptor_depth)
+        if any(value <= 0 for value in donor_dilations):
+            return False
+        if any(value <= 0 for value in acceptor_dilations):
+            return False
+
+        if donor_len is not None:
+            donor_len = _resolve_cnn_effective_input_length(
+                window_len=donor_len,
+                input_mode=input_mode,
+            )
+            if (
+                _apply_cnn_v3_pool_schedule(
+                    donor_len,
+                    depth=donor_depth,
+                    max_pool_size=max_pool_size,
+                    pool_every=pool_every,
+                )
+                <= 0
+            ):
+                return False
+        if acceptor_len is not None:
+            acceptor_len = _resolve_cnn_effective_input_length(
+                window_len=acceptor_len,
+                input_mode=input_mode,
+            )
+            if (
+                _apply_cnn_v3_pool_schedule(
+                    acceptor_len,
+                    depth=acceptor_depth,
+                    max_pool_size=max_pool_size,
+                    pool_every=pool_every,
                 )
                 <= 0
             ):
@@ -4285,6 +4587,216 @@ def _materialize_cnn_architecture_params(
         if pool_controlled and explicit_max_pool is None:
             out["max_pool_size"] = chosen_max_pool
 
+    def _materialize_cnn_v3_branches() -> None:
+        def _get_config_value(*keys: str, default: object) -> object:
+            for key in keys:
+                value = out.get(key)
+                if value is not None:
+                    return value
+                value = base_args.get(key)
+                if value is not None:
+                    return value
+            return default
+
+        def _normalize_kernel_size(value: int) -> int:
+            kernel_size = max(3, int(value))
+            if kernel_size % 2 == 0:
+                kernel_size -= 1
+            return max(3, kernel_size)
+
+        def _build_branch(prefix: str) -> None:
+            conv_key = f"{prefix}_conv_channels"
+            kernel_key = f"{prefix}_kernel_sizes"
+            dilation_key = f"{prefix}_block_dilations"
+            residual_key = f"{prefix}_residual_channels"
+
+            explicit_channels = _parse_conv_channels(out.get(conv_key))
+            if explicit_channels is None:
+                explicit_channels = _parse_conv_channels(base_args.get(conv_key))
+            if explicit_channels is None:
+                explicit_channels = _parse_conv_channels(out.get("conv_channels"))
+            if explicit_channels is None:
+                explicit_channels = _parse_conv_channels(base_args.get("conv_channels"))
+
+            explicit_kernels = _parse_conv_channels(out.get(kernel_key))
+            if explicit_kernels is None:
+                explicit_kernels = _parse_conv_channels(base_args.get(kernel_key))
+            if explicit_kernels is None:
+                explicit_kernels = _parse_conv_channels(out.get("kernel_sizes"))
+            if explicit_kernels is None:
+                explicit_kernels = _parse_conv_channels(base_args.get("kernel_sizes"))
+
+            explicit_dilations = _parse_conv_channels(out.get(dilation_key))
+            if explicit_dilations is None:
+                explicit_dilations = _parse_conv_channels(base_args.get(dilation_key))
+            if explicit_dilations is None:
+                explicit_dilations = _parse_conv_channels(out.get("block_dilations"))
+            if explicit_dilations is None:
+                explicit_dilations = _parse_conv_channels(base_args.get("block_dilations"))
+
+            explicit_residuals = _parse_conv_channels(out.get(residual_key))
+            if explicit_residuals is None:
+                explicit_residuals = _parse_conv_channels(base_args.get(residual_key))
+            if explicit_residuals is None:
+                explicit_residuals = _parse_conv_channels(out.get("residual_channels"))
+            if explicit_residuals is None:
+                explicit_residuals = _parse_conv_channels(base_args.get("residual_channels"))
+
+            if (
+                explicit_channels is not None
+                and explicit_kernels is not None
+                and explicit_dilations is not None
+                and explicit_residuals is not None
+            ):
+                out[conv_key] = _stringify_int_list(explicit_channels)
+                out[kernel_key] = _stringify_int_list(explicit_kernels)
+                out[dilation_key] = _stringify_int_list(explicit_dilations)
+                out[residual_key] = _stringify_int_list(explicit_residuals)
+                return
+
+            init_depth = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_init_depth",
+                    "arch_init_depth",
+                    default=3,
+                )
+            )
+            max_depth = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_max_depth",
+                    "arch_max_depth",
+                    default=8,
+                )
+            )
+            init_channels = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_init_channels",
+                    "arch_init_channels",
+                    default=64,
+                )
+            )
+            channel_step = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_channel_step",
+                    "arch_channel_step",
+                    default=32,
+                )
+            )
+            init_kernel_size = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_init_kernel_size",
+                    "arch_init_kernel_size",
+                    default=9,
+                )
+            )
+            min_kernel_size = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_min_kernel_size",
+                    "arch_min_kernel_size",
+                    default=3,
+                )
+            )
+            mutation_steps = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_mutation_steps",
+                    "arch_mutation_steps",
+                    default=4,
+                )
+            )
+            max_dilation = _to_positive_int(
+                _get_config_value(
+                    f"{prefix}_arch_max_dilation",
+                    "arch_max_dilation",
+                    default=32,
+                )
+            )
+            add_prob = float(
+                _get_config_value(
+                    f"{prefix}_arch_add_block_prob",
+                    "arch_add_block_prob",
+                    default=0.25,
+                )
+            )
+            widen_prob = float(
+                _get_config_value(
+                    f"{prefix}_arch_widen_prob",
+                    "arch_widen_prob",
+                    default=0.35,
+                )
+            )
+            dilation_prob = float(
+                _get_config_value(
+                    f"{prefix}_arch_dilation_prob",
+                    "arch_dilation_prob",
+                    default=0.20,
+                )
+            )
+            residual_prob = float(
+                _get_config_value(
+                    f"{prefix}_arch_residual_prob",
+                    "arch_residual_prob",
+                    default=0.10,
+                )
+            )
+
+            init_depth = min(init_depth or 3, max_depth or 8)
+            init_channels = init_channels or 64
+            channel_step = channel_step or 32
+            mutation_steps = mutation_steps or 4
+            max_dilation = max_dilation or 32
+            min_kernel_size = _normalize_kernel_size(min_kernel_size or 3)
+            initial_kernel = _normalize_kernel_size(init_kernel_size or 9)
+
+            channels = [init_channels + (index * channel_step) for index in range(init_depth)]
+            kernels = [
+                max(min_kernel_size, _normalize_kernel_size(initial_kernel - (2 * index)))
+                for index in range(init_depth)
+            ]
+            dilations = _default_cnn_v3_dilation_schedule(init_depth)
+            residuals = [max(32, channel // 2) for channel in channels]
+
+            mutation_total = add_prob + widen_prob + dilation_prob + residual_prob
+            for _ in range(mutation_steps):
+                if not channels:
+                    break
+                roll = rng.random()
+                index = rng.randrange(len(channels))
+                if roll < add_prob and len(channels) < max_depth:
+                    insert_index = rng.randrange(len(channels) + 1)
+                    base_channel = channels[index]
+                    new_channel = base_channel + channel_step
+                    channels.insert(insert_index, new_channel)
+                    kernels.insert(
+                        insert_index,
+                        max(min_kernel_size, kernels[index] - 2),
+                    )
+                    dilations.insert(
+                        insert_index,
+                        min(max_dilation, max(1, dilations[index] * 2)),
+                    )
+                    residuals.insert(insert_index, max(32, new_channel // 2))
+                elif roll < add_prob + widen_prob:
+                    channels[index] += channel_step
+                    residuals[index] = max(residuals[index], channels[index] // 2)
+                elif roll < add_prob + widen_prob + dilation_prob:
+                    dilations[index] = min(max_dilation, max(1, dilations[index] * 2))
+                elif roll < mutation_total:
+                    residuals[index] += max(16, channel_step // 2)
+                else:
+                    delta = -2 if rng.random() < 0.5 else 2
+                    kernels[index] = max(
+                        min_kernel_size,
+                        _normalize_kernel_size(kernels[index] + delta),
+                    )
+
+            out[conv_key] = _stringify_int_list(channels)
+            out[kernel_key] = _stringify_int_list(kernels)
+            out[dilation_key] = _stringify_int_list(dilations)
+            out[residual_key] = _stringify_int_list(residuals)
+
+        _build_branch("donor")
+        _build_branch("acceptor")
+
     if model_name in {"cnn", "cnn_resdil", "cnn_v2"}:
         has_arch_keys = any(
             key in out or key in base_args
@@ -4448,6 +4960,8 @@ def _materialize_cnn_architecture_params(
             _materialize_stride_and_pool_for_pair_models(
                 validation_model_name=validation_model_name
             )
+    elif model_name in {"cnn_v3", "cnn_pair_v3"}:
+        _materialize_cnn_v3_branches()
 
     helper_keys = {
         "conv_depth",
@@ -4467,6 +4981,42 @@ def _materialize_cnn_architecture_params(
         "acceptor_kernel_order",
         "conv_stride_candidates",
         "max_pool_candidates",
+        "arch_init_depth",
+        "arch_max_depth",
+        "arch_init_channels",
+        "arch_channel_step",
+        "arch_init_kernel_size",
+        "arch_min_kernel_size",
+        "arch_mutation_steps",
+        "arch_max_dilation",
+        "arch_add_block_prob",
+        "arch_widen_prob",
+        "arch_dilation_prob",
+        "arch_residual_prob",
+        "donor_arch_init_depth",
+        "donor_arch_max_depth",
+        "donor_arch_init_channels",
+        "donor_arch_channel_step",
+        "donor_arch_init_kernel_size",
+        "donor_arch_min_kernel_size",
+        "donor_arch_mutation_steps",
+        "donor_arch_max_dilation",
+        "donor_arch_add_block_prob",
+        "donor_arch_widen_prob",
+        "donor_arch_dilation_prob",
+        "donor_arch_residual_prob",
+        "acceptor_arch_init_depth",
+        "acceptor_arch_max_depth",
+        "acceptor_arch_init_channels",
+        "acceptor_arch_channel_step",
+        "acceptor_arch_init_kernel_size",
+        "acceptor_arch_min_kernel_size",
+        "acceptor_arch_mutation_steps",
+        "acceptor_arch_max_dilation",
+        "acceptor_arch_add_block_prob",
+        "acceptor_arch_widen_prob",
+        "acceptor_arch_dilation_prob",
+        "acceptor_arch_residual_prob",
     }
     for key in helper_keys:
         out.pop(key, None)
@@ -4868,6 +5418,116 @@ def estimate_cnn_pair_param_complexity(
     return donor_params + acceptor_params + head_params
 
 
+def estimate_cnn_pair_v3_param_complexity(
+    sampled_params: dict[str, Scalar],
+    base_args: dict[str, ArgValue],
+) -> Optional[int]:
+    """Estimate trainable parameters for the residual-dilated pair ``cnn_pair_v3``."""
+
+    def _resolve_branch_list(
+        *,
+        branch_key: str,
+        shared_key: str,
+        default_values: list[int],
+    ) -> list[int]:
+        raw = sampled_params.get(branch_key)
+        if raw is None:
+            raw = base_args.get(branch_key)
+        parsed = _parse_conv_channels(raw)
+        if parsed is not None:
+            return parsed
+        shared_raw = sampled_params.get(shared_key)
+        if shared_raw is None:
+            shared_raw = base_args.get(shared_key)
+        shared_parsed = _parse_conv_channels(shared_raw)
+        if shared_parsed is not None:
+            return shared_parsed
+        return list(default_values)
+
+    donor_conv_channels = _resolve_branch_list(
+        branch_key="donor_conv_channels",
+        shared_key="conv_channels",
+        default_values=[64, 128, 256, 384],
+    )
+    acceptor_conv_channels = _resolve_branch_list(
+        branch_key="acceptor_conv_channels",
+        shared_key="conv_channels",
+        default_values=[64, 128, 256, 384],
+    )
+    donor_kernel_sizes = _resolve_branch_kernel_sizes(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        branch_key="donor_kernel_sizes",
+        depth=len(donor_conv_channels),
+        shared_kernel_raw=sampled_params.get("kernel_sizes", base_args.get("kernel_sizes")),
+        scalar_kernel_raw=sampled_params.get("kernel_size", base_args.get("kernel_size", 9)),
+    )
+    acceptor_kernel_sizes = _resolve_branch_kernel_sizes(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        branch_key="acceptor_kernel_sizes",
+        depth=len(acceptor_conv_channels),
+        shared_kernel_raw=sampled_params.get("kernel_sizes", base_args.get("kernel_sizes")),
+        scalar_kernel_raw=sampled_params.get("kernel_size", base_args.get("kernel_size", 9)),
+    )
+    donor_residual_channels = _resolve_branch_list(
+        branch_key="donor_residual_channels",
+        shared_key="residual_channels",
+        default_values=[max(32, channel // 2) for channel in donor_conv_channels],
+    )
+    acceptor_residual_channels = _resolve_branch_list(
+        branch_key="acceptor_residual_channels",
+        shared_key="residual_channels",
+        default_values=[max(32, channel // 2) for channel in acceptor_conv_channels],
+    )
+    if donor_kernel_sizes is None or acceptor_kernel_sizes is None:
+        return None
+
+    fc_hidden_raw = sampled_params.get("fc_hidden")
+    if fc_hidden_raw is None:
+        fc_hidden_raw = base_args.get("fc_hidden", 192)
+    fc_hidden = _to_positive_int(fc_hidden_raw)
+    if fc_hidden is None:
+        return None
+
+    def _estimate_branch(
+        *,
+        channels: list[int],
+        kernel_sizes: list[int],
+        residual_channels: list[int],
+    ) -> int:
+        total = 0
+        in_channels = 4
+        for channel, kernel_size, residual_channel in zip(
+            channels,
+            kernel_sizes,
+            residual_channels,
+            strict=True,
+        ):
+            total += (in_channels * residual_channel * kernel_size) + residual_channel
+            total += 2 * residual_channel
+            total += (residual_channel * channel * kernel_size) + channel
+            total += 2 * channel
+            if in_channels != channel:
+                total += (in_channels * channel) + channel
+            in_channels = channel
+        return total
+
+    donor_params = _estimate_branch(
+        channels=donor_conv_channels,
+        kernel_sizes=donor_kernel_sizes,
+        residual_channels=donor_residual_channels,
+    )
+    acceptor_params = _estimate_branch(
+        channels=acceptor_conv_channels,
+        kernel_sizes=acceptor_kernel_sizes,
+        residual_channels=acceptor_residual_channels,
+    )
+    pair_dim = donor_conv_channels[-1] + acceptor_conv_channels[-1]
+    head_params = (pair_dim * fc_hidden) + fc_hidden + fc_hidden + 1
+    return donor_params + acceptor_params + head_params
+
+
 def estimate_model_param_complexity(
     *,
     model_name: str,
@@ -4895,6 +5555,76 @@ def estimate_model_param_complexity(
             sampled_params=sampled_params,
             base_args=base_args,
         )
+    if model_name == "cnn_pair_v3":
+        return estimate_cnn_pair_v3_param_complexity(
+            sampled_params=sampled_params,
+            base_args=base_args,
+        )
+    if model_name == "cnn_v3":
+        train_target_raw = sampled_params.get("train_target", base_args.get("train_target"))
+        train_target = str(train_target_raw).strip().lower() or "donor"
+        branch_prefix = "donor" if train_target != "acceptor" else "acceptor"
+        branch_channels_raw = sampled_params.get(
+            f"{branch_prefix}_conv_channels",
+            base_args.get(f"{branch_prefix}_conv_channels"),
+        )
+        if branch_channels_raw is None:
+            branch_channels_raw = sampled_params.get(
+                "conv_channels",
+                base_args.get("conv_channels"),
+            )
+        branch_channels = _parse_conv_channels(branch_channels_raw)
+        if branch_channels is None:
+            branch_channels = [64, 128, 256, 384]
+        branch_kernel_sizes = _resolve_branch_kernel_sizes(
+            sampled_params=sampled_params,
+            base_args=base_args,
+            branch_key=f"{branch_prefix}_kernel_sizes",
+            depth=len(branch_channels),
+            shared_kernel_raw=sampled_params.get(
+                "kernel_sizes",
+                base_args.get("kernel_sizes"),
+            ),
+            scalar_kernel_raw=sampled_params.get(
+                "kernel_size",
+                base_args.get("kernel_size", 9),
+            ),
+        )
+        if branch_kernel_sizes is None:
+            return None
+        branch_residuals_raw = sampled_params.get(
+            f"{branch_prefix}_residual_channels",
+            base_args.get(f"{branch_prefix}_residual_channels"),
+        )
+        if branch_residuals_raw is None:
+            branch_residuals_raw = sampled_params.get(
+                "residual_channels",
+                base_args.get("residual_channels"),
+            )
+        branch_residuals = _parse_conv_channels(branch_residuals_raw)
+        if branch_residuals is None:
+            branch_residuals = [max(32, channel // 2) for channel in branch_channels]
+        fc_hidden_raw = sampled_params.get("fc_hidden", base_args.get("fc_hidden", 192))
+        fc_hidden = _to_positive_int(fc_hidden_raw)
+        if fc_hidden is None:
+            return None
+        total = 0
+        in_channels = 4
+        for channel, kernel_size, residual_channel in zip(
+            branch_channels,
+            branch_kernel_sizes,
+            branch_residuals,
+            strict=True,
+        ):
+            total += (in_channels * residual_channel * kernel_size) + residual_channel
+            total += 2 * residual_channel
+            total += (residual_channel * channel * kernel_size) + channel
+            total += 2 * channel
+            if in_channels != channel:
+                total += (in_channels * channel) + channel
+            in_channels = channel
+        total += (branch_channels[-1] * fc_hidden) + fc_hidden + fc_hidden + 1
+        return total
     return None
 
 
@@ -5756,16 +6486,26 @@ def build_trial_params(
         for _attempt in range(max_resample_attempts):
             if (
                 phase == "quick"
-                and config.search_algo == "history_guided"
+                and config.search_algo in {"history_guided", "reinforce"}
                 and history_trials
             ):
-                params = sample_trial_params_history_guided(
-                    search_space=config.search_space,
-                    seed=rng.randrange(1 << 30),
-                    history_trials=history_trials,
-                    random_fraction=config.guided_random_fraction,
-                    mutation_rate=config.guided_mutation_rate,
-                )
+                if config.search_algo == "history_guided":
+                    params = sample_trial_params_history_guided(
+                        search_space=config.search_space,
+                        seed=rng.randrange(1 << 30),
+                        history_trials=history_trials,
+                        random_fraction=config.guided_random_fraction,
+                        mutation_rate=config.guided_mutation_rate,
+                    )
+                else:
+                    params = sample_trial_params_reinforce(
+                        search_space=config.search_space,
+                        seed=rng.randrange(1 << 30),
+                        history_trials=history_trials,
+                        random_fraction=config.guided_random_fraction,
+                        mutation_rate=config.guided_mutation_rate,
+                        temperature=config.reinforce_temperature,
+                    )
             else:
                 params = _sample_trial_params_with_rng(config.search_space, rng)
             params = _materialize_cnn_architecture_params(
@@ -5998,7 +6738,7 @@ def _extract_model_name_from_best_update(
             if isinstance(raw_model, str) and raw_model.strip():
                 return raw_model.strip()
     tuning_model_name = global_best_path.parent.parent.name
-    if tuning_model_name in {"cnn_v2", "cnn_pair_v2"}:
+    if tuning_model_name in {"cnn_v2", "cnn_pair_v2", "cnn_v3", "cnn_pair_v3"}:
         return tuning_model_name
     return None
 
@@ -6237,7 +6977,7 @@ def run_search(config: SearchConfig) -> int:
         )
 
     history_trials: list[tuple[float, dict[str, Scalar]]] = []
-    if config.search_algo == "history_guided":
+    if config.search_algo in {"history_guided", "reinforce"}:
         history_trials = load_historical_trials(
             output_dir=config.output_dir,
             search_space=config.search_space,
@@ -6245,14 +6985,25 @@ def run_search(config: SearchConfig) -> int:
             top_n=config.history_top_n,
             base_args=config.base_args,
         )
-        print(
-            "[hparam_search] Search algorithm: history_guided "
-            f"(history_candidates={len(history_trials)}, "
-            f"top_n={config.history_top_n}, "
-            f"random_fraction={config.guided_random_fraction:.2f}, "
-            f"mutation_rate={config.guided_mutation_rate:.2f}).",
-            flush=True,
-        )
+        if config.search_algo == "history_guided":
+            print(
+                "[hparam_search] Search algorithm: history_guided "
+                f"(history_candidates={len(history_trials)}, "
+                f"top_n={config.history_top_n}, "
+                f"random_fraction={config.guided_random_fraction:.2f}, "
+                f"mutation_rate={config.guided_mutation_rate:.2f}).",
+                flush=True,
+            )
+        else:
+            print(
+                "[hparam_search] Search algorithm: reinforce "
+                f"(history_candidates={len(history_trials)}, "
+                f"top_n={config.history_top_n}, "
+                f"random_fraction={config.guided_random_fraction:.2f}, "
+                f"mutation_rate={config.guided_mutation_rate:.2f}, "
+                f"temperature={config.reinforce_temperature:.2f}).",
+                flush=True,
+            )
     else:
         print("[hparam_search] Search algorithm: random.", flush=True)
 

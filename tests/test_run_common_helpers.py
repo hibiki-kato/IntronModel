@@ -189,6 +189,25 @@ def test_common_resolve_pair_best_config_path_prefers_public_pair_tree(
     ]
 
 
+def test_common_resolve_pair_best_config_path_supports_cnn_pair_v3(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    run = _run_common_shell(
+        f'DATA_ROOT={shlex.quote(str(data_root))}\n'
+        'printf "%s\\n" '
+        '"$(intronmodel_resolve_pair_best_config_path "${DATA_ROOT}" '
+        '"Dmel" "cnn_pair_v3")"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip().splitlines() == [
+        str(
+            data_root / "Dmel" / "tuning" / "cnn_pair_v3" / "pair" / "best_config.json"
+        )
+    ]
+
+
 def test_common_resolve_pair_tuning_model_name_is_public_pair_name() -> None:
     run = _run_common_shell(
         'printf "%s\\n" "$(intronmodel_resolve_pair_tuning_model_name)"\n'
