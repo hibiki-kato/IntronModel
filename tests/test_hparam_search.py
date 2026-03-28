@@ -181,10 +181,10 @@ def test_derive_validation_protocol_uses_test_split_for_test_objective() -> None
     assert protocol["split_type"] == "test_transcript_eval"
 
 
-def test_derive_validation_protocol_marks_cnn_v2_pair_as_pair_mode() -> None:
+def test_derive_validation_protocol_marks_cnn_pair_v2_as_pair_mode() -> None:
     protocol = hparam_search._derive_validation_protocol_from_args(
         merged_args={
-            "model": "cnn_v2_pair",
+            "model": "cnn_pair_v2",
             "species": "Dmel",
             "batch_size": 512,
             "train_target": "pair",
@@ -1203,7 +1203,7 @@ def test_run_trial_preserves_explicit_report_train_metrics_override(
     assert captured_report_train_metrics == ["1"]
 
 
-@pytest.mark.parametrize("model_name", ["cnn", "cnn_v2", "cnn_pair", "cnn_v2_pair"])
+@pytest.mark.parametrize("model_name", ["cnn", "cnn_v2", "cnn_pair", "cnn_pair_v2"])
 def test_run_trial_disables_train_metrics_for_parallel_trials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2326,6 +2326,85 @@ def test_maybe_update_global_best_skips_same_sampled_params_recheck(
     assert "skip global best update/version publish" in captured.out
     assert write_calls == []
     assert publish_calls == []
+
+
+def test_print_trial_result_includes_failure_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = hparam_search.TrialResult(
+        phase="quick",
+        trial_id=2,
+        status="failed",
+        gpu_id="0",
+        sampled_params={"batch_size": 512},
+        effective_batch_size=512,
+        oom_retries=1,
+        donor_pr_auc=None,
+        acceptor_pr_auc=None,
+        mean_pr_auc=None,
+        objective_metric="pair_max_f1",
+        objective_score=None,
+        error_message="Training command failed (exit=1). See trial log for details.",
+        return_code=1,
+        duration_sec=1.0,
+        metrics_json="metrics.json",
+        log_file="trial.log",
+    )
+
+    hparam_search._print_trial_result(
+        phase="quick",
+        trial_count=16,
+        completed_count=7,
+        result=result,
+    )
+
+    captured = capsys.readouterr()
+    assert "quick trial 0002 failed (7/16) pair_max_f1=-." in captured.out
+    assert "reason=Training command failed (exit=1). See trial log for details." in (
+        captured.out
+    )
+    assert "log=trial.log" in captured.out
+
+
+def test_summarize_failure_output_prefers_final_error_line() -> None:
+    text = "\n".join(
+        [
+            "epoch=1",
+            "Traceback (most recent call last):",
+            "FileNotFoundError: Checkpoint not found: /tmp/missing.pt",
+        ]
+    )
+
+    summary = hparam_search._summarize_failure_output(text)
+
+    assert summary == "FileNotFoundError: Checkpoint not found: /tmp/missing.pt"
+
+
+def test_emit_trial_failure_output_excerpt_prints_tail_in_silent_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    previous_stream_mode = hparam_search._set_active_trial_stream_mode("silent")
+    try:
+        hparam_search._emit_trial_failure_output_excerpt(
+            output_text="\n".join(
+                [
+                    "line 1",
+                    "line 2",
+                    "Traceback (most recent call last):",
+                    "ValueError: boom",
+                ]
+            ),
+            phase="quick",
+            trial_id=2,
+            max_lines=2,
+        )
+    finally:
+        _ = hparam_search._set_active_trial_stream_mode(previous_stream_mode)
+
+    captured = capsys.readouterr()
+    assert "failure log excerpt (last 2 lines)" in captured.out
+    assert "Traceback (most recent call last):" in captured.out
+    assert "ValueError: boom" in captured.out
 
 
 def test_build_fixed_run_args_context_excludes_search_and_runtime_keys() -> None:
@@ -4728,7 +4807,7 @@ def test_build_trial_params_preserves_explicit_pair_layer_layout(
     ]
 
 
-def test_build_trial_params_materializes_cnn_v2_pair_stride_pool_candidates(
+def test_build_trial_params_materializes_cnn_pair_v2_stride_pool_candidates(
     tmp_path: Path,
 ) -> None:
     search_space = hparam_search._validate_search_space(
@@ -4773,7 +4852,7 @@ def test_build_trial_params_materializes_cnn_v2_pair_stride_pool_candidates(
         global_best_config_path=None,
         seed_best_config_path=None,
         base_args={
-            "model": "cnn_v2_pair",
+            "model": "cnn_pair_v2",
             "species": "Dmel",
             "batch_size": 256,
             "input_mode": "onehot",
@@ -4995,7 +5074,7 @@ def test_build_trial_params_resamples_invalid_cnn_v2_pool_shape(
     ]
 
 
-def test_build_trial_params_resamples_invalid_cnn_v2_pair_onehot_pool_shape(
+def test_build_trial_params_resamples_invalid_cnn_pair_v2_onehot_pool_shape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5031,7 +5110,7 @@ def test_build_trial_params_resamples_invalid_cnn_v2_pair_onehot_pool_shape(
         global_best_config_path=None,
         seed_best_config_path=None,
         base_args={
-            "model": "cnn_v2_pair",
+            "model": "cnn_pair_v2",
             "species": "Dmel",
             "batch_size": 256,
             "donor_len": 8,
@@ -5089,7 +5168,7 @@ def test_build_trial_params_resamples_invalid_cnn_v2_pair_onehot_pool_shape(
     ]
 
 
-def test_build_trial_params_resamples_invalid_cnn_v2_pair_kmer3_pool_shape(
+def test_build_trial_params_resamples_invalid_cnn_pair_v2_kmer3_pool_shape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5126,7 +5205,7 @@ def test_build_trial_params_resamples_invalid_cnn_v2_pair_kmer3_pool_shape(
         global_best_config_path=None,
         seed_best_config_path=None,
         base_args={
-            "model": "cnn_v2_pair",
+            "model": "cnn_pair_v2",
             "species": "Dmel",
             "batch_size": 256,
             "donor_len": 100,
@@ -5595,7 +5674,7 @@ def test_run_quick_full_overlap_subprocess_applies_parallel_trial_defaults(
         objective_metric="mean_pr_auc",
         global_best_config_path=None,
         seed_best_config_path=None,
-        base_args={"model": "cnn_v2_pair", "species": "Dmel", "batch_size": 128},
+        base_args={"model": "cnn_pair_v2", "species": "Dmel", "batch_size": 128},
         quick_overrides={"epochs": 1},
         full_overrides={"epochs": 4},
         search_space=search_space,

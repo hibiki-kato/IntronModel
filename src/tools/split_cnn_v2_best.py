@@ -31,7 +31,7 @@ from util.checkpoint_io import (
 
 NON_PAIR_SOURCES: tuple[str, ...] = ("cnn_v2", "cnn", "cnn_mask")
 PAIR_SOURCES: tuple[str, ...] = (
-    "cnn_v2_pair",
+    "cnn_pair_v2",
     "cnn_v2",
     "cnn_pair",
     "cnn_pair_mask",
@@ -98,7 +98,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Split cnn_v2 best artifacts into cnn_v2 (non-pair) and "
-            "cnn_v2_pair (pair)."
+            "cnn_pair_v2 (pair)."
         )
     )
     parser.add_argument(

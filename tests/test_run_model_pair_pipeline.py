@@ -521,7 +521,7 @@ def test_run_pipeline_pair_model_writes_compatible_transcript_tsv(
     assert len(lines[1].split("\t")) == 5
 
 
-def test_run_pipeline_cnn_v2_pair_rows_aggregate_from_pair_scores(
+def test_run_pipeline_cnn_pair_v2_rows_aggregate_from_pair_scores(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

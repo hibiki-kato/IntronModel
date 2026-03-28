@@ -294,7 +294,7 @@ def test_ensure_publication_seed_promotes_legacy_pair_outputs(tmp_path: Path) ->
         / "data"
         / "SpX"
         / "tuning"
-        / "cnn_v2_pair"
+        / "cnn_pair_v2"
         / "pair"
         / "best_config.json"
     )
@@ -306,7 +306,7 @@ def test_ensure_publication_seed_promotes_legacy_pair_outputs(tmp_path: Path) ->
             objective_score=0.88,
         ),
     )
-    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_v2_pair")
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_pair_v2")
 
     published_name = ensure_publication_seed(
         project_root=tmp_path,

@@ -769,7 +769,7 @@ RESERVOIR_ACCEPTOR_CFG="${TUNING_ROOT}/reservoir/acceptor/best_config.json"
 DNABERT6_DONOR_CFG="${TUNING_ROOT}/dnabert6/donor/best_config.json"
 DNABERT6_ACCEPTOR_CFG="${TUNING_ROOT}/dnabert6/acceptor/best_config.json"
 DNABERT2_PAIR_TRUNC_CFG="${TUNING_ROOT}/dnabert2_pair_trunc/pair/best_config.json"
-CNN_V2_PAIR_CFG="${TUNING_ROOT}/cnn_v2_pair/pair/best_config.json"
+CNN_PAIR_V2_CFG="${TUNING_ROOT}/cnn_pair_v2/pair/best_config.json"
 
 log "Inference: wrappers (Markov excluded)"
 log "infer_models=${INFER_MODELS}"

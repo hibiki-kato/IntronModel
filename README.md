@@ -93,7 +93,8 @@ bash run/eval_intron_pr_auc.sh --species Dmel
 Registered in `src/models/registry.py`:
 
 - `cnn`
-- `cnn_pair`
+- `cnn_pair_v2`
+- `cnn_pair` (legacy implementation kept for compatibility)
 - `cnn_resdil`
 - `tcn`
 - `bert`
@@ -154,7 +155,7 @@ Transcript score TSV compatibility:
 - Output schema is fixed to 5 columns:
   `transcript_id`, `min_intron_index`, `Score_donor`,
   `Score_acceptor`, `trans_score`.
-- `cnn_pair` keeps this schema by writing the same pair score into both
+- `cnn_pair_v2` keeps this schema by writing the same pair score into both
   `Score_donor` and `Score_acceptor`.
 
 Reservoir-specific notes:

@@ -8,7 +8,7 @@ Usage: bash run/rerun_active_best_scores_and_evals.sh
 This script reruns the saved best active models for all species using
 ``--skip_train``, then rebuilds the downstream eval outputs and plots:
   1) best cnn_v2 inference from saved checkpoints
-  2) best cnn_v2_pair inference from saved checkpoints
+  2) best cnn_pair_v2 inference from saved checkpoints
   3) run/plot_eval.sh
   4) run/eval_trans_score.sh
   5) run/eval_intron_pr_auc.sh
@@ -264,12 +264,12 @@ run_for_species() {
 	}
 
 		local cnn_v2_best=""
-		local cnn_v2_pair_best=""
+		local cnn_pair_v2_best=""
 		cnn_v2_best="$(
 			resolve_best_config_path "cnn_v2" "donor" "acceptor" || true
 		)"
-	cnn_v2_pair_best="$(
-		resolve_best_config_path "cnn_v2_pair" "pair" || true
+	cnn_pair_v2_best="$(
+		resolve_best_config_path "cnn_pair_v2" "pair" || true
 	)"
 
 	if [[ "${RUN_CNN_V2}" == "1" ]]; then
@@ -283,12 +283,12 @@ run_for_species() {
 		fi
 
 	if [[ "${RUN_CNN_V2_PAIR}" == "1" ]]; then
-		if [[ -n "${cnn_v2_pair_best}" ]]; then
-			run_best_infer "cnn_v2_pair" "${cnn_v2_pair_best}" "${species}" \
-				"${species_label}: rerun cnn_v2_pair best"
+		if [[ -n "${cnn_pair_v2_best}" ]]; then
+			run_best_infer "cnn_pair_v2" "${cnn_pair_v2_best}" "${species}" \
+				"${species_label}: rerun cnn_pair_v2 best"
 		else
-			echo "[rerun_active_best_scores_and_evals] skip cnn_v2_pair for ${species}:"
-			echo "  missing best_config under data/${species}/tuning/cnn_v2_pair/pair/best_config.json"
+			echo "[rerun_active_best_scores_and_evals] skip cnn_pair_v2 for ${species}:"
+			echo "  missing best_config under data/${species}/tuning/cnn_pair_v2/pair/best_config.json"
 		fi
 	fi
 }

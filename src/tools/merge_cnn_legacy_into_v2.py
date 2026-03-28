@@ -1,9 +1,9 @@
-"""Migrate legacy CNN-pair best settings into ``cnn_v2_pair`` runs.
+"""Migrate legacy CNN-pair best settings into ``cnn_pair_v2`` runs.
 
 This tool automates:
 
-1. Re-running legacy pair best configs with ``cnn_v2_pair`` in one-hot 100bp mode.
-2. Promoting candidate outputs to canonical ``cnn_v2_pair`` outputs.
+1. Re-running legacy pair best configs with ``cnn_pair_v2`` in one-hot 100bp mode.
+2. Promoting candidate outputs to canonical ``cnn_pair_v2`` outputs.
 3. Archiving legacy non-tuning artifacts into an archive directory.
 """
 
@@ -51,8 +51,8 @@ LEGACY_VARIANTS: dict[str, VariantSpec] = {
     "cnn_pair": VariantSpec(
         name="cnn_pair",
         tuned_model_name="cnn_pair",
-        target_model_name="cnn_v2_pair",
-        target_artifact_stem="cnn_v2_pair",
+        target_model_name="cnn_pair_v2",
+        target_artifact_stem="cnn_pair_v2",
         pair_mode="pair",
         train_target="pair",
         mask_mode=False,
@@ -60,8 +60,8 @@ LEGACY_VARIANTS: dict[str, VariantSpec] = {
     "cnn_pair_mask": VariantSpec(
         name="cnn_pair_mask",
         tuned_model_name="cnn_pair_mask",
-        target_model_name="cnn_v2_pair",
-        target_artifact_stem="cnn_v2_pair",
+        target_model_name="cnn_pair_v2",
+        target_artifact_stem="cnn_pair_v2",
         pair_mode="pair",
         train_target="pair",
         mask_mode=True,
@@ -134,7 +134,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Replay legacy cnn_pair best configs with cnn_v2_pair and promote."
+            "Replay legacy cnn_pair best configs with cnn_pair_v2 and promote."
         )
     )
     parser.add_argument(
@@ -169,7 +169,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--promote-if-better",
         action="store_true",
         help=(
-            "Promote candidate outputs to cnn_v2 or cnn_v2_pair when better than "
+            "Promote candidate outputs to cnn_v2 or cnn_pair_v2 when better than "
             "current best."
         ),
     )
@@ -302,7 +302,7 @@ def _load_sampled_params(path: Path) -> dict[str, object]:
 
 
 def _build_pair_overrides(sampled_params: Mapping[str, object]) -> dict[str, str]:
-    """Build CLI overrides for ``cnn_v2_pair``."""
+    """Build CLI overrides for ``cnn_pair_v2``."""
     overrides: dict[str, str] = {}
     for key, value in sampled_params.items():
         if key in {"donor_len", "acceptor_len"}:

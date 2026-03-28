@@ -82,12 +82,12 @@ def test_evaluate_score_file_uses_internal_counts_and_ref_gff(
     assert float(fields[5]) == pytest.approx(0.0)
 
 
-def test_hsap_cnn_v2_pair_eval_matches_current_reference_files() -> None:
-    """Verify Hsap cnn_v2_pair evaluation uses the current class file."""
+def test_hsap_cnn_pair_v2_eval_matches_current_reference_files() -> None:
+    """Verify Hsap cnn_pair_v2 evaluation uses the current class file."""
 
     repo_root = Path(__file__).resolve().parents[1]
     class_file = repo_root / "data" / "Hsap" / "raw" / "transcript_class.txt"
-    score_file = repo_root / "data" / "Hsap" / "trans_score" / "cnn_v2_pair.tsv"
+    score_file = repo_root / "data" / "Hsap" / "trans_score" / "cnn_pair_v2.tsv"
     ref_gff = (
         repo_root
         / "data"
@@ -95,7 +95,7 @@ def test_hsap_cnn_v2_pair_eval_matches_current_reference_files() -> None:
         / "raw"
         / "GCF_000001405.40_GRCh38.p14_genomic.noalpsnopatches.filtered.gff"
     )
-    eval_file = repo_root / "data" / "Hsap" / "eval_score" / "cnn_v2_pair.txt"
+    eval_file = repo_root / "data" / "Hsap" / "eval_score" / "cnn_pair_v2.txt"
 
     if not class_file.is_file() or not score_file.is_file() or not ref_gff.is_file():
         pytest.skip("Hsap reference evaluation files are required for this test.")

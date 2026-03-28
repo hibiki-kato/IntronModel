@@ -118,7 +118,7 @@ def _resolve_base_pair_checkpoints(model_args: argparse.Namespace) -> list[str]:
     checkpoints = _parse_checkpoint_csv(raw, arg_name="--base_pair_checkpoints")
     incompatible: list[str] = []
     for checkpoint_path in checkpoints:
-        if not _is_compatible_cnn_v2_pair_checkpoint(checkpoint_path):
+        if not _is_compatible_cnn_pair_v2_checkpoint(checkpoint_path):
             incompatible.append(checkpoint_path)
     if incompatible:
         incompatible_text = ", ".join(incompatible)
@@ -136,8 +136,8 @@ def _normalize_model_state_key(key: str) -> str:
     return key
 
 
-def _is_cnn_v2_pair_checkpoint_payload(payload: object) -> bool:
-    """Return whether a checkpoint payload matches cnn_v2 pair format."""
+def _is_cnn_pair_v2_checkpoint_payload(payload: object) -> bool:
+    """Return whether a checkpoint payload matches cnn_pair_v2 format."""
     if not isinstance(payload, dict):
         return False
     model_config_obj = payload.get("model_config")
@@ -165,8 +165,8 @@ def _is_cnn_v2_pair_checkpoint_payload(payload: object) -> bool:
     return has_donor_encoder and has_acceptor_encoder and has_fc_head
 
 
-def _is_compatible_cnn_v2_pair_checkpoint(checkpoint_path: str) -> bool:
-    """Return whether one checkpoint path is cnn_v2-compatible for cnn_v3."""
+def _is_compatible_cnn_pair_v2_checkpoint(checkpoint_path: str) -> bool:
+    """Return whether one checkpoint path is cnn_pair_v2-compatible for cnn_v3."""
     try:
         try:
             payload = torch.load(
@@ -178,7 +178,7 @@ def _is_compatible_cnn_v2_pair_checkpoint(checkpoint_path: str) -> bool:
             payload = torch.load(checkpoint_path, map_location="cpu")
     except Exception:
         return False
-    return _is_cnn_v2_pair_checkpoint_payload(payload)
+    return _is_cnn_pair_v2_checkpoint_payload(payload)
 
 
 def _stratified_split_indices(

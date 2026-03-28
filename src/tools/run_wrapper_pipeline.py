@@ -164,7 +164,7 @@ def _resolve_tuned_config_path(
     if task_path.is_file():
         return task_path
 
-    task_only_models = {"cnn_v2", "cnn_v2_pair", "cnn_pair_v2"}
+    task_only_models = {"cnn_v2", "cnn_pair_v2"}
     if model_name not in task_only_models and shared_path.strip() != "":
         shared = Path(shared_path)
         if shared.is_file():
@@ -353,7 +353,7 @@ def _apply_tuned_overrides(
         synth_enabled=synth_enabled,
     )
 
-    task_only_models = {"cnn_v2", "cnn_v2_pair", "cnn_pair_v2"}
+    task_only_models = {"cnn_v2", "cnn_pair_v2"}
     if (
         env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == ""
         and tuned_model_name not in task_only_models
@@ -1953,7 +1953,6 @@ def _apply_species_parallel_env_overrides(
         "cnn",
         "cnn_pair",
         "cnn_v2",
-        "cnn_v2_pair",
         "cnn_pair_v2",
     }:
         resolved_env["REPORT_TRAIN_METRICS"] = "0"

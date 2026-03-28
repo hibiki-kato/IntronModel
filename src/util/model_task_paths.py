@@ -8,7 +8,6 @@ from typing import Sequence
 DEFAULT_TASKS: tuple[str, ...] = ("donor", "acceptor")
 _MODEL_TASK_OVERRIDES: dict[str, tuple[str, ...]] = {
     "cnn_pair": ("pair",),
-    "cnn_v2_pair": ("pair",),
     "cnn_pair_v2": ("pair",),
     "cnn_v3": ("pair",),
     "bilstm_pair": ("pair",),

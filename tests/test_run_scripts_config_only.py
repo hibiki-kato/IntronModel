@@ -149,7 +149,7 @@ def test_run_cnn_v2_sh_ignores_cnn_v2_only_tuned_keys() -> None:
     assert 'mode=independent tasks=donor,acceptor' in content
 
 
-def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
+def test_run_cnn_pair_v2_sh_rejects_cli_arguments() -> None:
     script_path = _project_root() / "run" / "run_cnn_pair_v2.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
@@ -161,7 +161,7 @@ def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
+def test_run_cnn_pair_v2_sh_leaves_mask_to_best_config() -> None:
     content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
@@ -194,7 +194,7 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     assert "--checkpoint_top_k" in content
 
 
-def test_run_cnn_v2_pair_sh_omits_empty_optional_loss_alpha_args() -> None:
+def test_run_cnn_pair_v2_sh_omits_empty_optional_loss_alpha_args() -> None:
     content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
@@ -210,7 +210,7 @@ def test_run_cnn_v2_pair_sh_omits_empty_optional_loss_alpha_args() -> None:
     assert 'append_arg_if_set "asym_alpha_pos" "${ASYM_ALPHA_POS}"' in content
 
 
-def test_run_cnn_v2_pair_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
+def test_run_cnn_pair_v2_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
     content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
@@ -224,7 +224,7 @@ def test_run_cnn_v2_pair_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
     ]
 
 
-def test_run_cnn_v2_pair_sh_uses_single_pair_tuning_namespace() -> None:
+def test_run_cnn_pair_v2_sh_uses_single_pair_tuning_namespace() -> None:
     content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
@@ -261,7 +261,7 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     assert "TAG=" not in content
 
 
-def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
+def test_tune_cnn_pair_v2_time_omits_max_model_params() -> None:
     content = (_project_root() / "run" / "tune_cnn_pair_v2_time.sh").read_text(
         encoding="utf-8"
     )
@@ -275,7 +275,7 @@ def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
     assert "MASK_MODE" not in content
 
 
-def test_tune_cnn_v2_pair_time_uses_single_pair_tuning_namespace() -> None:
+def test_tune_cnn_pair_v2_time_uses_single_pair_tuning_namespace() -> None:
     content = (_project_root() / "run" / "tune_cnn_pair_v2_time.sh").read_text(
         encoding="utf-8"
     )
@@ -644,7 +644,7 @@ def test_run_cnn_v2_sh_includes_gpu_parallel_config() -> None:
     assert 'MAX_PARALLEL_TRIALS="auto"' in content
 
 
-def test_run_cnn_v2_pair_sh_includes_gpu_parallel_config() -> None:
+def test_run_cnn_pair_v2_sh_includes_gpu_parallel_config() -> None:
     content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
@@ -719,7 +719,7 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         text=True,
         check=False,
     )
-    cnn_v2_pair = subprocess.run(
+    cnn_pair_v2 = subprocess.run(
         ["bash", "-n", str(root / "run" / "run_cnn_pair_v2.sh")],
         capture_output=True,
         text=True,
@@ -861,7 +861,7 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
     assert cnn_pair.returncode == 0, cnn_pair.stderr
     assert bilstm_pair.returncode == 0, bilstm_pair.stderr
     assert cnn_v2.returncode == 0, cnn_v2.stderr
-    assert cnn_v2_pair.returncode == 0, cnn_v2_pair.stderr
+    assert cnn_pair_v2.returncode == 0, cnn_pair_v2.stderr
     assert tcn.returncode == 0, tcn.stderr
     assert bert.returncode == 0, bert.stderr
     assert dnabert.returncode == 0, dnabert.stderr

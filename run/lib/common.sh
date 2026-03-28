@@ -706,19 +706,6 @@ intronmodel_resolve_pair_best_config_path() {
 		printf '%s\n' "${primary_path}"
 		return 0
 	fi
-	local legacy_model_name="${tuning_model_name}"
-	case "${tuning_model_name}" in
-		cnn_pair_v2)
-			legacy_model_name="cnn_v2_pair"
-			;;
-	esac
-	if [[ "${legacy_model_name}" != "${tuning_model_name}" ]]; then
-		local legacy_path="${data_root}/${species}/tuning/${legacy_model_name}/pair/${best_config_filename}"
-		if [[ -f "${legacy_path}" ]]; then
-			printf '%s\n' "${legacy_path}"
-			return 0
-		fi
-	fi
 	printf '%s\n' "${primary_path}"
 }
 

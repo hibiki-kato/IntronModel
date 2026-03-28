@@ -488,7 +488,7 @@ def load_config(path: Path) -> SearchConfig:
     normalized_model_name = normalized_base_args["model"].strip().lower()
     if normalized_model_name == "cnn_v2":
         pair_mode_raw = normalized_base_args.get("pair_mode", "independent")
-        if _normalize_cnn_v2_pair_mode(pair_mode_raw) != "independent":
+        if _normalize_cnn_pair_v2_mode(pair_mode_raw) != "independent":
             raise ValueError("base_args.pair_mode must be independent for cnn_v2.")
         train_target_raw = normalized_base_args.get("train_target", "donor")
         train_target = str(train_target_raw).strip().lower() or "donor"
@@ -498,7 +498,7 @@ def load_config(path: Path) -> SearchConfig:
             )
         normalized_base_args["pair_mode"] = "independent"
         normalized_base_args["train_target"] = train_target
-    elif normalized_model_name == "cnn_v2_pair":
+    elif normalized_model_name == "cnn_pair_v2":
         normalized_base_args["pair_mode"] = "pair"
         normalized_base_args["train_target"] = "pair"
 
@@ -1109,7 +1109,7 @@ def _score_site_rows_pair_model(
     """Score pair-site rows for one pair-model checkpoint."""
     if model_name == "cnn_pair":
         from models import cnn_pair as pair_module
-    elif model_name in {"cnn_v2", "cnn_v2_pair"}:
+    elif model_name in {"cnn_v2", "cnn_pair_v2"}:
         from models import cnn_v2 as pair_module
     else:
         raise ValueError(f"Unsupported pair model for scoring: {model_name}")
@@ -1150,13 +1150,13 @@ def _compute_test_pr_auc_objective(
     if train_target not in {"both", "donor", "acceptor", "pair"}:
         return None
     pair_mode_default = "independent" if model_name == "cnn_v2" else "pair"
-    cnn_v2_pair_mode = str(
+    cnn_pair_v2_mode = str(
         merged_args.get("pair_mode", pair_mode_default)
     ).strip().lower()
-    if model_name == "cnn_v2_pair":
-        cnn_v2_pair_mode = "pair"
+    if model_name == "cnn_pair_v2":
+        cnn_pair_v2_mode = "pair"
     if model_name == "cnn_v2":
-        if _normalize_cnn_v2_pair_mode(cnn_v2_pair_mode) != "independent":
+        if _normalize_cnn_pair_v2_mode(cnn_pair_v2_mode) != "independent":
             return None
         if train_target not in {"donor", "acceptor"}:
             return None
@@ -1179,7 +1179,7 @@ def _compute_test_pr_auc_objective(
 
     checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
     scored_rows: list[dict[str, object]] = []
-    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_v2_pair"}
+    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_pair_v2"}
     if use_pair_model_scoring:
         pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
         if pair_checkpoint_raw is None:
@@ -2001,6 +2001,33 @@ def _has_internal_oom_backoff(text: str) -> bool:
     return marker in lowered
 
 
+def _summarize_failure_output(text: str) -> str | None:
+    """Extract one short human-readable failure detail from captured output."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    preferred_markers = (
+        "traceback",
+        "filenotfounderror",
+        "valueerror",
+        "runtimeerror",
+        "assertionerror",
+        "exception",
+        "error:",
+        "error ",
+        "cuda out of memory",
+        "out of memory",
+        "oom",
+        "checkpoint not found",
+        "no such file",
+    )
+    for line in reversed(lines):
+        lowered = line.lower()
+        if any(marker in lowered for marker in preferred_markers):
+            return " ".join(line.split())
+    return " ".join(lines[-1].split())
+
+
 def _build_run_model_command(
     project_root: Path,
     args: dict[str, ArgValue],
@@ -2504,6 +2531,29 @@ def _emit_trial_output_lines(
             print(f"{prefix}{raw_line}", flush=True)
 
 
+def _emit_trial_failure_output_excerpt(
+    *,
+    output_text: str,
+    phase: str,
+    trial_id: int,
+    max_lines: int = 12,
+) -> None:
+    """Emit a short failure log excerpt even when trial stdout is silent."""
+    if _ACTIVE_TRIAL_STREAM_MODE != "silent":
+        return
+    lines = [line for line in output_text.splitlines() if line.strip()]
+    if not lines:
+        return
+    excerpt = lines[-max_lines:]
+    prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+    print(
+        f"{prefix}failure log excerpt (last {len(excerpt)} lines):",
+        flush=True,
+    )
+    for line in excerpt:
+        print(f"{prefix}{line}", flush=True)
+
+
 def _should_print_trial_start(stream_mode: str) -> bool:
     """Return whether per-trial start lines should print."""
     return stream_mode != "silent"
@@ -2714,7 +2764,7 @@ def _run_trial_with_command_runner(
         "cnn",
         "cnn_pair",
         "cnn_v2",
-        "cnn_v2_pair",
+        "cnn_pair_v2",
     }
     if (
         _ACTIVE_MAX_PARALLEL_TRIALS > 1
@@ -2793,6 +2843,12 @@ def _run_trial_with_command_runner(
             and current_batch > config.min_batch_size
         )
         if not can_retry:
+            failure_detail = _summarize_failure_output(combined_output)
+            _emit_trial_failure_output_excerpt(
+                output_text=combined_output,
+                phase=phase,
+                trial_id=trial_id,
+            )
             if is_non_retryable_oom:
                 error_message = (
                     f"Training failed with non-retryable OOM (exit={return_code}). "
@@ -2808,6 +2864,8 @@ def _run_trial_with_command_runner(
                     f"Training command failed (exit={return_code}). "
                     "See trial log for details."
                 )
+            if failure_detail is not None:
+                error_message = f"{error_message} detail={failure_detail}"
             duration_sec = time.time() - started_at
             return _build_failed_trial_result(
                 config=config,
@@ -3185,8 +3243,8 @@ def _normalize_cnn_pair_fusion_mode(raw_mode: object) -> str:
     return mode
 
 
-def _normalize_cnn_v2_pair_mode(raw_mode: object) -> str:
-    """Normalize cnn_v2 pair mode aliases for architecture validation."""
+def _normalize_cnn_pair_v2_mode(raw_mode: object) -> str:
+    """Normalize cnn_pair_v2 pair mode aliases for architecture validation."""
     mode = str(raw_mode).strip().lower()
     if mode in {"off", "false", "0", "independent"}:
         return "independent"
@@ -3216,11 +3274,11 @@ def _resolve_cnn_architecture_validation_model_name(
         pair_mode_raw = sampled_params.get("pair_mode")
         if pair_mode_raw is None:
             pair_mode_raw = base_args.get("pair_mode", "pair")
-        pair_mode = _normalize_cnn_v2_pair_mode(pair_mode_raw)
+        pair_mode = _normalize_cnn_pair_v2_mode(pair_mode_raw)
         if pair_mode == "independent":
             return "cnn"
         return "cnn_pair"
-    if normalized_model == "cnn_v2_pair":
+    if normalized_model == "cnn_pair_v2":
         return "cnn_pair"
     return ""
 
@@ -3265,7 +3323,7 @@ def _derive_validation_protocol_from_args(
     include_pair_mixed_negatives = False
     if train_target == "pair":
         include_pair_mixed_negatives = True
-    elif model_name == "cnn_v2_pair":
+    elif model_name == "cnn_pair_v2":
         include_pair_mixed_negatives = True
     elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
         include_pair_mixed_negatives = True
@@ -3653,7 +3711,7 @@ def _is_valid_cnn_architecture(
             pair_mode_raw = sampled_params.get("pair_mode")
             if pair_mode_raw is None:
                 pair_mode_raw = base_args.get("pair_mode", "independent")
-            if _normalize_cnn_v2_pair_mode(pair_mode_raw) != "independent":
+            if _normalize_cnn_pair_v2_mode(pair_mode_raw) != "independent":
                 return False
             if train_target not in {"donor", "acceptor"}:
                 return False
@@ -4088,7 +4146,7 @@ def _materialize_cnn_architecture_params(
             pair_mode_raw = out.get("pair_mode")
             if pair_mode_raw is None:
                 pair_mode_raw = base_args.get("pair_mode", "independent")
-            if _normalize_cnn_v2_pair_mode(pair_mode_raw) != "independent":
+            if _normalize_cnn_pair_v2_mode(pair_mode_raw) != "independent":
                 return
             if train_target not in {"donor", "acceptor"}:
                 return
@@ -4262,7 +4320,7 @@ def _materialize_cnn_architecture_params(
                     kernel_order_key="kernel_order",
                 )
             _materialize_stride_and_pool_for_site_models()
-    elif model_name in {"cnn_pair", "cnn_v2_pair"}:
+    elif model_name in {"cnn_pair", "cnn_pair_v2"}:
         fusion_mode_raw = out.get("fusion_mode")
         if fusion_mode_raw is None:
             fusion_mode_raw = base_args.get("fusion_mode")
@@ -5029,10 +5087,16 @@ def _print_trial_result(
     metric_text = (
         "-" if result.objective_score is None else f"{result.objective_score:.6f}"
     )
+    error_suffix = ""
+    if result.status != "success" and result.error_message is not None:
+        error_text = " ".join(result.error_message.strip().split())
+        if len(error_text) > 120:
+            error_text = error_text[:117] + "..."
+        error_suffix = f" reason={error_text} log={result.log_file}"
     print(
         f"[hparam_search] {phase} trial {result.trial_id:04d} "
         f"{result.status} ({completed_count}/{trial_count}) "
-        f"{result.objective_metric}={metric_text}.",
+        f"{result.objective_metric}={metric_text}.{error_suffix}",
         flush=True,
     )
 
@@ -5934,7 +5998,7 @@ def _extract_model_name_from_best_update(
             if isinstance(raw_model, str) and raw_model.strip():
                 return raw_model.strip()
     tuning_model_name = global_best_path.parent.parent.name
-    if tuning_model_name in {"cnn_v2", "cnn_v2_pair", "cnn_pair_v2"}:
+    if tuning_model_name in {"cnn_v2", "cnn_pair_v2"}:
         return tuning_model_name
     return None
 

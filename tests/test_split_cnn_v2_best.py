@@ -22,7 +22,7 @@ def test_split_one_species_prefers_resolvable_source_best(tmp_path: Path) -> Non
         model_root / "Dmel" / "acceptor" / "cnn_v2_demo_h123456789abc.pt"
     )
     pair_checkpoint = (
-        model_root / "Dmel" / "pair" / "cnn_v2_pair_demo_h123456789abc.pt"
+        model_root / "Dmel" / "pair" / "cnn_pair_v2_demo_h123456789abc.pt"
     )
     donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     acceptor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +39,7 @@ def test_split_one_species_prefers_resolvable_source_best(tmp_path: Path) -> Non
         data_root / "Dmel" / "tuning" / "cnn_mask" / "acceptor" / "best_config.json"
     )
     pair_source = (
-        data_root / "Dmel" / "tuning" / "cnn_v2_pair" / "pair" / "best_config.json"
+        data_root / "Dmel" / "tuning" / "cnn_pair_v2" / "pair" / "best_config.json"
     )
 
     _write_json(
@@ -104,7 +104,7 @@ def test_split_one_species_prefers_resolvable_source_best(tmp_path: Path) -> Non
     acceptor_best = (
         data_root / "Dmel" / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
     )
-    pair_best = data_root / "Dmel" / "tuning" / "cnn_v2_pair" / "pair" / "best_config.json"
+    pair_best = data_root / "Dmel" / "tuning" / "cnn_pair_v2" / "pair" / "best_config.json"
 
     donor_payload = json.loads(donor_best.read_text(encoding="utf-8"))
     acceptor_payload = json.loads(acceptor_best.read_text(encoding="utf-8"))

@@ -100,17 +100,17 @@ CNN-family tuning search-space conventions:
 
 - `cnn` / `cnn_resdil` tune scripts sample architecture from independent keys:
   `conv_depth` (CNN stage count), `channel_candidates`, `kernel_candidates`.
-- `cnn_pair` uses branch-specific variants:
+- `cnn_pair_v2` uses branch-specific variants:
   `donor_conv_depth`, `acceptor_conv_depth`,
   `donor_channel_candidates`, `acceptor_channel_candidates`,
   `donor_kernel_candidates`, `acceptor_kernel_candidates`.
 - The sampled architecture is materialized to run-time args
   (`conv_channels`, `kernel_sizes`, branch overrides) before each trial.
-- CNN and CNN-pair tuning can also search `max_pool_size` to compare no-pool
+- CNN and CNN-pair-v2 tuning can also search `max_pool_size` to compare no-pool
   (`1`) vs. wider pooling windows, `conv_stride` for learned downsampling, and
   `head_type=gap|center` for readout style.
-- Shape-invalid CNN / CNN-pair samples (for example, pooling that collapses the
-  sequence length after conv/pool downsampling, or `cnn_pair` early/mid fusion
+- Shape-invalid CNN / CNN-pair-v2 samples (for example, pooling that collapses the
+  sequence length after conv/pool downsampling, or `cnn_pair_v2` early/mid fusion
   with mismatched input lengths) are discarded and resampled before a trial is
   launched.
 - `run/tune_cnn_v2_time.sh` and `run/tune_cnn_pair_v2_time.sh` intentionally
@@ -121,7 +121,7 @@ CNN-family tuning search-space conventions:
   candidates.
 - `run/run_cnn_pair_v2.sh` and `run/tune_cnn_pair_v2_time.sh` use a single
   active tuning namespace: `cnn_pair_v2`. The legacy
-  `cnn_v2_pair_synth` subtree is retired and no longer participates in active
+  `cnn_pair_v2_synth` subtree is retired and no longer participates in active
   wrapper resolution.
 - `archive/run/dnabert/run_dnabert_pair.sh`,
   `archive/run/dnabert/tune_dnabert_pair.sh`, and

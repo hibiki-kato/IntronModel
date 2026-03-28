@@ -3,7 +3,7 @@
 This module manages a small public-artifact layer for the active wrappers:
 
 - ``cnn_v2`` (shared donor/acceptor publication)
-- ``cnn_pair_v2`` (public alias for the legacy ``cnn_v2_pair`` pair model)
+- ``cnn_pair_v2`` (public pair model alias)
 
 Publication happens when a canonical ``best_config.json`` improves. The latest
 and previous versions remain live under ``data/`` and ``model/`` while older
@@ -28,7 +28,7 @@ from util.checkpoint_io import (
 )
 
 PAIR_PUBLIC_MODEL_NAME: str = "cnn_pair_v2"
-PAIR_MODEL_ALIASES: frozenset[str] = frozenset({"cnn_v2_pair", PAIR_PUBLIC_MODEL_NAME})
+PAIR_MODEL_ALIASES: frozenset[str] = frozenset({PAIR_PUBLIC_MODEL_NAME})
 ACTIVE_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
     {"cnn_v2", PAIR_PUBLIC_MODEL_NAME}
 )
@@ -625,7 +625,7 @@ def _seed_unversioned_outputs_if_needed(
 
 def _iter_public_output_stem_candidates(public_model_name: str) -> tuple[str, ...]:
     if public_model_name == PAIR_PUBLIC_MODEL_NAME:
-        return ("cnn_v2_pair", PAIR_PUBLIC_MODEL_NAME)
+        return (PAIR_PUBLIC_MODEL_NAME,)
     return (public_model_name,)
 
 
@@ -686,7 +686,9 @@ def _resolve_pair_best_config_path(data_root: Path, species: str) -> Path:
     )
     if new_path.is_file():
         return new_path
-    return data_root / species / "tuning" / "cnn_v2_pair" / "pair" / "best_config.json"
+    return (
+        data_root / species / "tuning" / PAIR_PUBLIC_MODEL_NAME / "pair" / "best_config.json"
+    )
 
 
 def _resolve_task_checkpoint_from_payload(
