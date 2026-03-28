@@ -119,6 +119,39 @@ def test_common_resolve_seed_list_normalizes_and_deduplicates_entries() -> None:
     assert "SEED_LIST is ignored" in run.stderr
 
 
+def test_common_collect_gpu_release_ids_returns_only_new_events(
+    tmp_path: Path,
+) -> None:
+    release_file = tmp_path / "gpu_release_events.jsonl"
+    cursor_file = tmp_path / "gpu_release.cursor"
+    release_file.write_text(
+        "\n".join(
+            [
+                '{"event":"gpu_released","gpu_id":"2"}',
+                '{"event":"gpu_released","gpu_id":"5"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run_first = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        f'intronmodel_collect_gpu_release_ids "${{PY_BIN}}" '
+        f'{shlex.quote(str(release_file))} {shlex.quote(str(cursor_file))}\n'
+    )
+    run_second = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        f'intronmodel_collect_gpu_release_ids "${{PY_BIN}}" '
+        f'{shlex.quote(str(release_file))} {shlex.quote(str(cursor_file))}\n'
+    )
+
+    assert run_first.returncode == 0, run_first.stderr
+    assert run_first.stdout.strip().splitlines() == ["2", "5"]
+    assert run_second.returncode == 0, run_second.stderr
+    assert run_second.stdout.strip() == ""
+
+
 def test_common_run_with_process_title_preserves_python_executable() -> None:
     run = _run_common_shell(
         'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'

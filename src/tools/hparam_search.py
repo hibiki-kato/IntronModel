@@ -189,6 +189,7 @@ class SearchConfig:
     skip_full_phase: bool = False
     enable_visualization: bool = True
     enable_phase_overlap: bool = False
+    gpu_release_events_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -550,6 +551,17 @@ def load_config(path: Path) -> SearchConfig:
         raise ValueError("full_overrides must be an object.")
     skip_full_phase = _to_bool(raw.get("skip_full_phase", False))
     enable_phase_overlap = _to_bool(raw.get("enable_phase_overlap", False))
+    gpu_release_events_raw = raw.get("gpu_release_events_path")
+    gpu_release_events_path: Optional[Path]
+    if gpu_release_events_raw is None:
+        gpu_release_events_path = None
+    else:
+        if (
+            not isinstance(gpu_release_events_raw, str)
+            or not gpu_release_events_raw.strip()
+        ):
+            raise ValueError("gpu_release_events_path must be a non-empty string.")
+        gpu_release_events_path = Path(gpu_release_events_raw).resolve()
     enable_visualization = _resolve_enable_visualization(
         raw.get("enable_visualization"),
         base_args=normalized_base_args,
@@ -586,6 +598,7 @@ def load_config(path: Path) -> SearchConfig:
         skip_full_phase=skip_full_phase,
         enable_visualization=enable_visualization,
         enable_phase_overlap=enable_phase_overlap,
+        gpu_release_events_path=gpu_release_events_path,
     )
 
 
@@ -3358,6 +3371,35 @@ def _to_bool(value: object) -> bool:
         if lowered in {"0", "false", "no", "off", ""}:
             return False
     return False
+
+
+def _append_gpu_release_event(
+    events_path: Path,
+    *,
+    gpu_id: str,
+    reason: str,
+) -> None:
+    """Append one released-GPU event for outer tune schedulers.
+
+    Parameters
+    ----------
+    events_path : Path
+        JSONL file that receives appended release events.
+    gpu_id : str
+        Released GPU identifier.
+    reason : str
+        Machine-readable reason label for the release.
+    """
+    payload = {
+        "event": "gpu_released",
+        "gpu_id": gpu_id,
+        "reason": reason,
+        "timestamp": time.time(),
+    }
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write("\n")
 
 
 def _normalize_cnn_pair_fusion_mode(raw_mode: object) -> str:
@@ -6338,6 +6380,30 @@ def _run_quick_full_overlap_subprocess(
                 full_consumed_keys.add(row_key)
                 _queue_full_task(task)
 
+        def _maybe_release_full_only_slots() -> None:
+            """Release idle GPU slots once the search cannot schedule quick work.
+
+            After the quick phase fully drains, the remaining work is bounded by
+            the number of still-pending full trials. Any extra idle GPU slots are
+            guaranteed to stay unused for this run, so the outer tune script may
+            safely reuse them for the next quick cycle.
+            """
+            if config.gpu_release_events_path is None:
+                return
+            if quick_pending_indices or quick_running_count > 0:
+                return
+            releasable_count = max(0, len(available_slots) - len(pending_full_tasks))
+            for _ in range(releasable_count):
+                slot_index, assigned_gpu = available_slots.pop()
+                del slot_index
+                if assigned_gpu is None:
+                    continue
+                _append_gpu_release_event(
+                    config.gpu_release_events_path,
+                    gpu_id=assigned_gpu,
+                    reason="full_only_idle_slot",
+                )
+
         def _submit_task(
             *,
             slot_index: int,
@@ -6446,8 +6512,9 @@ def _run_quick_full_overlap_subprocess(
                     and not full_priority_inserted
                 ):
                     _maybe_queue_priority_recheck()
-                if completed_quick_rows:
-                    _maybe_promote_locked_rows()
+                    if completed_quick_rows:
+                        _maybe_promote_locked_rows()
+                    _maybe_release_full_only_slots()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 

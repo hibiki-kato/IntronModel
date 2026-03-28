@@ -867,6 +867,48 @@ intronmodel_resolve_parallel_slots() {
 }
 
 
+intronmodel_collect_gpu_release_ids() {
+	local py_bin="$1"
+	local release_file="$2"
+	local cursor_file="$3"
+
+	"${py_bin}" - "${release_file}" "${cursor_file}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+release_path = Path(sys.argv[1])
+cursor_path = Path(sys.argv[2])
+start_index = 0
+if cursor_path.is_file():
+    text = cursor_path.read_text(encoding="utf-8").strip()
+    if text:
+        start_index = int(text)
+
+gpu_ids: list[str] = []
+if release_path.is_file():
+    lines = release_path.read_text(encoding="utf-8").splitlines()
+    for raw_line in lines[start_index:]:
+        if not raw_line.strip():
+            continue
+        payload = json.loads(raw_line)
+        if payload.get("event") != "gpu_released":
+            continue
+        gpu_id = payload.get("gpu_id")
+        if isinstance(gpu_id, str) and gpu_id:
+            gpu_ids.append(gpu_id)
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_path.write_text(str(len(lines)), encoding="utf-8")
+
+if gpu_ids:
+    print("\n".join(gpu_ids))
+PY
+}
+
+
 intronmodel_resolve_max_model_params() {
 	local script_tag="$1"
 	local setting="$2"

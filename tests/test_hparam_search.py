@@ -102,6 +102,18 @@ def test_load_config_accepts_reinforce_settings(tmp_path: Path) -> None:
     assert loaded.reinforce_temperature == pytest.approx(0.5)
 
 
+def test_load_config_parses_gpu_release_events_path(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    release_path = tmp_path / "gpu_release_events.jsonl"
+    config["gpu_release_events_path"] = str(release_path)
+    config_path = tmp_path / "gpu_release_path.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.gpu_release_events_path == release_path.resolve()
+
+
 def test_load_config_injects_site_window_len_defaults(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     base_args = dict(config["base_args"])
@@ -5973,6 +5985,135 @@ def test_run_quick_full_overlap_subprocess_applies_parallel_trial_defaults(
     assert "quick trial 0001 success" in captured.out
     assert "full trial" in captured.out
     assert "mean_pr_auc=" in captured.out
+
+
+def test_run_quick_full_overlap_subprocess_releases_full_only_gpu_slots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {
+                "type": "categorical",
+                "values": [128, 256, 512, 1024],
+            },
+        }
+    )
+    release_path = tmp_path / "gpu_release_events.jsonl"
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=4,
+        quick_epochs=1,
+        top_k=2,
+        full_epochs=4,
+        base_seed=1337,
+        gpu_ids_setting=["0", "1", "2", "3"],
+        max_parallel_trials_setting=4,
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 128},
+        quick_overrides={"epochs": 1},
+        full_overrides={"epochs": 4},
+        search_space=search_space,
+        enable_phase_overlap=True,
+        gpu_release_events_path=release_path,
+    )
+
+    def _fake_run_trial(
+        *,
+        config: hparam_search.SearchConfig,
+        phase: str,
+        trial_id: int,
+        sampled_params: dict[str, hparam_search.Scalar],
+        overrides: dict[str, hparam_search.ArgValue],
+        assigned_gpu_id: str | None,
+        metrics_json: Path,
+        log_file: Path,
+    ) -> hparam_search.TrialResult:
+        del config, overrides
+        objective_score = 0.99 - (0.01 * trial_id)
+        if phase == "full":
+            objective_score += 0.1
+            time.sleep(0.05)
+        metrics_json.parent.mkdir(parents=True, exist_ok=True)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        metrics_json.write_text(
+            json.dumps(
+                {
+                    "donor": {
+                        "best_metric": "pr_auc",
+                        "best_score": objective_score,
+                        "best_epoch": 1,
+                    },
+                    "acceptor": {
+                        "best_metric": "pr_auc",
+                        "best_score": objective_score,
+                        "best_epoch": 1,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        log_file.write_text("ok", encoding="utf-8")
+        return hparam_search.TrialResult(
+            phase=phase,
+            trial_id=trial_id,
+            status="success",
+            gpu_id=assigned_gpu_id,
+            sampled_params=sampled_params,
+            effective_batch_size=int(sampled_params["batch_size"]),
+            oom_retries=0,
+            donor_pr_auc=objective_score,
+            acceptor_pr_auc=objective_score,
+            mean_pr_auc=objective_score,
+            objective_metric="mean_pr_auc",
+            objective_score=objective_score,
+            error_message=None,
+            return_code=0,
+            duration_sec=0.01,
+            metrics_json=str(metrics_json),
+            log_file=str(log_file),
+        )
+
+    monkeypatch.setattr(hparam_search, "run_trial", _fake_run_trial)
+
+    _ = hparam_search._run_quick_full_overlap_subprocess(
+        config=config,
+        quick_params=[
+            {"batch_size": 128},
+            {"batch_size": 256},
+            {"batch_size": 512},
+            {"batch_size": 1024},
+        ],
+        quick_overrides={"epochs": 1},
+        full_overrides={"epochs": 4},
+        gpu_ids=["0", "1", "2", "3"],
+        max_parallel_trials=4,
+        out_dir=config.output_dir,
+        seed_best_params=None,
+        seed_best_context_mismatch=False,
+        global_best_recheck_params=None,
+        global_best_recheck_context_mismatch=False,
+        full_epochs_value=4,
+    )
+
+    events = [
+        json.loads(line)
+        for line in release_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert len(events) >= 2
+    assert all(event["event"] == "gpu_released" for event in events)
+    released_gpu_ids = [str(event["gpu_id"]) for event in events]
+    assert set(released_gpu_ids) <= {"0", "1", "2", "3"}
+    assert len(set(released_gpu_ids[:2])) == 2
 
 
 def test_main_returns_130_on_keyboard_interrupt(

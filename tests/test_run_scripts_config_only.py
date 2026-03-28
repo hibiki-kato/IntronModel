@@ -308,8 +308,10 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     assert 'OBJECTIVE_METRIC="max_f1"' in content
     assert 'TRIAL_STREAM_MODE="silent"' in content
     assert 'ENABLE_PHASE_OVERLAP="1"' in content
-    assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
+    assert '"trial_stream_mode": "silent"' in content
     assert '"enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON}' in content
+    assert '"gpu_release_events_path": "${gpu_release_events_path}"' in content
+    assert 'cycle_stdout.log' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
@@ -326,8 +328,10 @@ def test_tune_cnn_pair_v2_time_omits_max_model_params() -> None:
     )
     assert 'OBJECTIVE_METRIC="max_f1"' in content
     assert 'TRIAL_STREAM_MODE="silent"' in content
-    assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
+    assert '"trial_stream_mode": "silent"' in content
     assert '"enable_phase_overlap": true' in content
+    assert '"gpu_release_events_path": "${gpu_release_events_path}"' in content
+    assert 'cycle_stdout.log' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert '"mask": {' in content
     assert '"sequence_transform": {' not in content
