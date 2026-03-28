@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="300"
+TIME_BUDGET_MINUTES="800"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -38,7 +38,7 @@ QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="silent"
 
-GPU_IDS="auto"
+GPU_IDS="4,5,6,7"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 
