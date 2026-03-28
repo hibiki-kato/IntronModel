@@ -35,10 +35,12 @@ from util.model_task_paths import (
     resolve_required_checkpoint_paths,
     resolve_train_target,
 )
+from util.model_runtime import log10_sigmoid_np
 from util.sequence_transform import (
     PairSequenceRecord,
     apply_pair_sequence_transform,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 from util.training_control import resolve_training_epoch_budget
 
 try:
@@ -655,16 +657,22 @@ def infer_site(
     model.eval()
     with torch.no_grad():
         logits = model(torch.from_numpy(features.astype(np.float32)).to(device))
-        probs = torch.sigmoid(logits).float().detach().cpu().numpy()
+        scores = log10_sigmoid_np(logits.float().detach().cpu().numpy())
+    if len(scores) != len(pair_rows):
+        raise ValueError(
+            "Pair score count does not match pair row count: "
+            f"{len(scores)} != {len(pair_rows)}"
+        )
 
     out_rows: list[dict[str, object]] = []
-    for row, score in zip(pair_rows, probs):
+    for row, score in zip(pair_rows, scores, strict=True):
         out_rows.append(
             {
                 "transcript_id": str(row["transcript_id"]),
                 "intron_index": int(row["intron_index"]),
                 "site_type": "pair",
                 "score": float(score),
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return out_rows

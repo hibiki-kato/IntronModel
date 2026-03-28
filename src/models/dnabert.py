@@ -71,6 +71,7 @@ from util.model_runtime import (
     is_compile_runtime_error as _is_compile_runtime_error,
     is_cuda_oom_error as _is_cuda_oom_error,
     is_mps_oom_error as _is_mps_oom_error,
+    log10_sigmoid_np,
     normalize_checkpoint_state_dict as _normalize_checkpoint_state_dict,
     pick_device,
     resolve_amp_dtype as _resolve_amp_dtype,
@@ -90,6 +91,7 @@ from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -1438,6 +1440,7 @@ def _prepare_infer_model(
     model: nn.Module,
     task_name: str,
     compile_enabled: bool,
+    compile_mode: str,
 ) -> nn.Module:
     """Compile one inference model when requested and supported."""
     compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
@@ -1457,7 +1460,7 @@ def _prepare_infer_model(
         compile_enabled_attempt,
         _compile_selected_mode,
         compile_setup_error,
-    ) = _compile_model_with_fallback(model)
+    ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
     if (not compile_enabled_attempt) and compile_setup_error is not None:
         print(
             f"[{task_name}] infer torch.compile setup failed "
@@ -2678,7 +2681,7 @@ def score_sequences(
         raise ValueError("batch_size must be positive.")
 
     model.eval()
-    all_probs: list[np.ndarray] = []
+    all_log_scores: list[np.ndarray] = []
     total = len(sequences)
     log_every_batches = 200
     use_non_blocking = device == "cuda"
@@ -2704,8 +2707,8 @@ def score_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
-        probs = torch.sigmoid(logits).float().cpu().numpy()
-        all_probs.append(probs)
+        log_scores = log10_sigmoid_np(logits.float().cpu().numpy())
+        all_log_scores.append(log_scores)
         should_log = (
             batch_idx == 1
             or (batch_idx % log_every_batches == 0)
@@ -2719,7 +2722,7 @@ def score_sequences(
                 f"({pct:.1f}%) batches={batch_idx}"
             )
 
-    return np.concatenate(all_probs)
+    return np.concatenate(all_log_scores)
 
 
 @torch.no_grad()
@@ -2747,7 +2750,7 @@ def score_sequence_pairs(
         raise ValueError("batch_size must be positive.")
 
     model.eval()
-    all_probs: list[np.ndarray] = []
+    all_log_scores: list[np.ndarray] = []
     total = len(donor_sequences)
     log_every_batches = 200
     use_non_blocking = device == "cuda"
@@ -2775,8 +2778,8 @@ def score_sequence_pairs(
             amp_context = nullcontext()
         with amp_context:
             logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
-        probs = torch.sigmoid(logits).float().cpu().numpy()
-        all_probs.append(probs)
+        log_scores = log10_sigmoid_np(logits.float().cpu().numpy())
+        all_log_scores.append(log_scores)
         should_log = (
             batch_idx == 1
             or (batch_idx % log_every_batches == 0)
@@ -2790,7 +2793,7 @@ def score_sequence_pairs(
                 f"({pct:.1f}%) batches={batch_idx}"
             )
 
-    return np.concatenate(all_probs)
+    return np.concatenate(all_log_scores)
 
 
 def infer_site_scores(
@@ -2827,11 +2830,13 @@ def infer_site_scores(
         model=donor_model,
         task_name="donor",
         compile_enabled=infer_runtime.compile_enabled,
+        compile_mode=infer_compile_mode,
     )
     acceptor_model = _prepare_infer_model(
         model=acceptor_model,
         task_name="acceptor",
         compile_enabled=infer_runtime.compile_enabled,
+        compile_mode=infer_compile_mode,
     )
 
     donor_max_tokens = _int_from_checkpoint(donor_config, "max_tokens", 128)
@@ -2878,6 +2883,16 @@ def infer_site_scores(
         use_amp=infer_runtime.use_amp,
         amp_dtype=infer_runtime.amp_dtype,
     )
+    if len(donor_scores) != len(donor_seqs):
+        raise ValueError(
+            "Donor score count does not match donor site count: "
+            f"{len(donor_scores)} != {len(donor_seqs)}"
+        )
+    if len(acceptor_scores) != len(acceptor_seqs):
+        raise ValueError(
+            "Acceptor score count does not match acceptor site count: "
+            f"{len(acceptor_scores)} != {len(acceptor_seqs)}"
+        )
 
     out_rows: List[Dict[str, object]] = []
     donor_idx = 0
@@ -2886,16 +2901,10 @@ def infer_site_scores(
     for row in site_rows:
         site_type = str(row["site_type"])
         if site_type == "donor":
-            score = (
-                float(donor_scores[donor_idx]) if donor_idx < len(donor_scores) else 0.0
-            )
+            score = float(donor_scores[donor_idx])
             donor_idx += 1
         else:
-            score = (
-                float(acceptor_scores[acceptor_idx])
-                if acceptor_idx < len(acceptor_scores)
-                else 0.0
-            )
+            score = float(acceptor_scores[acceptor_idx])
             acceptor_idx += 1
 
         out_rows.append(
@@ -2904,6 +2913,7 @@ def infer_site_scores(
                 "intron_index": int(row["intron_index"]),
                 "site_type": site_type,
                 "score": score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
 
@@ -2939,6 +2949,7 @@ def infer_pair_site_scores(
         model=pair_model,
         task_name="pair",
         compile_enabled=infer_runtime.compile_enabled,
+        compile_mode=infer_compile_mode,
     )
     pair_max_tokens = _int_from_checkpoint(pair_config, "max_tokens", 128)
     pair_input_kmer_obj = pair_config.get("input_kmer")
@@ -2963,16 +2974,22 @@ def infer_pair_site_scores(
         use_amp=infer_runtime.use_amp,
         amp_dtype=infer_runtime.amp_dtype,
     )
+    if len(pair_scores) != len(pair_rows):
+        raise ValueError(
+            "Pair score count does not match pair row count: "
+            f"{len(pair_scores)} != {len(pair_rows)}"
+        )
 
     out_rows: List[Dict[str, object]] = []
     for index, row in enumerate(pair_rows):
-        score = float(pair_scores[index]) if index < len(pair_scores) else 0.0
+        score = float(pair_scores[index])
         out_rows.append(
             {
                 "transcript_id": row["transcript_id"],
                 "intron_index": int(row["intron_index"]),
                 "site_type": "pair",
                 "score": score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return out_rows

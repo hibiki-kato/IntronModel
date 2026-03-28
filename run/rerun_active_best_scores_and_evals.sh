@@ -263,24 +263,24 @@ run_for_species() {
 		return 1
 	}
 
-	local cnn_v2_best=""
-	local cnn_v2_pair_best=""
-	cnn_v2_best="$(
-		resolve_best_config_path "cnn_v2" "both" "donor" "acceptor" || true
-	)"
+		local cnn_v2_best=""
+		local cnn_v2_pair_best=""
+		cnn_v2_best="$(
+			resolve_best_config_path "cnn_v2" "donor" "acceptor" || true
+		)"
 	cnn_v2_pair_best="$(
 		resolve_best_config_path "cnn_v2_pair" "pair" || true
 	)"
 
 	if [[ "${RUN_CNN_V2}" == "1" ]]; then
-		if [[ -n "${cnn_v2_best}" ]]; then
-			run_best_infer "cnn_v2" "${cnn_v2_best}" "${species}" \
-				"${species_label}: rerun cnn_v2 best"
-		else
-			echo "[rerun_active_best_scores_and_evals] skip cnn_v2 for ${species}:"
-			echo "  missing best_config under data/${species}/tuning/cnn_v2/{both,donor,acceptor}/best_config.json"
+			if [[ -n "${cnn_v2_best}" ]]; then
+				run_best_infer "cnn_v2" "${cnn_v2_best}" "${species}" \
+					"${species_label}: rerun cnn_v2 best"
+			else
+				echo "[rerun_active_best_scores_and_evals] skip cnn_v2 for ${species}:"
+				echo "  missing best_config under data/${species}/tuning/cnn_v2/{donor,acceptor}/best_config.json"
+			fi
 		fi
-	fi
 
 	if [[ "${RUN_CNN_V2_PAIR}" == "1" ]]; then
 		if [[ -n "${cnn_v2_pair_best}" ]]; then

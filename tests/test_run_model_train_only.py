@@ -45,6 +45,52 @@ class _DummyModelModule:
         raise AssertionError("infer_site must not run when --train_only is set.")
 
 
+class _DummySingleTaskModelModule:
+    def __init__(self) -> None:
+        self.train_targets: list[str] = []
+
+    def add_train_args(self, parser: argparse.ArgumentParser) -> None:
+        del parser
+
+    def add_infer_args(self, parser: argparse.ArgumentParser) -> None:
+        del parser
+
+    def train(
+        self,
+        common_args: argparse.Namespace,
+        model_args: argparse.Namespace,
+    ) -> dict[str, object]:
+        assert common_args is model_args
+        self.train_targets.append(str(model_args.train_target))
+        return {
+            "acceptor": {
+                "checkpoint": str(common_args.acceptor_checkpoint_path),
+                "best_metric": "pr_auc",
+                "best_score": 0.87,
+            },
+        }
+
+    def infer_site(
+        self,
+        common_args: argparse.Namespace,
+        model_args: argparse.Namespace,
+    ) -> list[dict[str, object]]:
+        del common_args, model_args
+        raise AssertionError("infer_site must not run when --train_only is set.")
+
+
+def test_build_parser_defaults_intron_score_op_to_plus() -> None:
+    """Default pipeline intron-score operator should be log-space addition."""
+    parser = run_model._build_parser(
+        selected_model="cnn",
+        skip_model_import_error=True,
+    )
+
+    args = parser.parse_args([])
+
+    assert args.intron_score_op == "+"
+
+
 def test_run_pipeline_train_only_skips_infer_and_eval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,6 +202,95 @@ def test_run_pipeline_rejects_single_task_without_train_only(
 
     with pytest.raises(ValueError, match="requires --train_only"):
         run_model.run_pipeline(args)
+
+
+def test_run_pipeline_cnn_v2_train_only_keeps_single_task_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics_json = tmp_path / "cnn_v2_acceptor_summary.json"
+    parser = run_model._build_parser(
+        selected_model="cnn_v2",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_v2",
+            "--species",
+            "Dmel",
+            "--train_target",
+            "acceptor",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--epochs",
+            "1",
+            "--train_only",
+            "--metrics_json",
+            str(metrics_json),
+        ]
+    )
+    dummy_module = _DummySingleTaskModelModule()
+
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: dummy_module,
+    )
+
+    run_model.run_pipeline(args)
+
+    assert dummy_module.train_targets == ["acceptor"]
+    summary = json.loads(metrics_json.read_text(encoding="utf-8"))
+    assert "donor" not in summary
+    assert summary["acceptor"]["best_metric"] == "pr_auc"
+    assert float(summary["acceptor"]["best_score"]) == pytest.approx(0.87)
+
+
+def test_run_pipeline_cnn_v2_train_only_allows_both_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics_json = tmp_path / "cnn_v2_both_summary.json"
+    parser = run_model._build_parser(
+        selected_model="cnn_v2",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_v2",
+            "--species",
+            "Dmel",
+            "--train_target",
+            "both",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--epochs",
+            "1",
+            "--train_only",
+            "--metrics_json",
+            str(metrics_json),
+        ]
+    )
+    dummy_module = _DummySingleTaskModelModule()
+
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: dummy_module,
+    )
+
+    run_model.run_pipeline(args)
+
+    assert dummy_module.train_targets == ["both"]
+    summary = json.loads(metrics_json.read_text(encoding="utf-8"))
+    assert summary["acceptor"]["best_metric"] == "pr_auc"
+    assert float(summary["acceptor"]["best_score"]) == pytest.approx(0.87)
 
 
 def test_run_model_applies_process_title_from_env_on_import(

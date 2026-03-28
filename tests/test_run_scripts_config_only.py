@@ -98,21 +98,21 @@ def test_run_cnn_v2_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_run_cnn_v2_sh_leaves_mask_to_best_config() -> None:
+def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
         encoding="utf-8"
     )
-    assert 'INTRONMODEL_AUTO_TMUX="on"' in content
+    assert 'INTRONMODEL_AUTO_TMUX=' in content
     assert 'DEVICE="auto"' in content
     assert 'GPU_IDS="auto"' in content
     assert 'MAX_PARALLEL_TRIALS="auto"' in content
     assert 'MODEL="cnn_v2"' in content
     assert 'DONOR_LEN="100"' in content
     assert 'ACCEPTOR_LEN="100"' in content
-    assert 'TRAIN_TARGET="both"' in content
     assert 'VAL_FRAC="0.2"' in content
+    assert 'VALIDATION_METRIC="pr_auc"' in content
     assert 'SEED="1337"' in content
-    assert 'INTRON_SCORE_OP="*"' in content
+    assert 'INTRON_SCORE_OP="+"' in content
     assert 'VISUALIZE="true"' in content
     assert 'SKIP_TRAINING="0"' in content
     assert 'CONTINUE_TRAINING="0"' in content
@@ -126,10 +126,27 @@ def test_run_cnn_v2_sh_leaves_mask_to_best_config() -> None:
     assert "--sequence_transform" not in content
     assert "--intron_score_op" in content
     assert "--visualize" in content
-    assert "--train_target" in content
-    assert "--val_frac" in content
+    assert '--train_target "both"' in content
+    assert "--validation_metric" in content
     assert "--seed" in content
     assert "--checkpoint_top_k" in content
+    assert 'for task_name in donor acceptor; do' not in content
+
+
+def test_run_cnn_v2_sh_ignores_cnn_v2_only_tuned_keys() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "run_model.py forces cnn_v2 into pair_mode=independent" in content
+    assert '|input_mode | pair_mode | sequence_transform | embedding_dim \\' in content
+    assert '|bpe_pretrained_model_name | bpe_pretrained_revision \\' in content
+    assert 'printf \'%s\\n\' "shared"' not in content[
+        content.index('|input_mode | pair_mode | sequence_transform | embedding_dim \\') :
+    ]
+    assert 'printf \'%s\\n\' "ignore"' in content[
+        content.index('|input_mode | pair_mode | sequence_transform | embedding_dim \\') :
+    ]
+    assert 'mode=independent tasks=donor,acceptor' in content
 
 
 def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
@@ -154,8 +171,9 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     assert 'ACCEPTOR_LEN="100"' in content
     assert 'TRAIN_TARGET="pair"' in content
     assert 'VAL_FRAC="0.25"' in content
+    assert 'VALIDATION_METRIC="pr_auc"' in content
     assert 'SEED="1337"' in content
-    assert 'INTRON_SCORE_OP="*"' in content
+    assert 'INTRON_SCORE_OP="+"' in content
     assert 'VISUALIZE="true"' in content
     assert 'SKIP_TRAINING="0"' in content
     assert 'CONTINUE_TRAINING="0"' in content
@@ -170,6 +188,7 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     assert "--intron_score_op" in content
     assert "--visualize" in content
     assert "--train_target" in content
+    assert "--validation_metric" in content
     assert "--val_frac" in content
     assert "--seed" in content
     assert "--checkpoint_top_k" in content
@@ -196,7 +215,10 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
         encoding="utf-8"
     )
     assert 'OBJECTIVE_METRIC="max_f1"' in content
-    assert '"enable_phase_overlap": true' in content
+    assert 'TRIAL_STREAM_MODE="silent"' in content
+    assert 'ENABLE_PHASE_OVERLAP="0"' in content
+    assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
+    assert '"enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON}' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
@@ -356,8 +378,10 @@ def test_cnn_resdil_sh_rejects_cli_arguments() -> None:
 
 def test_sync_sh_pushes_run_scripts_with_checksum() -> None:
     content = (_project_root() / "sync.sh").read_text(encoding="utf-8")
-    assert 'RUN_SYNC_PATH="run/"' in content
-    assert '--exclude "$RUN_SYNC_PATH"' in content
+    assert 'CHECKSUM_SYNC_PATHS=(' in content
+    assert '"run/"' in content
+    assert '"src/scripts/"' in content
+    assert '--exclude "$sync_path"' in content
     assert "--size-only" in content
     assert "--checksum" in content
 

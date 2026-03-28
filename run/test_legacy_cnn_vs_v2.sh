@@ -12,7 +12,7 @@ fi
 # --------------------------
 set -a
 SPECIES="${SPECIES:-Athal,Dmel,Hsap,Mmus}"
-VARIANTS="${VARIANTS:-cnn,cnn_mask,cnn_pair,cnn_pair_mask}"
+VARIANTS="${VARIANTS:-cnn_pair,cnn_pair_mask}"
 DEVICE="${DEVICE:-auto}"
 SEED="${SEED:-1337}"
 PROMOTE_EPSILON="${PROMOTE_EPSILON:-0.0}"

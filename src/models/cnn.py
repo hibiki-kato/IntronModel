@@ -91,11 +91,14 @@ from util.process_title import (
 from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
+    resolve_validation_metric,
+    select_validation_score,
 )
 from util.sequence_transform import (
     SEQUENCE_TRANSFORM_CHOICES,
     apply_site_sequence_transform,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -218,6 +221,7 @@ def _prepare_infer_model(
     model: nn.Module,
     task_name: str,
     compile_enabled: bool,
+    compile_mode: str,
 ) -> nn.Module:
     """Compile one inference model when requested and supported."""
     compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
@@ -237,7 +241,7 @@ def _prepare_infer_model(
         compile_enabled_attempt,
         _compile_selected_mode,
         compile_setup_error,
-    ) = _compile_model_with_fallback(model)
+    ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
     if (not compile_enabled_attempt) and compile_setup_error is not None:
         print(
             f"[{task_name}] infer torch.compile setup failed "
@@ -598,6 +602,7 @@ def train_task_model(
     pin_memory: Union[bool, int] = 1,
     min_batch_size: int = 64,
     max_oom_retries: int = 8,
+    validation_metric: str = "pr_auc",
     sequence_transform: str = "none",
     quick_phase: bool = False,
     report_train_metrics: Union[bool, int] = 1,
@@ -748,6 +753,7 @@ def train_task_model(
         raise ValueError("--max_oom_retries must be >= 0.")
     if batch_size < min_batch_size:
         raise ValueError("--batch_size must be >= --min_batch_size.")
+    resolved_validation_metric = resolve_validation_metric(validation_metric)
     if sequence_transform not in SEQUENCE_TRANSFORM_CHOICES:
         raise ValueError(
             "Unsupported --sequence_transform: "
@@ -1124,15 +1130,10 @@ def train_task_model(
                         else max(best_acc_at_0_5, acc_at_0_5)
                     )
 
-                if pr_auc is not None:
-                    score = pr_auc
-                    score_name = "pr_auc"
-                elif roc_auc is not None:
-                    score = roc_auc
-                    score_name = "roc_auc"
-                else:
-                    score = float(val_metrics.get("acc@0.5", 0.0))
-                    score_name = "acc@0.5"
+                score, score_name = select_validation_score(
+                    metrics=val_metrics,
+                    validation_metric=resolved_validation_metric,
+                )
 
                 improved = score > (best_score + early_stop_min_delta)
                 if improved:
@@ -1239,6 +1240,7 @@ def train_task_model(
                 "stopped_early": stopped_early,
                 "early_stop_patience": early_stop_patience,
                 "early_stop_min_delta": early_stop_min_delta,
+                "validation_metric": resolved_validation_metric,
                 "checkpoint": checkpoint_path,
                 "loss": loss_name,
                 "pos_weight": loss_meta["pos_weight"],
@@ -1431,11 +1433,13 @@ def infer_site_scores(
         model=donor_model,
         task_name="donor",
         compile_enabled=infer_runtime.compile_enabled,
+        compile_mode=infer_compile_mode,
     )
     acceptor_model = _prepare_infer_model(
         model=acceptor_model,
         task_name="acceptor",
         compile_enabled=infer_runtime.compile_enabled,
+        compile_mode=infer_compile_mode,
     )
 
     donor_window_len = int(donor_ckpt.get("window_len", 50))
@@ -1481,6 +1485,12 @@ def infer_site_scores(
         use_amp=infer_runtime.use_amp,
         amp_dtype=infer_runtime.amp_dtype,
     )
+    if len(donor_scores) != len(donor_seqs):
+        raise ValueError("Donor score count does not match donor sequence count.")
+    if len(acceptor_scores) != len(acceptor_seqs):
+        raise ValueError(
+            "Acceptor score count does not match acceptor sequence count."
+        )
 
     out_rows: List[Dict[str, object]] = []
     donor_idx = 0
@@ -1488,17 +1498,10 @@ def infer_site_scores(
     for row in transformed_rows:
         site_type = str(row["site_type"])
         if site_type == "donor":
-            if donor_idx < len(donor_scores):
-                score = float(donor_scores[donor_idx])
-            else:
-                score = 0.0
+            score = float(donor_scores[donor_idx])
             donor_idx += 1
         else:
-            score = (
-                float(acceptor_scores[acceptor_idx])
-                if acceptor_idx < len(acceptor_scores)
-                else 0.0
-            )
+            score = float(acceptor_scores[acceptor_idx])
             acceptor_idx += 1
 
         out_rows.append(
@@ -1507,6 +1510,7 @@ def infer_site_scores(
                 "intron_index": int(row["intron_index"]),
                 "site_type": site_type,
                 "score": score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
 
@@ -1538,6 +1542,15 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.0,
         help="Minimum validation-metric improvement to reset patience.",
+    )
+    parser.add_argument(
+        "--validation_metric",
+        type=str,
+        default="pr_auc",
+        help=(
+            "Validation metric used for checkpoint selection and early "
+            "stopping: pr_auc, roc_auc, max_f1, or acc@0.5."
+        ),
     )
     parser.add_argument(
         "--train_target",
@@ -2201,6 +2214,7 @@ def train(
             epochs=resolved_epochs,
             early_stop_patience=effective_early_stop_patience,
             early_stop_min_delta=early_stop_min_delta,
+            validation_metric=model_args.validation_metric,
             batch_size=resolved.batch_size,
             lr=resolved.lr,
             seed=common_args.seed,
@@ -2301,6 +2315,9 @@ def train(
         "max_epochs": model_args.max_epochs,
         "early_stop_patience": early_stop_patience,
         "early_stop_min_delta": early_stop_min_delta,
+        "validation_metric": resolve_validation_metric(
+            model_args.validation_metric
+        ),
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,

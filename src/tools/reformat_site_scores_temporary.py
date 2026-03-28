@@ -5,7 +5,7 @@ This script is intended for existing datasets that already contain legacy
 ``transcript_id, intron_index, site_type, score``.
 
 It rewrites each file to:
-``transcript_id, intron_index, donor_score, acceptor_score, label``.
+``transcript_id, intron_index, donor_score, acceptor_score, label, _score_space``.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from typing import Optional
 
 from util.transcript_eval import (
     SCORE_OUTPUT_PRECISION,
+    SCORE_SPACE_FIELD,
+    SCORE_SPACE_LOG10,
     probability_to_log10_score,
 )
 
@@ -184,6 +186,7 @@ def _write_wide_site_scores(
                 "donor_score",
                 "acceptor_score",
                 "label",
+                SCORE_SPACE_FIELD,
             ]
         )
         for key in sorted(grouped_scores.keys()):
@@ -215,6 +218,7 @@ def _write_wide_site_scores(
                     donor_text,
                     acceptor_text,
                     label_text,
+                    SCORE_SPACE_LOG10,
                 ]
             )
             written_rows += 1

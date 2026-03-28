@@ -107,7 +107,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--intron-score-op",
         type=str,
-        default="*",
+        default="+",
         choices=["+", "*", "harmonic", "min"],
     )
     parser.add_argument("--dry-run", type=int, choices=[0, 1], default=0)

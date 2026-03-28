@@ -14,7 +14,7 @@ Options:
   --site-score-tsv <path>      Evaluate only this site_score TSV
   --site-score-pattern <glob>  Pattern under data/<species>/site_score
                                (default: *.tsv)
-  --intron-score-op <op>       + | * | harmonic | min (default: *)
+  --intron-score-op <op>       + | * | harmonic | min (default: +)
   --score-source <mode>        auto | donor_acceptor | pair (default: auto)
   --strict-missing             Fail if labeled introns lack usable scores
   --output-dir <path>          Base output dir
@@ -35,7 +35,7 @@ LABELED_TSV=""
 LABELED_NAME="intron_eval_flank10.unique.tsv"
 SITE_SCORE_TSV=""
 SITE_SCORE_PATTERN="*.tsv"
-INTRON_SCORE_OP="*"
+INTRON_SCORE_OP="+"
 SCORE_SOURCE="auto"
 STRICT_MISSING="0"
 OUTPUT_DIR=""

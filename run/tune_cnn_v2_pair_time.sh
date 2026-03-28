@@ -12,12 +12,12 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="12"
+TIME_BUDGET_MINUTES="60"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
-VAL_FRAC="0.25"
+VAL_FRAC="0.2"
 OBJECTIVE_METRIC="f1_max"
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
@@ -38,7 +38,7 @@ FULL_EPOCHS="10"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 
-GPU_IDS="4, 5"
+GPU_IDS="4, 5, 6, 7"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 

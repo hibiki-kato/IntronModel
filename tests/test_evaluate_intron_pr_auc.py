@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from evaluate_intron_pr_auc import evaluate_labeled_introns
+from evaluate_intron_pr_auc import evaluate_labeled_introns, parse_args
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -78,7 +78,7 @@ def test_evaluate_labeled_introns_donor_acceptor_perfect_rank(
     summary, rows = evaluate_labeled_introns(
         labeled_tsv=labeled_tsv,
         site_score_tsv=site_score_tsv,
-        intron_score_op="*",
+        intron_score_op="+",
         score_source="donor_acceptor",
     )
 
@@ -89,6 +89,20 @@ def test_evaluate_labeled_introns_donor_acceptor_perfect_rank(
     assert summary.pr_auc == pytest.approx(1.0)
     assert summary.roc_auc == pytest.approx(1.0)
     assert len(rows) == 4
+
+
+def test_parse_args_defaults_intron_score_op_to_plus() -> None:
+    """Default CLI intron score operator should match log-space site scores."""
+    args = parse_args(
+        [
+            "--labeled-intron-tsv",
+            "labeled.tsv",
+            "--site-score-tsv",
+            "site_score.tsv",
+        ]
+    )
+
+    assert args.intron_score_op == "+"
 
 
 def test_evaluate_labeled_introns_auto_mode_uses_pair_scores(tmp_path: Path) -> None:
@@ -150,7 +164,7 @@ def test_evaluate_labeled_introns_strict_missing_raises(tmp_path: Path) -> None:
         _ = evaluate_labeled_introns(
             labeled_tsv=labeled_tsv,
             site_score_tsv=site_score_tsv,
-            intron_score_op="*",
+            intron_score_op="+",
             score_source="donor_acceptor",
             strict_missing=True,
         )
@@ -184,7 +198,7 @@ def test_evaluate_labeled_introns_rejects_single_class_labels(
         _ = evaluate_labeled_introns(
             labeled_tsv=labeled_tsv,
             site_score_tsv=site_score_tsv,
-            intron_score_op="*",
+            intron_score_op="+",
             score_source="donor_acceptor",
         )
 
@@ -218,7 +232,7 @@ def test_evaluate_labeled_introns_reads_wide_site_score_format(
     summary, rows = evaluate_labeled_introns(
         labeled_tsv=labeled_tsv,
         site_score_tsv=site_score_tsv,
-        intron_score_op="*",
+        intron_score_op="+",
         score_source="donor_acceptor",
     )
 

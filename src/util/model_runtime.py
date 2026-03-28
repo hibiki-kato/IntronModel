@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 import os
 import random
 import shutil
@@ -396,12 +397,31 @@ def _can_use_max_autotune_mode() -> bool:
 
 @contextmanager
 def _temporary_max_autotune_setting(enabled: bool) -> Iterator[None]:
+    """Temporarily align env/config max-autotune flags with one compile mode."""
     key = _TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV
     previous = os.environ.get(key)
+    inductor_module = getattr(torch, "_inductor", None)
+    config_obj = getattr(inductor_module, "config", None) if inductor_module else None
+    max_autotune_prev = None
+    max_autotune_gemm_prev = None
+    if config_obj is not None:
+        value_obj = getattr(config_obj, "max_autotune", None)
+        if isinstance(value_obj, bool):
+            max_autotune_prev = value_obj
+            setattr(config_obj, "max_autotune", enabled)
+        value_obj = getattr(config_obj, "max_autotune_gemm", None)
+        if isinstance(value_obj, bool):
+            max_autotune_gemm_prev = value_obj
+            setattr(config_obj, "max_autotune_gemm", enabled)
     os.environ[key] = "1" if enabled else "0"
     try:
         yield
     finally:
+        if config_obj is not None:
+            if max_autotune_prev is not None:
+                setattr(config_obj, "max_autotune", max_autotune_prev)
+            if max_autotune_gemm_prev is not None:
+                setattr(config_obj, "max_autotune_gemm", max_autotune_gemm_prev)
         if previous is None:
             os.environ.pop(key, None)
         else:
@@ -409,6 +429,27 @@ def _temporary_max_autotune_setting(enabled: bool) -> Iterator[None]:
 
 
 def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
+    """Compile one model with a fixed-shape graph preference.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Module to compile.
+    mode : str
+        Torch compile mode token.
+
+    Returns
+    -------
+    nn.Module
+        Compiled module.
+
+    Raises
+    ------
+    RuntimeError
+        If ``torch.compile`` is unavailable.
+    ValueError
+        If ``mode`` is unsupported.
+    """
     compile_fn = getattr(torch, "compile", None)
     if not callable(compile_fn):
         raise RuntimeError("torch.compile is unavailable in this torch build.")
@@ -417,10 +458,23 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
             f"Unsupported compile mode '{mode}'. "
             f"Expected one of: {', '.join(_COMPILE_MODE_CHOICES)}."
         )
+    torch_mode = mode
+    if mode == _COMPILE_MODE_REDUCE_OVERHEAD:
+        # ``reduce-overhead`` is implemented as cudagraph-enabled Inductor. On
+        # these sequence models that tends to fragment into several partitions,
+        # producing noisy perf hints without a matching runtime benefit. Keep
+        # the same public compile policy, but compile with the default
+        # no-cudagraph Inductor mode under the hood.
+        torch_mode = "default"
+    elif model.training and mode == _COMPILE_MODE_MAX_AUTOTUNE:
+        # Keep autotuning for training, but skip cudagraph capture to avoid the
+        # same graph partition issue as ``reduce-overhead``.
+        torch_mode = "max-autotune-no-cudagraphs"
     with _temporary_max_autotune_setting(mode == _COMPILE_MODE_MAX_AUTOTUNE):
-        if mode == _COMPILE_MODE_REDUCE_OVERHEAD:
-            return compile_fn(model, mode=mode)
-        return compile_fn(model, mode=mode)
+        # The training/inference entry points that enable compile already keep
+        # loaders and padded inference batches shape-stable. Asking Inductor to
+        # avoid dynamic shape graphs lets cudagraph capture remain intact.
+        return compile_fn(model, mode=torch_mode, dynamic=False)
 
 
 def compile_model_with_fallback(
@@ -698,6 +752,12 @@ def configure_torch_compile_runtime() -> None:
     inductor_config_obj = getattr(inductor_module, "config", None)
     if inductor_config_obj is None:
         return
+    max_autotune = getattr(inductor_config_obj, "max_autotune", None)
+    if isinstance(max_autotune, bool) and max_autotune:
+        setattr(inductor_config_obj, "max_autotune", False)
+    max_autotune_gemm = getattr(inductor_config_obj, "max_autotune_gemm", None)
+    if isinstance(max_autotune_gemm, bool) and max_autotune_gemm:
+        setattr(inductor_config_obj, "max_autotune_gemm", False)
     triton_config_obj = getattr(inductor_config_obj, "triton", None)
     if triton_config_obj is None:
         return
@@ -866,4 +926,27 @@ def sigmoid_np(x: np.ndarray) -> np.ndarray:
     negative_logits = clipped[~positive_mask]
     exp_values = np.exp(negative_logits)
     out[~positive_mask] = exp_values / (1.0 + exp_values)
+    return out.astype(np.float32, copy=False)
+
+
+def probabilities_to_log10_scores_np(values: np.ndarray) -> np.ndarray:
+    """Convert probability values in ``[0, 1]`` to log10 scores."""
+    probabilities = np.asarray(values, dtype=np.float64)
+    if np.any(probabilities < 0.0) or np.any(probabilities > 1.0):
+        raise ValueError("Probability values must lie in [0, 1].")
+    out = np.full_like(probabilities, fill_value=-np.inf, dtype=np.float64)
+    positive_mask = probabilities > 0.0
+    out[positive_mask] = np.log10(probabilities[positive_mask])
+    return out.astype(np.float32, copy=False)
+
+
+def log10_sigmoid_np(x: np.ndarray) -> np.ndarray:
+    """Compute ``log10(sigmoid(x))`` with numerically stable branches."""
+    logits = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(logits, dtype=np.float64)
+    positive_mask = logits >= 0.0
+    out[positive_mask] = -np.log1p(np.exp(-logits[positive_mask]))
+    negative_logits = logits[~positive_mask]
+    out[~positive_mask] = negative_logits - np.log1p(np.exp(negative_logits))
+    out /= math.log(10.0)
     return out.astype(np.float32, copy=False)

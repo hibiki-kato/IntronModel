@@ -106,6 +106,14 @@ def test_resolve_pair_train_params_accepts_f1_lambda() -> None:
     assert resolved.f1_lambda == pytest.approx(0.3)
 
 
+def test_add_train_args_accepts_validation_metric() -> None:
+    parser = argparse.ArgumentParser()
+    cnn_pair.add_train_args(parser)
+    args = parser.parse_args(["--validation_metric", "max_f1"])
+
+    assert args.validation_metric == "max_f1"
+
+
 def test_add_train_args_accepts_fusion_mode() -> None:
     parser = argparse.ArgumentParser()
     cnn_pair.add_train_args(parser)

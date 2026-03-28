@@ -12,8 +12,8 @@ fi
 # --------------------------
 set -a
 MODEL="cnn_v2"
-SPECIES="Mmus"
-INTRONMODEL_AUTO_TMUX="on"
+SPECIES="Athal"
+INTRONMODEL_AUTO_TMUX="off"
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
@@ -40,6 +40,7 @@ FC_HIDDEN="128"
 WEIGHT_DECAY="0.01"
 ETA_MIN_RATIO="0.01"
 VAL_FRAC="0.2"
+VALIDATION_METRIC="max_f1"  # pr_auc | roc_auc | max_f1 | acc@0.5
 GRAD_CLIP="5.0"
 POS_WEIGHT_CAP="20.0"
 FOCAL_GAMMA="2.0"
@@ -47,13 +48,10 @@ FOCAL_ALPHA_POS=""
 ASYM_GAMMA_POS="0.0"
 ASYM_GAMMA_NEG="4.0"
 ASYM_ALPHA_POS=""
-TRAIN_TARGET="both"
 USE_TUNED_HPARAMS="required"   # off | auto | required
-TUNED_CONFIG_PATH=""
 DONOR_TUNED_CONFIG_PATH=""
 ACCEPTOR_TUNED_CONFIG_PATH=""
-SHARED_TUNED_CONFIG_PATH=""
-INTRON_SCORE_OP="*"
+INTRON_SCORE_OP="+"
 NAME_FIELDS="none"
 TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
@@ -65,7 +63,6 @@ CONTINUE_TRAINING="0"
 TRAIN_ONLY="0"
 CHECKPOINT_TOP_K="3"
 CHECKPOINT_PRUNE_DRY_RUN="0"
-TUNED_TARGET="auto"        # auto | both | donor | acceptor
 USE_AMP="1"
 AMP_DTYPE="auto"
 COMPILE_MODE="on"
@@ -129,9 +126,145 @@ append_flag_if_truthy() {
 	esac
 }
 
+resolve_task_tuned_config_path() {
+	local species="$1"
+	local task_name="$2"
+	local explicit_path="$3"
+	local task_tuned_path="${explicit_path}"
+	if [[ -z "${task_tuned_path}" ]]; then
+		task_tuned_path="${DATA_ROOT}/${species}/tuning/cnn_v2/${task_name}/best_config.json"
+	fi
+	printf '%s\n' "${task_tuned_path}"
+}
+
+tuned_key_scope() {
+	local tuned_key="$1"
+	case "${tuned_key}" in
+		batch_size | lr | loss | conv_channels | kernel_size | kernel_sizes \
+		|max_pool_size | conv_stride | head_type | dropout | fc_hidden \
+		|weight_decay | eta_min_ratio | val_frac | grad_clip \
+		|pos_weight_cap | focal_gamma | focal_alpha_pos | f1_lambda \
+		|asym_gamma_pos | asym_gamma_neg | asym_alpha_pos)
+			printf '%s\n' "task"
+			;;
+		# run_model.py forces cnn_v2 into pair_mode=independent and delegates
+		# donor/acceptor training to models/cnn, so cnn_v2-only token keys do not
+		# participate in the effective runtime for this script.
+		model | species | seed | train_target | donor_len | acceptor_len \
+		|input_mode | pair_mode | sequence_transform | embedding_dim \
+		|bpe_pretrained_model_name | bpe_pretrained_revision \
+		|bpe_trust_remote_code)
+			printf '%s\n' "ignore"
+			;;
+		*)
+			printf '%s\n' "ignore"
+			;;
+	esac
+}
+
+append_tuned_args_for_task() {
+	local species="$1"
+	local task_name="$2"
+	local explicit_path="$3"
+	local -n task_arg_ref="$4"
+	local -n shared_value_ref="$5"
+	local -n shared_order_ref="$6"
+	local config_path
+	config_path="$(
+		resolve_task_tuned_config_path \
+			"${species}" \
+			"${task_name}" \
+			"${explicit_path}"
+	)"
+
+	if [[ ! -f "${config_path}" ]]; then
+		if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+			echo "[cnn_v2.sh] tuned config path not found: ${config_path}" >&2
+			exit 1
+		fi
+		echo "[cnn_v2.sh] tuned config path not found: ${config_path}; "\
+			"using CONFIG defaults for species=${species}, target=${task_name}." >&2
+		return
+	fi
+
+	local tuned_output
+	if ! tuned_output="$(intronmodel_load_tuned_overrides "${config_path}" 2>&1)"; then
+		if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+			echo "[cnn_v2.sh] failed to load tuned config: ${config_path}" >&2
+			echo "[cnn_v2.sh] detail: ${tuned_output}" >&2
+			exit 1
+		fi
+		echo "[cnn_v2.sh] failed to load tuned config: ${config_path}; "\
+			"using CONFIG defaults for species=${species}, target=${task_name}." >&2
+		return
+	fi
+
+	local loaded_count=0
+	local line tuned_key tuned_value key_scope prefixed_key existing_value
+	while IFS= read -r line; do
+		if [[ -z "${line}" ]]; then
+			continue
+		fi
+		IFS=$'\t' read -r tuned_key tuned_value <<<"${line}"
+		if [[ -z "${tuned_key}" || -z "${tuned_value}" ]]; then
+			continue
+		fi
+		key_scope="$(tuned_key_scope "${tuned_key}")"
+		case "${key_scope}" in
+			task)
+				prefixed_key="${task_name}_${tuned_key}"
+				task_arg_ref+=(--"${prefixed_key}" "${tuned_value}")
+				loaded_count=$((loaded_count + 1))
+				;;
+			shared)
+				existing_value="${shared_value_ref[${tuned_key}]:-}"
+				if [[ -n "${existing_value}" && "${existing_value}" != "${tuned_value}" ]]; then
+					echo "[cnn_v2.sh] conflicting shared tuned parameter ${tuned_key}: "\
+						"${existing_value} vs ${tuned_value} "\
+						"(species=${species}, target=${task_name})." >&2
+					exit 1
+				fi
+				if [[ -z "${existing_value}" ]]; then
+					shared_value_ref["${tuned_key}"]="${tuned_value}"
+					shared_order_ref+=("${tuned_key}")
+					loaded_count=$((loaded_count + 1))
+				fi
+				;;
+		esac
+	done <<<"${tuned_output}"
+
+	echo "[cnn_v2.sh] tuned params loaded from ${config_path} "\
+		"(species=${species}, target=${task_name}, count=${loaded_count})"
+}
+
 run_species_once() {
 	local species="$1"
 	local assigned_gpu_id="${2-}"
+
+	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+	local donor_tuned_args=()
+	local acceptor_tuned_args=()
+	local shared_tuned_args=()
+	local shared_key
+	declare -A shared_tuned_values=()
+	local shared_tuned_order=()
+	append_tuned_args_for_task \
+		"${species}" \
+		"donor" \
+		"${DONOR_TUNED_CONFIG_PATH}" \
+		donor_tuned_args \
+		shared_tuned_values \
+		shared_tuned_order
+	append_tuned_args_for_task \
+		"${species}" \
+		"acceptor" \
+		"${ACCEPTOR_TUNED_CONFIG_PATH}" \
+		acceptor_tuned_args \
+		shared_tuned_values \
+		shared_tuned_order
+	for shared_key in "${shared_tuned_order[@]}"; do
+		shared_tuned_args+=(--"${shared_key}" "${shared_tuned_values[${shared_key}]}")
+	done
 
 	args=(
 		--model "${MODEL}"
@@ -150,12 +283,13 @@ run_species_once() {
 		--num_workers "${NUM_WORKERS}"
 		--prefetch_factor "${PREFETCH_FACTOR}"
 		--persistent_workers "${PERSISTENT_WORKERS}"
-        --pin_memory "${PIN_MEMORY}"
-        --min_batch_size "${MIN_BATCH_SIZE}"
-        --max_oom_retries "${MAX_OOM_RETRIES}"
-        --transcript_score_agg "${TRANSCRIPT_SCORE_AGG}"
-        --softmin_tau "${SOFTMIN_TAU}"
-        --train_target "${TRAIN_TARGET}"
+		--pin_memory "${PIN_MEMORY}"
+		--min_batch_size "${MIN_BATCH_SIZE}"
+		--max_oom_retries "${MAX_OOM_RETRIES}"
+		--transcript_score_agg "${TRANSCRIPT_SCORE_AGG}"
+		--softmin_tau "${SOFTMIN_TAU}"
+		--train_target "both"
+		--validation_metric "${VALIDATION_METRIC}"
 		--intron_score_op "${INTRON_SCORE_OP}"
 		--visualize "${VISUALIZE}"
 		--checkpoint_top_k "${CHECKPOINT_TOP_K}"
@@ -175,89 +309,30 @@ run_species_once() {
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
 
-	tuned_path=""
-	tuned_output=""
-	tuned_args=()
-	if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
-		tuned_path="$(
-			intronmodel_resolve_tuned_config_path \
-				"${DATA_ROOT}" \
-				"${species}" \
-				"cnn_v2" \
-				"${RESOLVED_TUNED_TARGET}" \
-				"${TUNED_CONFIG_PATH}" \
-				"${SHARED_TUNED_CONFIG_PATH}"
-		)"
-		if [[ -z "${tuned_path}" ]]; then
-			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2.sh] tuned config is required but not found: "\
-					"species=${species} target=${RESOLVED_TUNED_TARGET}" >&2
-				exit 1
-			fi
-			echo "[cnn_v2.sh] tuned config not found; "\
-				"using CONFIG defaults for species=${species}." >&2
-		elif [[ ! -f "${tuned_path}" ]]; then
-			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2.sh] tuned config path not found: ${tuned_path}" >&2
-				exit 1
-			fi
-			echo "[cnn_v2.sh] tuned config path not found: ${tuned_path}; "\
-				"using CONFIG defaults for species=${species}." >&2
-			tuned_path=""
-		fi
+	if [[ ${#shared_tuned_args[@]} -gt 0 ]]; then
+		args+=("${shared_tuned_args[@]}")
+	fi
+	if [[ ${#donor_tuned_args[@]} -gt 0 ]]; then
+		args+=("${donor_tuned_args[@]}")
+	fi
+	if [[ ${#acceptor_tuned_args[@]} -gt 0 ]]; then
+		args+=("${acceptor_tuned_args[@]}")
 	fi
 
-	if [[ -n "${tuned_path}" ]]; then
-		if ! tuned_output="$(intronmodel_load_tuned_overrides "${tuned_path}" 2>&1)"; then
-			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2.sh] failed to load tuned config: ${tuned_path}" >&2
-				echo "[cnn_v2.sh] detail: ${tuned_output}" >&2
-				exit 1
-			fi
-			echo "[cnn_v2.sh] failed to load tuned config: ${tuned_path}; "\
-				"using CONFIG defaults for species=${species}." >&2
-		else
-			loaded_count=0
-			while IFS= read -r line; do
-				if [[ -z "${line}" ]]; then
-					continue
-				fi
-				IFS=$'\t' read -r tuned_key tuned_value <<<"${line}"
-				if [[ -z "${tuned_key}" || -z "${tuned_value}" ]]; then
-					continue
-				fi
-				tuned_args+=(--"${tuned_key}" "${tuned_value}")
-				loaded_count=$((loaded_count + 1))
-			done <<<"${tuned_output}"
-			echo "[cnn_v2.sh] tuned params loaded from ${tuned_path} "\
-				"(species=${species}, count=${loaded_count})"
-		fi
-	fi
-
-	if [[ ${#tuned_args[@]} -gt 0 ]]; then
-		args+=("${tuned_args[@]}")
-	fi
-
-	echo "[cnn_v2.sh] species=${species}"
-	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+	echo "[cnn_v2.sh] species=${species} mode=independent tasks=donor,acceptor"
 	if [[ -n "${assigned_gpu_id}" ]]; then
 		CUDA_VISIBLE_DEVICES="${assigned_gpu_id}" \
 			PYTHONPATH="${pythonpath}" \
 			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-		return $?
+	else
+		PYTHONPATH="${pythonpath}" \
+			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 	fi
-	PYTHONPATH="${pythonpath}" \
-	python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
 }
 
 USE_TUNED_HPARAMS_MODE="$(
 	intronmodel_normalize_use_tuned_mode "${USE_TUNED_HPARAMS}" "cnn_v2.sh"
 )"
-if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
-	RESOLVED_TUNED_TARGET="$(
-		intronmodel_resolve_tuned_target "${TUNED_TARGET}" "both"
-	)"
-fi
 
 IFS=',' read -r -a SPECIES_LIST_RESOLVED <<<"${SPECIES}"
 mapfile -t GPU_ID_LIST < <(

@@ -18,7 +18,12 @@ from pathlib import Path
 import sys
 
 import numpy as np
-from util.transcript_eval import SCORE_OUTPUT_PRECISION
+from util.transcript_eval import (
+    SCORE_OUTPUT_PRECISION,
+    SCORE_SPACE_FIELD,
+    SCORE_SPACE_LOG10,
+    probability_to_log10_score,
+)
 from util.unique_intron import UNIQUE_MAP_TSV_NAME, invert_unique_map, load_unique_map
 
 try:
@@ -375,6 +380,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
     }
     prior_wide_required = {"Transcript number", "donor score", "acceptor score"}
     site_scores: dict[tuple[str, int], dict[str, float]] = {}
+    explicit_log10_keys: set[tuple[str, int]] = set()
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -402,6 +408,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                     score = float(str(raw["score"]))
                 except ValueError as exc:
                     raise ValueError(f"Invalid score at {path}:{line_no}") from exc
+                score_space = str(raw.get(SCORE_SPACE_FIELD, "")).strip().lower()
 
                 key = (transcript_id, intron_index)
                 per_site = site_scores.setdefault(key, {})
@@ -411,6 +418,8 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                         f"{transcript_id}:{intron_index}:{site_type} in {path}"
                     )
                 per_site[site_type] = score
+                if score_space == SCORE_SPACE_LOG10:
+                    explicit_log10_keys.add(key)
         elif wide_required.issubset(fieldnames):
             for line_no, raw in enumerate(reader, start=2):
                 transcript_id = str(raw["transcript_id"]).strip()
@@ -427,6 +436,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                 acceptor_raw = str(raw["acceptor_score"]).strip()
                 donor_score = float(donor_raw) if donor_raw != "" else None
                 acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
+                score_space = str(raw.get(SCORE_SPACE_FIELD, "")).strip().lower()
 
                 key = (transcript_id, intron_index)
                 per_site = site_scores.setdefault(key, {})
@@ -434,6 +444,8 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                     per_site["donor"] = donor_score
                 if acceptor_score is not None:
                     per_site["acceptor"] = acceptor_score
+                if score_space == SCORE_SPACE_LOG10:
+                    explicit_log10_keys.add(key)
         elif prior_wide_required.issubset(fieldnames):
             for line_no, raw in enumerate(reader, start=2):
                 transcript_number = str(raw["Transcript number"]).strip()
@@ -469,6 +481,7 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                 acceptor_raw = str(raw["acceptor score"]).strip()
                 donor_score = float(donor_raw) if donor_raw != "" else None
                 acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
+                score_space = str(raw.get(SCORE_SPACE_FIELD, "")).strip().lower()
 
                 key = (transcript_id, intron_index)
                 per_site = site_scores.setdefault(key, {})
@@ -482,12 +495,22 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
                     and combined_score is not None
                 ):
                     per_site["pair"] = combined_score
+                if score_space == SCORE_SPACE_LOG10:
+                    explicit_log10_keys.add(key)
         else:
             raise ValueError(
                 "Site score TSV must include columns: "
                 "transcript_id, intron_index, site_type, score "
                 "or transcript_id, intron_index, donor_score, acceptor_score"
             )
+
+    for key, per_site in site_scores.items():
+        if key in explicit_log10_keys:
+            continue
+        if any(score < 0.0 or score > 1.0 for score in per_site.values()):
+            continue
+        for site_type, score in list(per_site.items()):
+            per_site[site_type] = probability_to_log10_score(float(score))
 
     if not site_scores:
         raise ValueError(f"No valid site score rows found: {path}")
@@ -555,11 +578,15 @@ def _collapse_site_scores_to_unique(
 
 
 def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
-    """Combine donor/acceptor log10 scores into one intron score."""
+    """Combine donor/acceptor scores that are already in log10 space.
+
+    The operator is applied in the current score space. In particular,
+    ``"+"`` performs log-space addition via ``log10(a) + log10(b)``.
+    """
     if op == "+":
-        return _log10_sum([donor_score, acceptor_score])
-    if op == "*":
         return donor_score + acceptor_score
+    if op == "*":
+        return donor_score * acceptor_score
     if op == "harmonic":
         # log10(2ab / (a + b)) = log10(2) + log10(a) + log10(b) - log10(a + b)
         return (
@@ -624,7 +651,7 @@ def evaluate_labeled_introns(
     *,
     labeled_tsv: Path,
     site_score_tsv: Path,
-    intron_score_op: str = "*",
+    intron_score_op: str = "+",
     score_source: str = "auto",
     strict_missing: bool = False,
     unique_map_tsv: Path | None = None,
@@ -638,7 +665,7 @@ def evaluate_labeled_introns(
         ``make_labeled_intron_eval_data.py``.
     site_score_tsv : Path
         Path to model site-score TSV produced by ``run_model.py``.
-    intron_score_op : str, default="*"
+    intron_score_op : str, default="+"
         Donor/acceptor score merge operator.
     score_source : str, default="auto"
         Intron score source mode:
@@ -865,7 +892,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--intron-score-op",
         choices=list(INTRON_SCORE_OP_CHOICES),
-        default="*",
+        default="+",
         help="How to combine donor/acceptor into intron score.",
     )
     parser.add_argument(

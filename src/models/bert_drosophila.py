@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from util.model_runtime import log10_sigmoid_np
 from util.transcript_eval import probability_to_log10_score
 
 try:
@@ -594,7 +595,7 @@ def score_sequences(
     batch_size: int = 512,
 ) -> np.ndarray:
     model.eval()
-    all_probs = []
+    all_scores = []
 
     encoded_ids = []
     encoded_masks = []
@@ -610,10 +611,10 @@ def score_sequences(
         batch_ids = input_ids[i : i + batch_size].to(device)
         batch_mask = attn_mask[i : i + batch_size].to(device)
         logits = model(batch_ids, batch_mask)
-        probs = torch.sigmoid(logits).float().cpu().numpy()
-        all_probs.append(probs)
+        scores = log10_sigmoid_np(logits.float().cpu().numpy())
+        all_scores.append(scores)
 
-    return np.concatenate(all_probs) if all_probs else np.array([])
+    return np.concatenate(all_scores) if all_scores else np.array([])
 
 
 def score_test_sites(
@@ -700,13 +701,23 @@ def score_test_sites(
         device,
         batch_size=512,
     )
+    if len(donor_scores) != len(all_donor_seqs):
+        raise ValueError(
+            "Donor score count does not match donor intron count: "
+            f"{len(donor_scores)} != {len(all_donor_seqs)}"
+        )
+    if len(acceptor_scores) != len(all_acceptor_seqs):
+        raise ValueError(
+            "Acceptor score count does not match acceptor intron count: "
+            f"{len(acceptor_scores)} != {len(all_acceptor_seqs)}"
+        )
 
     print("Aggregating results...")
 
     transcript_intron_dict = defaultdict(dict)
     for idx, (tid, iidx) in enumerate(transcript_keys):
-        donor_score = donor_scores[idx] if all_donor_seqs[idx] else 0.0
-        acceptor_score = acceptor_scores[idx] if all_acceptor_seqs[idx] else 0.0
+        donor_score = donor_scores[idx]
+        acceptor_score = acceptor_scores[idx]
         total_score = donor_score + acceptor_score
         transcript_intron_dict[tid][iidx] = (donor_score, acceptor_score, total_score)
 

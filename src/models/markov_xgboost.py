@@ -42,6 +42,7 @@ from util.model_runtime import (
     fallback_average_precision as _fallback_average_precision,
     fallback_max_f1 as _fallback_max_f1,
     fallback_roc_auc as _fallback_roc_auc,
+    probabilities_to_log10_scores_np,
 )
 from util.model_task_paths import (
     resolve_required_checkpoint_paths,
@@ -57,6 +58,7 @@ from util.sequence_transform import (
     PairSequenceRecord,
     apply_pair_sequence_transform,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -1216,15 +1218,22 @@ def _infer_pair_site_scores(
         feature_mode=feature_mode,
     )
     probabilities = _predict_positive_probability(classifier, pair_features)
+    scores = probabilities_to_log10_scores_np(probabilities)
+    if len(scores) != len(pair_rows):
+        raise ValueError(
+            "Pair score count does not match pair row count: "
+            f"{len(scores)} != {len(pair_rows)}"
+        )
 
     out_rows: list[dict[str, object]] = []
-    for row, score in zip(pair_rows, probabilities):
+    for row, score in zip(pair_rows, scores, strict=True):
         out_rows.append(
             {
                 "transcript_id": str(row["transcript_id"]),
                 "intron_index": int(row["intron_index"]),
                 "site_type": "pair",
                 "score": float(score),
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return out_rows

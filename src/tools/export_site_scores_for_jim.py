@@ -173,7 +173,7 @@ def _convert_one_file(
         non_label_columns = [
             column
             for column in fieldnames
-            if column not in {"transcript_id", "intron_index", "label"}
+            if column not in {"transcript_id", "intron_index", "label", "_score_space"}
         ]
         output_columns = [*non_label_columns, "label"]
 

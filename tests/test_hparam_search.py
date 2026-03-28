@@ -834,7 +834,7 @@ def test_run_trial_drops_mask_for_independent_cnn_v2(
         "model": "cnn_v2",
         "species": "Hsap",
         "pair_mode": "independent",
-        "train_target": "both",
+        "train_target": "donor",
         "batch_size": 128,
         "epochs": 1,
     }
@@ -900,6 +900,32 @@ def test_run_trial_drops_mask_for_independent_cnn_v2(
     assert "--mask" not in captured_cmd["cmd"]
     assert "--sequence_transform" in captured_cmd["cmd"]
     assert "none" in captured_cmd["cmd"]
+
+
+def test_load_config_rejects_both_train_target_for_cnn_v2(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_dict = _base_config_dict(tmp_path)
+    config_dict["base_args"] = {
+        "model": "cnn_v2",
+        "species": "Hsap",
+        "pair_mode": "independent",
+        "train_target": "both",
+        "batch_size": 128,
+        "epochs": 1,
+    }
+    config_dict["search_space"] = {
+        "batch_size": {
+            "type": "categorical",
+            "values": [128],
+        },
+    }
+    config_path.write_text(json.dumps(config_dict), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="base_args.train_target must be donor or acceptor for cnn_v2",
+    ):
+        _ = hparam_search.load_config(config_path)
 
 
 def test_rank_successful_trials_prefers_high_mean_pr_auc() -> None:

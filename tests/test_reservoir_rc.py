@@ -203,7 +203,8 @@ def test_train_and_infer_with_dummy_rc(
 
     assert len(inferred) == len(rows)
     for row in inferred:
-        assert 0.0 <= float(row["score"]) <= 1.0
+        assert float(row["score"]) <= 0.0
+        assert row["_score_space"] == "log10"
 
 
 def test_train_task_model_rejects_large_washout(

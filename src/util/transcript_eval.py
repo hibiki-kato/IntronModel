@@ -36,11 +36,15 @@ TRANSCRIPT_SCORE_AGG_CHOICES: tuple[str, ...] = (
 
 
 def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
-    """Combine donor/acceptor log10 scores into one intron score."""
+    """Combine donor/acceptor scores that are already in log10 space.
+
+    The operator is applied in the current score space. In particular,
+    ``"+"`` performs log-space addition via ``log10(a) + log10(b)``.
+    """
     if op == "+":
-        return _log10_sum([donor_score, acceptor_score])
-    if op == "*":
         return donor_score + acceptor_score
+    if op == "*":
+        return donor_score * acceptor_score
     if op == "harmonic":
         return math.log10(2.0) + donor_score + acceptor_score - _log10_sum(
             [donor_score, acceptor_score]
@@ -605,14 +609,14 @@ def write_site_scores(
     rows: List[Dict[str, object]],
     labels: Dict[tuple[str, int], int] | None = None,
 ) -> None:
-    """Write site-level scores to the wide 5-column TSV format.
+    """Write site-level scores to the wide TSV format.
 
     Output schema:
     ``transcript_id``, ``intron_index``, ``donor_score``,
-    ``acceptor_score``, ``label``.
+    ``acceptor_score``, ``label``, ``_score_space``.
     Donor/acceptor columns are written in log10 space. Probability inputs are
     converted to log10 values, while log10 inputs are preserved. When
-    `labels` is provided, `label` is filled from
+    ``labels`` is provided, ``label`` is filled from
     ``(transcript_id, intron_index) -> {0,1}`` mapping.
     """
     outdir = os.path.dirname(output_tsv)
@@ -620,13 +624,16 @@ def write_site_scores(
         os.makedirs(outdir, exist_ok=True)
     label_map = labels or {}
 
-    grouped: dict[tuple[str, int], dict[str, float]] = defaultdict(dict)
+    grouped: dict[tuple[str, int], dict[str, object]] = defaultdict(dict)
     for row in rows:
         transcript_id = str(row["transcript_id"])
         intron_index = int(row["intron_index"])
         site_type = str(row["site_type"]).strip().lower()
         score = float(row["score"])
-        grouped[(transcript_id, intron_index)][site_type] = score
+        group = grouped[(transcript_id, intron_index)]
+        group[site_type] = score
+        if _row_has_log10_score_space(row):
+            group[SCORE_SPACE_FIELD] = SCORE_SPACE_LOG10
 
     with open(output_tsv, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -637,14 +644,23 @@ def write_site_scores(
                 "donor_score",
                 "acceptor_score",
                 "label",
+                SCORE_SPACE_FIELD,
             ]
         )
         for key in sorted(grouped.keys()):
             transcript_id, intron_index = key
             per_site = grouped[key]
-            donor_score = per_site.get("donor")
-            acceptor_score = per_site.get("acceptor")
-            pair_score = per_site.get("pair")
+            donor_score = (
+                float(per_site["donor"]) if per_site.get("donor") is not None else None
+            )
+            acceptor_score = (
+                float(per_site["acceptor"])
+                if per_site.get("acceptor") is not None
+                else None
+            )
+            pair_score = (
+                float(per_site["pair"]) if per_site.get("pair") is not None else None
+            )
             raw_scores = [
                 score for score in (donor_score, acceptor_score, pair_score)
                 if score is not None
@@ -656,7 +672,11 @@ def write_site_scores(
             ):
                 continue
 
-            if _row_scores_look_like_log10(raw_scores):
+            explicit_log10 = (
+                str(per_site.get(SCORE_SPACE_FIELD, "")).strip().lower()
+                == SCORE_SPACE_LOG10
+            )
+            if explicit_log10 or _row_scores_look_like_log10(raw_scores):
                 donor_text = (
                     "" if donor_score is None else _format_log10_score(donor_score)
                 )
@@ -687,6 +707,7 @@ def write_site_scores(
                     donor_text,
                     acceptor_text,
                     label_text,
+                    SCORE_SPACE_LOG10,
                 ]
             )
 
@@ -712,12 +733,21 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
     """Read site-score TSV in legacy long or new wide format."""
     rows: List[Dict[str, object]] = []
     raw_scores: list[float] = []
+    saw_explicit_log10 = False
 
     def _append_row(row: Dict[str, object]) -> None:
+        nonlocal saw_explicit_log10
+        score_space = str(row.get(SCORE_SPACE_FIELD, "")).strip()
+        if score_space == "":
+            row.pop(SCORE_SPACE_FIELD, None)
         rows.append(row)
         raw_scores.append(float(row["score"]))
+        if _row_has_log10_score_space(row):
+            saw_explicit_log10 = True
 
     def _finalize_rows() -> None:
+        if saw_explicit_log10:
+            return
         if _row_scores_look_like_log10(raw_scores):
             return
         for row in rows:
@@ -745,6 +775,7 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                         "intron_index": int(str(raw["intron_index"])),
                         "site_type": str(raw["site_type"]).strip().lower(),
                         "score": float(str(raw["score"])),
+                        SCORE_SPACE_FIELD: str(raw.get(SCORE_SPACE_FIELD, "")).strip(),
                     }
                 )
             _finalize_rows()
@@ -765,6 +796,9 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             "intron_index": intron_index,
                             "site_type": "donor",
                             "score": donor_score,
+                            SCORE_SPACE_FIELD: str(
+                                raw.get(SCORE_SPACE_FIELD, "")
+                            ).strip(),
                         }
                     )
                 if acceptor_score is not None:
@@ -774,6 +808,9 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             "intron_index": intron_index,
                             "site_type": "acceptor",
                             "score": acceptor_score,
+                            SCORE_SPACE_FIELD: str(
+                                raw.get(SCORE_SPACE_FIELD, "")
+                            ).strip(),
                         }
                     )
             _finalize_rows()
@@ -795,6 +832,9 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             "intron_index": intron_index,
                             "site_type": "donor",
                             "score": donor_score,
+                            SCORE_SPACE_FIELD: str(
+                                raw.get(SCORE_SPACE_FIELD, "")
+                            ).strip(),
                         }
                     )
                 if acceptor_score is not None:
@@ -804,6 +844,9 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             "intron_index": intron_index,
                             "site_type": "acceptor",
                             "score": acceptor_score,
+                            SCORE_SPACE_FIELD: str(
+                                raw.get(SCORE_SPACE_FIELD, "")
+                            ).strip(),
                         }
                     )
                 if (
@@ -817,6 +860,9 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             "intron_index": intron_index,
                             "site_type": "pair",
                             "score": float(combined_score),
+                            SCORE_SPACE_FIELD: str(
+                                raw.get(SCORE_SPACE_FIELD, "")
+                            ).strip(),
                         }
                     )
             _finalize_rows()

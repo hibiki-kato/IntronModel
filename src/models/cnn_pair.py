@@ -63,6 +63,7 @@ from util.model_runtime import (
     is_compile_runtime_error as _is_compile_runtime_error,
     is_cuda_oom_error as _is_cuda_oom_error,
     is_mps_oom_error as _is_mps_oom_error,
+    log10_sigmoid_np,
     normalize_checkpoint_state_dict as _normalize_checkpoint_state_dict,
     pick_device,
     resolve_amp_dtype as _resolve_amp_dtype,
@@ -86,7 +87,10 @@ from util.sequence_transform import (
 from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
+    resolve_validation_metric,
+    select_validation_score,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -220,6 +224,7 @@ def _prepare_infer_model(
     model: nn.Module,
     task_name: str,
     compile_enabled: bool,
+    compile_mode: str,
 ) -> nn.Module:
     """Compile one inference model when requested and supported."""
     compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
@@ -239,7 +244,7 @@ def _prepare_infer_model(
         compile_enabled_attempt,
         _compile_selected_mode,
         compile_setup_error,
-    ) = _compile_model_with_fallback(model)
+    ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
     if (not compile_enabled_attempt) and compile_setup_error is not None:
         print(
             f"[{task_name}] infer torch.compile setup failed "
@@ -738,6 +743,7 @@ def train_pair_model(
     min_batch_size: int,
     max_oom_retries: int,
     quick_phase: bool,
+    validation_metric: str = "pr_auc",
     report_train_metrics: Union[bool, int] = 1,
     gpu_id: Optional[int] = None,
 ) -> Dict[str, object]:
@@ -770,6 +776,7 @@ def train_pair_model(
         raise ValueError("--max_oom_retries must be >= 0.")
     if train_params.batch_size < min_batch_size:
         raise ValueError("--batch_size must be >= --min_batch_size.")
+    resolved_validation_metric = resolve_validation_metric(validation_metric)
     if sequence_transform not in SEQUENCE_TRANSFORM_CHOICES:
         raise ValueError(
             "Unsupported --sequence_transform: "
@@ -1176,15 +1183,10 @@ def train_pair_model(
                         else max(best_acc_at_0_5, acc_at_0_5)
                     )
 
-                if pr_auc is not None:
-                    score = pr_auc
-                    score_name = "pr_auc"
-                elif roc_auc is not None:
-                    score = roc_auc
-                    score_name = "roc_auc"
-                else:
-                    score = float(val_metrics.get("acc@0.5", 0.0))
-                    score_name = "acc@0.5"
+                score, score_name = select_validation_score(
+                    metrics=val_metrics,
+                    validation_metric=resolved_validation_metric,
+                )
 
                 improved = score > (best_score + early_stop_min_delta)
                 if improved:
@@ -1315,6 +1317,7 @@ def train_pair_model(
                 "stopped_early": stopped_early,
                 "early_stop_patience": early_stop_patience,
                 "early_stop_min_delta": early_stop_min_delta,
+                "validation_metric": resolved_validation_metric,
                 "checkpoint": checkpoint_path,
                 "loss": train_params.loss_name,
                 "pos_weight": loss_meta["pos_weight"],
@@ -1536,10 +1539,10 @@ def score_pair_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(batch_donor, batch_acceptor)
-        probs = torch.sigmoid(logits).float().detach().cpu().numpy()[
+        log_scores = log10_sigmoid_np(logits.float().detach().cpu().numpy())[
             :valid_batch_size
         ]
-        outputs.append(probs)
+        outputs.append(log_scores)
     return np.concatenate(outputs)
 
 
@@ -1576,6 +1579,7 @@ def infer_pair_site_scores(
         model=model,
         task_name="pair",
         compile_enabled=infer_runtime.compile_enabled,
+        compile_mode=infer_compile_mode,
     )
 
     donor_window_len = int(ckpt.get("donor_window_len", 50))
@@ -1607,15 +1611,21 @@ def infer_pair_site_scores(
         use_amp=infer_runtime.use_amp,
         amp_dtype=infer_runtime.amp_dtype,
     )
+    if len(scores) != len(pair_rows):
+        raise ValueError(
+            "Pair score count does not match pair row count: "
+            f"{len(scores)} != {len(pair_rows)}"
+        )
 
     out_rows: List[Dict[str, object]] = []
-    for row, score in zip(pair_rows, scores):
+    for row, score in zip(pair_rows, scores, strict=True):
         out_rows.append(
             {
                 "transcript_id": str(row["transcript_id"]),
                 "intron_index": int(row["intron_index"]),
                 "site_type": "pair",
                 "score": float(score),
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return out_rows
@@ -1627,6 +1637,15 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max_epochs", type=int, default=200)
     parser.add_argument("--early_stop_patience", type=int, default=12)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.0)
+    parser.add_argument(
+        "--validation_metric",
+        type=str,
+        default="pr_auc",
+        help=(
+            "Validation metric used for checkpoint selection and early "
+            "stopping: pr_auc, roc_auc, max_f1, or acc@0.5."
+        ),
+    )
     parser.add_argument("--train_target", choices=["pair"], default="pair")
     parser.add_argument(
         "--sequence_transform",
@@ -1847,6 +1866,7 @@ def train(
         epochs=resolved_epochs,
         early_stop_patience=effective_early_stop_patience,
         early_stop_min_delta=early_stop_min_delta,
+        validation_metric=model_args.validation_metric,
         sequence_transform=model_args.sequence_transform,
         seed=common_args.seed,
         lightweight=model_args.lightweight,
@@ -1912,6 +1932,9 @@ def train(
         "max_epochs": model_args.max_epochs,
         "early_stop_patience": early_stop_patience,
         "early_stop_min_delta": early_stop_min_delta,
+        "validation_metric": resolve_validation_metric(
+            model_args.validation_metric
+        ),
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,

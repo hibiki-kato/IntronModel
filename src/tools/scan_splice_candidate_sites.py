@@ -211,8 +211,13 @@ def build_candidate_windows(
     return donor_candidates, acceptor_candidates
 
 
-def resolve_best_config_path(data_root: Path, species: str, model_name: str) -> Path:
-    """Resolve the canonical best-config path for one site-scoring model.
+def resolve_task_best_config_path(
+    data_root: Path,
+    species: str,
+    model_name: str,
+    task: str,
+) -> Path:
+    """Resolve the canonical best-config path for one site-scoring task.
 
     Parameters
     ----------
@@ -222,6 +227,8 @@ def resolve_best_config_path(data_root: Path, species: str, model_name: str) -> 
         Species identifier.
     model_name : str
         Model name, for example ``cnn_v2``.
+    task : str
+        Task name, expected to be ``donor`` or ``acceptor``.
 
     Returns
     -------
@@ -232,17 +239,17 @@ def resolve_best_config_path(data_root: Path, species: str, model_name: str) -> 
     ------
     FileNotFoundError
         If no suitable best-config file exists.
+    ValueError
+        If ``task`` is unsupported.
     """
-    candidates = [
-        data_root / species / "tuning" / model_name / "both" / "best_config.json",
-        data_root / species / "tuning" / model_name / "best_config.json",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
+    if task not in {"donor", "acceptor"}:
+        raise ValueError(f"Unsupported task: {task}")
+    candidate = data_root / species / "tuning" / model_name / task / "best_config.json"
+    if candidate.is_file():
+        return candidate.resolve()
     raise FileNotFoundError(
-        "No canonical best_config.json found for "
-        f"species={species} model={model_name} under {data_root}."
+        "No canonical task-specific best_config.json found for "
+        f"species={species} model={model_name} task={task} under {data_root}."
     )
 
 
@@ -285,26 +292,30 @@ def _resolve_existing_checkpoint_path(
     raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
 
-def load_best_checkpoint_paths(best_config_path: Path) -> tuple[Path, Path]:
-    """Load donor and acceptor checkpoint paths from one best-config payload.
+def load_task_checkpoint_path(best_config_path: Path, task: str) -> Path:
+    """Load one task checkpoint path from a best-config payload.
 
     Parameters
     ----------
     best_config_path : Path
         Canonical best-config path.
+    task : str
+        Task name, expected to be ``donor`` or ``acceptor``.
 
     Returns
     -------
-    tuple[Path, Path]
-        Donor and acceptor checkpoint paths.
+    Path
+        Resolved checkpoint path.
 
     Raises
     ------
     FileNotFoundError
-        If the payload or referenced checkpoint paths cannot be resolved.
+        If the payload or referenced checkpoint path cannot be resolved.
     ValueError
         If the best-config payload is malformed.
     """
+    if task not in {"donor", "acceptor"}:
+        raise ValueError(f"Unsupported task: {task}")
     payload = read_json_object(best_config_path)
     if payload is None:
         raise FileNotFoundError(f"best_config not found: {best_config_path}")
@@ -314,80 +325,38 @@ def load_best_checkpoint_paths(best_config_path: Path) -> tuple[Path, Path]:
             f"Expected best_config status='ok', got: {status or '<missing>'}"
         )
 
-    donor_checkpoint = extract_task_checkpoint_path(
+    checkpoint = extract_task_checkpoint_path(
         payload,
-        task="donor",
+        task=task,
         base_dir=best_config_path.parent,
     )
-    acceptor_checkpoint = extract_task_checkpoint_path(
-        payload,
-        task="acceptor",
-        base_dir=best_config_path.parent,
-    )
-    if donor_checkpoint is not None and acceptor_checkpoint is not None:
-        root_dir = Path(model_root()).resolve()
-        return (
-            _resolve_existing_checkpoint_path(
-                donor_checkpoint,
-                model_root_dir=root_dir,
-            ),
-            _resolve_existing_checkpoint_path(
-                acceptor_checkpoint,
-                model_root_dir=root_dir,
-            ),
+    if checkpoint is None:
+        source_best_config = payload.get(f"source_{task}_best_config")
+        if not isinstance(source_best_config, str):
+            raise FileNotFoundError(
+                f"best_config does not contain a {task} checkpoint path or "
+                f"source best-config reference: {best_config_path}"
+            )
+        source_path = _resolve_json_path(source_best_config, best_config_path.parent)
+        source_payload = read_json_object(source_path)
+        if source_payload is None:
+            raise FileNotFoundError(
+                f"Unable to read source best-config payload referenced by "
+                f"{best_config_path}: {source_path}"
+            )
+        checkpoint = extract_task_checkpoint_path(
+            source_payload,
+            task=task,
+            base_dir=source_path.parent,
         )
-
-    source_donor_best_config = payload.get("source_donor_best_config")
-    source_acceptor_best_config = payload.get("source_acceptor_best_config")
-    if not isinstance(source_donor_best_config, str) or not isinstance(
-        source_acceptor_best_config, str
-    ):
-        raise FileNotFoundError(
-            "best_config does not contain donor/acceptor checkpoints or "
-            "source best-config references."
-        )
-
-    donor_source_path = _resolve_json_path(
-        source_donor_best_config,
-        best_config_path.parent,
-    )
-    acceptor_source_path = _resolve_json_path(
-        source_acceptor_best_config,
-        best_config_path.parent,
-    )
-    donor_payload = read_json_object(donor_source_path)
-    acceptor_payload = read_json_object(acceptor_source_path)
-    if donor_payload is None or acceptor_payload is None:
-        raise FileNotFoundError(
-            "Unable to read source best-config payloads referenced by "
-            f"{best_config_path}."
-        )
-
-    donor_checkpoint = extract_task_checkpoint_path(
-        donor_payload,
-        task="donor",
-        base_dir=donor_source_path.parent,
-    )
-    acceptor_checkpoint = extract_task_checkpoint_path(
-        acceptor_payload,
-        task="acceptor",
-        base_dir=acceptor_source_path.parent,
-    )
-    if donor_checkpoint is None or acceptor_checkpoint is None:
-        raise FileNotFoundError(
-            "Unable to resolve donor and acceptor checkpoint paths from "
-            f"{best_config_path}."
-        )
+        if checkpoint is None:
+            raise FileNotFoundError(
+                f"Unable to resolve {task} checkpoint path from {best_config_path}."
+            )
     root_dir = Path(model_root()).resolve()
-    return (
-        _resolve_existing_checkpoint_path(
-            donor_checkpoint,
-            model_root_dir=root_dir,
-        ),
-        _resolve_existing_checkpoint_path(
-            acceptor_checkpoint,
-            model_root_dir=root_dir,
-        ),
+    return _resolve_existing_checkpoint_path(
+        checkpoint,
+        model_root_dir=root_dir,
     )
 
 
@@ -415,9 +384,25 @@ def load_resolved_best_model_paths(
     device: str,
 ) -> ResolvedBestModelPaths:
     """Resolve best-config and best checkpoint metadata for one run."""
-    best_config_path = resolve_best_config_path(data_root, species, model_name)
-    donor_checkpoint_path, acceptor_checkpoint_path = load_best_checkpoint_paths(
-        best_config_path
+    donor_best_config_path = resolve_task_best_config_path(
+        data_root,
+        species,
+        model_name,
+        "donor",
+    )
+    acceptor_best_config_path = resolve_task_best_config_path(
+        data_root,
+        species,
+        model_name,
+        "acceptor",
+    )
+    donor_checkpoint_path = load_task_checkpoint_path(
+        donor_best_config_path,
+        "donor",
+    )
+    acceptor_checkpoint_path = load_task_checkpoint_path(
+        acceptor_best_config_path,
+        "acceptor",
     )
 
     donor_window_len = _load_window_len_from_checkpoint(
@@ -429,7 +414,7 @@ def load_resolved_best_model_paths(
         device=device,
     )
     return ResolvedBestModelPaths(
-        best_config_path=best_config_path,
+        best_config_path=donor_best_config_path,
         donor_checkpoint_path=donor_checkpoint_path,
         acceptor_checkpoint_path=acceptor_checkpoint_path,
         donor_window_len=donor_window_len,
@@ -544,8 +529,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         best_config_path = args.best_config_path.resolve()
-        donor_checkpoint_path, acceptor_checkpoint_path = load_best_checkpoint_paths(
+        task_dir = best_config_path.parent.name
+        if task_dir not in {"donor", "acceptor"}:
+            raise ValueError(
+                "--best-config-path must point to a donor or acceptor "
+                "best_config.json file."
+            )
+        donor_best_config_path = (
             best_config_path
+            if task_dir == "donor"
+            else best_config_path.parent.parent / "donor" / "best_config.json"
+        )
+        acceptor_best_config_path = (
+            best_config_path
+            if task_dir == "acceptor"
+            else best_config_path.parent.parent / "acceptor" / "best_config.json"
+        )
+        donor_checkpoint_path = load_task_checkpoint_path(
+            donor_best_config_path,
+            "donor",
+        )
+        acceptor_checkpoint_path = load_task_checkpoint_path(
+            acceptor_best_config_path,
+            "acceptor",
         )
         donor_window_len = _load_window_len_from_checkpoint(
             donor_checkpoint_path,

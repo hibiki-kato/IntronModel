@@ -51,6 +51,40 @@ def test_pair_splice_cnn_forward_onehot_pair_mode() -> None:
     assert logits.shape == (3,)
 
 
+def test_prepare_infer_model_passes_compile_mode_to_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_modes: list[str] = []
+    model = torch.nn.Linear(4, 1)
+
+    monkeypatch.setattr(cnn_v2, "_configure_triton_tool_paths", lambda: None)
+    monkeypatch.setattr(cnn_v2, "_configure_torch_compile_runtime", lambda: None)
+
+    def _fake_compile_model_with_fallback(
+        module: torch.nn.Module,
+        *,
+        compile_mode: str = "auto",
+    ) -> tuple[torch.nn.Module, bool, str | None, Exception | None]:
+        captured_modes.append(compile_mode)
+        return module, True, "reduce-overhead", None
+
+    monkeypatch.setattr(
+        cnn_v2,
+        "_compile_model_with_fallback",
+        _fake_compile_model_with_fallback,
+    )
+
+    compiled = cnn_v2._prepare_infer_model(
+        model=model,
+        task_name="pair",
+        compile_enabled=True,
+        compile_mode="on",
+    )
+
+    assert compiled is model
+    assert captured_modes == ["on"]
+
+
 def test_pair_splice_cnn_supports_token_early_fusion() -> None:
     model = cnn_v2.PairSpliceCNN(
         input_mode="kmer3",
@@ -131,6 +165,14 @@ def test_resolve_pair_train_params_v2_flags() -> None:
     assert params.pair_mode == "pair"
     assert params.fusion_mode == "early"
     assert params.embedding_dim == 32
+
+
+def test_add_train_args_accepts_validation_metric() -> None:
+    parser = argparse.ArgumentParser()
+    cnn_v2.add_train_args(parser)
+    args = parser.parse_args(["--validation_metric", "max_f1"])
+
+    assert args.validation_metric == "max_f1"
 
 
 def test_train_pair_model_forwards_model_args(
@@ -231,6 +273,80 @@ def test_train_pair_model_forwards_model_args(
     assert captured["lightweight"] is False
 
 
+def test_train_pair_model_rejects_invalid_validation_metric() -> None:
+    train_params = cnn_v2.PairTrainParams(
+        batch_size=4,
+        lr=1e-3,
+        loss_name="focal",
+        input_mode="onehot",
+        pair_mode="pair",
+        fusion_mode="late",
+        embedding_dim=8,
+        bpe_pretrained_model_name=cnn_v2.BPE_DEFAULT_MODEL_NAME,
+        bpe_pretrained_revision=None,
+        bpe_trust_remote_code=False,
+        dropout=0.1,
+        weight_decay=0.01,
+        eta_min_ratio=0.01,
+        val_frac=0.2,
+        grad_clip=5.0,
+        pos_weight_cap=20.0,
+        focal_gamma=2.0,
+        focal_alpha_pos=None,
+        asym_gamma_pos=0.0,
+        asym_gamma_neg=4.0,
+        asym_alpha_pos=None,
+        f1_lambda=0.1,
+    )
+    model_args = argparse.Namespace(
+        fusion_mode="late",
+        conv_channels=None,
+        donor_conv_channels=[8, 16],
+        acceptor_conv_channels=[8, 16],
+        donor_kernel_sizes=[5, 3],
+        acceptor_kernel_sizes=[5, 3],
+        max_pool_size=2,
+        conv_stride=1,
+        head_type="gap",
+        fc_hidden=32,
+    )
+
+    with pytest.raises(ValueError, match="validation_metric"):
+        cnn_v2.train_pair_model(
+            pos_path="pos.tsv",
+            neg_path="neg.tsv",
+            checkpoint_path="pair.pt",
+            donor_window_len=100,
+            acceptor_window_len=100,
+            donor_len=100,
+            acceptor_len=100,
+            model_args=model_args,
+            train_params=train_params,
+            epochs=1,
+            early_stop_patience=0,
+            early_stop_min_delta=0.0,
+            validation_metric="not_a_metric",
+            sequence_transform="none",
+            seed=1,
+            lightweight=False,
+            compile_model=False,
+            compile_mode="off",
+            device="cpu",
+            use_amp=False,
+            amp_dtype="auto",
+            allow_tf32=False,
+            cudnn_benchmark=False,
+            deterministic=False,
+            num_workers=0,
+            prefetch_factor=1,
+            persistent_workers=False,
+            pin_memory=False,
+            min_batch_size=1,
+            max_oom_retries=0,
+            quick_phase=False,
+        )
+
+
 def test_bpe_encoder_uses_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeAutoTokenizer:
         @staticmethod
@@ -300,6 +416,7 @@ def test_infer_site_independent_returns_site_rows(
     common_args = argparse.Namespace(species="Hsap")
     model_args = argparse.Namespace(
         pair_mode="independent",
+        train_target="donor",
         sequence_transform="mask_outside_intron_n",
         mask="on",
     )
@@ -352,7 +469,7 @@ def test_train_independent_fills_cnn_defaults(
             _ = common_args
             assert hasattr(model_args, "report_train_metrics")
             assert int(model_args.report_train_metrics) == 1
-            assert model_args.train_target == "both"
+            assert model_args.train_target == "donor"
             assert model_args.sequence_transform == "none"
             assert not hasattr(model_args, "mask")
             return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
@@ -361,14 +478,14 @@ def test_train_independent_fills_cnn_defaults(
     common_args = argparse.Namespace(species="Hsap")
     model_args = argparse.Namespace(
         pair_mode="independent",
-        train_target="both",
+        train_target="donor",
         sequence_transform="mask_outside_intron_n",
         mask="on",
     )
     summary = cnn_v2.train(common_args, model_args)
     assert summary["model"] == "cnn_v2"
     assert summary["pair_mode"] == "independent"
-    assert summary["train_target"] == "both"
+    assert summary["train_target"] == "donor"
     assert summary["delegated_backend"] == "cnn"
 
 
@@ -412,30 +529,10 @@ def test_train_independent_preserves_single_site_target(
     assert summary["delegated_backend"] == "cnn"
 
 
-def test_train_independent_maps_pair_target_to_both(
+def test_train_independent_rejects_pair_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeCnnModule:
-        @staticmethod
-        def add_train_args(parser: argparse.ArgumentParser) -> None:
-            parser.add_argument("--report_train_metrics", type=int, default=1)
-
-        @staticmethod
-        def add_infer_args(parser: argparse.ArgumentParser) -> None:
-            parser.add_argument("--infer_batch_size", type=int, default=None)
-
-        @staticmethod
-        def train(
-            common_args: argparse.Namespace,
-            model_args: argparse.Namespace,
-        ) -> dict[str, object]:
-            _ = common_args
-            assert model_args.train_target == "both"
-            assert model_args.sequence_transform == "none"
-            assert not hasattr(model_args, "mask")
-            return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
-
-    monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
+    _ = monkeypatch
     common_args = argparse.Namespace(species="Hsap")
     model_args = argparse.Namespace(
         pair_mode="independent",
@@ -444,12 +541,8 @@ def test_train_independent_maps_pair_target_to_both(
         mask="on",
     )
 
-    summary = cnn_v2.train(common_args, model_args)
-
-    assert summary["model"] == "cnn_v2"
-    assert summary["pair_mode"] == "independent"
-    assert summary["train_target"] == "both"
-    assert summary["delegated_backend"] == "cnn"
+    with pytest.raises(ValueError, match="donor or acceptor"):
+        cnn_v2.train(common_args, model_args)
 
 
 def test_train_independent_tolerates_duplicate_parser_options(
@@ -473,18 +566,18 @@ def test_train_independent_tolerates_duplicate_parser_options(
             _ = common_args
             assert hasattr(model_args, "batch_size")
             assert hasattr(model_args, "infer_batch_size")
-            assert model_args.train_target == "both"
+            assert model_args.train_target == "donor"
             return {"model": "cnn", "donor": {"best_pr_auc": 0.5}}
 
     monkeypatch.setattr(models, "cnn", _FakeCnnModule, raising=False)
     common_args = argparse.Namespace(species="Hsap")
-    model_args = argparse.Namespace(pair_mode="independent", train_target="both")
+    model_args = argparse.Namespace(pair_mode="independent", train_target="donor")
 
     summary = cnn_v2.train(common_args, model_args)
 
     assert summary["model"] == "cnn_v2"
     assert summary["pair_mode"] == "independent"
-    assert summary["train_target"] == "both"
+    assert summary["train_target"] == "donor"
 
 
 def test_train_independent_disables_sequence_transform(
@@ -521,7 +614,7 @@ def test_train_independent_disables_sequence_transform(
     common_args = argparse.Namespace(species="Hsap")
     model_args = argparse.Namespace(
         pair_mode="independent",
-        train_target="both",
+        train_target="acceptor",
         sequence_transform="mask_outside_intron_n",
         mask="on",
     )

@@ -47,6 +47,7 @@ from util.model_runtime import (
     fallback_max_f1 as _fallback_max_f1,
     fallback_roc_auc as _fallback_roc_auc,
     is_compile_runtime_error as _is_compile_runtime_error,
+    log10_sigmoid_np,
     pick_device,
     record_compile_runtime_failure as _record_compile_runtime_failure,
     resolve_amp_dtype as _resolve_amp_dtype,
@@ -65,6 +66,7 @@ from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 from models.cnn_common import _apply_split_fusion_head
 
 try:
@@ -1458,7 +1460,7 @@ def infer_pair_site_scores(
         ),
     )
 
-    probs_list: list[np.ndarray] = []
+    score_list: list[np.ndarray] = []
     use_non_blocking = device_name == "cuda"
     for (
         donor_ids,
@@ -1501,17 +1503,23 @@ def infer_pair_site_scores(
                 concat_ids,
                 concat_lengths,
             )
-        probs_list.append(sigmoid_np(logits.float().cpu().numpy()))
+        score_list.append(log10_sigmoid_np(logits.float().cpu().numpy()))
 
-    scores = np.concatenate(probs_list) if probs_list else np.array([])
+    scores = np.concatenate(score_list) if score_list else np.array([])
+    if len(scores) != len(pair_rows):
+        raise ValueError(
+            "Pair score count does not match pair row count: "
+            f"{len(scores)} != {len(pair_rows)}"
+        )
     out_rows: list[dict[str, object]] = []
-    for row, score in zip(pair_rows, scores):
+    for row, score in zip(pair_rows, scores, strict=True):
         out_rows.append(
             {
                 "transcript_id": str(row["transcript_id"]),
                 "intron_index": int(row["intron_index"]),
                 "site_type": "pair",
                 "score": float(score),
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return out_rows

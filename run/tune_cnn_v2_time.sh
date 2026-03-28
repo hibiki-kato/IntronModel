@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="30"
+TIME_BUDGET_MINUTES="60"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -33,6 +33,8 @@ TOP_K="4"
 FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
+TRIAL_STREAM_MODE="silent"
+ENABLE_PHASE_OVERLAP="0"
 
 GPU_IDS="4,5,6,7"
 # auto: use one concurrent trial per configured GPU_IDS entry.
@@ -196,15 +198,9 @@ resolve_search_space_file() {
 		printf '%s\n' "${target_file}"
 		return 0
 	fi
-	local both_target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/both/search_space.json"
-	if [[ -f "${both_target_file}" ]]; then
-		printf '%s\n' "${both_target_file}"
-		return 0
-	fi
-
-	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
-	if [[ -f "${species_file}" ]]; then
-		printf '%s\n' "${species_file}"
+		local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
+		if [[ -f "${species_file}" ]]; then
+			printf '%s\n' "${species_file}"
 		return 0
 	fi
 	local base_species_file="${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
@@ -282,6 +278,18 @@ if [[ "${FULL_COMPILE_MODE}" != "off" \
 	echo "[tune_cnn_v2_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
 	exit 1
 fi
+if [[ "${TRIAL_STREAM_MODE}" != "auto" \
+	&& "${TRIAL_STREAM_MODE}" != "full" \
+	&& "${TRIAL_STREAM_MODE}" != "errors" \
+	&& "${TRIAL_STREAM_MODE}" != "silent" ]]; then
+	echo "[tune_cnn_v2_time.sh] TRIAL_STREAM_MODE must be auto|full|errors|silent." >&2
+	exit 1
+fi
+if [[ "${ENABLE_PHASE_OVERLAP}" != "0" \
+	&& "${ENABLE_PHASE_OVERLAP}" != "1" ]]; then
+	echo "[tune_cnn_v2_time.sh] ENABLE_PHASE_OVERLAP must be 0 or 1." >&2
+	exit 1
+fi
 if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; then
 	echo "[tune_cnn_v2_time.sh] SEARCH_ALGO must be random|history_guided." >&2
 	exit 1
@@ -355,6 +363,10 @@ ETA_PREFIX="$(intronmodel_eta_prefix "${ETA_SCOPE}")"
 START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
+ENABLE_PHASE_OVERLAP_JSON="false"
+if [[ "${ENABLE_PHASE_OVERLAP}" == "1" ]]; then
+	ENABLE_PHASE_OVERLAP_JSON="true"
+fi
 
 echo "[tune_cnn_v2_time.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}min"
 echo "[tune_cnn_v2_time.sh] quick+full cycles: "\
@@ -460,7 +472,8 @@ while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
   "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
-  "enable_phase_overlap": true,
+  "trial_stream_mode": "${TRIAL_STREAM_MODE}",
+  "enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON},
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
   "seed_best_config_path": null,

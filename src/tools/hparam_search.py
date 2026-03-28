@@ -369,7 +369,9 @@ def _resolve_site_window_len_search_keys(
     base_args: dict[str, ArgValue],
 ) -> tuple[str, ...]:
     """Resolve which site-window length keys should be searched."""
-    raw_train_target = base_args.get("train_target", "both")
+    model_name = str(base_args.get("model", "")).strip().lower()
+    default_train_target = "donor" if model_name == "cnn_v2" else "both"
+    raw_train_target = base_args.get("train_target", default_train_target)
     train_target = str(raw_train_target).strip().lower()
     if train_target == "donor":
         return ("donor_len",)
@@ -478,6 +480,22 @@ def load_config(path: Path) -> SearchConfig:
     normalized_base_args["model"] = model_name.strip()
     normalized_base_args.setdefault("donor_len", _SITE_WINDOW_LEN_DEFAULT)
     normalized_base_args.setdefault("acceptor_len", _SITE_WINDOW_LEN_DEFAULT)
+    normalized_model_name = normalized_base_args["model"].strip().lower()
+    if normalized_model_name == "cnn_v2":
+        pair_mode_raw = normalized_base_args.get("pair_mode", "independent")
+        if _normalize_cnn_v2_pair_mode(pair_mode_raw) != "independent":
+            raise ValueError("base_args.pair_mode must be independent for cnn_v2.")
+        train_target_raw = normalized_base_args.get("train_target", "donor")
+        train_target = str(train_target_raw).strip().lower() or "donor"
+        if train_target not in {"donor", "acceptor"}:
+            raise ValueError(
+                "base_args.train_target must be donor or acceptor for cnn_v2."
+            )
+        normalized_base_args["pair_mode"] = "independent"
+        normalized_base_args["train_target"] = train_target
+    elif normalized_model_name == "cnn_v2_pair":
+        normalized_base_args["pair_mode"] = "pair"
+        normalized_base_args["train_target"] = "pair"
 
     normalized_space = _inject_site_window_len_space(
         _validate_search_space(search_space),
@@ -975,6 +993,8 @@ def _combine_donor_acceptor_rows(
     rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     """Convert donor/acceptor log10 rows into pair rows by addition."""
+    from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
+
     donor_scores: dict[tuple[str, int], float] = {}
     acceptor_scores: dict[tuple[str, int], float] = {}
     for row in rows:
@@ -994,6 +1014,7 @@ def _combine_donor_acceptor_rows(
                 "intron_index": key[1],
                 "site_type": "pair",
                 "score": donor_scores[key] + acceptor_scores[key],
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return pair_rows
@@ -1012,6 +1033,7 @@ def _score_site_rows_single_task_model(
     """Score donor/acceptor site rows for one single-task model checkpoint."""
     from models.registry import load_model_module
     from util.sequence_transform import apply_site_sequence_transform
+    from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
     model_module = load_model_module(model_name)
     if not hasattr(model_module, "load_task_model") or not hasattr(
@@ -1064,6 +1086,7 @@ def _score_site_rows_single_task_model(
                 "intron_index": int(row["intron_index"]),
                 "site_type": task,
                 "score": float(score),
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
     return out_rows
@@ -1116,15 +1139,22 @@ def _compute_test_pr_auc_objective(
     if model_name == "" or species == "":
         return None
 
-    train_target_raw = merged_args.get("train_target", "both")
-    train_target = str(train_target_raw).strip().lower() or "both"
+    default_train_target = "donor" if model_name == "cnn_v2" else "both"
+    train_target_raw = merged_args.get("train_target", default_train_target)
+    train_target = str(train_target_raw).strip().lower() or default_train_target
     if train_target not in {"both", "donor", "acceptor", "pair"}:
         return None
-    cnn_v2_pair_mode = str(merged_args.get("pair_mode", "pair")).strip().lower()
+    pair_mode_default = "independent" if model_name == "cnn_v2" else "pair"
+    cnn_v2_pair_mode = str(
+        merged_args.get("pair_mode", pair_mode_default)
+    ).strip().lower()
     if model_name == "cnn_v2_pair":
         cnn_v2_pair_mode = "pair"
-    if model_name == "cnn_v2" and cnn_v2_pair_mode != "pair" and train_target == "pair":
-        train_target = "both"
+    if model_name == "cnn_v2":
+        if _normalize_cnn_v2_pair_mode(cnn_v2_pair_mode) != "independent":
+            return None
+        if train_target not in {"donor", "acceptor"}:
+            return None
 
     donor_len = _to_optional_int(merged_args.get("donor_len"))
     acceptor_len = _to_optional_int(merged_args.get("acceptor_len"))
@@ -1144,9 +1174,7 @@ def _compute_test_pr_auc_objective(
 
     checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
     scored_rows: list[dict[str, object]] = []
-    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_v2_pair"} or (
-        model_name == "cnn_v2" and cnn_v2_pair_mode == "pair"
-    )
+    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_v2_pair"}
     if use_pair_model_scoring:
         pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
         if pair_checkpoint_raw is None:
@@ -1173,10 +1201,10 @@ def _compute_test_pr_auc_objective(
             acceptor_len,
         )
         tasks_to_score: tuple[str, ...]
-        if train_target == "both":
-            tasks_to_score = ("donor", "acceptor")
-        elif train_target in {"donor", "acceptor"}:
+        if train_target in {"donor", "acceptor"}:
             tasks_to_score = (train_target,)
+        elif train_target == "both":
+            tasks_to_score = ("donor", "acceptor")
         else:
             return None
 
@@ -1196,10 +1224,6 @@ def _compute_test_pr_auc_objective(
             )
             scored_rows.extend(task_rows)
 
-    if model_name == "cnn_v2" and cnn_v2_pair_mode != "pair":
-        scored_rows = _combine_donor_acceptor_rows(scored_rows)
-        train_target = "pair"
-
     if not scored_rows:
         return None
 
@@ -1215,8 +1239,8 @@ def _compute_test_pr_auc_objective(
             data_root / species / "processed" / "intron_eval_flank10.unique.tsv"
         )
 
-    intron_score_op_raw = merged_args.get("intron_score_op", "*")
-    intron_score_op = str(intron_score_op_raw).strip() or "*"
+    intron_score_op_raw = merged_args.get("intron_score_op", "+")
+    intron_score_op = str(intron_score_op_raw).strip() or "+"
     score_source = _resolve_test_pr_auc_score_source(train_target)
     summary, rows = evaluate_labeled_introns(
         labeled_tsv=labeled_intron_tsv,
@@ -2200,7 +2224,9 @@ def _write_tuning_leaderboard(
     """Write tuning leaderboard JSON under run and model tuning directories."""
     model_obj = config.base_args.get("model")
     model_name = str(model_obj) if isinstance(model_obj, str) else "unknown"
-    target = str(config.base_args.get("train_target", "both"))
+    model_name_normalized = model_name.strip().lower()
+    default_train_target = "donor" if model_name_normalized == "cnn_v2" else "both"
+    target = str(config.base_args.get("train_target", default_train_target))
     top_entries = _serialize_top_trials(ranked_rows, config.top_k)
     best_checkpoint_paths = (
         _extract_checkpoint_paths_from_metrics(best_row.metrics_json)
@@ -2426,6 +2452,11 @@ def _emit_trial_output_lines(
             continue
         if _should_stream_trial_line(raw_line, stream_mode):
             print(f"{prefix}{raw_line}", flush=True)
+
+
+def _should_print_trial_lifecycle(stream_mode: str) -> bool:
+    """Return whether per-trial start/result lifecycle lines should print."""
+    return stream_mode != "silent"
 
 
 def _extract_run_model_argv(cmd: list[str]) -> list[str]:
@@ -3174,8 +3205,6 @@ def _derive_validation_protocol_from_args(
     include_pair_mixed_negatives = False
     if train_target == "pair":
         include_pair_mixed_negatives = True
-    elif model_name == "cnn_v2" and pair_mode in {"pair", "on", "true", "1"}:
-        include_pair_mixed_negatives = True
     elif model_name == "cnn_v2_pair":
         include_pair_mixed_negatives = True
     elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
@@ -3555,18 +3584,19 @@ def _is_valid_cnn_architecture(
     if validation_model_name in {"cnn", "cnn_resdil"}:
         train_target_raw = sampled_params.get("train_target")
         if train_target_raw is None:
-            train_target_raw = base_args.get("train_target", "both")
+            train_target_raw = base_args.get(
+                "train_target",
+                "donor" if str(model_name).strip().lower() == "cnn_v2" else "both",
+            )
         train_target = str(train_target_raw).strip().lower()
         if str(model_name).strip().lower() == "cnn_v2":
             pair_mode_raw = sampled_params.get("pair_mode")
             if pair_mode_raw is None:
-                pair_mode_raw = base_args.get("pair_mode", "pair")
-            if (
-                _normalize_cnn_v2_pair_mode(pair_mode_raw) == "independent"
-                and train_target == "pair"
-            ):
-                # cnn_v2 independent path delegates to cnn; pair target is invalid.
-                train_target = "both"
+                pair_mode_raw = base_args.get("pair_mode", "independent")
+            if _normalize_cnn_v2_pair_mode(pair_mode_raw) != "independent":
+                return False
+            if train_target not in {"donor", "acceptor"}:
+                return False
 
         conv_channels_raw = sampled_params.get("conv_channels")
         if conv_channels_raw is None:
@@ -3987,17 +4017,21 @@ def _materialize_cnn_architecture_params(
 
         train_target_raw = out.get("train_target")
         if train_target_raw is None:
-            train_target_raw = base_args.get("train_target", "both")
-        train_target = str(train_target_raw).strip().lower() or "both"
+            train_target_raw = base_args.get(
+                "train_target",
+                "donor" if model_name == "cnn_v2" else "both",
+            )
+        train_target = str(train_target_raw).strip().lower() or (
+            "donor" if model_name == "cnn_v2" else "both"
+        )
         if model_name == "cnn_v2":
             pair_mode_raw = out.get("pair_mode")
             if pair_mode_raw is None:
-                pair_mode_raw = base_args.get("pair_mode", "pair")
-            if (
-                _normalize_cnn_v2_pair_mode(pair_mode_raw) == "independent"
-                and train_target == "pair"
-            ):
-                train_target = "both"
+                pair_mode_raw = base_args.get("pair_mode", "independent")
+            if _normalize_cnn_v2_pair_mode(pair_mode_raw) != "independent":
+                return
+            if train_target not in {"donor", "acceptor"}:
+                return
 
         donor_len_raw = out.get("donor_len")
         if donor_len_raw is None:
@@ -4954,6 +4988,7 @@ def _run_phase_subprocess(
     out_dir: Path,
 ) -> list[TrialResult]:
     """Run one phase using subprocess-backed trials."""
+    stream_mode = _ACTIVE_TRIAL_STREAM_MODE
     pending_indices = list(range(trial_count))
     running: dict[Future[TrialResult], Optional[str]] = {}
     collected: list[TrialResult] = []
@@ -4977,11 +5012,12 @@ def _run_phase_subprocess(
                     log_file=log_file,
                 )
                 running[future] = assigned_gpu
-                _print_trial_start(
-                    phase=phase,
-                    trial_id=trial_id,
-                    assigned_gpu=assigned_gpu,
-                )
+                if _should_print_trial_lifecycle(stream_mode):
+                    _print_trial_start(
+                        phase=phase,
+                        trial_id=trial_id,
+                        assigned_gpu=assigned_gpu,
+                    )
 
             done, _ = wait(running.keys(), return_when=FIRST_COMPLETED)
             for future in done:
@@ -4989,12 +5025,13 @@ def _run_phase_subprocess(
                 slots.append(assigned_gpu)
                 result = future.result()
                 collected.append(result)
-                _print_trial_result(
-                    phase=phase,
-                    trial_count=trial_count,
-                    completed_count=len(collected),
-                    result=result,
-                )
+                if _should_print_trial_lifecycle(stream_mode):
+                    _print_trial_result(
+                        phase=phase,
+                        trial_count=trial_count,
+                        completed_count=len(collected),
+                        result=result,
+                    )
     except KeyboardInterrupt:
         print(
             "[hparam_search] Interrupt received. Terminating active trials...",
@@ -5139,6 +5176,7 @@ def _run_phase_persistent(
     stream_mode: str,
 ) -> list[TrialResult]:
     """Run one phase using persistent in-process trial workers."""
+    stream_mode = _ACTIVE_TRIAL_STREAM_MODE
     context = mp.get_context("spawn")
     task_queues = [context.Queue() for _ in slots]
     result_queue = context.Queue()
@@ -5182,11 +5220,12 @@ def _run_phase_persistent(
                 task_queues[slot_index].put(task)
                 slot_busy[slot_index] = True
                 slot_active_trial[slot_index] = trial_id
-                _print_trial_start(
-                    phase=phase,
-                    trial_id=trial_id,
-                    assigned_gpu=assigned_gpu,
-                )
+                if _should_print_trial_lifecycle(stream_mode):
+                    _print_trial_start(
+                        phase=phase,
+                        trial_id=trial_id,
+                        assigned_gpu=assigned_gpu,
+                    )
 
             if not any(slot_busy):
                 continue
@@ -5210,12 +5249,13 @@ def _run_phase_persistent(
             slot_busy[slot_index] = False
             slot_active_trial[slot_index] = None
             collected.append(outcome.result)
-            _print_trial_result(
-                phase=phase,
-                trial_count=trial_count,
-                completed_count=len(collected),
-                result=outcome.result,
-            )
+            if _should_print_trial_lifecycle(stream_mode):
+                _print_trial_result(
+                    phase=phase,
+                    trial_count=trial_count,
+                    completed_count=len(collected),
+                    result=outcome.result,
+                )
     finally:
         for queue_obj in task_queues:
             queue_obj.put(None)
@@ -5311,6 +5351,7 @@ def _run_quick_full_overlap_subprocess(
         slots = list(gpu_ids[:max_parallel_trials])
     else:
         slots = [None for _ in range(max_parallel_trials)]
+    stream_mode = _ACTIVE_TRIAL_STREAM_MODE
 
     full_priority_params: Optional[dict[str, Scalar]] = None
     if seed_best_params is not None and seed_best_context_mismatch:
@@ -5457,11 +5498,12 @@ def _run_quick_full_overlap_subprocess(
             quick_running_count += 1
         else:
             full_running_count += 1
-        _print_trial_start(
-            phase=task.phase,
-            trial_id=task.trial_id,
-            assigned_gpu=assigned_gpu,
-        )
+        if _should_print_trial_lifecycle(stream_mode):
+            _print_trial_start(
+                phase=task.phase,
+                trial_id=task.trial_id,
+                assigned_gpu=assigned_gpu,
+            )
 
     try:
         while quick_pending_indices or pending_full_tasks or running:
@@ -5522,12 +5564,13 @@ def _run_quick_full_overlap_subprocess(
                     if task.phase == "quick"
                     else len(full_rows)
                 )
-                _print_trial_result(
-                    phase=task.phase,
-                    trial_count=max(1, total_count),
-                    completed_count=completed_count,
-                    result=result,
-                )
+                if _should_print_trial_lifecycle(stream_mode):
+                    _print_trial_result(
+                        phase=task.phase,
+                        trial_count=max(1, total_count),
+                        completed_count=completed_count,
+                        result=result,
+                    )
 
             if (
                 not quick_pending_indices

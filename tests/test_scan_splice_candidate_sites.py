@@ -53,10 +53,10 @@ def test_build_candidate_windows_skips_edge_candidates() -> None:
     assert acceptor_candidates[0].window == "TAAAGT"
 
 
-def test_load_best_checkpoint_paths_follows_source_configs(
+def test_load_task_checkpoint_path_uses_direct_task_best_config(
     tmp_path: Path,
 ) -> None:
-    """Resolve donor and acceptor checkpoints through a summary best-config."""
+    """Resolve one checkpoint path from one task-specific best-config."""
     donor_best = tmp_path / "donor" / "best_config.json"
     acceptor_best = tmp_path / "acceptor" / "best_config.json"
     donor_ckpt = tmp_path / "model" / "donor.pt"
@@ -81,22 +81,17 @@ def test_load_best_checkpoint_paths_follows_source_configs(
         },
     )
 
-    summary_best = tmp_path / "cnn_v2" / "best_config.json"
-    _write_json(
-        summary_best,
-        {
-            "status": "ok",
-            "source_donor_best_config": str(donor_best),
-            "source_acceptor_best_config": str(acceptor_best),
-        },
+    assert (
+        scan.load_task_checkpoint_path(donor_best, "donor")
+        == donor_ckpt.resolve()
+    )
+    assert (
+        scan.load_task_checkpoint_path(acceptor_best, "acceptor")
+        == acceptor_ckpt.resolve()
     )
 
-    resolved = scan.load_best_checkpoint_paths(summary_best)
 
-    assert resolved == (donor_ckpt.resolve(), acceptor_ckpt.resolve())
-
-
-def test_load_best_checkpoint_paths_falls_back_to_local_model_root(
+def test_load_task_checkpoint_path_falls_back_to_local_model_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,9 +129,14 @@ def test_load_best_checkpoint_paths_falls_back_to_local_model_root(
 
     monkeypatch.setattr(scan, "model_root", lambda: str(local_root))
 
-    resolved = scan.load_best_checkpoint_paths(best_config)
-
-    assert resolved == (donor_checkpoint.resolve(), acceptor_checkpoint.resolve())
+    assert (
+        scan.load_task_checkpoint_path(best_config, "donor")
+        == donor_checkpoint.resolve()
+    )
+    assert (
+        scan.load_task_checkpoint_path(best_config, "acceptor")
+        == acceptor_checkpoint.resolve()
+    )
 
 
 def test_main_writes_output_files_and_skips_edges(
@@ -149,7 +149,7 @@ def test_main_writes_output_files_and_skips_edges(
     _write_text(sequence_file, ">chr1\nAGTAAAGTAAAG\n")
 
     resolved = scan.ResolvedBestModelPaths(
-        best_config_path=tmp_path / "best_config.json",
+        best_config_path=tmp_path / "donor" / "best_config.json",
         donor_checkpoint_path=tmp_path / "donor.pt",
         acceptor_checkpoint_path=tmp_path / "acceptor.pt",
         donor_window_len=6,

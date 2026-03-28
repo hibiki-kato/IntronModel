@@ -243,7 +243,9 @@ def test_markov_xgboost_train_and_infer_with_fake_classifier(
     assert all(str(row["site_type"]) == "pair" for row in rows)
     for row in rows:
         score = float(row["score"])
-        assert 0.0 <= score <= 1.0
+        assert score <= 0.0
+        assert row["_score_space"] == "log10"
+    assert float(rows[0]["score"]) > float(rows[1]["score"])
 
 
 def test_load_or_build_markov_feature_bundle_uses_cache_when_available(

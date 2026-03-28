@@ -52,7 +52,7 @@ def test_aggregate_transcript_scores_softmin_exp_sum() -> None:
 
     assert len(rows) == 1
     result = rows[0]
-    intron_scores = [math.log10(1.0), math.log10(0.6)]
+    intron_scores = [math.log10(0.25), math.log10(0.09)]
     min_score = min(intron_scores)
     shifted_sum = sum(math.exp(-(score - min_score)) for score in intron_scores)
     expected = min_score - math.log(shifted_sum)
@@ -97,7 +97,7 @@ def test_aggregate_transcript_scores_softmin_wavg() -> None:
 
     assert len(rows) == 1
     result = rows[0]
-    intron_scores = [math.log10(0.5), math.log10(1.5)]
+    intron_scores = [math.log10(0.0625), math.log10(0.5625)]
     min_score = min(intron_scores)
     weights = [math.exp(-(score - min_score)) for score in intron_scores]
     expected = (
@@ -285,13 +285,13 @@ def test_write_intron_scores_preserves_zero_log10_scores(
                 "transcript_id": "tx1",
                 "intron_index": 1,
                 "site_type": "donor",
-                "score": 0.5,
+                "score": 1.0,
             },
             {
                 "transcript_id": "tx1",
                 "intron_index": 1,
                 "site_type": "acceptor",
-                "score": 0.5,
+                "score": 1.0,
             },
         ],
         intron_score_op="+",
@@ -330,9 +330,9 @@ def test_write_site_scores_outputs_wide_format(tmp_path: Path) -> None:
     lines = output_tsv.read_text(encoding="utf-8").strip().splitlines()
     assert (
         lines[0]
-        == "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel"
+        == "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel\t_score_space"
     )
-    assert lines[1] == "tx1\t1\t-0.040959\t-0.086186"
+    assert lines[1] == "tx1\t1\t-0.040959\t-0.086186\t\tlog10"
 
 
 def test_write_site_scores_fills_label_from_mapping(tmp_path: Path) -> None:
@@ -359,7 +359,7 @@ def test_write_site_scores_fills_label_from_mapping(tmp_path: Path) -> None:
     )
     lines = output_tsv.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
-    assert lines[1] == "tx1\t1\t-0.040959\t-0.086186\t1"
+    assert lines[1] == "tx1\t1\t-0.040959\t-0.086186\t1\tlog10"
 
 
 def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
@@ -393,6 +393,40 @@ def test_read_site_scores_supports_wide_format(tmp_path: Path) -> None:
     ]
 
 
+def test_read_site_scores_honors_explicit_log10_score_space(tmp_path: Path) -> None:
+    """Read explicit log10 wide-format scores without re-conversion."""
+    site_score_tsv = tmp_path / "site_log.tsv"
+    site_score_tsv.write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel\t_score_space",
+                "tx1\t1\t0.000000\t-1.000000\t1\tlog10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = read_site_scores(str(site_score_tsv))
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "donor",
+            "score": pytest.approx(0.0),
+            "_score_space": "log10",
+        },
+        {
+            "transcript_id": "tx1",
+            "intron_index": 1,
+            "site_type": "acceptor",
+            "score": pytest.approx(-1.0),
+            "_score_space": "log10",
+        },
+    ]
+
+
 def test_write_site_scores_keeps_pair_rows_as_blank_scores(tmp_path: Path) -> None:
     """Keep pair-only rows with blank donor/acceptor in wide output."""
     output_tsv = tmp_path / "pair.tsv"
@@ -407,7 +441,7 @@ def test_write_site_scores_keeps_pair_rows_as_blank_scores(tmp_path: Path) -> No
     write_site_scores(str(output_tsv), rows)
     lines = output_tsv.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
-    assert lines[1] == "tx_pair\t3\t\t\t"
+    assert lines[1] == "tx_pair\t3\t\t\t\tlog10"
 
 
 def test_write_transcript_scores_preserves_zero_log10_scores(
@@ -464,7 +498,7 @@ def test_build_intron_scores_uses_pair_or_donor_acceptor() -> None:
         {
             "transcript_id": "tx1",
             "intron_index": 1,
-            "score": pytest.approx(math.log10(0.7)),
+            "score": pytest.approx(math.log10(0.1)),
             "_score_space": "log10",
         },
         {

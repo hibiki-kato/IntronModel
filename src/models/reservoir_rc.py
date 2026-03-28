@@ -40,10 +40,12 @@ from util.model_task_paths import (
     resolve_tasks_to_train,
     resolve_train_target,
 )
+from util.model_runtime import probabilities_to_log10_scores_np
 from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -2574,7 +2576,7 @@ def score_sequences(
     Returns
     -------
     np.ndarray
-        Positive-class probabilities with shape ``(N,)``.
+        Log10 positive-class scores with shape ``(N,)``.
 
     Raises
     ------
@@ -2586,7 +2588,7 @@ def score_sequences(
     if not sequences:
         return np.array([], dtype=np.float64)
 
-    all_probs: list[np.ndarray] = []
+    all_log_scores: list[np.ndarray] = []
     for start in range(0, len(sequences), batch_size):
         seq_batch = sequences[start : start + batch_size]
         x_batch = _encode_sequence_batch(
@@ -2599,9 +2601,9 @@ def score_sequences(
             projection=projection,
         )
         _, probs = _predict_labels_and_probs(model=model, x_data=x_batch)
-        all_probs.append(probs)
+        all_log_scores.append(probabilities_to_log10_scores_np(probs))
 
-    return np.concatenate(all_probs)
+    return np.concatenate(all_log_scores)
 
 
 def infer_site_scores(
@@ -2680,6 +2682,16 @@ def infer_site_scores(
         projection=acceptor_projection,
         batch_size=batch_size,
     )
+    if len(donor_scores) != len(donor_seqs):
+        raise ValueError(
+            "Donor score count does not match donor site count: "
+            f"{len(donor_scores)} != {len(donor_seqs)}"
+        )
+    if len(acceptor_scores) != len(acceptor_seqs):
+        raise ValueError(
+            "Acceptor score count does not match acceptor site count: "
+            f"{len(acceptor_scores)} != {len(acceptor_seqs)}"
+        )
 
     out_rows: List[Dict[str, object]] = []
     donor_idx = 0
@@ -2688,18 +2700,10 @@ def infer_site_scores(
     for row in site_rows:
         site_type = str(row["site_type"])
         if site_type == "donor":
-            score = (
-                float(donor_scores[donor_idx])
-                if donor_idx < len(donor_scores)
-                else 0.0
-            )
+            score = float(donor_scores[donor_idx])
             donor_idx += 1
         else:
-            score = (
-                float(acceptor_scores[acceptor_idx])
-                if acceptor_idx < len(acceptor_scores)
-                else 0.0
-            )
+            score = float(acceptor_scores[acceptor_idx])
             acceptor_idx += 1
 
         out_rows.append(
@@ -2708,6 +2712,7 @@ def infer_site_scores(
                 "intron_index": int(row["intron_index"]),
                 "site_type": site_type,
                 "score": score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
 

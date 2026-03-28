@@ -1,13 +1,14 @@
-"""Split ``cnn_v2`` tuning bests into non-pair and pair model namespaces.
+"""Split ``cnn_v2`` tuning bests into task-local and pair model namespaces.
 
 This utility creates/updates:
 
-- ``data/<species>/tuning/cnn_v2/both/best_config.json`` for non-pair runs
+- ``data/<species>/tuning/cnn_v2/donor/best_config.json`` for donor runs
+- ``data/<species>/tuning/cnn_v2/acceptor/best_config.json`` for acceptor runs
 - ``data/<species>/tuning/cnn_v2_pair/pair/best_config.json`` for pair runs
 
 Selection policy:
 
-- Non-pair donor/acceptor bests are selected independently from legacy sources.
+- Donor and acceptor bests are selected independently from legacy sources.
 - Pair best is selected from existing pair-capable sources, including
   ``cnn_v2_pair_synth`` when present.
 """
@@ -227,49 +228,68 @@ def _format_cli_value(value: object) -> str:
     return str(value)
 
 
-def _build_non_pair_sampled_params(
-    donor_params: Mapping[str, object],
-    acceptor_params: Mapping[str, object],
+def _build_target_payload(
+    *,
+    source_payload: Mapping[str, object],
+    source_path: Path,
+    target: str,
 ) -> dict[str, object]:
-    """Build ``cnn_v2`` independent-mode sampled params for ``train_target=both``."""
-    sampled: dict[str, object] = {
-        "input_mode": "onehot",
-        "pair_mode": "independent",
-        "train_target": "both",
-    }
-    donor_len = donor_params.get("donor_len")
-    acceptor_len = donor_params.get("acceptor_len")
-    if donor_len is None:
-        donor_len = acceptor_params.get("donor_len")
-    if acceptor_len is None:
-        acceptor_len = acceptor_params.get("acceptor_len")
-    if donor_len is not None:
-        sampled["donor_len"] = donor_len
-    if acceptor_len is not None:
-        sampled["acceptor_len"] = acceptor_len
+    """Build one donor or acceptor best payload from one source payload."""
+    objective_metric = f"{target}_pr_auc"
+    objective_value = _as_finite_float(source_payload.get(objective_metric))
+    if objective_value is None:
+        raise ValueError(
+            f"Missing finite {objective_metric} in source payload: {source_path}"
+        )
 
-    donor_global: dict[str, object] = {}
-    acceptor_global: dict[str, object] = {}
-    for key, value in donor_params.items():
-        if key in {"donor_len", "acceptor_len"} or value is None:
-            continue
-        if key in _INDEPENDENT_TASK_KEYS:
-            sampled[f"donor_{key}"] = _format_cli_value(value)
-        elif key in _INDEPENDENT_GLOBAL_KEYS:
-            donor_global[key] = value
-    for key, value in acceptor_params.items():
-        if key in {"donor_len", "acceptor_len"} or value is None:
-            continue
-        if key in _INDEPENDENT_TASK_KEYS:
-            sampled[f"acceptor_{key}"] = _format_cli_value(value)
-        elif key in _INDEPENDENT_GLOBAL_KEYS:
-            acceptor_global[key] = value
-    for key in sorted(_INDEPENDENT_GLOBAL_KEYS):
-        if key in donor_global:
-            sampled[key] = donor_global[key]
-        elif key in acceptor_global:
-            sampled[key] = acceptor_global[key]
-    return sampled
+    sampled_params_raw = source_payload.get("sampled_params")
+    if not isinstance(sampled_params_raw, Mapping):
+        raise ValueError(f"Missing sampled_params object: {source_path}")
+
+    payload: dict[str, object] = dict(source_payload)
+    payload["objective_metric"] = objective_metric
+    payload["objective_score"] = objective_value
+    payload["selection_score"] = objective_value
+    if target == "donor":
+        payload["donor_pr_auc"] = objective_value
+        payload["acceptor_pr_auc"] = None
+    else:
+        payload["donor_pr_auc"] = None
+        payload["acceptor_pr_auc"] = objective_value
+    payload["mean_pr_auc"] = None
+    payload["sampled_params"] = {
+        key: value
+        for key, value in sampled_params_raw.items()
+        if key not in {"train_target", "sequence_transform"}
+        and not key.startswith("donor_")
+        and not key.startswith("acceptor_")
+    }
+    payload["sampled_params"]["train_target"] = target
+    payload["sampled_params"]["pair_mode"] = "independent"
+
+    conv_key = f"{target}_conv_channels"
+    kernel_key = f"{target}_kernel_sizes"
+    if conv_key in sampled_params_raw and sampled_params_raw[conv_key] is not None:
+        payload["sampled_params"]["conv_channels"] = sampled_params_raw[conv_key]
+    if kernel_key in sampled_params_raw and sampled_params_raw[kernel_key] is not None:
+        payload["sampled_params"]["kernel_sizes"] = sampled_params_raw[kernel_key]
+
+    hparam_context_raw = source_payload.get("hparam_context")
+    if isinstance(hparam_context_raw, Mapping):
+        hparam_context: dict[str, object] = dict(hparam_context_raw)
+        hparam_context["objective_metric"] = objective_metric
+        fixed_run_args_raw = hparam_context.get("fixed_run_args")
+        if isinstance(fixed_run_args_raw, Mapping):
+            fixed_run_args: dict[str, object] = dict(fixed_run_args_raw)
+            fixed_run_args["train_target"] = target
+            fixed_run_args.pop("sequence_transform", None)
+            hparam_context["fixed_run_args"] = fixed_run_args
+        payload["hparam_context"] = hparam_context
+
+    payload["source_best_config"] = str(source_path)
+    payload["generated_by"] = "split_cnn_v2_best.py"
+    payload["generated_at_utc"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return payload
 
 
 def _write_json(path: Path, payload: Mapping[str, object], *, dry_run: bool) -> None:
@@ -325,31 +345,21 @@ def _split_one_species(
     if pair_best is None:
         raise FileNotFoundError(f"Missing pair best candidate. species={species}")
 
-    non_pair_sampled = _build_non_pair_sampled_params(
-        donor_params=donor_best.sampled_params,
-        acceptor_params=acceptor_best.sampled_params,
-    )
-    non_pair_objective = (
-        donor_best.objective_score + acceptor_best.objective_score
-    ) / 2.0
-    non_pair_payload: dict[str, object] = {
-        "status": "ok",
-        "objective_metric": "mean_pr_auc",
-        "objective_score": non_pair_objective,
-        "sampled_params": non_pair_sampled,
-        "source_donor_model": donor_best.source_model,
-        "source_donor_best_config": str(donor_best.path),
-        "source_acceptor_model": acceptor_best.source_model,
-        "source_acceptor_best_config": str(acceptor_best.path),
-        "generated_by": "split_cnn_v2_best.py",
-        "generated_at_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-
     species_tuning_root = data_root / species / "tuning"
-    non_pair_both_path = species_tuning_root / "cnn_v2" / "both" / "best_config.json"
-    non_pair_shared_path = species_tuning_root / "cnn_v2" / "best_config.json"
+    donor_path = species_tuning_root / "cnn_v2" / "donor" / "best_config.json"
+    acceptor_path = species_tuning_root / "cnn_v2" / "acceptor" / "best_config.json"
     pair_path = species_tuning_root / "cnn_v2_pair" / "pair" / "best_config.json"
-    pair_shared_path = species_tuning_root / "cnn_v2_pair" / "best_config.json"
+
+    donor_payload = _build_target_payload(
+        source_payload=donor_best.payload,
+        source_path=donor_best.path,
+        target="donor",
+    )
+    acceptor_payload = _build_target_payload(
+        source_payload=acceptor_best.payload,
+        source_path=acceptor_best.path,
+        target="acceptor",
+    )
 
     pair_payload = dict(pair_best.payload)
     pair_sampled = pair_payload.get("sampled_params")
@@ -368,29 +378,23 @@ def _split_one_species(
     pair_payload["generated_by"] = "split_cnn_v2_best.py"
     pair_payload["generated_at_utc"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    _write_json(non_pair_both_path, non_pair_payload, dry_run=dry_run)
-    _write_json(non_pair_shared_path, non_pair_payload, dry_run=dry_run)
+    _write_json(donor_path, donor_payload, dry_run=dry_run)
+    _write_json(acceptor_path, acceptor_payload, dry_run=dry_run)
     _write_json(pair_path, pair_payload, dry_run=dry_run)
-    _write_json(pair_shared_path, pair_payload, dry_run=dry_run)
 
-    old_pair_search_space = (
-        species_tuning_root / "cnn_v2" / "pair" / "search_space.json"
-    )
     new_pair_search_space = (
         species_tuning_root / "cnn_v2_pair" / "pair" / "search_space.json"
     )
-    if old_pair_search_space.is_file() and not new_pair_search_space.exists():
-        _copy_file(old_pair_search_space, new_pair_search_space, dry_run=dry_run)
 
     return {
         "species": species,
-        "non_pair": {
+        "site": {
             "donor_source_model": donor_best.source_model,
             "donor_source_best_config": str(donor_best.path),
             "acceptor_source_model": acceptor_best.source_model,
             "acceptor_source_best_config": str(acceptor_best.path),
-            "objective_score": non_pair_objective,
-            "output_best_config": str(non_pair_both_path),
+            "output_donor_best_config": str(donor_path),
+            "output_acceptor_best_config": str(acceptor_path),
         },
         "pair": {
             "source_model": pair_best.source_model,

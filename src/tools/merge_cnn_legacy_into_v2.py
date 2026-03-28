@@ -1,9 +1,9 @@
-"""Migrate legacy CNN/CNN-pair best settings into ``cnn_v2`` family runs.
+"""Migrate legacy CNN-pair best settings into ``cnn_v2_pair`` runs.
 
 This tool automates:
 
-1. Re-running legacy best configs with ``cnn_v2``-family models in one-hot 100bp mode.
-2. Promoting candidate outputs to canonical ``cnn_v2``/``cnn_v2_pair`` outputs.
+1. Re-running legacy pair best configs with ``cnn_v2_pair`` in one-hot 100bp mode.
+2. Promoting candidate outputs to canonical ``cnn_v2_pair`` outputs.
 3. Archiving legacy non-tuning artifacts into an archive directory.
 """
 
@@ -22,7 +22,7 @@ from typing import Iterable, Mapping, Sequence
 
 @dataclass(frozen=True)
 class VariantSpec:
-    """Configuration for one legacy variant to replay with ``cnn_v2``."""
+    """Configuration for one legacy pair variant to replay."""
 
     name: str
     tuned_model_name: str
@@ -48,24 +48,6 @@ class CandidateResult:
 
 
 LEGACY_VARIANTS: dict[str, VariantSpec] = {
-    "cnn": VariantSpec(
-        name="cnn",
-        tuned_model_name="cnn",
-        target_model_name="cnn_v2",
-        target_artifact_stem="cnn_v2",
-        pair_mode="independent",
-        train_target="both",
-        mask_mode=False,
-    ),
-    "cnn_mask": VariantSpec(
-        name="cnn_mask",
-        tuned_model_name="cnn_mask",
-        target_model_name="cnn_v2",
-        target_artifact_stem="cnn_v2",
-        pair_mode="independent",
-        train_target="both",
-        mask_mode=True,
-    ),
     "cnn_pair": VariantSpec(
         name="cnn_pair",
         tuned_model_name="cnn_pair",
@@ -152,8 +134,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Replay legacy cnn/cnn_pair best configs with cnn_v2/cnn_v2_pair and "
-            "promote."
+            "Replay legacy cnn_pair best configs with cnn_v2_pair and promote."
         )
     )
     parser.add_argument(
@@ -163,7 +144,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--variants",
-        default="cnn,cnn_mask,cnn_pair,cnn_pair_mask",
+        default="cnn_pair,cnn_pair_mask",
         help="Comma-separated legacy variants to replay.",
     )
     parser.add_argument(
@@ -321,7 +302,7 @@ def _load_sampled_params(path: Path) -> dict[str, object]:
 
 
 def _build_pair_overrides(sampled_params: Mapping[str, object]) -> dict[str, str]:
-    """Build CLI overrides for ``cnn_v2 --pair_mode pair``."""
+    """Build CLI overrides for ``cnn_v2_pair``."""
     overrides: dict[str, str] = {}
     for key, value in sampled_params.items():
         if key in {"donor_len", "acceptor_len"}:
@@ -444,14 +425,8 @@ def _build_run_args(
     if class_file.is_file():
         args.extend(["--class_file", str(class_file)])
 
-    overrides: dict[str, str]
-    if variant_spec.pair_mode == "pair":
-        assert sampled_pair is not None
-        overrides = _build_pair_overrides(sampled_pair)
-    else:
-        assert sampled_donor is not None
-        assert sampled_acceptor is not None
-        overrides = _build_independent_overrides(sampled_donor, sampled_acceptor)
+    assert sampled_pair is not None
+    overrides = _build_pair_overrides(sampled_pair)
     for key in sorted(overrides):
         args.extend([f"--{key}", overrides[key]])
     return args

@@ -18,7 +18,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from util.model_runtime import log10_sigmoid_np
+
 CNN_HEAD_TYPE_CHOICES: tuple[str, ...] = ("gap", "center")
+
+
+def _is_torch_compile_active() -> bool:
+    """Return whether execution is currently inside ``torch.compile``.
+
+    Returns
+    -------
+    bool
+        ``True`` when TorchDynamo is tracing or executing a compiled graph.
+    """
+    compiler_module = getattr(torch, "compiler", None)
+    if compiler_module is not None:
+        is_compiling = getattr(compiler_module, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+
+    dynamo_module = getattr(torch, "_dynamo", None)
+    if dynamo_module is None:
+        return False
+    is_compiling = getattr(dynamo_module, "is_compiling", None)
+    if not callable(is_compiling):
+        return False
+    return bool(is_compiling())
 
 
 def one_hot_encode_dna(seq: str, window_len: int = 50) -> np.ndarray:
@@ -346,10 +371,16 @@ class CnnFeatureReadout(nn.Module):
         """
         if x.ndim != 3:
             raise ValueError("x must have shape (batch, channels, length).")
-        if x.shape[2] <= 0:
-            raise ValueError("x length dimension must be positive.")
         if self.head_type == "gap":
-            return x.mean(dim=-1)
+            gap = self.gap
+            if gap is None:
+                raise RuntimeError("gap readout requires an adaptive pool module.")
+            # Keep the gap path free of runtime shape reads so
+            # ``torch.compile`` can retain a single cudagraph-friendly graph.
+            return gap(x).squeeze(-1)
+
+        if not _is_torch_compile_active() and x.shape[2] <= 0:
+            raise ValueError("x length dimension must be positive.")
 
         center_right = x.shape[2] // 2
         if x.shape[2] % 2 == 1:
@@ -523,7 +554,7 @@ class BasicSpliceCNN(nn.Module):
         """
         y = self.conv_layers(x)
         features = self.readout(y)
-        return self.fc(features)[:, 0]
+        return self.fc(features).squeeze(-1)
 
 
 @torch.no_grad()
@@ -572,7 +603,7 @@ def score_sequences(
     encoded = [one_hot_encode_dna(seq, window_len) for seq in sequences]
     x = torch.from_numpy(np.stack(encoded)).to(device)
 
-    all_probs: list[np.ndarray] = []
+    all_log_scores: list[np.ndarray] = []
     for index in range(0, len(x), batch_size):
         batch_x, valid_batch_size = _pad_batch_to_fixed_size(
             x[index : index + batch_size],
@@ -588,9 +619,9 @@ def score_sequences(
             amp_context = nullcontext()
         with amp_context:
             logits = model(batch_x)
-        probs = torch.sigmoid(logits).float().detach().cpu().numpy()[
+        log_scores = log10_sigmoid_np(logits.float().detach().cpu().numpy())[
             :valid_batch_size
         ]
-        all_probs.append(probs)
+        all_log_scores.append(log_scores)
 
-    return np.concatenate(all_probs)
+    return np.concatenate(all_log_scores)

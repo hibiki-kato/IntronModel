@@ -64,6 +64,7 @@ from util.model_runtime import (
     is_compile_runtime_error as _is_compile_runtime_error,
     is_cuda_oom_error as _is_cuda_oom_error,
     is_mps_oom_error as _is_mps_oom_error,
+    log10_sigmoid_np,
     normalize_checkpoint_state_dict as _normalize_checkpoint_state_dict,
     pick_device,
     resolve_amp_dtype as _resolve_amp_dtype,
@@ -83,6 +84,7 @@ from util.training_control import (
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
 )
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -1501,7 +1503,7 @@ def score_sequences(
         raise ValueError("batch_size must be positive.")
 
     model.eval()
-    all_probs: list[np.ndarray] = []
+    all_log_scores: list[np.ndarray] = []
 
     for start in range(0, len(sequences), batch_size):
         batch_sequences = sequences[start : start + batch_size]
@@ -1521,10 +1523,10 @@ def score_sequences(
         mask_tensor = torch.from_numpy(np.stack(encoded_masks)).to(device)
 
         logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
-        probs = torch.sigmoid(logits).float().cpu().numpy()
-        all_probs.append(probs)
+        log_scores = log10_sigmoid_np(logits.float().cpu().numpy())
+        all_log_scores.append(log_scores)
 
-    return np.concatenate(all_probs)
+    return np.concatenate(all_log_scores)
 
 
 def infer_site_scores(
@@ -1571,6 +1573,16 @@ def infer_site_scores(
         device=device,
         batch_size=batch_size,
     )
+    if len(donor_scores) != len(donor_seqs):
+        raise ValueError(
+            "Donor score count does not match donor site count: "
+            f"{len(donor_scores)} != {len(donor_seqs)}"
+        )
+    if len(acceptor_scores) != len(acceptor_seqs):
+        raise ValueError(
+            "Acceptor score count does not match acceptor site count: "
+            f"{len(acceptor_scores)} != {len(acceptor_seqs)}"
+        )
 
     out_rows: List[Dict[str, object]] = []
     donor_idx = 0
@@ -1579,16 +1591,10 @@ def infer_site_scores(
     for row in site_rows:
         site_type = str(row["site_type"])
         if site_type == "donor":
-            score = (
-                float(donor_scores[donor_idx]) if donor_idx < len(donor_scores) else 0.0
-            )
+            score = float(donor_scores[donor_idx])
             donor_idx += 1
         else:
-            score = (
-                float(acceptor_scores[acceptor_idx])
-                if acceptor_idx < len(acceptor_scores)
-                else 0.0
-            )
+            score = float(acceptor_scores[acceptor_idx])
             acceptor_idx += 1
 
         out_rows.append(
@@ -1597,6 +1603,7 @@ def infer_site_scores(
                 "intron_index": int(row["intron_index"]),
                 "site_type": site_type,
                 "score": score,
+                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
             }
         )
 

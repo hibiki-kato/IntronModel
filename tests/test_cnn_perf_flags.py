@@ -96,6 +96,18 @@ def test_basic_splice_cnn_supports_center_readout_with_stride() -> None:
     assert logits.shape == (4,)
 
 
+def test_basic_splice_cnn_keeps_batch_dim_for_single_sample() -> None:
+    model = cnn.BasicSpliceCNN(
+        conv_channels=[16],
+        kernel_size=[5],
+        max_pool_size=1,
+    )
+
+    batch = torch.randn(1, 4, 51)
+    logits = model(batch)
+    assert logits.shape == (1,)
+
+
 def test_cnn_feature_readout_gap_uses_mean_pooling() -> None:
     readout = cnn_common.CnnFeatureReadout(output_channels=2, head_type="gap")
     x = torch.tensor(
@@ -109,6 +121,17 @@ def test_cnn_feature_readout_gap_uses_mean_pooling() -> None:
         features,
         torch.tensor([[103.0 / 3.0, 13.0]], dtype=torch.float32),
     )
+
+
+def test_is_torch_compile_active_checks_torch_compiler_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        torch.compiler,
+        "is_compiling",
+        lambda: True,
+    )
+    assert cnn_common._is_torch_compile_active() is True
 
 
 def test_resolve_loader_batch_size_and_drop_last_prefers_static_shapes() -> None:

@@ -239,7 +239,7 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--intron_score_op",
         choices=list(INTRON_SCORE_OP_CHOICES),
-        default="*",
+        default="+",
         help="How to combine donor and acceptor scores into intron score.",
     )
     parser.add_argument(
@@ -309,6 +309,12 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.0,
         help="Minimum validation-metric improvement to reset patience.",
+    )
+    parser.add_argument(
+        "--validation_metric",
+        type=str,
+        default="pr_auc",
+        help="Validation metric used for checkpoint selection and early stopping.",
     )
     parser.add_argument(
         "--train_target",
@@ -567,8 +573,8 @@ def _add_cnn_v2_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--train_target",
-        choices=["both", "donor", "acceptor", "pair"],
-        default="both",
+        choices=["donor", "acceptor"],
+        default="donor",
     )
 
 
@@ -737,7 +743,7 @@ def _build_checkpoint_stem_from_params(
     train_target = (
         str(train_target_raw).strip().lower()
         if train_target_raw is not None
-        else "both"
+        else ("donor" if model_name == "cnn_v2" else "both")
     )
     for key in sorted(params):
         if key in CHECKPOINT_NAME_EXCLUDED_FIELDS:
@@ -1267,8 +1273,6 @@ def _attach_validation_metadata(
     include_pair_mixed_negatives = False
     if train_target == "pair":
         include_pair_mixed_negatives = True
-    elif model_name == "cnn_v2" and pair_mode in {"pair", "on", "true", "1"}:
-        include_pair_mixed_negatives = True
     elif model_name == "cnn_v2_pair":
         include_pair_mixed_negatives = True
     elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
@@ -1363,25 +1367,32 @@ def run_pipeline(args: argparse.Namespace) -> None:
     elif args.model == "cnn_v2_pair":
         args.pair_mode = "pair"
         model_tasks = ("pair",)
-    default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
+    default_train_target = (
+        model_tasks[0]
+        if args.model == "cnn_v2"
+        else ("both" if len(model_tasks) > 1 else model_tasks[0])
+    )
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
-    if args.model == "cnn_v2":
-        if train_target != "both":
-            train_target = "both"
-            args.train_target = "both"
-    elif args.model == "cnn_v2_pair":
+    if args.model == "cnn_v2_pair":
         if train_target != "pair":
             train_target = "pair"
             args.train_target = "pair"
     allowed_targets = (
-        ("both", *model_tasks) if len(model_tasks) > 1 else tuple(model_tasks)
+        ("both", *model_tasks)
+        if len(model_tasks) > 1
+        else tuple(model_tasks)
     )
     if train_target not in allowed_targets:
         allowed_text = ", ".join(allowed_targets)
         raise ValueError(f"--train_target must be one of: {allowed_text}.")
-    if len(model_tasks) > 1 and (not args.train_only) and train_target != "both":
+    if (
+        args.model != "cnn_v2"
+        and len(model_tasks) > 1
+        and (not args.train_only)
+        and train_target != "both"
+    ):
         task_text = "/".join(model_tasks)
         raise ValueError(
             f"--train_target {task_text} requires --train_only. "

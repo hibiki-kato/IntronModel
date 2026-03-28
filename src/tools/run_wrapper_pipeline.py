@@ -164,12 +164,16 @@ def _resolve_tuned_config_path(
     if task_path.is_file():
         return task_path
 
-    if shared_path.strip() != "":
+    task_only_models = {"cnn_v2", "cnn_v2_pair"}
+    if model_name not in task_only_models and shared_path.strip() != "":
         shared = Path(shared_path)
         if shared.is_file():
             return shared
 
-    if best_config_filename == "best_config.json":
+    if (
+        model_name not in task_only_models
+        and best_config_filename == "best_config.json"
+    ):
         legacy = data_root / species / "tuning" / model_name / "best_config.json"
         if legacy.is_file():
             return legacy
@@ -281,6 +285,7 @@ def _extract_tuned_assignments(
 
 def _resolve_tasks_for_target(
     *,
+    model_name: str,
     train_target: str,
     model_tasks: tuple[TaskName, ...],
     train_only: bool,
@@ -291,6 +296,12 @@ def _resolve_tasks_for_target(
         if train_target != expected:
             raise ValueError(f"TRAIN_TARGET must be {expected}.")
         return model_tasks
+
+    if model_name == "cnn_v2":
+        if train_target not in model_tasks:
+            allowed = "|".join(model_tasks)
+            raise ValueError(f"TRAIN_TARGET must be {allowed}.")
+        return (train_target,)
 
     if train_target not in ("both", *model_tasks):
         allowed = "|".join(("both", *model_tasks))
@@ -310,7 +321,7 @@ def _apply_wrapper_defaults(spec: WrapperSpec, env: dict[str, str]) -> None:
         return
 
     model_tasks = checkpoint_tasks_for_model(env["MODEL"])
-    if len(model_tasks) == 1:
+    if env["MODEL"] == "cnn_v2" or len(model_tasks) == 1:
         env["TRAIN_TARGET"] = model_tasks[0]
 
 
@@ -342,7 +353,11 @@ def _apply_tuned_overrides(
         synth_enabled=synth_enabled,
     )
 
-    if env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == "":
+    task_only_models = {"cnn_v2", "cnn_v2_pair"}
+    if (
+        env.get("SHARED_TUNED_CONFIG_PATH", "").strip() == ""
+        and tuned_model_name not in task_only_models
+    ):
         env["SHARED_TUNED_CONFIG_PATH"] = str(
             data_root
             / species
@@ -358,6 +373,11 @@ def _apply_tuned_overrides(
         if train_target != model_tasks[0]:
             raise ValueError(f"TRAIN_TARGET must be {model_tasks[0]}.")
         tasks = model_tasks
+    elif model_name == "cnn_v2":
+        if train_target not in model_tasks:
+            allowed = "|".join(model_tasks)
+            raise ValueError(f"TRAIN_TARGET must be {allowed}.")
+        tasks = (train_target,)
     else:
         if train_target not in ("both", *model_tasks):
             allowed = "|".join(("both", *model_tasks))
@@ -513,11 +533,15 @@ def _resolve_expected_checkpoint_paths_for_run(
         checkpoint_stem,
         tasks=model_tasks,
     )
-    default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
+    default_train_target = (
+        model_tasks[0] if args.model == "cnn_v2" else
+        ("both" if len(model_tasks) > 1 else model_tasks[0])
+    )
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
     required_tasks = _resolve_tasks_for_target(
+        model_name=args.model,
         train_target=train_target,
         model_tasks=model_tasks,
         train_only=bool(getattr(args, "train_only", False)),
@@ -792,12 +816,23 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
     model_name = _require_env(env, "MODEL")
     model_tasks = checkpoint_tasks_for_model(model_name)
     train_target = _require_env(env, "TRAIN_TARGET")
-    allowed_targets = ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
+    allowed_targets = (
+        model_tasks
+        if model_name == "cnn_v2"
+        else (
+            ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
+        )
+    )
     _check_choice(train_target, tuple(allowed_targets), "TRAIN_TARGET")
 
     if env["SKIP_TRAINING"] == "1" and env["CONTINUE_TRAINING"] == "1":
         raise ValueError("CONTINUE_TRAINING=1 cannot be used with SKIP_TRAINING=1.")
-    if len(model_tasks) > 1 and train_target != "both" and env["TRAIN_ONLY"] != "1":
+    if (
+        model_name != "cnn_v2"
+        and len(model_tasks) > 1
+        and train_target != "both"
+        and env["TRAIN_ONLY"] != "1"
+    ):
         raise ValueError("TRAIN_TARGET single-task mode requires TRAIN_ONLY=1.")
 
     if spec.supports_tuned_hparams:
@@ -876,11 +911,15 @@ def _check_dnabert_skip_training_preconditions(run_args: list[str]) -> None:
         checkpoint_stem,
         tasks=model_tasks,
     )
-    default_train_target = "both" if len(model_tasks) > 1 else model_tasks[0]
+    default_train_target = (
+        model_tasks[0] if args.model == "cnn_v2" else
+        ("both" if len(model_tasks) > 1 else model_tasks[0])
+    )
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
     required_tasks = _resolve_tasks_for_target(
+        model_name=args.model,
         train_target=train_target,
         model_tasks=model_tasks,
         train_only=bool(getattr(args, "train_only", False)),

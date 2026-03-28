@@ -50,7 +50,14 @@ intronmodel_resolve_tuned_config_path() {
 		return 0
 	fi
 
-	if [[ -n "${shared_path}" ]]; then
+	local use_task_only_configs="0"
+	case "${tuned_model_name}" in
+		cnn_v2 | cnn_v2_pair)
+			use_task_only_configs="1"
+			;;
+	esac
+
+	if [[ "${use_task_only_configs}" != "1" && -n "${shared_path}" ]]; then
 		local shared_candidate="${shared_path}"
 		if [[ -f "${shared_candidate}" ]]; then
 			printf '%s\n' "${shared_candidate}"
@@ -58,7 +65,7 @@ intronmodel_resolve_tuned_config_path() {
 		fi
 	fi
 
-	if [[ "${best_config_filename}" == "best_config.json" ]]; then
+	if [[ "${use_task_only_configs}" != "1" && "${best_config_filename}" == "best_config.json" ]]; then
 		local legacy_path="${data_root}/${species}/tuning/${tuned_model_name}/best_config.json"
 		if [[ -f "${legacy_path}" ]]; then
 			printf '%s\n' "${legacy_path}"
