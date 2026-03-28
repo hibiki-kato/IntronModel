@@ -1160,17 +1160,17 @@ def train_task_model(
                 )
 
                 mark = "*" if improved else "-"
-                train_pr_auc_text = (
+                train_score_text = (
                     "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
                 )
-                test_pr_auc_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
+                val_score_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
                 objective_text = (
                     "" if score_name == "pr_auc" else f"{score_name}={score:.4f} "
                 )
                 print(
                     f"[{task}] {mark} epoch {epoch}/{epochs} "
-                    f"loss={train_loss:.4f} train_pr_auc={train_pr_auc_text} "
-                    f"test_pr_auc={test_pr_auc_text} "
+                    f"loss={train_loss:.4f} train_score={train_score_text} "
+                    f"val_score={val_score_text} "
                     f"elapsed={epoch_elapsed_sec:.2f}s "
                     f"{objective_text}best={best_score:.4f} "
                     f"(ep {best_epoch})"

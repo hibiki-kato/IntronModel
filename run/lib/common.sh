@@ -451,8 +451,97 @@ intronmodel_run_with_process_title() {
 
 	(
 		export INTRONMODEL_PROCESS_TITLE="${process_title}"
-		"$@"
+		exec "$@"
 	)
+}
+
+
+intronmodel_run_with_deadline() {
+	local deadline_epoch="$1"
+	local grace_seconds="$2"
+	local process_title="${3-}"
+	shift 3 || true
+
+	if [[ $# -eq 0 ]]; then
+		echo "[common.sh] intronmodel_run_with_deadline requires a command." >&2
+		return 2
+	fi
+	if [[ ! "${deadline_epoch}" =~ ^[0-9]+$ ]]; then
+		echo "[common.sh] deadline_epoch must be an integer epoch." >&2
+		return 2
+	fi
+	if [[ ! "${grace_seconds}" =~ ^[0-9]+$ ]]; then
+		echo "[common.sh] grace_seconds must be a non-negative integer." >&2
+		return 2
+	fi
+
+	local timed_out=0
+	local run_status=0
+	(
+		if [[ -n "${process_title}" ]]; then
+			export INTRONMODEL_PROCESS_TITLE="${process_title}"
+		fi
+		exec "$@"
+	) &
+	local run_pid="$!"
+
+	while kill -0 "${run_pid}" 2>/dev/null; do
+		local now_epoch
+		now_epoch="$(date +%s)"
+		if (( now_epoch >= deadline_epoch )); then
+			timed_out=1
+			kill -TERM "${run_pid}" 2>/dev/null || true
+			local kill_deadline
+			kill_deadline=$((now_epoch + grace_seconds))
+			while kill -0 "${run_pid}" 2>/dev/null; do
+				now_epoch="$(date +%s)"
+				if (( now_epoch >= kill_deadline )); then
+					kill -KILL "${run_pid}" 2>/dev/null || true
+					break
+				fi
+				sleep 1
+			done
+			break
+		fi
+		sleep 1
+	done
+
+	if wait "${run_pid}"; then
+		run_status=0
+	else
+		run_status="$?"
+	fi
+
+	if [[ "${timed_out}" -eq 1 ]]; then
+		return 124
+	fi
+	return "${run_status}"
+}
+
+
+intronmodel_prune_timeout_artifacts() {
+	local script_tag="$1"
+	local python_bin="$2"
+	local project_root="$3"
+	local data_root="$4"
+	local model_root="$5"
+	local species="$6"
+	local model_name="$7"
+	local output_dir="$8"
+
+	if [[ -n "${output_dir}" && -d "${output_dir}" ]]; then
+		rm -rf "${output_dir}"
+		echo "[${script_tag}] removed partial output dir: ${output_dir}"
+	fi
+
+	PYTHONPATH="${project_root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+		"${python_bin}" \
+		"${project_root}/src/tools/prune_missing_rank_checkpoints.py" \
+		--data_root "${data_root}" \
+		--model_root "${model_root}" \
+		--species "${species}" \
+		--model "${model_name}" \
+		--dry_run 0
 }
 
 

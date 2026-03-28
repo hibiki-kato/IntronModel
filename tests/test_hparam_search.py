@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import json
 import os
+import signal
+import time
 from pathlib import Path
 from queue import Queue
 from typing import Optional, cast
@@ -267,6 +269,17 @@ def test_load_config_parses_skip_full_and_visualization_flags(
 
     assert loaded.skip_full_phase is True
     assert loaded.enable_visualization is False
+
+
+def test_load_config_parses_phase_overlap_flag(tmp_path: Path) -> None:
+    config = _base_config_dict(tmp_path)
+    config["enable_phase_overlap"] = True
+    config_path = tmp_path / "phase_overlap.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.enable_phase_overlap is True
 
 
 def test_load_config_disables_visualization_when_base_visualize_is_none(
@@ -543,6 +556,76 @@ def test_resolve_workload_execution_mode(
     )
 
     assert resolved == expected
+
+
+def test_select_locked_quick_trials_returns_conservative_prefix() -> None:
+    rows = [
+        hparam_search.TrialResult(
+            phase="quick",
+            trial_id=0,
+            status="success",
+            gpu_id=None,
+            sampled_params={"batch_size": 128},
+            effective_batch_size=128,
+            oom_retries=0,
+            donor_pr_auc=0.6,
+            acceptor_pr_auc=0.6,
+            mean_pr_auc=0.6,
+            objective_metric="mean_pr_auc",
+            objective_score=0.82,
+            error_message=None,
+            return_code=0,
+            duration_sec=0.01,
+            metrics_json="",
+            log_file="",
+        ),
+        hparam_search.TrialResult(
+            phase="quick",
+            trial_id=1,
+            status="success",
+            gpu_id=None,
+            sampled_params={"batch_size": 256},
+            effective_batch_size=256,
+            oom_retries=0,
+            donor_pr_auc=0.7,
+            acceptor_pr_auc=0.7,
+            mean_pr_auc=0.7,
+            objective_metric="mean_pr_auc",
+            objective_score=0.95,
+            error_message=None,
+            return_code=0,
+            duration_sec=0.01,
+            metrics_json="",
+            log_file="",
+        ),
+        hparam_search.TrialResult(
+            phase="quick",
+            trial_id=2,
+            status="success",
+            gpu_id=None,
+            sampled_params={"batch_size": 512},
+            effective_batch_size=512,
+            oom_retries=0,
+            donor_pr_auc=0.65,
+            acceptor_pr_auc=0.65,
+            mean_pr_auc=0.65,
+            objective_metric="mean_pr_auc",
+            objective_score=0.88,
+            error_message=None,
+            return_code=0,
+            duration_sec=0.01,
+            metrics_json="",
+            log_file="",
+        ),
+    ]
+
+    selected = hparam_search._select_locked_quick_trials(
+        completed_quick_rows=rows,
+        unfinished_quick_count=1,
+        top_k=3,
+    )
+
+    assert [row.trial_id for row in selected] == [1, 2]
 
 
 def test_sample_trial_params_is_deterministic(tmp_path: Path) -> None:
@@ -4883,6 +4966,141 @@ def test_run_phase_subprocess_interrupt_triggers_cleanup(
     assert cleanup_calls["count"] == 1
 
 
+def test_run_quick_full_overlap_subprocess_promotes_full_early(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [128, 256]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=2,
+        full_epochs=4,
+        base_seed=1337,
+        gpu_ids_setting=["0", "1"],
+        max_parallel_trials_setting=2,
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 128},
+        quick_overrides={"epochs": 1},
+        full_overrides={"epochs": 4},
+        search_space=search_space,
+        enable_phase_overlap=True,
+    )
+    events: list[tuple[str, int, str, float]] = []
+
+    def _fake_run_trial(
+        *,
+        config: hparam_search.SearchConfig,
+        phase: str,
+        trial_id: int,
+        sampled_params: dict[str, hparam_search.Scalar],
+        overrides: dict[str, hparam_search.ArgValue],
+        assigned_gpu_id: str | None,
+        metrics_json: Path,
+        log_file: Path,
+    ) -> hparam_search.TrialResult:
+        del overrides
+        start_time = time.monotonic()
+        events.append((phase, trial_id, "start", start_time))
+        metrics_json.parent.mkdir(parents=True, exist_ok=True)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        if phase == "quick" and trial_id == 0:
+            time.sleep(0.25)
+            objective_score = 0.81
+        elif phase == "quick":
+            time.sleep(0.05)
+            objective_score = 0.93
+        else:
+            time.sleep(0.05)
+            objective_score = 0.97
+        metrics_json.write_text(
+            json.dumps(
+                {
+                    "donor": {
+                        "best_metric": "pr_auc",
+                        "best_score": objective_score,
+                        "best_epoch": 1,
+                    },
+                    "acceptor": {
+                        "best_metric": "pr_auc",
+                        "best_score": objective_score,
+                        "best_epoch": 1,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        log_file.write_text("ok", encoding="utf-8")
+        end_time = time.monotonic()
+        events.append((phase, trial_id, "end", end_time))
+        return hparam_search.TrialResult(
+            phase=phase,
+            trial_id=trial_id,
+            status="success",
+            gpu_id=assigned_gpu_id,
+            sampled_params=sampled_params,
+            effective_batch_size=int(sampled_params["batch_size"]),
+            oom_retries=0,
+            donor_pr_auc=objective_score,
+            acceptor_pr_auc=objective_score,
+            mean_pr_auc=objective_score,
+            objective_metric="mean_pr_auc",
+            objective_score=objective_score,
+            error_message=None,
+            return_code=0,
+            duration_sec=end_time - start_time,
+            metrics_json=str(metrics_json),
+            log_file=str(log_file),
+        )
+
+    monkeypatch.setattr(hparam_search, "run_trial", _fake_run_trial)
+
+    quick_rows, full_rows = hparam_search._run_quick_full_overlap_subprocess(
+        config=config,
+        quick_params=[
+            {"batch_size": 128},
+            {"batch_size": 256},
+        ],
+        quick_overrides={"epochs": 1},
+        full_overrides={"epochs": 4},
+        gpu_ids=["0", "1"],
+        max_parallel_trials=2,
+        out_dir=config.output_dir,
+        seed_best_params=None,
+        seed_best_context_mismatch=False,
+        global_best_recheck_params=None,
+        global_best_recheck_context_mismatch=False,
+        full_epochs_value=4,
+    )
+
+    quick0_end = next(
+        timestamp
+        for phase, trial_id, kind, timestamp in events
+        if phase == "quick" and trial_id == 0 and kind == "end"
+    )
+    first_full_start = min(
+        timestamp
+        for phase, _trial_id, kind, timestamp in events
+        if phase == "full" and kind == "start"
+    )
+
+    assert len(quick_rows) == 2
+    assert len(full_rows) >= 1
+    assert first_full_start < quick0_end
+
+
 def test_main_returns_130_on_keyboard_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4912,3 +5130,27 @@ def test_main_returns_130_on_keyboard_interrupt(
 
     assert exit_code == 130
     assert cleanup_calls["count"] == 1
+
+
+def test_main_installs_sigterm_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _base_config_dict(tmp_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    calls: list[int] = []
+
+    def _fake_signal(signum: int, handler: object) -> object:
+        del handler
+        calls.append(signum)
+        return object()
+
+    monkeypatch.setattr(hparam_search.signal, "signal", _fake_signal)
+    monkeypatch.setattr(hparam_search, "run_search", lambda _config: 0)
+
+    exit_code = hparam_search.main(["--config", str(config_path)])
+
+    assert exit_code == 0
+    assert signal.SIGINT in calls
+    assert signal.SIGTERM in calls

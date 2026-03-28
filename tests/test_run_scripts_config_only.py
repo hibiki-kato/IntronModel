@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -194,7 +195,8 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     content = (_project_root() / "run" / "tune_cnn_v2_time.sh").read_text(
         encoding="utf-8"
     )
-    assert 'OBJECTIVE_METRIC="pr_auc"' in content
+    assert 'OBJECTIVE_METRIC="max_f1"' in content
+    assert '"enable_phase_overlap": true' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
@@ -209,7 +211,8 @@ def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
     content = (_project_root() / "run" / "tune_cnn_v2_pair_time.sh").read_text(
         encoding="utf-8"
     )
-    assert 'OBJECTIVE_METRIC="pr_auc"' in content
+    assert 'OBJECTIVE_METRIC="f1_max"' in content
+    assert '"enable_phase_overlap": true' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert '"mask": {' in content
     assert '"sequence_transform": {' not in content
@@ -229,6 +232,76 @@ def test_tune_cnn_v2_pair_time_exposes_synthesize_mode() -> None:
     assert '"tag": "${resolved_tag}"' in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
+
+
+def test_common_run_with_deadline_times_out() -> None:
+    common_sh = _project_root() / "run" / "lib" / "common.sh"
+    script = f"""
+set -euo pipefail
+source "{common_sh}"
+deadline=$(( $(date +%s) + 1 ))
+start=$SECONDS
+if intronmodel_run_with_deadline "$deadline" 1 "" sleep 5; then
+  rc=0
+else
+  rc=$?
+fi
+elapsed=$((SECONDS - start))
+echo "rc=$rc elapsed=$elapsed"
+"""
+    start_time = time.monotonic()
+    run = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    elapsed = time.monotonic() - start_time
+    assert run.returncode == 0, run.stderr
+    assert "rc=124" in run.stdout
+    assert elapsed < 4.0
+
+
+def test_common_prune_timeout_artifacts_removes_output_dir(tmp_path: Path) -> None:
+    common_sh = _project_root() / "run" / "lib" / "common.sh"
+    output_dir = tmp_path / "partial-run"
+    output_dir.mkdir()
+    (output_dir / "artifact.txt").write_text("tmp", encoding="utf-8")
+    capture_path = tmp_path / "prune_args.txt"
+    fake_python = tmp_path / "fake_python.sh"
+    fake_python.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$@" > "{capture_path}"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    script = f"""
+set -euo pipefail
+source "{common_sh}"
+intronmodel_prune_timeout_artifacts \
+  "test-script" \
+  "{fake_python}" \
+  "{_project_root()}" \
+  "{tmp_path}" \
+  "{tmp_path}" \
+  "Dmel" \
+  "cnn" \
+  "{output_dir}"
+"""
+    run = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    assert not output_dir.exists()
+    captured_args = capture_path.read_text(encoding="utf-8")
+    assert "prune_missing_rank_checkpoints.py" in captured_args
+    assert "--species" in captured_args
+    assert "Dmel" in captured_args
 
 
 def test_modified_tuning_scripts_do_not_use_cross_species_seed_fallback() -> None:

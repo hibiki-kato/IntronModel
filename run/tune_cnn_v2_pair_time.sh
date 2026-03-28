@@ -13,6 +13,7 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="12"
+TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
@@ -564,6 +565,7 @@ while true; do
   "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
+  "enable_phase_overlap": true,
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
   "seed_best_config_path": null,
@@ -627,11 +629,33 @@ JSON
 		"${remaining_hms}" \
 		"${species}" \
 		"${base_seed}"
-	if ! intronmodel_run_with_process_title \
+	run_status=0
+	if intronmodel_run_with_deadline \
+		"${ETA_DEADLINE_EPOCH}" \
+		"${TIMEOUT_GRACE_SECONDS}" \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \
 		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
 		--config "${config_path}"; then
+		:
+	else
+		run_status=$?
+	fi
+	if [[ "${run_status}" -eq 124 ]]; then
+		echo "[tune_cnn_v2_pair_time.sh] time budget reached; "\
+			"stopping current cycle and cleaning up." >&2
+		intronmodel_prune_timeout_artifacts \
+			"tune_cnn_v2_pair_time.sh" \
+			"${PYTHON_BIN}" \
+			"${PROJECT_ROOT}" \
+			"${DATA_ROOT}" \
+			"${MODEL_ROOT}" \
+			"${species}" \
+			"${TUNING_MODEL_NAME}" \
+			"${output_dir}" || true
+		exit 124
+	fi
+	if [[ "${run_status}" -ne 0 ]]; then
 		echo "[tune_cnn_v2_pair_time.sh] cycle=${job_index} failed "\
 			"species=${species} target=pair seed=${base_seed}" >&2
 	fi

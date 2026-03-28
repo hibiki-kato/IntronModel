@@ -20,6 +20,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import signal
 from queue import Empty
 import random
 import shutil
@@ -181,6 +182,7 @@ class SearchConfig:
     trial_process_mode: str = "subprocess"
     skip_full_phase: bool = False
     enable_visualization: bool = True
+    enable_phase_overlap: bool = False
 
 
 @dataclass(frozen=True)
@@ -210,6 +212,19 @@ class PersistentTrialOutcome:
 
     slot_index: int
     result: TrialResult
+
+
+@dataclass(frozen=True)
+class ScheduledTrialTask:
+    """One scheduled trial consumed by the overlap scheduler."""
+
+    phase: str
+    trial_id: int
+    priority_score: float
+    sampled_params: dict[str, Scalar]
+    overrides: dict[str, ArgValue]
+    metrics_json: str
+    log_file: str
 
 
 def _validate_positive_int(value: object, name: str) -> int:
@@ -491,6 +506,7 @@ def load_config(path: Path) -> SearchConfig:
     if not isinstance(full_overrides, dict):
         raise ValueError("full_overrides must be an object.")
     skip_full_phase = _to_bool(raw.get("skip_full_phase", False))
+    enable_phase_overlap = _to_bool(raw.get("enable_phase_overlap", False))
     enable_visualization = _resolve_enable_visualization(
         raw.get("enable_visualization"),
         base_args=normalized_base_args,
@@ -525,6 +541,7 @@ def load_config(path: Path) -> SearchConfig:
         trial_process_mode=trial_process_mode,
         skip_full_phase=skip_full_phase,
         enable_visualization=enable_visualization,
+        enable_phase_overlap=enable_phase_overlap,
     )
 
 
@@ -2976,6 +2993,43 @@ def rank_successful_trials(results: list[TrialResult]) -> list[TrialResult]:
     return successful
 
 
+def _rank_successful_trials_by_score(
+    results: list[TrialResult],
+) -> list[TrialResult]:
+    """Rank successful trials using objective score only."""
+    successful = [
+        row
+        for row in results
+        if row.status == "success" and row.objective_score is not None
+    ]
+    successful.sort(
+        key=lambda row: float(row.objective_score)
+        if row.objective_score is not None
+        else -1.0,
+        reverse=True,
+    )
+    return successful
+
+
+def _select_locked_quick_trials(
+    *,
+    completed_quick_rows: list[TrialResult],
+    unfinished_quick_count: int,
+    top_k: int,
+) -> list[TrialResult]:
+    """Select the currently locked quick rows.
+
+    A row is locked when it cannot fall out of the final top-k even if every
+    unfinished quick trial beats it. The guarantee is conservative and uses the
+    number of still-unfinished quick trials only.
+    """
+    locked_count = max(0, top_k - unfinished_quick_count)
+    if locked_count <= 0:
+        return []
+    ranked_quick = _rank_successful_trials_by_score(completed_quick_rows)
+    return ranked_quick[:locked_count]
+
+
 def _format_float(value: Optional[float]) -> str:
     """Format float values for TSV output."""
     if value is None:
@@ -5185,6 +5239,267 @@ def run_phase(
         _set_active_trial_stream_mode(previous_stream_mode)
 
 
+def _run_quick_full_overlap_subprocess(
+    *,
+    config: SearchConfig,
+    quick_params: list[dict[str, Scalar]],
+    quick_overrides: dict[str, ArgValue],
+    full_overrides: dict[str, ArgValue],
+    gpu_ids: list[str],
+    max_parallel_trials: int,
+    out_dir: Path,
+    seed_best_params: Optional[dict[str, Scalar]],
+    seed_best_context_mismatch: bool,
+    global_best_recheck_params: Optional[dict[str, Scalar]],
+    global_best_recheck_context_mismatch: bool,
+    full_epochs_value: int,
+) -> tuple[list[TrialResult], list[TrialResult]]:
+    """Run quick/full tuning on one shared slot scheduler.
+
+    The scheduler starts quick trials first, then promotes full trials as soon
+    as the current completed quick rows are mathematically locked. This path is
+    intentionally limited to the subprocess backend so the existing persistent
+    worker code remains unchanged for the other execution modes.
+    """
+    slots: list[Optional[str]]
+    if gpu_ids:
+        slots = list(gpu_ids[:max_parallel_trials])
+    else:
+        slots = [None for _ in range(max_parallel_trials)]
+
+    full_priority_params: Optional[dict[str, Scalar]] = None
+    if seed_best_params is not None and seed_best_context_mismatch:
+        full_priority_params = dict(seed_best_params)
+    elif (
+        global_best_recheck_params is not None
+        and global_best_recheck_context_mismatch
+    ):
+        full_priority_params = dict(global_best_recheck_params)
+
+    seed_best_key: Optional[str] = None
+    if seed_best_params is not None:
+        seed_best_key = json.dumps(
+            seed_best_params,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    quick_pending_indices = list(range(len(quick_params)))
+    quick_running_count = 0
+    full_running_count = 0
+    quick_rows: list[TrialResult] = []
+    full_rows: list[TrialResult] = []
+    completed_quick_rows: list[TrialResult] = []
+    pending_full_tasks: list[ScheduledTrialTask] = []
+    full_consumed_keys: set[str] = set()
+    full_priority_inserted = False
+    next_full_trial_id = 1 if full_priority_params is not None else 0
+    skipped_same_best_epoch = 0
+    skipped_seed_context_match = 0
+    running: dict[Future[TrialResult], tuple[int, ScheduledTrialTask]] = {}
+    available_slots: list[tuple[int, Optional[str]]] = [
+        (slot_index, assigned_gpu)
+        for slot_index, assigned_gpu in enumerate(slots)
+    ]
+    executor = ThreadPoolExecutor(max_workers=max(1, len(slots)))
+
+    def _queue_full_task(task: ScheduledTrialTask) -> None:
+        """Insert one full task into the pending queue by priority."""
+        pending_full_tasks.append(task)
+        pending_full_tasks.sort(
+            key=lambda item: (-item.priority_score, item.trial_id)
+        )
+
+    def _maybe_queue_priority_recheck() -> None:
+        """Queue the stored full recheck once full work is otherwise ready."""
+        nonlocal full_priority_inserted, next_full_trial_id
+        if full_priority_inserted or full_priority_params is None:
+            return
+        priority_task = ScheduledTrialTask(
+            phase="full",
+            trial_id=0,
+            priority_score=float("inf"),
+            sampled_params=dict(full_priority_params),
+            overrides=dict(full_overrides),
+            metrics_json=str(out_dir / "full_trial_0000.metrics.json"),
+            log_file=str(out_dir / "full_trial_0000.log.txt"),
+        )
+        _queue_full_task(priority_task)
+        full_priority_inserted = True
+        next_full_trial_id = max(next_full_trial_id, 1)
+
+    def _maybe_promote_locked_rows() -> None:
+        """Promote locked quick rows into the full queue."""
+        nonlocal next_full_trial_id, skipped_same_best_epoch
+        nonlocal skipped_seed_context_match
+        unfinished_quick_count = len(quick_pending_indices) + quick_running_count
+        locked_rows = _select_locked_quick_trials(
+            completed_quick_rows=completed_quick_rows,
+            unfinished_quick_count=unfinished_quick_count,
+            top_k=config.top_k,
+        )
+        if locked_rows:
+            _maybe_queue_priority_recheck()
+        for row in locked_rows:
+            row_key = json.dumps(
+                row.sampled_params,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if row_key in full_consumed_keys:
+                continue
+            if (
+                seed_best_key is not None
+                and row_key == seed_best_key
+                and not seed_best_context_mismatch
+            ):
+                skipped_seed_context_match += 1
+                full_consumed_keys.add(row_key)
+                continue
+            quick_best_epoch = _read_objective_best_epoch_from_metrics(
+                metrics_json_path=Path(row.metrics_json),
+                objective_metric=config.objective_metric,
+            )
+            if (
+                quick_best_epoch is not None
+                and quick_best_epoch == full_epochs_value
+            ):
+                skipped_same_best_epoch += 1
+                full_consumed_keys.add(row_key)
+                continue
+            task = ScheduledTrialTask(
+                phase="full",
+                trial_id=next_full_trial_id,
+                priority_score=(
+                    float(row.objective_score)
+                    if row.objective_score is not None
+                    else float("-inf")
+                ),
+                sampled_params=dict(row.sampled_params),
+                overrides=dict(full_overrides),
+                metrics_json=str(
+                    out_dir / f"full_trial_{next_full_trial_id:04d}.metrics.json"
+                ),
+                log_file=str(
+                    out_dir / f"full_trial_{next_full_trial_id:04d}.log.txt"
+                ),
+            )
+            next_full_trial_id += 1
+            full_consumed_keys.add(row_key)
+            _queue_full_task(task)
+
+    def _submit_task(
+        *,
+        slot_index: int,
+        assigned_gpu: Optional[str],
+        task: ScheduledTrialTask,
+    ) -> None:
+        """Submit one scheduled task into the shared executor."""
+        nonlocal quick_running_count, full_running_count
+        future = executor.submit(
+            run_trial,
+            config=config,
+            phase=task.phase,
+            trial_id=task.trial_id,
+            sampled_params=task.sampled_params,
+            overrides=task.overrides,
+            assigned_gpu_id=assigned_gpu,
+            metrics_json=Path(task.metrics_json),
+            log_file=Path(task.log_file),
+        )
+        running[future] = (slot_index, task)
+        if task.phase == "quick":
+            quick_running_count += 1
+        else:
+            full_running_count += 1
+        _print_trial_start(
+            phase=task.phase,
+            trial_id=task.trial_id,
+            assigned_gpu=assigned_gpu,
+        )
+
+    try:
+        while quick_pending_indices or pending_full_tasks or running:
+            while available_slots and (pending_full_tasks or quick_pending_indices):
+                slot_index, assigned_gpu = available_slots.pop(0)
+                if pending_full_tasks:
+                    task = pending_full_tasks.pop(0)
+                else:
+                    trial_id = quick_pending_indices.pop(0)
+                    task = ScheduledTrialTask(
+                        phase="quick",
+                        trial_id=trial_id,
+                        priority_score=0.0,
+                        sampled_params=dict(quick_params[trial_id]),
+                        overrides=dict(quick_overrides),
+                        metrics_json=str(
+                            out_dir / f"quick_trial_{trial_id:04d}.metrics.json"
+                        ),
+                        log_file=str(
+                            out_dir / f"quick_trial_{trial_id:04d}.log.txt"
+                        ),
+                    )
+                _submit_task(
+                    slot_index=slot_index,
+                    assigned_gpu=assigned_gpu,
+                    task=task,
+                )
+
+            if not running:
+                if full_priority_params is not None and not full_priority_inserted:
+                    _maybe_queue_priority_recheck()
+                    continue
+                if quick_pending_indices:
+                    continue
+                break
+
+            done, _ = wait(running.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                slot_index, task = running.pop(future)
+                available_slots.append((slot_index, slots[slot_index]))
+                result = future.result()
+                if task.phase == "quick":
+                    quick_running_count -= 1
+                    quick_rows.append(result)
+                    if result.status == "success":
+                        completed_quick_rows.append(result)
+                    _maybe_promote_locked_rows()
+                else:
+                    full_running_count -= 1
+                    full_rows.append(result)
+                total_count = (
+                    len(quick_params)
+                    if task.phase == "quick"
+                    else len(full_rows) + len(pending_full_tasks) + full_running_count
+                )
+                completed_count = (
+                    len(quick_rows)
+                    if task.phase == "quick"
+                    else len(full_rows)
+                )
+                _print_trial_result(
+                    phase=task.phase,
+                    trial_count=max(1, total_count),
+                    completed_count=completed_count,
+                    result=result,
+                )
+
+            if (
+                not quick_pending_indices
+                and quick_running_count == 0
+                and not full_priority_inserted
+            ):
+                _maybe_queue_priority_recheck()
+            if completed_quick_rows:
+                _maybe_promote_locked_rows()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if full_priority_params is not None and not full_priority_inserted:
+        _maybe_queue_priority_recheck()
+    return quick_rows, full_rows
+
+
 def build_trial_params(
     *,
     config: SearchConfig,
@@ -5726,43 +6041,74 @@ def run_search(config: SearchConfig) -> int:
         f"epochs={quick_overrides.get('epochs')}.",
         flush=True,
     )
-    quick_rows = run_phase(
-        phase="quick",
-        config=config,
-        trial_count=config.quick_trials,
-        trial_params=quick_params,
-        overrides=quick_overrides,
-        gpu_ids=gpu_ids,
-        max_parallel_trials=max_parallel_trials,
-        out_dir=config.output_dir,
-        execution_mode=quick_execution_mode,
-    )
-    write_trials_tsv(config.output_dir / "quick_trials.tsv", quick_rows)
-    ranked_quick = rank_successful_trials(quick_rows)
-
     full_rows: list[TrialResult]
+    full_compile_mode = str(full_overrides.get("compile_mode", "auto")).strip().lower()
+    if full_compile_mode == "auto" and gpu_ids:
+        cuda_header_path = _find_cuda_header()
+        if cuda_header_path is None:
+            full_overrides["compile_mode"] = "off"
+            print(
+                "[hparam_search] Full phase compile_mode auto -> off: "
+                "cuda.h not found. Install CUDA toolkit headers (or set "
+                "CUDA_HOME/CUDA_PATH) to enable torch.compile.",
+                flush=True,
+            )
     if config.skip_full_phase:
+        quick_rows = run_phase(
+            phase="quick",
+            config=config,
+            trial_count=config.quick_trials,
+            trial_params=quick_params,
+            overrides=quick_overrides,
+            gpu_ids=gpu_ids,
+            max_parallel_trials=max_parallel_trials,
+            out_dir=config.output_dir,
+            execution_mode=quick_execution_mode,
+        )
         full_rows = []
         print(
             "[hparam_search] Full phase skipped by config (skip_full_phase=true).",
             flush=True,
         )
+    elif (
+        config.enable_phase_overlap
+        and quick_execution_mode == _DEFAULT_PHASE_EXECUTION_MODE
+        and full_mode_policy == _DEFAULT_PHASE_EXECUTION_MODE
+    ):
+        print(
+            "[hparam_search] Phase overlap enabled: quick and full share slots.",
+            flush=True,
+        )
+        quick_rows, full_rows = _run_quick_full_overlap_subprocess(
+            config=config,
+            quick_params=quick_params,
+            quick_overrides=quick_overrides,
+            full_overrides=full_overrides,
+            gpu_ids=gpu_ids,
+            max_parallel_trials=max_parallel_trials,
+            out_dir=config.output_dir,
+            seed_best_params=seed_best_params,
+            seed_best_context_mismatch=seed_best_context_mismatch,
+            global_best_recheck_params=global_best_recheck_params,
+            global_best_recheck_context_mismatch=(
+                global_best_recheck_context_mismatch
+            ),
+            full_epochs_value=full_epochs_value,
+        )
     else:
+        quick_rows = run_phase(
+            phase="quick",
+            config=config,
+            trial_count=config.quick_trials,
+            trial_params=quick_params,
+            overrides=quick_overrides,
+            gpu_ids=gpu_ids,
+            max_parallel_trials=max_parallel_trials,
+            out_dir=config.output_dir,
+            execution_mode=quick_execution_mode,
+        )
         selected_for_full: list[TrialResult] = []
         selected_for_full_keys: set[str] = set()
-        full_compile_mode = (
-            str(full_overrides.get("compile_mode", "auto")).strip().lower()
-        )
-        if full_compile_mode == "auto" and gpu_ids:
-            cuda_header_path = _find_cuda_header()
-            if cuda_header_path is None:
-                full_overrides["compile_mode"] = "off"
-                print(
-                    "[hparam_search] Full phase compile_mode auto -> off: "
-                    "cuda.h not found. Install CUDA toolkit headers (or set "
-                    "CUDA_HOME/CUDA_PATH) to enable torch.compile.",
-                    flush=True,
-                )
         skipped_same_best_epoch = 0
         skipped_seed_context_match = 0
         seed_best_key: Optional[str] = None
@@ -5772,6 +6118,7 @@ def run_search(config: SearchConfig) -> int:
                 sort_keys=True,
                 separators=(",", ":"),
             )
+        ranked_quick = rank_successful_trials(quick_rows)
         for row in ranked_quick:
             row_key = json.dumps(
                 row.sampled_params,
@@ -5862,6 +6209,8 @@ def run_search(config: SearchConfig) -> int:
             )
         else:
             full_rows = []
+    write_trials_tsv(config.output_dir / "quick_trials.tsv", quick_rows)
+    ranked_quick = rank_successful_trials(quick_rows)
     write_trials_tsv(config.output_dir / "full_trials.tsv", full_rows)
 
     ranked_full = rank_successful_trials(full_rows)
@@ -5970,17 +6319,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _raise_keyboard_interrupt_from_signal(
+    signum: int,
+    frame: object | None,
+) -> None:
+    """Translate termination signals into KeyboardInterrupt."""
+    del signum, frame
+    raise KeyboardInterrupt
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entry point."""
     actual_argv = argv if argv is not None else sys.argv[1:]
     args = parse_args(actual_argv)
     config = load_config(Path(args.config))
+    old_sigint_handler = signal.signal(
+        signal.SIGINT,
+        _raise_keyboard_interrupt_from_signal,
+    )
+    old_sigterm_handler = signal.signal(
+        signal.SIGTERM,
+        _raise_keyboard_interrupt_from_signal,
+    )
     try:
         return run_search(config)
     except KeyboardInterrupt:
         _interrupt_active_trial_processes()
         print("[hparam_search] Interrupted by user.", flush=True)
         return 130
+    finally:
+        signal.signal(signal.SIGINT, old_sigint_handler)
+        signal.signal(signal.SIGTERM, old_sigterm_handler)
 
 
 if __name__ == "__main__":
