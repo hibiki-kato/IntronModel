@@ -34,7 +34,7 @@ FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="silent"
-ENABLE_PHASE_OVERLAP="0"
+ENABLE_PHASE_OVERLAP="1"
 
 GPU_IDS="4,5,6,7"
 # auto: use one concurrent trial per configured GPU_IDS entry.

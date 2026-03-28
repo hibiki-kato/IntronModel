@@ -1320,6 +1320,51 @@ def _read_best_objective_score(
     return None
 
 
+def _read_best_sampled_params(path: Optional[Path]) -> Optional[dict[str, Scalar]]:
+    """Read sampled params from one best-config payload when available."""
+    if path is None:
+        return None
+    raw = read_json_object(path)
+    if raw is None or raw.get("status") != "ok":
+        return None
+    sampled = raw.get("sampled_params")
+    if not isinstance(sampled, dict):
+        return None
+    normalized: dict[str, Scalar] = {}
+    for key, value in sampled.items():
+        if isinstance(value, (str, int, float, bool)):
+            normalized[str(key)] = value
+    return normalized
+
+
+def _sampled_params_key(sampled_params: dict[str, Scalar]) -> str:
+    """Return a deterministic key for one sampled-parameter dictionary."""
+    return json.dumps(sampled_params, sort_keys=True, separators=(",", ":"))
+
+
+def _sampled_params_match(
+    left: dict[str, Scalar],
+    right: dict[str, Scalar],
+) -> bool:
+    """Return whether two sampled-parameter dictionaries are identical."""
+    return _sampled_params_key(left) == _sampled_params_key(right)
+
+
+def _exclude_recheck_rows_from_ranking(
+    rows: list[TrialResult],
+    *,
+    excluded_param_keys: set[str],
+) -> list[TrialResult]:
+    """Drop comparison-only recheck rows from winner selection."""
+    if not excluded_param_keys:
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if _sampled_params_key(row.sampled_params) not in excluded_param_keys
+    ]
+
+
 def _extract_validation_protocol(
     summary: dict[str, object],
 ) -> Optional[dict[str, object]]:
@@ -2459,9 +2504,19 @@ def _emit_trial_output_lines(
             print(f"{prefix}{raw_line}", flush=True)
 
 
-def _should_print_trial_lifecycle(stream_mode: str) -> bool:
-    """Return whether per-trial start/result lifecycle lines should print."""
+def _should_print_trial_start(stream_mode: str) -> bool:
+    """Return whether per-trial start lines should print."""
     return stream_mode != "silent"
+
+
+def _should_print_trial_result_line(stream_mode: str) -> bool:
+    """Return whether per-trial completion lines should print.
+
+    Silent mode still emits one completion summary per trial so long-running
+    GPU sweeps remain observable without restoring verbose per-trial stdout.
+    """
+    del stream_mode
+    return True
 
 
 def _extract_run_model_argv(cmd: list[str]) -> list[str]:
@@ -5017,7 +5072,7 @@ def _run_phase_subprocess(
                     log_file=log_file,
                 )
                 running[future] = assigned_gpu
-                if _should_print_trial_lifecycle(stream_mode):
+                if _should_print_trial_start(stream_mode):
                     _print_trial_start(
                         phase=phase,
                         trial_id=trial_id,
@@ -5030,7 +5085,7 @@ def _run_phase_subprocess(
                 slots.append(assigned_gpu)
                 result = future.result()
                 collected.append(result)
-                if _should_print_trial_lifecycle(stream_mode):
+                if _should_print_trial_result_line(stream_mode):
                     _print_trial_result(
                         phase=phase,
                         trial_count=trial_count,
@@ -5225,7 +5280,7 @@ def _run_phase_persistent(
                 task_queues[slot_index].put(task)
                 slot_busy[slot_index] = True
                 slot_active_trial[slot_index] = trial_id
-                if _should_print_trial_lifecycle(stream_mode):
+                if _should_print_trial_start(stream_mode):
                     _print_trial_start(
                         phase=phase,
                         trial_id=trial_id,
@@ -5254,7 +5309,7 @@ def _run_phase_persistent(
             slot_busy[slot_index] = False
             slot_active_trial[slot_index] = None
             collected.append(outcome.result)
-            if _should_print_trial_lifecycle(stream_mode):
+            if _should_print_trial_result_line(stream_mode):
                 _print_trial_result(
                     phase=phase,
                     trial_count=trial_count,
@@ -5513,7 +5568,7 @@ def _run_quick_full_overlap_subprocess(
                 quick_running_count += 1
             else:
                 full_running_count += 1
-            if _should_print_trial_lifecycle(stream_mode):
+            if _should_print_trial_start(stream_mode):
                 _print_trial_start(
                     phase=task.phase,
                     trial_id=task.trial_id,
@@ -5583,7 +5638,7 @@ def _run_quick_full_overlap_subprocess(
                         if task.phase == "quick"
                         else len(full_rows)
                     )
-                    if _should_print_trial_lifecycle(stream_mode):
+                    if _should_print_trial_result_line(stream_mode):
                         _print_trial_result(
                             phase=task.phase,
                             trial_count=max(1, total_count),
@@ -5791,11 +5846,31 @@ def maybe_update_global_best(
         best_row.objective_metric,
         expected_hparam_context=hparam_context,
     )
+    previous_display_score = _read_best_objective_score(
+        global_best_path,
+        best_row.objective_metric,
+    )
+    previous_sampled_params = _read_best_sampled_params(global_best_path)
     if previous_score is not None and previous_score > best_row.objective_score:
         print(
             "[hparam_search] Keep previous global best "
             f"{previous_score:.6f} > {best_row.objective_score:.6f}: "
             f"{global_best_path}",
+            flush=True,
+        )
+        return
+    if (
+        previous_sampled_params is not None
+        and _sampled_params_match(previous_sampled_params, best_row.sampled_params)
+    ):
+        score_text = "n/a"
+        if previous_display_score is not None:
+            score_text = f"{previous_display_score:.6f}"
+        print(
+            "[hparam_search] Recheck matched existing global-best sampled params; "
+            "skip global best update/version publish "
+            f"({best_row.objective_metric}: {score_text} -> "
+            f"{best_row.objective_score:.6f}).",
             flush=True,
         )
         return
@@ -5809,6 +5884,8 @@ def maybe_update_global_best(
     previous_text = "n/a"
     if previous_score is not None:
         previous_text = f"{previous_score:.6f}"
+    elif previous_display_score is not None:
+        previous_text = f"{previous_display_score:.6f} [context-mismatch]"
     print(
         "[hparam_search] Updated global best config: "
         f"{global_best_path} "
@@ -6397,13 +6474,42 @@ def run_search(config: SearchConfig) -> int:
     ranked_quick = rank_successful_trials(quick_rows)
     write_trials_tsv(config.output_dir / "full_trials.tsv", full_rows)
 
+    excluded_ranking_param_keys: set[str] = set()
+    if seed_best_params is not None and seed_best_context_mismatch:
+        excluded_ranking_param_keys.add(_sampled_params_key(seed_best_params))
+    elif (
+        global_best_recheck_params is not None
+        and global_best_recheck_context_mismatch
+    ):
+        excluded_ranking_param_keys.add(
+            _sampled_params_key(global_best_recheck_params)
+        )
+
     ranked_full = rank_successful_trials(full_rows)
-    if ranked_full:
-        best_row = ranked_full[0]
-        ranked_for_export = ranked_full
-    elif ranked_quick:
-        best_row = ranked_quick[0]
-        ranked_for_export = ranked_quick
+    ranked_quick_for_export = _exclude_recheck_rows_from_ranking(
+        ranked_quick,
+        excluded_param_keys=excluded_ranking_param_keys,
+    )
+    ranked_full_for_export = _exclude_recheck_rows_from_ranking(
+        ranked_full,
+        excluded_param_keys=excluded_ranking_param_keys,
+    )
+    excluded_ranking_count = (len(ranked_quick) - len(ranked_quick_for_export)) + (
+        len(ranked_full) - len(ranked_full_for_export)
+    )
+    if excluded_ranking_count > 0:
+        print(
+            "[hparam_search] Excluded comparison-only recheck rows from "
+            f"winner selection: count={excluded_ranking_count}.",
+            flush=True,
+        )
+
+    if ranked_full_for_export:
+        best_row = ranked_full_for_export[0]
+        ranked_for_export = ranked_full_for_export
+    elif ranked_quick_for_export:
+        best_row = ranked_quick_for_export[0]
+        ranked_for_export = ranked_quick_for_export
     else:
         best_row = None
         ranked_for_export = []

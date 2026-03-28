@@ -204,6 +204,87 @@ def test_publish_latest_best_version_carries_forward_other_site_checkpoint(
     assert history[-1].carry_forward_side == "acceptor"
 
 
+def test_publish_latest_best_version_acceptor_update_ignores_stale_donor_payload(
+    tmp_path: Path,
+) -> None:
+    donor_raw_1 = tmp_path / "model" / "SpX" / "donor" / "donor_raw_1.pt"
+    acceptor_raw_1 = (
+        tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw_1.pt"
+    )
+    donor_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    donor_raw_1.write_bytes(b"donor-1")
+    acceptor_raw_1.write_bytes(b"acceptor-1")
+    donor_best = (
+        tmp_path / "data" / "SpX" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    )
+    acceptor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_v2"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw_1,
+            objective_metric="donor_pr_auc",
+            objective_score=0.91,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_raw_1,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.87,
+        ),
+    )
+    _ = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+    )
+
+    stale_donor_payload = _site_best_payload(
+        task="donor",
+        checkpoint_path=tmp_path / "model" / "SpX" / "donor" / "stale_raw.pt",
+        objective_metric="donor_pr_auc",
+        objective_score=0.91,
+    )
+    new_acceptor_raw = tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw_2.pt"
+    new_acceptor_raw.write_bytes(b"acceptor-2")
+    _write_json(donor_best, stale_donor_payload)
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=new_acceptor_raw,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.92,
+        ),
+    )
+
+    entry = publish_latest_best_version(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+        updated_side="acceptor",
+    )
+
+    assert entry is not None
+    assert entry.published_name == "cnn_v2.02"
+    donor_v2 = tmp_path / "model" / "SpX" / "donor" / "cnn_v2.02.pt"
+    acceptor_v2 = tmp_path / "model" / "SpX" / "acceptor" / "cnn_v2.02.pt"
+    assert donor_v2.read_bytes() == b"donor-1"
+    assert acceptor_v2.read_bytes() == b"acceptor-2"
+
+
 def test_ensure_publication_seed_promotes_legacy_pair_outputs(tmp_path: Path) -> None:
     pair_checkpoint = tmp_path / "model" / "SpX" / "pair" / "pair_raw.pt"
     pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)

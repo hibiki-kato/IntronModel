@@ -248,7 +248,7 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     )
     assert 'OBJECTIVE_METRIC="max_f1"' in content
     assert 'TRIAL_STREAM_MODE="silent"' in content
-    assert 'ENABLE_PHASE_OVERLAP="0"' in content
+    assert 'ENABLE_PHASE_OVERLAP="1"' in content
     assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
     assert '"enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON}' in content
     assert "MAX_MODEL_PARAMS" not in content

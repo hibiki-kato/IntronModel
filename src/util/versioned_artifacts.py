@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import csv
 import json
+import os
 from pathlib import Path
 import shutil
 from typing import Iterable, Mapping
@@ -321,24 +322,26 @@ def _publish_cnn_v2_version(
     previous_entry = history[-1] if history else None
     updated_side_normalized = updated_side.strip().lower()
     carry_forward_side = ""
-    donor_source = _resolve_task_checkpoint_from_payload(
-        payload=donor_payload,
-        task="donor",
-        base_dir=donor_path.parent,
-        model_root=model_root,
-    )
-    acceptor_source = _resolve_task_checkpoint_from_payload(
-        payload=acceptor_payload,
-        task="acceptor",
-        base_dir=acceptor_path.parent,
-        model_root=model_root,
-    )
-    if donor_source is None or acceptor_source is None:
-        return None
+    donor_source: Path | None = None
+    acceptor_source: Path | None = None
 
     donor_destination = model_root / species / "donor" / f"{published_name}.pt"
     acceptor_destination = model_root / species / "acceptor" / f"{published_name}.pt"
     if updated_side_normalized == "seed":
+        donor_source = _resolve_task_checkpoint_from_payload(
+            payload=donor_payload,
+            task="donor",
+            base_dir=donor_path.parent,
+            model_root=model_root,
+        )
+        acceptor_source = _resolve_task_checkpoint_from_payload(
+            payload=acceptor_payload,
+            task="acceptor",
+            base_dir=acceptor_path.parent,
+            model_root=model_root,
+        )
+        if donor_source is None or acceptor_source is None:
+            return None
         _move_checkpoint_file(donor_source, donor_destination)
         _move_checkpoint_file(acceptor_source, acceptor_destination)
         source_best_config = str(donor_path.resolve())
@@ -347,11 +350,21 @@ def _publish_cnn_v2_version(
         metrics_json = str(donor_payload.get("metrics_json", "")).strip()
     elif updated_side_normalized == "acceptor":
         carry_forward_side = "donor"
-        donor_source = _resolve_carry_forward_checkpoint(
+        donor_source = _resolve_carry_forward_or_payload_checkpoint(
             previous_entry=previous_entry,
-            fallback=donor_source,
+            payload=donor_payload,
             task="donor",
+            base_dir=donor_path.parent,
+            model_root=model_root,
         )
+        acceptor_source = _resolve_task_checkpoint_from_payload(
+            payload=acceptor_payload,
+            task="acceptor",
+            base_dir=acceptor_path.parent,
+            model_root=model_root,
+        )
+        if donor_source is None or acceptor_source is None:
+            return None
         _copy_checkpoint_file(donor_source, donor_destination)
         _move_checkpoint_file(acceptor_source, acceptor_destination)
         source_best_config = str(acceptor_path.resolve())
@@ -361,16 +374,21 @@ def _publish_cnn_v2_version(
     else:
         if updated_side_normalized == "donor":
             carry_forward_side = "acceptor"
-        donor_source = _resolve_carry_forward_checkpoint(
-            previous_entry=previous_entry if updated_side_normalized != "donor" else None,
-            fallback=donor_source,
+        donor_source = _resolve_updated_or_payload_checkpoint(
+            payload=donor_payload,
             task="donor",
+            base_dir=donor_path.parent,
+            model_root=model_root,
         )
-        acceptor_source = _resolve_carry_forward_checkpoint(
+        acceptor_source = _resolve_carry_forward_or_payload_checkpoint(
             previous_entry=previous_entry,
-            fallback=acceptor_source,
+            payload=acceptor_payload,
             task="acceptor",
+            base_dir=acceptor_path.parent,
+            model_root=model_root,
         )
+        if donor_source is None or acceptor_source is None:
+            return None
         if updated_side_normalized == "donor":
             _move_checkpoint_file(donor_source, donor_destination)
         else:
@@ -682,6 +700,57 @@ def _resolve_task_checkpoint_from_payload(
     if raw_path is None:
         return None
     return resolve_existing_checkpoint_path(raw_path, model_root_dir=model_root)
+
+
+def _resolve_updated_or_payload_checkpoint(
+    *,
+    payload: Mapping[str, object],
+    task: str,
+    base_dir: Path,
+    model_root: Path,
+) -> Path | None:
+    """Resolve the checkpoint for the side updated in the current publication."""
+    return _resolve_task_checkpoint_from_payload(
+        payload=payload,
+        task=task,
+        base_dir=base_dir,
+        model_root=model_root,
+    )
+
+
+def _resolve_carry_forward_or_payload_checkpoint(
+    *,
+    previous_entry: VersionHistoryEntry | None,
+    payload: Mapping[str, object],
+    task: str,
+    base_dir: Path,
+    model_root: Path,
+) -> Path | None:
+    """Resolve a carried-forward checkpoint with payload fallback.
+
+    Prefer the previously published version for the untouched side because the
+    current best payload may contain a stale raw checkpoint path that was moved
+    during an earlier publication. Fall back to the payload only when no live
+    previous version exists.
+    """
+    if previous_entry is not None:
+        raw_value = ""
+        if task == "donor":
+            raw_value = previous_entry.donor_checkpoint_path
+        elif task == "acceptor":
+            raw_value = previous_entry.acceptor_checkpoint_path
+        elif task == "pair":
+            raw_value = previous_entry.pair_checkpoint_path
+        if raw_value != "":
+            candidate = Path(raw_value)
+            if candidate.exists():
+                return candidate.resolve()
+    return _resolve_task_checkpoint_from_payload(
+        payload=payload,
+        task=task,
+        base_dir=base_dir,
+        model_root=model_root,
+    )
 
 
 def _resolve_carry_forward_checkpoint(
