@@ -271,12 +271,9 @@ def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
     assert mode_calls == [("default", False)]
 
 
-def test_compile_model_with_fallback_caches_failed_mode(
+def test_compile_model_with_fallback_on_ignores_max_autotune_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _Props:
-        multi_processor_count = 80
-
     mode_calls: list[tuple[str | None, bool | None]] = []
     model = torch.nn.Linear(2, 1)
 
@@ -286,8 +283,6 @@ def test_compile_model_with_fallback_caches_failed_mode(
         dynamic: bool | None = None,
     ) -> torch.nn.Module:
         mode_calls.append((mode, dynamic))
-        if mode is not None and mode.startswith("max-autotune"):
-            raise RuntimeError("max mode unsupported")
         if dynamic is not False:
             raise AssertionError("compile should force dynamic=False")
         return module
@@ -297,9 +292,6 @@ def test_compile_model_with_fallback_caches_failed_mode(
         "max-then-default-then-off",
     )
     monkeypatch.setattr(torch, "compile", _fake_compile)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: _Props())
 
     first = compile_model_with_fallback(model, compile_mode="on")
     second = compile_model_with_fallback(model, compile_mode="on")
@@ -311,7 +303,6 @@ def test_compile_model_with_fallback_caches_failed_mode(
     assert second[2] == "reduce-overhead"
     assert second[3] is None
     assert mode_calls == [
-        ("max-autotune-no-cudagraphs", False),
         ("default", False),
         ("default", False),
     ]

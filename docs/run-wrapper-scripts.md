@@ -245,6 +245,8 @@ Common runtime knobs exposed by wrappers include:
 - `COMPILE_MODE` (`off|on|auto`)
 - `INTRONMODEL_TORCH_COMPILE_STRATEGY`
   (`default-then-off|max-then-default-then-off|max-only|default-only|off`)
+  Wrappers and shared runtime helpers keep regular compile-enabled runs on the
+  `reduce-overhead` path by default.
 - `ALLOW_TF32`, `CUDNN_BENCHMARK`, `DETERMINISTIC`
 - DataLoader controls: `NUM_WORKERS`, `PREFETCH_FACTOR`,
   `PERSISTENT_WORKERS`, `PIN_MEMORY`

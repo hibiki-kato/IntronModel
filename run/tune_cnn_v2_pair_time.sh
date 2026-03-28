@@ -18,7 +18,7 @@ TIMEOUT_GRACE_SECONDS="30"
 INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
 VAL_FRAC="0.2"
-OBJECTIVE_METRIC="f1_max"
+OBJECTIVE_METRIC="max_f1"
 # Optional explicit training-data overrides.
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""

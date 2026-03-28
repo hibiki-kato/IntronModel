@@ -490,10 +490,9 @@ def compile_model_with_fallback(
         Model to compile with ``torch.compile``.
     compile_mode : str, default="auto"
         High-level compile policy passed from the training or inference
-        function.  When ``"auto"``, the strategy is always capped to
+        function.  Any enabled mode (``"auto"`` or ``"on"``) is capped to
         ``"default-then-off"`` (i.e. ``reduce-overhead`` only), ignoring
-        ``INTRONMODEL_TORCH_COMPILE_STRATEGY``.  For any other value (e.g.
-        ``"on"``) the env-var strategy is respected as usual.
+        ``INTRONMODEL_TORCH_COMPILE_STRATEGY``.
 
     Returns
     -------
@@ -512,7 +511,8 @@ def compile_model_with_fallback(
     configure_torch_compile_runtime()
 
     _load_compile_runtime_cache_from_env()
-    if compile_mode.strip().lower() == "auto":
+    normalized_compile_mode = compile_mode.strip().lower()
+    if normalized_compile_mode in {"auto", "on"}:
         strategy = "default-then-off"
     else:
         strategy_raw = os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
