@@ -354,10 +354,12 @@ def test_cnn_resdil_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_sync_sh_uses_checksum_for_rclone_push() -> None:
+def test_sync_sh_pushes_run_scripts_with_checksum() -> None:
     content = (_project_root() / "sync.sh").read_text(encoding="utf-8")
+    assert 'RUN_SYNC_PATH="run/"' in content
+    assert '--exclude "$RUN_SYNC_PATH"' in content
+    assert "--size-only" in content
     assert "--checksum" in content
-    assert "--size-only" not in content
 
 
 def test_tcn_sh_rejects_cli_arguments() -> None:
