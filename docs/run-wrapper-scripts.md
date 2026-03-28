@@ -29,7 +29,7 @@ place before reading implementation details.
 Active training/inference wrappers (edit CONFIG block, run without CLI args):
 
 - `run/run_cnn_v2.sh`
-- `run/run_cnn_v2_pair.sh`
+- `run/run_cnn_pair_v2.sh`
 - `run/run_isolated_mmus_rna60_pipeline.sh`
 
 Archived training/inference wrappers:
@@ -72,7 +72,7 @@ Data-generation notes:
 Active tuning wrappers:
 
 - `run/tune_cnn_v2_time.sh`
-- `run/tune_cnn_v2_pair_time.sh`
+- `run/tune_cnn_pair_v2_time.sh`
 
 Archived tuning wrappers:
 
@@ -113,19 +113,16 @@ CNN-family tuning search-space conventions:
   sequence length after conv/pool downsampling, or `cnn_pair` early/mid fusion
   with mismatched input lengths) are discarded and resampled before a trial is
   launched.
-- `run/tune_cnn_v2_time.sh` and `run/tune_cnn_v2_pair_time.sh` intentionally
+- `run/tune_cnn_v2_time.sh` and `run/tune_cnn_pair_v2_time.sh` intentionally
   omit `max_model_params` and rely on OOM backoff instead. Their search spaces
   now expose a binary `mask=off|on` hparam, which the wrappers translate to
   `sequence_transform=none|mask_outside_intron_n` during model execution.
   They are also widened to include more batch sizes and architecture
   candidates.
-- `run/run_cnn_v2_pair.sh` and `run/tune_cnn_v2_pair_time.sh` also expose
-  `SYNTHESIZE_MODE=off|on`. When enabled, the pair pipeline defaults the
-  negative training file to `processed/100bp_mixed_one_side.neg.err` and
-  appends a `synth` suffix through `tag`-based naming. Synth runs also move to
-  the `cnn_v2_pair_synth` tuning subtree and use a separate
-  `best_synth_config.json` there, while the run wrapper keeps its own `TAG`
-  control authoritative so tuned-config tags do not leak into an `off` run.
+- `run/run_cnn_pair_v2.sh` and `run/tune_cnn_pair_v2_time.sh` use a single
+  active tuning namespace: `cnn_pair_v2`. The legacy
+  `cnn_v2_pair_synth` subtree is retired and no longer participates in active
+  wrapper resolution.
 - `archive/run/dnabert/run_dnabert_pair.sh`,
   `archive/run/dnabert/tune_dnabert_pair.sh`, and
   `archive/run/dnabert/tune_dnabert_pair_time.sh` also expose

@@ -8,6 +8,7 @@ from util.checkpoint_io import (
     extract_task_checkpoint_path,
     normalize_checkpoint_path,
     read_json_object,
+    resolve_existing_checkpoint_path,
 )
 
 
@@ -93,3 +94,38 @@ def test_extract_checkpoint_paths_supports_pair_task(tmp_path: Path) -> None:
     paths = extract_checkpoint_paths(payload, base_dir=tmp_path, existing_only=True)
 
     assert paths == {"pair": pair.resolve()}
+
+
+def test_resolve_existing_checkpoint_path_relaxes_trailing_hash(
+    tmp_path: Path,
+) -> None:
+    model_root = tmp_path / "model"
+    expected = model_root / "Dmel" / "donor" / "cnn_v2_demo_h123456789abc.pt"
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    expected.write_bytes(b"checkpoint")
+
+    resolved = resolve_existing_checkpoint_path(
+        Path("/export/hibiki/intronmodel/model/Dmel/donor/cnn_v2_demo_habcdef123456.pt"),
+        model_root_dir=model_root,
+    )
+
+    assert resolved == expected.resolve()
+
+
+def test_resolve_existing_checkpoint_path_prefers_task_scoped_match(
+    tmp_path: Path,
+) -> None:
+    model_root = tmp_path / "model"
+    dmel = model_root / "Dmel" / "donor" / "cnn_v2_demo_h123456789abc.pt"
+    mmus = model_root / "Mmus" / "donor" / "cnn_v2_demo_h123456789abc.pt"
+    dmel.parent.mkdir(parents=True, exist_ok=True)
+    mmus.parent.mkdir(parents=True, exist_ok=True)
+    dmel.write_bytes(b"dmel")
+    mmus.write_bytes(b"mmus")
+
+    resolved = resolve_existing_checkpoint_path(
+        Path("/export/hibiki/intronmodel/model/Dmel/donor/cnn_v2_demo_habcdef123456.pt"),
+        model_root_dir=model_root,
+    )
+
+    assert resolved == dmel.resolve()

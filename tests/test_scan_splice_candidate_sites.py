@@ -139,6 +139,36 @@ def test_load_task_checkpoint_path_falls_back_to_local_model_root(
     )
 
 
+def test_load_task_checkpoint_path_relaxes_checkpoint_hash_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve stale checkpoint names when only the trailing hash changed."""
+    local_root = tmp_path / "model"
+    donor_checkpoint = (
+        local_root
+        / "Dmel"
+        / "donor"
+        / "cnn_v2_test_donor_h123456789abc.pt"
+    )
+    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    donor_checkpoint.write_bytes(b"donor")
+
+    payload = {
+        "status": "ok",
+        "donor_checkpoint_path": (
+            "/export/hibiki/intronmodel/model/Dmel/donor/"
+            "cnn_v2_test_donor_habcdef123456.pt"
+        ),
+    }
+    best_config = tmp_path / "best_config.json"
+    _write_json(best_config, payload)
+
+    monkeypatch.setattr(scan, "model_root", lambda: str(local_root))
+
+    assert scan.load_task_checkpoint_path(best_config, "donor") == donor_checkpoint
+
+
 def test_main_writes_output_files_and_skips_edges(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

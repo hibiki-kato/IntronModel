@@ -225,6 +225,16 @@ intronmodel_configure_hf_cache() {
 	fi
 	mkdir -p "${HF_MODULES_CACHE}"
 	export HF_MODULES_CACHE
+
+	if [[ -z "${HF_HUB_OFFLINE:-}" ]]; then
+		HF_HUB_OFFLINE="1"
+	fi
+	export HF_HUB_OFFLINE
+
+	if [[ -z "${TRANSFORMERS_OFFLINE:-}" ]]; then
+		TRANSFORMERS_OFFLINE="1"
+	fi
+	export TRANSFORMERS_OFFLINE
 }
 
 
@@ -436,6 +446,45 @@ intronmodel_resolve_python_bin() {
 }
 
 
+intronmodel_resolve_latest_published_name() {
+	local script_tag="$1"
+	local species="$2"
+	local model_name="$3"
+	local python_bin
+
+	python_bin="$(intronmodel_resolve_python_bin "${script_tag}")" || return 1
+	(
+		export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+		"${python_bin}" - "${PROJECT_ROOT}" "${species}" "${model_name}" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from util.versioned_artifacts import ensure_publication_seed
+from util.versioned_artifacts import resolve_latest_published_name
+
+
+project_root = Path(sys.argv[1]).resolve()
+species = sys.argv[2]
+model_name = sys.argv[3]
+
+published_name = ensure_publication_seed(
+    project_root=project_root,
+    species=species,
+    model_name=model_name,
+)
+if published_name is None:
+    data_root = project_root / "data"
+    published_name = resolve_latest_published_name(data_root, species, model_name)
+if published_name is None:
+    published_name = model_name
+print(published_name)
+PY
+	)
+}
+
+
 intronmodel_run_with_process_title() {
 	local process_title="${1-}"
 	shift || true
@@ -618,51 +667,7 @@ intronmodel_resolve_and_validate_train_paths() {
 }
 
 
-intronmodel_resolve_pair_synthesize_defaults() {
-	local species="$1"
-	local synthesize_mode="$2"
-	local tag_value="${3-}"
-	local train_pos_path="${4-}"
-	local train_neg_path="${5-}"
-	local normalized_mode
-
-	normalized_mode="$(printf '%s' "${synthesize_mode}" | tr '[:upper:]' '[:lower:]' \
-		| xargs)"
-	if [[ "${normalized_mode}" != "on" ]]; then
-		printf '%s\t%s\t%s\n' "${tag_value}" "${train_pos_path}" "${train_neg_path}"
-		return 0
-	fi
-
-	local resolved_tag="${tag_value}"
-	if [[ -z "${resolved_tag}" ]]; then
-		resolved_tag="synth"
-	elif [[ "${resolved_tag}" != *"synth"* ]]; then
-		resolved_tag="${resolved_tag}_synth"
-	fi
-
-	local resolved_pos="${train_pos_path}"
-	local resolved_neg="${train_neg_path}"
-	if [[ -z "${resolved_pos}" ]]; then
-		resolved_pos="${DATA_ROOT}/${species}/raw/100bp.err"
-	fi
-	if [[ -z "${resolved_neg}" ]]; then
-		resolved_neg="${DATA_ROOT}/${species}/processed/100bp_mixed_one_side.neg.err"
-	fi
-
-	printf '%s\t%s\t%s\n' "${resolved_tag}" "${resolved_pos}" "${resolved_neg}"
-}
-
-
 intronmodel_resolve_pair_best_config_filename() {
-	local synthesize_mode="${1-}"
-	local normalized_mode
-
-	normalized_mode="$(printf '%s' "${synthesize_mode}" | tr '[:upper:]' '[:lower:]' \
-		| xargs)"
-	if [[ "${normalized_mode}" == "on" ]]; then
-		printf '%s\n' "best_synth_config.json"
-		return 0
-	fi
 	printf '%s\n' "best_config.json"
 }
 
@@ -683,7 +688,7 @@ intronmodel_resolve_synth_tuning_model_name() {
 
 
 intronmodel_resolve_pair_tuning_model_name() {
-	intronmodel_resolve_synth_tuning_model_name "cnn_v2_pair" "${1-}"
+	printf '%s\n' "cnn_pair_v2"
 }
 
 
@@ -691,14 +696,30 @@ intronmodel_resolve_pair_best_config_path() {
 	local data_root="$1"
 	local species="$2"
 	local tuning_model_name="$3"
-	local synthesize_mode="${4-}"
 	local best_config_filename
 
 	best_config_filename="$(
-		intronmodel_resolve_pair_best_config_filename "${synthesize_mode}"
+		intronmodel_resolve_pair_best_config_filename
 	)"
-	printf '%s\n' \
-		"${data_root}/${species}/tuning/${tuning_model_name}/pair/${best_config_filename}"
+	local primary_path="${data_root}/${species}/tuning/${tuning_model_name}/pair/${best_config_filename}"
+	if [[ -f "${primary_path}" ]]; then
+		printf '%s\n' "${primary_path}"
+		return 0
+	fi
+	local legacy_model_name="${tuning_model_name}"
+	case "${tuning_model_name}" in
+		cnn_pair_v2)
+			legacy_model_name="cnn_v2_pair"
+			;;
+	esac
+	if [[ "${legacy_model_name}" != "${tuning_model_name}" ]]; then
+		local legacy_path="${data_root}/${species}/tuning/${legacy_model_name}/pair/${best_config_filename}"
+		if [[ -f "${legacy_path}" ]]; then
+			printf '%s\n' "${legacy_path}"
+			return 0
+		fi
+	fi
+	printf '%s\n' "${primary_path}"
 }
 
 

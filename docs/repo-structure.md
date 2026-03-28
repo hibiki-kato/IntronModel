@@ -22,7 +22,7 @@
 Unified pipeline wrappers (config-only):
 
 - `run/run_cnn_v2.sh`
-- `run/run_cnn_v2_pair.sh`
+- `run/run_cnn_pair_v2.sh`
 - `run/run_isolated_mmus_rna60_pipeline.sh`
 
 Archived wrappers:
@@ -53,7 +53,7 @@ Archived wrappers:
 Active tuning wrappers:
 
 - `run/tune_cnn_v2_time.sh`
-- `run/tune_cnn_v2_pair_time.sh`
+- `run/tune_cnn_pair_v2_time.sh`
 
 Utilities:
 

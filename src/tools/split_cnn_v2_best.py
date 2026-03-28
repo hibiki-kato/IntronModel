@@ -1,16 +1,15 @@
-"""Split ``cnn_v2`` tuning bests into task-local and pair model namespaces.
+"""Split ``cnn_v2`` tuning bests into task-local and public pair namespaces.
 
 This utility creates/updates:
 
 - ``data/<species>/tuning/cnn_v2/donor/best_config.json`` for donor runs
 - ``data/<species>/tuning/cnn_v2/acceptor/best_config.json`` for acceptor runs
-- ``data/<species>/tuning/cnn_v2_pair/pair/best_config.json`` for pair runs
+- ``data/<species>/tuning/cnn_pair_v2/pair/best_config.json`` for pair runs
 
 Selection policy:
 
 - Donor and acceptor bests are selected independently from legacy sources.
-- Pair best is selected from existing pair-capable sources, including
-  ``cnn_v2_pair_synth`` when present.
+- Pair best is selected from existing pair-capable sources.
 """
 
 from __future__ import annotations
@@ -25,10 +24,13 @@ import shutil
 import sys
 from typing import Mapping, Sequence
 
+from util.checkpoint_io import (
+    extract_checkpoint_paths,
+    resolve_existing_checkpoint_path,
+)
 
 NON_PAIR_SOURCES: tuple[str, ...] = ("cnn_v2", "cnn", "cnn_mask")
 PAIR_SOURCES: tuple[str, ...] = (
-    "cnn_v2_pair_synth",
     "cnn_v2_pair",
     "cnn_v2",
     "cnn_pair",
@@ -162,6 +164,7 @@ def _as_finite_float(value: object) -> float | None:
 def _load_candidate(
     *,
     data_root: Path,
+    model_root_dir: Path,
     species: str,
     source_model: str,
     task: str,
@@ -176,6 +179,22 @@ def _load_candidate(
         return None
     sampled_params_raw = payload.get("sampled_params")
     if not isinstance(sampled_params_raw, dict):
+        return None
+    checkpoint_paths = extract_checkpoint_paths(
+        payload,
+        base_dir=best_path.parent,
+        existing_only=False,
+        tasks=(task,),
+    )
+    target_checkpoint = checkpoint_paths.get(task)
+    if target_checkpoint is None:
+        return None
+    try:
+        _ = resolve_existing_checkpoint_path(
+            target_checkpoint,
+            model_root_dir=model_root_dir,
+        )
+    except FileNotFoundError:
         return None
     objective_score = _as_finite_float(payload.get("objective_score"))
     if objective_score is None:
@@ -193,6 +212,7 @@ def _load_candidate(
 def _pick_best_candidate(
     *,
     data_root: Path,
+    model_root_dir: Path,
     species: str,
     task: str,
     source_models: Sequence[str],
@@ -202,6 +222,7 @@ def _pick_best_candidate(
     for source_model in source_models:
         candidate = _load_candidate(
             data_root=data_root,
+            model_root_dir=model_root_dir,
             species=species,
             source_model=source_model,
             task=task,
@@ -233,6 +254,7 @@ def _build_target_payload(
     source_payload: Mapping[str, object],
     source_path: Path,
     target: str,
+    model_root_dir: Path,
 ) -> dict[str, object]:
     """Build one donor or acceptor best payload from one source payload."""
     objective_metric = f"{target}_pr_auc"
@@ -289,7 +311,11 @@ def _build_target_payload(
     payload["source_best_config"] = str(source_path)
     payload["generated_by"] = "split_cnn_v2_best.py"
     payload["generated_at_utc"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return payload
+    return _canonicalize_checkpoint_fields(
+        payload,
+        base_dir=source_path.parent,
+        model_root_dir=model_root_dir,
+    )
 
 
 def _write_json(path: Path, payload: Mapping[str, object], *, dry_run: bool) -> None:
@@ -310,27 +336,55 @@ def _copy_file(src: Path, dst: Path, *, dry_run: bool) -> None:
     shutil.copy2(src, dst)
 
 
+def _canonicalize_checkpoint_fields(
+    payload: dict[str, object],
+    *,
+    base_dir: Path,
+    model_root_dir: Path,
+) -> dict[str, object]:
+    """Resolve checkpoint fields in one payload to local existing files."""
+    checkpoint_paths = extract_checkpoint_paths(
+        payload,
+        base_dir=base_dir,
+        existing_only=False,
+    )
+    for task, checkpoint_path in checkpoint_paths.items():
+        try:
+            resolved_path = resolve_existing_checkpoint_path(
+                checkpoint_path,
+                model_root_dir=model_root_dir,
+            )
+        except FileNotFoundError:
+            continue
+        payload[f"{task}_checkpoint_path"] = str(resolved_path)
+    return payload
+
+
 def _split_one_species(
     *,
     data_root: Path,
+    model_root_dir: Path,
     species: str,
     dry_run: bool,
 ) -> dict[str, object]:
     """Split best artifacts for one species."""
     donor_best = _pick_best_candidate(
         data_root=data_root,
+        model_root_dir=model_root_dir,
         species=species,
         task="donor",
         source_models=NON_PAIR_SOURCES,
     )
     acceptor_best = _pick_best_candidate(
         data_root=data_root,
+        model_root_dir=model_root_dir,
         species=species,
         task="acceptor",
         source_models=NON_PAIR_SOURCES,
     )
     pair_best = _pick_best_candidate(
         data_root=data_root,
+        model_root_dir=model_root_dir,
         species=species,
         task="pair",
         source_models=PAIR_SOURCES,
@@ -348,20 +402,26 @@ def _split_one_species(
     species_tuning_root = data_root / species / "tuning"
     donor_path = species_tuning_root / "cnn_v2" / "donor" / "best_config.json"
     acceptor_path = species_tuning_root / "cnn_v2" / "acceptor" / "best_config.json"
-    pair_path = species_tuning_root / "cnn_v2_pair" / "pair" / "best_config.json"
+    pair_path = species_tuning_root / "cnn_pair_v2" / "pair" / "best_config.json"
 
     donor_payload = _build_target_payload(
         source_payload=donor_best.payload,
         source_path=donor_best.path,
         target="donor",
+        model_root_dir=model_root_dir,
     )
     acceptor_payload = _build_target_payload(
         source_payload=acceptor_best.payload,
         source_path=acceptor_best.path,
         target="acceptor",
+        model_root_dir=model_root_dir,
     )
 
-    pair_payload = dict(pair_best.payload)
+    pair_payload = _canonicalize_checkpoint_fields(
+        dict(pair_best.payload),
+        base_dir=pair_best.path.parent,
+        model_root_dir=model_root_dir,
+    )
     pair_sampled = pair_payload.get("sampled_params")
     if isinstance(pair_sampled, dict):
         normalized_pair_sampled = dict(pair_sampled)
@@ -383,7 +443,7 @@ def _split_one_species(
     _write_json(pair_path, pair_payload, dry_run=dry_run)
 
     new_pair_search_space = (
-        species_tuning_root / "cnn_v2_pair" / "pair" / "search_space.json"
+        species_tuning_root / "cnn_pair_v2" / "pair" / "search_space.json"
     )
 
     return {
@@ -410,16 +470,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     project_root = Path(args.project_root).resolve()
     data_root = project_root / "data"
+    model_root_dir = (project_root / "model").resolve()
     species_list = _parse_csv(str(args.species))
     dry_run = bool(args.dry_run)
 
     summary_rows: list[dict[str, object]] = []
     for species in species_list:
-        row = _split_one_species(data_root=data_root, species=species, dry_run=dry_run)
+        row = _split_one_species(
+            data_root=data_root,
+            model_root_dir=model_root_dir,
+            species=species,
+            dry_run=dry_run,
+        )
         summary_rows.append(row)
         print(
             "[split] "
-            f"species={species} non_pair={row['non_pair']} pair={row['pair']}",
+            f"species={species} site={row['site']} pair={row['pair']}",
             flush=True,
         )
 

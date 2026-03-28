@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="30"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"

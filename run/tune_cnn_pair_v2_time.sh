@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] This script is config-only." \
+	echo "[tune_cnn_pair_v2_time.sh] This script is config-only." \
 		"Edit top CONFIG and run without args." >&2
 	exit 1
 fi
@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="30"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -24,7 +24,6 @@ TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 CHEAT_MODE="off"
 TAG=""
-SYNTHESIZE_MODE="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 BASE_SEED="0"
@@ -37,8 +36,9 @@ TOP_K="4"
 FULL_EPOCHS="10"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
+TRIAL_STREAM_MODE="silent"
 
-GPU_IDS="4, 5, 6, 7"
+GPU_IDS="0,1,2,3"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -232,12 +232,12 @@ resolve_species_case() {
 }
 
 resolve_python_bin() {
-	intronmodel_resolve_python_bin "tune_cnn_v2_pair_time.sh"
+	intronmodel_resolve_python_bin "tune_cnn_pair_v2_time.sh"
 }
 
 resolve_seed_list() {
 	intronmodel_resolve_seed_list \
-		"tune_cnn_v2_pair_time.sh" \
+		"tune_cnn_pair_v2_time.sh" \
 		"${BASE_SEED}" \
 		"${SEED_LIST}" \
 		"${PYTHON_BIN}"
@@ -253,7 +253,7 @@ resolve_search_space_file() {
 			printf '%s\n' "${explicit_file}"
 			return 0
 		fi
-		echo "[tune_cnn_v2_pair_time.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
+		echo "[tune_cnn_pair_v2_time.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
 		return 2
 	fi
 
@@ -267,18 +267,6 @@ resolve_search_space_file() {
 	if [[ -f "${species_file}" ]]; then
 		printf '%s\n' "${species_file}"
 		return 0
-	fi
-	if [[ "${tuning_model_name}" == "cnn_v2_pair_synth" ]]; then
-		local base_pair_target_file="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/pair/search_space.json"
-		if [[ -f "${base_pair_target_file}" ]]; then
-			printf '%s\n' "${base_pair_target_file}"
-			return 0
-		fi
-		local base_pair_species_file="${DATA_ROOT}/${species}/tuning/cnn_v2_pair/search_space.json"
-		if [[ -f "${base_pair_species_file}" ]]; then
-			printf '%s\n' "${base_pair_species_file}"
-			return 0
-		fi
 	fi
 	if [[ "${tuning_model_name}" != "cnn_pair" ]]; then
 		local base_target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
@@ -294,25 +282,6 @@ resolve_search_space_file() {
 	fi
 
 	return 1
-}
-
-resolve_synthesize_defaults() {
-	local species="$1"
-	local synthesize_mode="$2"
-	local tag_value="$3"
-	local train_pos_path="$4"
-	local train_neg_path="$5"
-	local resolved
-
-	resolved="$(
-		intronmodel_resolve_pair_synthesize_defaults \
-			"${species}" \
-			"${synthesize_mode}" \
-			"${tag_value}" \
-			"${train_pos_path}" \
-			"${train_neg_path}"
-	)"
-	printf '%s\n' "${resolved}"
 }
 
 normalize_json_object_file() {
@@ -349,82 +318,87 @@ run_double_descent_plot() {
 
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
 	|| [[ "${TIME_BUDGET_MINUTES}" -le 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
+	echo "[tune_cnn_pair_v2_time.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${QUICK_TRIALS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_TRIALS}" -le 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] QUICK_TRIALS must be a positive integer." >&2
+	echo "[tune_cnn_pair_v2_time.sh] QUICK_TRIALS must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${QUICK_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${QUICK_EPOCHS}" -le 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] QUICK_EPOCHS must be a positive integer." >&2
+	echo "[tune_cnn_pair_v2_time.sh] QUICK_EPOCHS must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${TOP_K}" =~ ^[0-9]+$ ]] || [[ "${TOP_K}" -le 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] TOP_K must be a positive integer." >&2
+	echo "[tune_cnn_pair_v2_time.sh] TOP_K must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${FULL_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${FULL_EPOCHS}" -le 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] FULL_EPOCHS must be a positive integer." >&2
+	echo "[tune_cnn_pair_v2_time.sh] FULL_EPOCHS must be a positive integer." >&2
 	exit 1
 fi
 if [[ "${QUICK_COMPILE_MODE}" != "off" \
 	&& "${QUICK_COMPILE_MODE}" != "on" \
 	&& "${QUICK_COMPILE_MODE}" != "auto" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] QUICK_COMPILE_MODE must be off|on|auto." >&2
+	echo "[tune_cnn_pair_v2_time.sh] QUICK_COMPILE_MODE must be off|on|auto." >&2
 	exit 1
 fi
 if [[ "${FULL_COMPILE_MODE}" != "off" \
 	&& "${FULL_COMPILE_MODE}" != "on" \
 	&& "${FULL_COMPILE_MODE}" != "auto" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
+	echo "[tune_cnn_pair_v2_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
+	exit 1
+fi
+if [[ "${TRIAL_STREAM_MODE}" != "auto" \
+	&& "${TRIAL_STREAM_MODE}" != "full" \
+	&& "${TRIAL_STREAM_MODE}" != "errors" \
+	&& "${TRIAL_STREAM_MODE}" != "silent" ]]; then
+	echo "[tune_cnn_pair_v2_time.sh] TRIAL_STREAM_MODE must be auto|full|errors|silent." >&2
 	exit 1
 fi
 if [[ "${SEARCH_ALGO}" != "random" && "${SEARCH_ALGO}" != "history_guided" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] SEARCH_ALGO must be random|history_guided." >&2
+	echo "[tune_cnn_pair_v2_time.sh] SEARCH_ALGO must be random|history_guided." >&2
 	exit 1
 fi
 if ! [[ "${HISTORY_TOP_N}" =~ ^[0-9]+$ ]] || [[ "${HISTORY_TOP_N}" -le 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] HISTORY_TOP_N must be a positive integer." >&2
+	echo "[tune_cnn_pair_v2_time.sh] HISTORY_TOP_N must be a positive integer." >&2
 	exit 1
 fi
 if ! [[ "${GUIDED_RANDOM_FRACTION}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] GUIDED_RANDOM_FRACTION must be numeric in [0,1]." >&2
+	echo "[tune_cnn_pair_v2_time.sh] GUIDED_RANDOM_FRACTION must be numeric in [0,1]." >&2
 	exit 1
 fi
 if ! awk -v x="${GUIDED_RANDOM_FRACTION}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
-	echo "[tune_cnn_v2_pair_time.sh] GUIDED_RANDOM_FRACTION must be in [0,1]." >&2
+	echo "[tune_cnn_pair_v2_time.sh] GUIDED_RANDOM_FRACTION must be in [0,1]." >&2
 	exit 1
 fi
 if ! [[ "${GUIDED_MUTATION_RATE}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] GUIDED_MUTATION_RATE must be numeric in [0,1]." >&2
+	echo "[tune_cnn_pair_v2_time.sh] GUIDED_MUTATION_RATE must be numeric in [0,1]." >&2
 	exit 1
 fi
 if ! awk -v x="${GUIDED_MUTATION_RATE}" 'BEGIN{exit !(x>=0 && x<=1)}'; then
-	echo "[tune_cnn_v2_pair_time.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
+	echo "[tune_cnn_pair_v2_time.sh] GUIDED_MUTATION_RATE must be in [0,1]." >&2
 	exit 1
 fi
 if [[ ${#JOB_ORDER[@]} -eq 0 ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] JOB_ORDER must contain at least one species." >&2
+	echo "[tune_cnn_pair_v2_time.sh] JOB_ORDER must contain at least one species." >&2
 	exit 1
 fi
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" != "0" \
 	&& "${UPDATE_DOUBLE_DESCENT_PLOT}" != "1" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
+	echo "[tune_cnn_pair_v2_time.sh] UPDATE_DOUBLE_DESCENT_PLOT must be 0 or 1." >&2
 	exit 1
 fi
 if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] CHEAT_MODE must be off|on." >&2
+	echo "[tune_cnn_pair_v2_time.sh] CHEAT_MODE must be off|on." >&2
 	exit 1
 fi
 if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
 	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
-	echo "[tune_cnn_v2_pair_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
+	echo "[tune_cnn_pair_v2_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
 	exit 1
 fi
-TUNING_MODEL_NAME="$(
-	intronmodel_resolve_pair_tuning_model_name "${SYNTHESIZE_MODE}"
-)"
+TUNING_MODEL_NAME="$(intronmodel_resolve_pair_tuning_model_name)"
 
 PYTHON_BIN="$(resolve_python_bin)"
 mapfile -t SEED_VALUES < <(resolve_seed_list)
@@ -435,7 +409,7 @@ ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
 ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
 RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
 ETA_SCOPE="$(intronmodel_resolve_eta_scope \
-	"tune_cnn_v2_pair_time.sh" \
+	"tune_cnn_pair_v2_time.sh" \
 	"${GPU_IDS}" \
 	"${MAX_PARALLEL_TRIALS}" \
 	"${DEVICE}" \
@@ -446,12 +420,12 @@ START_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CYCLE_SECONDS=0
 COMPLETED_CYCLES=0
 
-echo "[tune_cnn_v2_pair_time.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}min"
-echo "[tune_cnn_v2_pair_time.sh] quick+full cycles: "\
+echo "[tune_cnn_pair_v2_time.sh] start=${START_EPOCH} budget=${TIME_BUDGET_MINUTES}min"
+echo "[tune_cnn_pair_v2_time.sh] quick+full cycles: "\
 	"quick_trials=${QUICK_TRIALS} quick_epochs=${QUICK_EPOCHS} "\
 	"top_k=${TOP_K} full_epochs=${FULL_EPOCHS}"
-echo "[tune_cnn_v2_pair_time.sh] schedule=${JOB_ORDER[*]}"
-echo "[tune_cnn_v2_pair_time.sh] seeds=${SEED_VALUES[*]}"
+echo "[tune_cnn_pair_v2_time.sh] schedule=${JOB_ORDER[*]}"
+echo "[tune_cnn_pair_v2_time.sh] seeds=${SEED_VALUES[*]}"
 
 job_index=0
 while true; do
@@ -464,7 +438,7 @@ while true; do
 		avg_cycle_seconds_guard=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
 		if [[ "${avg_cycle_seconds_guard}" -gt 0 ]] \
 			&& [[ "${remaining_seconds}" -lt "${avg_cycle_seconds_guard}" ]]; then
-			echo "[tune_cnn_v2_pair_time.sh] stop before next cycle: "\
+			echo "[tune_cnn_pair_v2_time.sh] stop before next cycle: "\
 				"remaining=$(format_elapsed "${remaining_seconds}") "\
 				"< avg_cycle=$(format_elapsed "${avg_cycle_seconds_guard}")"
 			break
@@ -478,19 +452,12 @@ while true; do
 	raw_species="${JOB_ORDER[${species_index}]}"
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
 	base_seed="${SEED_VALUES[${seed_index}]}"
-	synthesize_resolved="$(
-		resolve_synthesize_defaults \
-			"${species}" \
-			"${SYNTHESIZE_MODE}" \
-			"${TAG}" \
-			"${TRAIN_POS_PATH}" \
-			"${TRAIN_NEG_PATH}"
-	)"
-	IFS=$'\t' read -r resolved_tag resolved_train_pos_path \
-		resolved_train_neg_path <<<"${synthesize_resolved}"
+	resolved_tag="${TAG}"
+	resolved_train_pos_path="${TRAIN_POS_PATH}"
+	resolved_train_neg_path="${TRAIN_NEG_PATH}"
 	resolved_train_paths="$(
 		intronmodel_resolve_and_validate_train_paths \
-			"tune_cnn_v2_pair_time.sh" \
+			"tune_cnn_pair_v2_time.sh" \
 			"${species}" \
 			"${resolved_train_pos_path}" \
 			"${resolved_train_neg_path}"
@@ -504,8 +471,7 @@ while true; do
 		intronmodel_resolve_pair_best_config_path \
 			"${DATA_ROOT}" \
 			"${species}" \
-			"${TUNING_MODEL_NAME}" \
-			"${SYNTHESIZE_MODE}"
+			"${TUNING_MODEL_NAME}"
 	)"
 
 	objective_metric="pair_${OBJECTIVE_METRIC}"
@@ -538,19 +504,19 @@ while true; do
 				"${PYTHON_BIN}" \
 				"${search_space_path}" 2>&1
 		)"; then
-			echo "[tune_cnn_v2_pair_time.sh] failed to parse search-space file: "\
+			echo "[tune_cnn_pair_v2_time.sh] failed to parse search-space file: "\
 				"${search_space_path}" >&2
-			echo "[tune_cnn_v2_pair_time.sh] parse detail: ${target_space_json}" >&2
+			echo "[tune_cnn_pair_v2_time.sh] parse detail: ${target_space_json}" >&2
 			exit 1
 		fi
 		target_search_space_json="${target_space_json}"
-		echo "[tune_cnn_v2_pair_time.sh] using search space: ${search_space_path}"
+		echo "[tune_cnn_pair_v2_time.sh] using search space: ${search_space_path}"
 	else
 		search_space_status=$?
 		if [[ "${search_space_status}" -eq 2 ]]; then
 			exit 1
 		fi
-		echo "[tune_cnn_v2_pair_time.sh] using embedded pair search space."
+		echo "[tune_cnn_pair_v2_time.sh] using embedded pair search space."
 	fi
 
 	cat > "${config_path}" <<JSON
@@ -565,6 +531,7 @@ while true; do
   "base_seed": ${base_seed},
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
+  "trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "enable_phase_overlap": true,
   "objective_metric": "${objective_metric}",
   "global_best_config_path": "${global_best_path}",
@@ -576,7 +543,7 @@ while true; do
   "min_batch_size": ${MIN_BATCH_SIZE},
   "max_oom_retries": ${MAX_OOM_RETRIES},
 	"base_args": {
-	"model": "cnn_v2_pair",
+	"model": "cnn_pair_v2",
     "species": "${species}",
     "train_target": "pair",
     "seed": ${base_seed},
@@ -623,7 +590,7 @@ JSON
 	job_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	job_start_seconds="${SECONDS}"
 	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
-	printf '[tune_cnn_v2_pair_time.sh] cycle=%s elapsed=%s start=%s ' \
+	printf '[tune_cnn_pair_v2_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA:%s species=%s target=pair seed=%s\n' \
 		"${remaining_hms}" \
@@ -642,10 +609,10 @@ JSON
 		run_status=$?
 	fi
 	if [[ "${run_status}" -eq 124 ]]; then
-		echo "[tune_cnn_v2_pair_time.sh] time budget reached; "\
+		echo "[tune_cnn_pair_v2_time.sh] time budget reached; "\
 			"stopping current cycle and cleaning up." >&2
 		intronmodel_prune_timeout_artifacts \
-			"tune_cnn_v2_pair_time.sh" \
+			"tune_cnn_pair_v2_time.sh" \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${DATA_ROOT}" \
@@ -656,7 +623,7 @@ JSON
 		exit 124
 	fi
 	if [[ "${run_status}" -ne 0 ]]; then
-		echo "[tune_cnn_v2_pair_time.sh] cycle=${job_index} failed "\
+		echo "[tune_cnn_pair_v2_time.sh] cycle=${job_index} failed "\
 			"species=${species} target=pair seed=${base_seed}" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
@@ -678,7 +645,7 @@ JSON
 	if [[ "${avg_cycle_seconds}" -gt 0 ]]; then
 		estimated_cycles_left=$((remaining_seconds / avg_cycle_seconds))
 	fi
-	printf '[tune_cnn_v2_pair_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
+	printf '[tune_cnn_pair_v2_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
 		"${job_index}" \
 		"$(format_elapsed "${cycle_duration_seconds}")" \
 		"$(format_elapsed "${avg_cycle_seconds}")"
@@ -701,5 +668,5 @@ fi
 END_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_SECONDS=$((SECONDS - START_SECONDS))
 TOTAL_HMS="$(format_elapsed "${TOTAL_SECONDS}")"
-echo "[tune_cnn_v2_pair_time.sh] done start=${START_EPOCH} end=${END_EPOCH} "\
+echo "[tune_cnn_pair_v2_time.sh] done start=${START_EPOCH} end=${END_EPOCH} "\
 	"elapsed=${TOTAL_HMS} cycles=${job_index}"

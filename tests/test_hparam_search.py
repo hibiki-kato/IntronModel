@@ -5313,6 +5313,138 @@ def test_run_quick_full_overlap_subprocess_promotes_full_early(
     assert first_full_start < quick0_end
 
 
+def test_run_quick_full_overlap_subprocess_applies_parallel_trial_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [128, 256]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=4,
+        base_seed=1337,
+        gpu_ids_setting=["0", "1"],
+        max_parallel_trials_setting=2,
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn_v2_pair", "species": "Dmel", "batch_size": 128},
+        quick_overrides={"epochs": 1},
+        full_overrides={"epochs": 4},
+        search_space=search_space,
+        trial_stream_mode="silent",
+        enable_phase_overlap=True,
+    )
+    captured_report_train_metrics: list[str] = []
+    captured_parallel_states: list[tuple[int, str]] = []
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env
+        captured_parallel_states.append(
+            (
+                hparam_search._ACTIVE_MAX_PARALLEL_TRIALS,
+                hparam_search._ACTIVE_TRIAL_STREAM_MODE,
+            )
+        )
+        for index, token in enumerate(cmd):
+            if token == "--report_train_metrics":
+                captured_report_train_metrics.append(cmd[index + 1])
+                break
+        metrics_path: Optional[Path] = None
+        for index, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[index + 1])
+                break
+        assert metrics_path is not None
+        if phase == "quick" and trial_id == 0:
+            time.sleep(0.2)
+            objective_score = 0.81
+        elif phase == "quick":
+            time.sleep(0.05)
+            objective_score = 0.93
+        else:
+            time.sleep(0.01)
+            objective_score = 0.97
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "donor": {
+                        "best_metric": "pr_auc",
+                        "best_score": objective_score,
+                        "best_epoch": 1,
+                    },
+                    "acceptor": {
+                        "best_metric": "pr_auc",
+                        "best_score": objective_score,
+                        "best_epoch": 1,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+
+    previous_stream_mode = hparam_search._set_active_trial_stream_mode("full")
+    previous_parallel = hparam_search._set_active_max_parallel_trials(1)
+    try:
+        quick_rows, full_rows = hparam_search._run_quick_full_overlap_subprocess(
+            config=config,
+            quick_params=[
+                {"batch_size": 128},
+                {"batch_size": 256},
+            ],
+            quick_overrides={"epochs": 1},
+            full_overrides={"epochs": 4},
+            gpu_ids=["0", "1"],
+            max_parallel_trials=2,
+            out_dir=config.output_dir,
+            seed_best_params=None,
+            seed_best_context_mismatch=False,
+            global_best_recheck_params=None,
+            global_best_recheck_context_mismatch=False,
+            full_epochs_value=4,
+        )
+    finally:
+        _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
+        _ = hparam_search._set_active_trial_stream_mode(previous_stream_mode)
+
+    captured = capsys.readouterr()
+
+    assert len(quick_rows) == 2
+    assert len(full_rows) >= 1
+    assert captured_report_train_metrics
+    assert set(captured_report_train_metrics) == {"0"}
+    assert captured_parallel_states
+    assert set(captured_parallel_states) == {(2, "silent")}
+    assert captured.out == ""
+
+
 def test_main_returns_130_on_keyboard_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

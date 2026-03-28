@@ -115,7 +115,8 @@ def test_common_resolve_seed_list_normalizes_and_deduplicates_entries() -> None:
     )
 
     assert run.returncode == 0
-    assert run.stdout.strip().splitlines() == ["2024", "1337", "3407"]
+    assert run.stdout.strip().splitlines() == ["1337"]
+    assert "SEED_LIST is ignored" in run.stderr
 
 
 def test_common_run_with_process_title_preserves_python_executable() -> None:
@@ -143,14 +144,16 @@ def test_common_init_paths_configures_runtime_cache_dirs(
         f'export TMPDIR={shlex.quote(str(tmpdir))}\n'
         "unset XDG_CACHE_HOME XDG_CONFIG_HOME HF_HOME TRANSFORMERS_CACHE\n"
         "unset HF_MODULES_CACHE MPLCONFIGDIR TORCHINDUCTOR_CACHE_DIR\n"
-        "unset TRITON_CACHE_DIR\n"
+        "unset TRITON_CACHE_DIR HF_HUB_OFFLINE TRANSFORMERS_OFFLINE\n"
         f'intronmodel_init_paths {shlex.quote(str(script_path))}\n'
         'printf "%s\\n" '
         '"${XDG_CACHE_HOME}" '
         '"${XDG_CONFIG_HOME}" '
         '"${MPLCONFIGDIR}" '
         '"${TORCHINDUCTOR_CACHE_DIR}" '
-        '"${TRITON_CACHE_DIR}"\n'
+        '"${TRITON_CACHE_DIR}" '
+        '"${HF_HUB_OFFLINE}" '
+        '"${TRANSFORMERS_OFFLINE}"\n'
     )
 
     assert run.returncode == 0
@@ -162,72 +165,37 @@ def test_common_init_paths_configures_runtime_cache_dirs(
         str(expected_root / "config" / "matplotlib"),
         str(expected_root / "torchinductor"),
         str(expected_root / "triton"),
+        "1",
+        "1",
     ]
-    for resolved_path in lines:
+    for resolved_path in lines[:5]:
         assert Path(resolved_path).is_dir()
 
 
-def test_common_resolve_pair_synthesize_defaults_appends_suffix_and_paths(
+def test_common_resolve_pair_best_config_path_prefers_public_pair_tree(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
     run = _run_common_shell(
         f'DATA_ROOT={shlex.quote(str(data_root))}\n'
-        'IFS=$\'\\t\' read -r TAG TRAIN_POS_PATH TRAIN_NEG_PATH <<< "$('
-        'intronmodel_resolve_pair_synthesize_defaults '
-        'Dmel on exp1 "" ""'
-        ')"\n'
-        'printf "%s\\n%s\\n%s\\n" "${TAG}" "${TRAIN_POS_PATH}" '
-        '"${TRAIN_NEG_PATH}"\n'
-    )
-
-    assert run.returncode == 0, run.stderr
-    assert run.stdout.strip().splitlines() == [
-        "exp1_synth",
-        str(data_root / "Dmel" / "raw" / "100bp.err"),
-        str(data_root / "Dmel" / "processed" / "100bp_mixed_one_side.neg.err"),
-    ]
-
-
-def test_common_resolve_pair_best_config_path_switches_by_mode(
-    tmp_path: Path,
-) -> None:
-    data_root = tmp_path / "data"
-    run = _run_common_shell(
-        f'DATA_ROOT={shlex.quote(str(data_root))}\n'
-        'printf "%s\\n%s\\n" '
+        'printf "%s\\n" '
         '"$(intronmodel_resolve_pair_best_config_path "${DATA_ROOT}" '
-        '"Dmel" "cnn_v2_pair" "off")" '
-        '"$(intronmodel_resolve_pair_best_config_path "${DATA_ROOT}" '
-        '"Dmel" "cnn_v2_pair" "on")"\n'
+        '"Dmel" "cnn_pair_v2")"\n'
     )
 
     assert run.returncode == 0, run.stderr
     assert run.stdout.strip().splitlines() == [
-        str(data_root / "Dmel" / "tuning" / "cnn_v2_pair" / "pair" / "best_config.json"),
-        str(
-            data_root
-            / "Dmel"
-            / "tuning"
-            / "cnn_v2_pair"
-            / "pair"
-            / "best_synth_config.json"
-        ),
+        str(data_root / "Dmel" / "tuning" / "cnn_pair_v2" / "pair" / "best_config.json")
     ]
 
 
-def test_common_resolve_pair_tuning_model_name_switches_by_mode() -> None:
+def test_common_resolve_pair_tuning_model_name_is_public_pair_name() -> None:
     run = _run_common_shell(
-        'printf "%s\\n%s\\n" '
-        '"$(intronmodel_resolve_pair_tuning_model_name off)" '
-        '"$(intronmodel_resolve_pair_tuning_model_name on)"\n'
+        'printf "%s\\n" "$(intronmodel_resolve_pair_tuning_model_name)"\n'
     )
 
     assert run.returncode == 0, run.stderr
-    assert run.stdout.strip().splitlines() == [
-        "cnn_v2_pair",
-        "cnn_v2_pair_synth",
-    ]
+    assert run.stdout.strip().splitlines() == ["cnn_pair_v2"]
 
 
 def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:

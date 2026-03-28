@@ -108,10 +108,10 @@ Registered in `src/models/registry.py`:
 Config-only training/inference wrappers:
 
 - `run/run_cnn_v2.sh`
-- `run/run_cnn_v2_pair.sh`
+- `run/run_cnn_pair_v2.sh`
 - `run/run_isolated_mmus_rna60_pipeline.sh`
 - `run/tune_cnn_v2_time.sh`
-- `run/tune_cnn_v2_pair_time.sh`
+- `run/tune_cnn_pair_v2_time.sh`
 
 Archived wrappers:
 
@@ -196,7 +196,7 @@ Tuning wrappers (`run/tune_*.sh`) follow the same pattern:
 
 - edit the top `CONFIG (edit here)` block first
 - then run without arguments (`bash run/tune_cnn_v2_time.sh`, etc.)
-- pair time-budget tuning: `bash run/tune_cnn_v2_pair_time.sh`
+- pair time-budget tuning: `bash run/tune_cnn_pair_v2_time.sh`
 - OOM protection in tuning uses both batch-size backoff and
   `max_model_params` pre-filtering in the generated search config
 - CNN-family tuning supports `MAX_MODEL_PARAMS=auto`; it estimates a safe

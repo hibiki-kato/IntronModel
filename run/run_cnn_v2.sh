@@ -126,6 +126,32 @@ append_flag_if_truthy() {
 	esac
 }
 
+
+append_versioned_output_args() {
+	local script_tag="$1"
+	local species="$2"
+	local model_name="$3"
+	local published_name=""
+
+	published_name="$(
+		intronmodel_resolve_latest_published_name \
+			"${script_tag}" \
+			"${species}" \
+			"${model_name}"
+	)"
+	if [[ -z "${published_name}" ]]; then
+		return 0
+	fi
+
+	args+=(
+		--site_output_tsv "${DATA_ROOT}/${species}/site_score/${published_name}.tsv"
+		--intron_output_tsv "${DATA_ROOT}/${species}/intron_score/${published_name}.tsv"
+		--transcript_output_tsv "${DATA_ROOT}/${species}/trans_score/${published_name}.tsv"
+		--eval_output_txt "${DATA_ROOT}/${species}/eval_score/${published_name}.txt"
+		--metrics_json "${DATA_ROOT}/${species}/learning_metric/${published_name}.train.json"
+	)
+}
+
 resolve_task_tuned_config_path() {
 	local species="$1"
 	local task_name="$2"
@@ -308,6 +334,9 @@ run_species_once() {
 	append_arg_if_set "test_tsv" "${TEST_TSV_PATH}"
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
+	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
+		append_versioned_output_args "cnn_v2.sh" "${species}" "${MODEL}"
+	fi
 
 	if [[ ${#shared_tuned_args[@]} -gt 0 ]]; then
 		args+=("${shared_tuned_args[@]}")

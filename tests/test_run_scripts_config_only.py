@@ -110,7 +110,7 @@ def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     assert 'DONOR_LEN="100"' in content
     assert 'ACCEPTOR_LEN="100"' in content
     assert 'VAL_FRAC="0.2"' in content
-    assert 'VALIDATION_METRIC="pr_auc"' in content
+    assert 'VALIDATION_METRIC="max_f1"' in content
     assert 'SEED="1337"' in content
     assert 'INTRON_SCORE_OP="+"' in content
     assert 'VISUALIZE="true"' in content
@@ -150,7 +150,7 @@ def test_run_cnn_v2_sh_ignores_cnn_v2_only_tuned_keys() -> None:
 
 
 def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "run_cnn_v2_pair.sh"
+    script_path = _project_root() / "run" / "run_cnn_pair_v2.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -162,16 +162,16 @@ def test_run_cnn_v2_pair_sh_rejects_cli_arguments() -> None:
 
 
 def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
-    content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
+    content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
     assert "INTRONMODEL_AUTO_TMUX" in content
-    assert 'MODEL="cnn_v2_pair"' in content
+    assert 'MODEL="cnn_pair_v2"' in content
     assert 'DONOR_LEN="100"' in content
     assert 'ACCEPTOR_LEN="100"' in content
     assert 'TRAIN_TARGET="pair"' in content
     assert 'VAL_FRAC="0.25"' in content
-    assert 'VALIDATION_METRIC="pr_auc"' in content
+    assert 'VALIDATION_METRIC="max_f1"' in content
     assert 'SEED="1337"' in content
     assert 'INTRON_SCORE_OP="+"' in content
     assert 'VISUALIZE="true"' in content
@@ -194,11 +194,40 @@ def test_run_cnn_v2_pair_sh_leaves_mask_to_best_config() -> None:
     assert "--checkpoint_top_k" in content
 
 
-def test_run_cnn_v2_pair_sh_exposes_synthesize_mode() -> None:
-    content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
+def test_run_cnn_v2_pair_sh_omits_empty_optional_loss_alpha_args() -> None:
+    content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
-    assert 'SYNTHESIZE_MODE="off"' in content
+
+    assert 'local use_wrapper_hparams="1"' in content
+    assert 'use_wrapper_hparams="0"' in content
+    assert 'if [[ "${use_wrapper_hparams}" == "1" ]]; then' in content
+    assert 'FOCAL_ALPHA_POS=""' in content
+    assert 'ASYM_ALPHA_POS=""' in content
+    assert '--focal_alpha_pos "${FOCAL_ALPHA_POS}"' not in content
+    assert '--asym_alpha_pos "${ASYM_ALPHA_POS}"' not in content
+    assert 'append_arg_if_set "focal_alpha_pos" "${FOCAL_ALPHA_POS}"' in content
+    assert 'append_arg_if_set "asym_alpha_pos" "${ASYM_ALPHA_POS}"' in content
+
+
+def test_run_cnn_v2_pair_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
+    content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'if [[ "${use_wrapper_hparams}" == "1" ]]; then' in content
+    assert '--batch_size "${BATCH_SIZE}"' in content[
+        content.index('if [[ "${use_wrapper_hparams}" == "1" ]]; then') :
+    ]
+    assert '--lr "${LR}"' in content[
+        content.index('if [[ "${use_wrapper_hparams}" == "1" ]]; then') :
+    ]
+
+
+def test_run_cnn_v2_pair_sh_uses_single_pair_tuning_namespace() -> None:
+    content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
+        encoding="utf-8"
+    )
     assert 'TAG=""' in content
     assert "intronmodel_resolve_pair_tuning_model_name" in content
     assert 'append_arg_if_set "tag" "${resolved_tag}"' in content
@@ -208,6 +237,9 @@ def test_run_cnn_v2_pair_sh_exposes_synthesize_mode() -> None:
     assert "intronmodel_resolve_pair_best_config_filename" in content
     assert 'best_config_filename="$(' in content
     assert "intronmodel_resolve_tuned_config_path" in content
+    assert "append_versioned_output_args" in content
+    assert "SYNTHESIZE_MODE" not in content
+    assert "cnn_pair_v2_synth" not in content
 
 
 def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
@@ -230,10 +262,12 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
 
 
 def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
-    content = (_project_root() / "run" / "tune_cnn_v2_pair_time.sh").read_text(
+    content = (_project_root() / "run" / "tune_cnn_pair_v2_time.sh").read_text(
         encoding="utf-8"
     )
-    assert 'OBJECTIVE_METRIC="f1_max"' in content
+    assert 'OBJECTIVE_METRIC="max_f1"' in content
+    assert 'TRIAL_STREAM_MODE="silent"' in content
+    assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
     assert '"enable_phase_overlap": true' in content
     assert "MAX_MODEL_PARAMS" not in content
     assert '"mask": {' in content
@@ -241,19 +275,19 @@ def test_tune_cnn_v2_pair_time_omits_max_model_params() -> None:
     assert "MASK_MODE" not in content
 
 
-def test_tune_cnn_v2_pair_time_exposes_synthesize_mode() -> None:
-    content = (_project_root() / "run" / "tune_cnn_v2_pair_time.sh").read_text(
+def test_tune_cnn_v2_pair_time_uses_single_pair_tuning_namespace() -> None:
+    content = (_project_root() / "run" / "tune_cnn_pair_v2_time.sh").read_text(
         encoding="utf-8"
     )
-    assert 'SYNTHESIZE_MODE="off"' in content
     assert 'TAG=""' in content
     assert "intronmodel_resolve_pair_tuning_model_name" in content
     assert "intronmodel_resolve_pair_best_config_path" in content
     assert 'TUNING_MODEL_NAME="$(' in content
-    assert "cnn_v2_pair_synth" in content
     assert '"tag": "${resolved_tag}"' in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
+    assert "SYNTHESIZE_MODE" not in content
+    assert "cnn_pair_v2_synth" not in content
 
 
 def test_common_run_with_deadline_times_out() -> None:
@@ -334,7 +368,7 @@ def test_modified_tuning_scripts_do_not_use_cross_species_seed_fallback() -> Non
         "tune_bilstm_pair_time.sh",
         "tune_cnn_resdil.sh",
         "tune_cnn_resdil_time.sh",
-        "tune_cnn_v2_pair_time.sh",
+        "tune_cnn_pair_v2_time.sh",
         "tune_cnn_v2_time.sh",
         "tune_dnabert.sh",
         "tune_dnabert_pair.sh",
@@ -611,7 +645,7 @@ def test_run_cnn_v2_sh_includes_gpu_parallel_config() -> None:
 
 
 def test_run_cnn_v2_pair_sh_includes_gpu_parallel_config() -> None:
-    content = (_project_root() / "run" / "run_cnn_v2_pair.sh").read_text(
+    content = (_project_root() / "run" / "run_cnn_pair_v2.sh").read_text(
         encoding="utf-8"
     )
     assert 'GPU_IDS="auto"' in content
@@ -686,7 +720,7 @@ def test_run_scripts_are_shellcheck_parsable() -> None:
         check=False,
     )
     cnn_v2_pair = subprocess.run(
-        ["bash", "-n", str(root / "run" / "run_cnn_v2_pair.sh")],
+        ["bash", "-n", str(root / "run" / "run_cnn_pair_v2.sh")],
         capture_output=True,
         text=True,
         check=False,

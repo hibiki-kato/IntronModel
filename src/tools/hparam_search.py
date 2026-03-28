@@ -45,6 +45,11 @@ from util.validation_protocol import (
     build_validation_protocol,
 )
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
+from util.versioned_artifacts import (
+    is_active_public_model,
+    normalize_public_model_name,
+    publish_latest_best_version,
+)
 from util.process_title import apply_process_title_from_env
 from util.model_runtime import resolve_auto_num_workers
 
@@ -5346,246 +5351,263 @@ def _run_quick_full_overlap_subprocess(
     intentionally limited to the subprocess backend so the existing persistent
     worker code remains unchanged for the other execution modes.
     """
-    slots: list[Optional[str]]
-    if gpu_ids:
-        slots = list(gpu_ids[:max_parallel_trials])
-    else:
-        slots = [None for _ in range(max_parallel_trials)]
-    stream_mode = _ACTIVE_TRIAL_STREAM_MODE
+    resolved_stream_mode = _resolve_trial_stream_mode(
+        config.trial_stream_mode,
+        max_parallel_trials,
+    )
+    previous_stream_mode = _set_active_trial_stream_mode(resolved_stream_mode)
+    previous_max_parallel_trials = _set_active_max_parallel_trials(
+        max_parallel_trials
+    )
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        slots: list[Optional[str]]
+        if gpu_ids:
+            slots = list(gpu_ids[:max_parallel_trials])
+        else:
+            slots = [None for _ in range(max_parallel_trials)]
+        stream_mode = _ACTIVE_TRIAL_STREAM_MODE
 
-    full_priority_params: Optional[dict[str, Scalar]] = None
-    if seed_best_params is not None and seed_best_context_mismatch:
-        full_priority_params = dict(seed_best_params)
-    elif (
-        global_best_recheck_params is not None
-        and global_best_recheck_context_mismatch
-    ):
-        full_priority_params = dict(global_best_recheck_params)
+        full_priority_params: Optional[dict[str, Scalar]] = None
+        if seed_best_params is not None and seed_best_context_mismatch:
+            full_priority_params = dict(seed_best_params)
+        elif (
+            global_best_recheck_params is not None
+            and global_best_recheck_context_mismatch
+        ):
+            full_priority_params = dict(global_best_recheck_params)
 
-    seed_best_key: Optional[str] = None
-    if seed_best_params is not None:
-        seed_best_key = json.dumps(
-            seed_best_params,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-    quick_pending_indices = list(range(len(quick_params)))
-    quick_running_count = 0
-    full_running_count = 0
-    quick_rows: list[TrialResult] = []
-    full_rows: list[TrialResult] = []
-    completed_quick_rows: list[TrialResult] = []
-    pending_full_tasks: list[ScheduledTrialTask] = []
-    full_consumed_keys: set[str] = set()
-    full_priority_inserted = False
-    next_full_trial_id = 1 if full_priority_params is not None else 0
-    skipped_same_best_epoch = 0
-    skipped_seed_context_match = 0
-    running: dict[Future[TrialResult], tuple[int, ScheduledTrialTask]] = {}
-    available_slots: list[tuple[int, Optional[str]]] = [
-        (slot_index, assigned_gpu)
-        for slot_index, assigned_gpu in enumerate(slots)
-    ]
-    executor = ThreadPoolExecutor(max_workers=max(1, len(slots)))
-
-    def _queue_full_task(task: ScheduledTrialTask) -> None:
-        """Insert one full task into the pending queue by priority."""
-        pending_full_tasks.append(task)
-        pending_full_tasks.sort(
-            key=lambda item: (-item.priority_score, item.trial_id)
-        )
-
-    def _maybe_queue_priority_recheck() -> None:
-        """Queue the stored full recheck once full work is otherwise ready."""
-        nonlocal full_priority_inserted, next_full_trial_id
-        if full_priority_inserted or full_priority_params is None:
-            return
-        priority_task = ScheduledTrialTask(
-            phase="full",
-            trial_id=0,
-            priority_score=float("inf"),
-            sampled_params=dict(full_priority_params),
-            overrides=dict(full_overrides),
-            metrics_json=str(out_dir / "full_trial_0000.metrics.json"),
-            log_file=str(out_dir / "full_trial_0000.log.txt"),
-        )
-        _queue_full_task(priority_task)
-        full_priority_inserted = True
-        next_full_trial_id = max(next_full_trial_id, 1)
-
-    def _maybe_promote_locked_rows() -> None:
-        """Promote locked quick rows into the full queue."""
-        nonlocal next_full_trial_id, skipped_same_best_epoch
-        nonlocal skipped_seed_context_match
-        unfinished_quick_count = len(quick_pending_indices) + quick_running_count
-        locked_rows = _select_locked_quick_trials(
-            completed_quick_rows=completed_quick_rows,
-            unfinished_quick_count=unfinished_quick_count,
-            top_k=config.top_k,
-        )
-        if locked_rows:
-            _maybe_queue_priority_recheck()
-        for row in locked_rows:
-            row_key = json.dumps(
-                row.sampled_params,
+        seed_best_key: Optional[str] = None
+        if seed_best_params is not None:
+            seed_best_key = json.dumps(
+                seed_best_params,
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            if row_key in full_consumed_keys:
-                continue
-            if (
-                seed_best_key is not None
-                and row_key == seed_best_key
-                and not seed_best_context_mismatch
-            ):
-                skipped_seed_context_match += 1
-                full_consumed_keys.add(row_key)
-                continue
-            quick_best_epoch = _read_objective_best_epoch_from_metrics(
-                metrics_json_path=Path(row.metrics_json),
-                objective_metric=config.objective_metric,
-            )
-            if (
-                quick_best_epoch is not None
-                and quick_best_epoch == full_epochs_value
-            ):
-                skipped_same_best_epoch += 1
-                full_consumed_keys.add(row_key)
-                continue
-            task = ScheduledTrialTask(
-                phase="full",
-                trial_id=next_full_trial_id,
-                priority_score=(
-                    float(row.objective_score)
-                    if row.objective_score is not None
-                    else float("-inf")
-                ),
-                sampled_params=dict(row.sampled_params),
-                overrides=dict(full_overrides),
-                metrics_json=str(
-                    out_dir / f"full_trial_{next_full_trial_id:04d}.metrics.json"
-                ),
-                log_file=str(
-                    out_dir / f"full_trial_{next_full_trial_id:04d}.log.txt"
-                ),
-            )
-            next_full_trial_id += 1
-            full_consumed_keys.add(row_key)
-            _queue_full_task(task)
 
-    def _submit_task(
-        *,
-        slot_index: int,
-        assigned_gpu: Optional[str],
-        task: ScheduledTrialTask,
-    ) -> None:
-        """Submit one scheduled task into the shared executor."""
-        nonlocal quick_running_count, full_running_count
-        future = executor.submit(
-            run_trial,
-            config=config,
-            phase=task.phase,
-            trial_id=task.trial_id,
-            sampled_params=task.sampled_params,
-            overrides=task.overrides,
-            assigned_gpu_id=assigned_gpu,
-            metrics_json=Path(task.metrics_json),
-            log_file=Path(task.log_file),
-        )
-        running[future] = (slot_index, task)
-        if task.phase == "quick":
-            quick_running_count += 1
-        else:
-            full_running_count += 1
-        if _should_print_trial_lifecycle(stream_mode):
-            _print_trial_start(
+        quick_pending_indices = list(range(len(quick_params)))
+        quick_running_count = 0
+        full_running_count = 0
+        quick_rows: list[TrialResult] = []
+        full_rows: list[TrialResult] = []
+        completed_quick_rows: list[TrialResult] = []
+        pending_full_tasks: list[ScheduledTrialTask] = []
+        full_consumed_keys: set[str] = set()
+        full_priority_inserted = False
+        next_full_trial_id = 1 if full_priority_params is not None else 0
+        skipped_same_best_epoch = 0
+        skipped_seed_context_match = 0
+        running: dict[Future[TrialResult], tuple[int, ScheduledTrialTask]] = {}
+        available_slots: list[tuple[int, Optional[str]]] = [
+            (slot_index, assigned_gpu)
+            for slot_index, assigned_gpu in enumerate(slots)
+        ]
+        executor = ThreadPoolExecutor(max_workers=max(1, len(slots)))
+
+        def _queue_full_task(task: ScheduledTrialTask) -> None:
+            """Insert one full task into the pending queue by priority."""
+            pending_full_tasks.append(task)
+            pending_full_tasks.sort(
+                key=lambda item: (-item.priority_score, item.trial_id)
+            )
+
+        def _maybe_queue_priority_recheck() -> None:
+            """Queue the stored full recheck once full work is otherwise ready."""
+            nonlocal full_priority_inserted, next_full_trial_id
+            if full_priority_inserted or full_priority_params is None:
+                return
+            priority_task = ScheduledTrialTask(
+                phase="full",
+                trial_id=0,
+                priority_score=float("inf"),
+                sampled_params=dict(full_priority_params),
+                overrides=dict(full_overrides),
+                metrics_json=str(out_dir / "full_trial_0000.metrics.json"),
+                log_file=str(out_dir / "full_trial_0000.log.txt"),
+            )
+            _queue_full_task(priority_task)
+            full_priority_inserted = True
+            next_full_trial_id = max(next_full_trial_id, 1)
+
+        def _maybe_promote_locked_rows() -> None:
+            """Promote locked quick rows into the full queue."""
+            nonlocal next_full_trial_id, skipped_same_best_epoch
+            nonlocal skipped_seed_context_match
+            unfinished_quick_count = len(quick_pending_indices) + quick_running_count
+            locked_rows = _select_locked_quick_trials(
+                completed_quick_rows=completed_quick_rows,
+                unfinished_quick_count=unfinished_quick_count,
+                top_k=config.top_k,
+            )
+            if locked_rows:
+                _maybe_queue_priority_recheck()
+            for row in locked_rows:
+                row_key = json.dumps(
+                    row.sampled_params,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if row_key in full_consumed_keys:
+                    continue
+                if (
+                    seed_best_key is not None
+                    and row_key == seed_best_key
+                    and not seed_best_context_mismatch
+                ):
+                    skipped_seed_context_match += 1
+                    full_consumed_keys.add(row_key)
+                    continue
+                quick_best_epoch = _read_objective_best_epoch_from_metrics(
+                    metrics_json_path=Path(row.metrics_json),
+                    objective_metric=config.objective_metric,
+                )
+                if (
+                    quick_best_epoch is not None
+                    and quick_best_epoch == full_epochs_value
+                ):
+                    skipped_same_best_epoch += 1
+                    full_consumed_keys.add(row_key)
+                    continue
+                task = ScheduledTrialTask(
+                    phase="full",
+                    trial_id=next_full_trial_id,
+                    priority_score=(
+                        float(row.objective_score)
+                        if row.objective_score is not None
+                        else float("-inf")
+                    ),
+                    sampled_params=dict(row.sampled_params),
+                    overrides=dict(full_overrides),
+                    metrics_json=str(
+                        out_dir / f"full_trial_{next_full_trial_id:04d}.metrics.json"
+                    ),
+                    log_file=str(
+                        out_dir / f"full_trial_{next_full_trial_id:04d}.log.txt"
+                    ),
+                )
+                next_full_trial_id += 1
+                full_consumed_keys.add(row_key)
+                _queue_full_task(task)
+
+        def _submit_task(
+            *,
+            slot_index: int,
+            assigned_gpu: Optional[str],
+            task: ScheduledTrialTask,
+        ) -> None:
+            """Submit one scheduled task into the shared executor."""
+            nonlocal quick_running_count, full_running_count
+            future = executor.submit(
+                run_trial,
+                config=config,
                 phase=task.phase,
                 trial_id=task.trial_id,
-                assigned_gpu=assigned_gpu,
+                sampled_params=task.sampled_params,
+                overrides=task.overrides,
+                assigned_gpu_id=assigned_gpu,
+                metrics_json=Path(task.metrics_json),
+                log_file=Path(task.log_file),
             )
-
-    try:
-        while quick_pending_indices or pending_full_tasks or running:
-            while available_slots and (pending_full_tasks or quick_pending_indices):
-                slot_index, assigned_gpu = available_slots.pop(0)
-                if pending_full_tasks:
-                    task = pending_full_tasks.pop(0)
-                else:
-                    trial_id = quick_pending_indices.pop(0)
-                    task = ScheduledTrialTask(
-                        phase="quick",
-                        trial_id=trial_id,
-                        priority_score=0.0,
-                        sampled_params=dict(quick_params[trial_id]),
-                        overrides=dict(quick_overrides),
-                        metrics_json=str(
-                            out_dir / f"quick_trial_{trial_id:04d}.metrics.json"
-                        ),
-                        log_file=str(
-                            out_dir / f"quick_trial_{trial_id:04d}.log.txt"
-                        ),
-                    )
-                _submit_task(
-                    slot_index=slot_index,
+            running[future] = (slot_index, task)
+            if task.phase == "quick":
+                quick_running_count += 1
+            else:
+                full_running_count += 1
+            if _should_print_trial_lifecycle(stream_mode):
+                _print_trial_start(
+                    phase=task.phase,
+                    trial_id=task.trial_id,
                     assigned_gpu=assigned_gpu,
-                    task=task,
                 )
 
-            if not running:
-                if full_priority_params is not None and not full_priority_inserted:
-                    _maybe_queue_priority_recheck()
-                    continue
-                if quick_pending_indices:
-                    continue
-                break
-
-            done, _ = wait(running.keys(), return_when=FIRST_COMPLETED)
-            for future in done:
-                slot_index, task = running.pop(future)
-                available_slots.append((slot_index, slots[slot_index]))
-                result = future.result()
-                if task.phase == "quick":
-                    quick_running_count -= 1
-                    quick_rows.append(result)
-                    if result.status == "success":
-                        completed_quick_rows.append(result)
-                    _maybe_promote_locked_rows()
-                else:
-                    full_running_count -= 1
-                    full_rows.append(result)
-                total_count = (
-                    len(quick_params)
-                    if task.phase == "quick"
-                    else len(full_rows) + len(pending_full_tasks) + full_running_count
-                )
-                completed_count = (
-                    len(quick_rows)
-                    if task.phase == "quick"
-                    else len(full_rows)
-                )
-                if _should_print_trial_lifecycle(stream_mode):
-                    _print_trial_result(
-                        phase=task.phase,
-                        trial_count=max(1, total_count),
-                        completed_count=completed_count,
-                        result=result,
+        try:
+            while quick_pending_indices or pending_full_tasks or running:
+                while available_slots and (pending_full_tasks or quick_pending_indices):
+                    slot_index, assigned_gpu = available_slots.pop(0)
+                    if pending_full_tasks:
+                        task = pending_full_tasks.pop(0)
+                    else:
+                        trial_id = quick_pending_indices.pop(0)
+                        task = ScheduledTrialTask(
+                            phase="quick",
+                            trial_id=trial_id,
+                            priority_score=0.0,
+                            sampled_params=dict(quick_params[trial_id]),
+                            overrides=dict(quick_overrides),
+                            metrics_json=str(
+                                out_dir / f"quick_trial_{trial_id:04d}.metrics.json"
+                            ),
+                            log_file=str(
+                                out_dir / f"quick_trial_{trial_id:04d}.log.txt"
+                            ),
+                        )
+                    _submit_task(
+                        slot_index=slot_index,
+                        assigned_gpu=assigned_gpu,
+                        task=task,
                     )
 
-            if (
-                not quick_pending_indices
-                and quick_running_count == 0
-                and not full_priority_inserted
-            ):
-                _maybe_queue_priority_recheck()
-            if completed_quick_rows:
-                _maybe_promote_locked_rows()
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+                if not running:
+                    if full_priority_params is not None and not full_priority_inserted:
+                        _maybe_queue_priority_recheck()
+                        continue
+                    if quick_pending_indices:
+                        continue
+                    break
 
-    if full_priority_params is not None and not full_priority_inserted:
-        _maybe_queue_priority_recheck()
-    return quick_rows, full_rows
+                done, _ = wait(running.keys(), return_when=FIRST_COMPLETED)
+                for future in done:
+                    slot_index, task = running.pop(future)
+                    available_slots.append((slot_index, slots[slot_index]))
+                    result = future.result()
+                    if task.phase == "quick":
+                        quick_running_count -= 1
+                        quick_rows.append(result)
+                        if result.status == "success":
+                            completed_quick_rows.append(result)
+                        _maybe_promote_locked_rows()
+                    else:
+                        full_running_count -= 1
+                        full_rows.append(result)
+                    total_count = (
+                        len(quick_params)
+                        if task.phase == "quick"
+                        else (
+                            len(full_rows)
+                            + len(pending_full_tasks)
+                            + full_running_count
+                        )
+                    )
+                    completed_count = (
+                        len(quick_rows)
+                        if task.phase == "quick"
+                        else len(full_rows)
+                    )
+                    if _should_print_trial_lifecycle(stream_mode):
+                        _print_trial_result(
+                            phase=task.phase,
+                            trial_count=max(1, total_count),
+                            completed_count=completed_count,
+                            result=result,
+                        )
+
+                if (
+                    not quick_pending_indices
+                    and quick_running_count == 0
+                    and not full_priority_inserted
+                ):
+                    _maybe_queue_priority_recheck()
+                if completed_quick_rows:
+                    _maybe_promote_locked_rows()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        if full_priority_params is not None and not full_priority_inserted:
+            _maybe_queue_priority_recheck()
+        return quick_rows, full_rows
+    finally:
+        _set_active_max_parallel_trials(previous_max_parallel_trials)
+        _set_active_trial_stream_mode(previous_stream_mode)
 
 
 def build_trial_params(
@@ -5794,6 +5816,80 @@ def maybe_update_global_best(
         f"{best_row.objective_score:.6f})",
         flush=True,
     )
+    model_name = _extract_model_name_from_best_update(
+        global_best_path=global_best_path,
+        hparam_context=hparam_context,
+    )
+    if model_name is None or not is_active_public_model(model_name):
+        return
+    species = _extract_species_from_best_update(
+        global_best_path=global_best_path,
+        hparam_context=hparam_context,
+    )
+    if species is None:
+        return
+    updated_side = global_best_path.parent.name
+    published = publish_latest_best_version(
+        project_root=config_project_root_from_best_path(global_best_path),
+        species=species,
+        model_name=normalize_public_model_name(model_name),
+        updated_side=updated_side,
+    )
+    if published is not None:
+        print(
+            "[hparam_search] Published versioned best: "
+            f"{published.published_name} "
+            f"(updated_side={published.updated_side} "
+            f"carry_forward={published.carry_forward_side or 'none'})",
+            flush=True,
+        )
+
+
+def _extract_model_name_from_best_update(
+    global_best_path: Path,
+    hparam_context: Optional[dict[str, object]],
+) -> str | None:
+    """Resolve the runtime model name for one best-config update."""
+    if isinstance(hparam_context, dict):
+        fixed_run_args = hparam_context.get("fixed_run_args")
+        if isinstance(fixed_run_args, dict):
+            raw_model = fixed_run_args.get("model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                return raw_model.strip()
+    tuning_model_name = global_best_path.parent.parent.name
+    if tuning_model_name in {"cnn_v2", "cnn_v2_pair", "cnn_pair_v2"}:
+        return tuning_model_name
+    return None
+
+
+def _extract_species_from_best_update(
+    global_best_path: Path,
+    hparam_context: Optional[dict[str, object]],
+) -> str | None:
+    """Resolve the species name for one best-config update."""
+    if isinstance(hparam_context, dict):
+        fixed_run_args = hparam_context.get("fixed_run_args")
+        if isinstance(fixed_run_args, dict):
+            raw_species = fixed_run_args.get("species")
+            if isinstance(raw_species, str) and raw_species.strip():
+                return raw_species.strip()
+    parts = global_best_path.parts
+    if "data" in parts:
+        data_index = parts.index("data")
+        if data_index + 1 < len(parts):
+            return parts[data_index + 1]
+    return None
+
+
+def config_project_root_from_best_path(global_best_path: Path) -> Path:
+    """Infer the project root from one canonical tuning best-config path."""
+    parts = global_best_path.resolve().parts
+    if "data" not in parts:
+        return global_best_path.resolve().parents[4]
+    data_index = parts.index("data")
+    if data_index == 0:
+        return Path(parts[0])
+    return Path(*parts[:data_index])
 
 
 def write_visualization(

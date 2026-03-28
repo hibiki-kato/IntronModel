@@ -1,0 +1,804 @@
+"""Utilities for publishing versioned best artifacts for active CNN v2 models.
+
+This module manages a small public-artifact layer for the active wrappers:
+
+- ``cnn_v2`` (shared donor/acceptor publication)
+- ``cnn_pair_v2`` (public alias for the legacy ``cnn_v2_pair`` pair model)
+
+Publication happens when a canonical ``best_config.json`` improves. The latest
+and previous versions remain live under ``data/`` and ``model/`` while older
+versions move under ``archive/versioned_artifacts/``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import csv
+import json
+from pathlib import Path
+import shutil
+from typing import Iterable, Mapping
+
+from util.checkpoint_io import (
+    extract_task_checkpoint_path,
+    read_json_object,
+    resolve_existing_checkpoint_path,
+)
+
+PAIR_PUBLIC_MODEL_NAME: str = "cnn_pair_v2"
+PAIR_MODEL_ALIASES: frozenset[str] = frozenset({"cnn_v2_pair", PAIR_PUBLIC_MODEL_NAME})
+ACTIVE_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
+    {"cnn_v2", PAIR_PUBLIC_MODEL_NAME}
+)
+VERSION_HISTORY_COLUMNS: tuple[str, ...] = (
+    "version",
+    "published_name",
+    "published_at",
+    "source_best_config",
+    "objective_metric",
+    "objective_score",
+    "updated_side",
+    "carry_forward_side",
+    "donor_checkpoint_path",
+    "acceptor_checkpoint_path",
+    "pair_checkpoint_path",
+    "metrics_json",
+    "archive_status",
+)
+LIVE_VERSION_KEEP_COUNT: int = 2
+INITIAL_VERSION_NUMBER: int = 1
+
+
+@dataclass(frozen=True)
+class VersionHistoryEntry:
+    """One row from ``version_history.tsv``."""
+
+    version: int
+    published_name: str
+    published_at: str
+    source_best_config: str
+    objective_metric: str
+    objective_score: str
+    updated_side: str
+    carry_forward_side: str
+    donor_checkpoint_path: str
+    acceptor_checkpoint_path: str
+    pair_checkpoint_path: str
+    metrics_json: str
+    archive_status: str
+
+    def to_row(self) -> dict[str, str]:
+        """Serialize one history entry for TSV output."""
+        return {
+            "version": str(self.version),
+            "published_name": self.published_name,
+            "published_at": self.published_at,
+            "source_best_config": self.source_best_config,
+            "objective_metric": self.objective_metric,
+            "objective_score": self.objective_score,
+            "updated_side": self.updated_side,
+            "carry_forward_side": self.carry_forward_side,
+            "donor_checkpoint_path": self.donor_checkpoint_path,
+            "acceptor_checkpoint_path": self.acceptor_checkpoint_path,
+            "pair_checkpoint_path": self.pair_checkpoint_path,
+            "metrics_json": self.metrics_json,
+            "archive_status": self.archive_status,
+        }
+
+
+def normalize_public_model_name(model_name: str) -> str:
+    """Normalize a runtime/public model name to the published public name."""
+    normalized = model_name.strip()
+    if normalized in PAIR_MODEL_ALIASES:
+        return PAIR_PUBLIC_MODEL_NAME
+    return normalized
+
+
+def is_active_public_model(model_name: str) -> bool:
+    """Return whether one model participates in version publication."""
+    return normalize_public_model_name(model_name) in ACTIVE_PUBLIC_MODEL_NAMES
+
+
+def format_published_name(public_model_name: str, version: int) -> str:
+    """Format one published version name."""
+    if version <= 0:
+        raise ValueError("version must be positive.")
+    return f"{public_model_name}.{version:02d}"
+
+
+def resolve_version_history_path(
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+) -> Path:
+    """Return the version-history TSV path for one published model."""
+    return (
+        data_root
+        / species
+        / "tuning"
+        / normalize_public_model_name(public_model_name)
+        / "version_history.tsv"
+    )
+
+
+def resolve_versions_dir(
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+) -> Path:
+    """Return the snapshot directory for one published model."""
+    return (
+        data_root
+        / species
+        / "tuning"
+        / normalize_public_model_name(public_model_name)
+        / "versions"
+    )
+
+
+def read_version_history(
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+) -> list[VersionHistoryEntry]:
+    """Read one version-history TSV file."""
+    history_path = resolve_version_history_path(data_root, species, public_model_name)
+    if not history_path.is_file():
+        return []
+
+    entries: list[VersionHistoryEntry] = []
+    with history_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            if row is None:
+                continue
+            raw_version = str(row.get("version", "")).strip()
+            if raw_version == "":
+                continue
+            entry = VersionHistoryEntry(
+                version=int(raw_version),
+                published_name=str(row.get("published_name", "")).strip(),
+                published_at=str(row.get("published_at", "")).strip(),
+                source_best_config=str(row.get("source_best_config", "")).strip(),
+                objective_metric=str(row.get("objective_metric", "")).strip(),
+                objective_score=str(row.get("objective_score", "")).strip(),
+                updated_side=str(row.get("updated_side", "")).strip(),
+                carry_forward_side=str(row.get("carry_forward_side", "")).strip(),
+                donor_checkpoint_path=str(
+                    row.get("donor_checkpoint_path", "")
+                ).strip(),
+                acceptor_checkpoint_path=str(
+                    row.get("acceptor_checkpoint_path", "")
+                ).strip(),
+                pair_checkpoint_path=str(row.get("pair_checkpoint_path", "")).strip(),
+                metrics_json=str(row.get("metrics_json", "")).strip(),
+                archive_status=str(row.get("archive_status", "")).strip() or "live",
+            )
+            entries.append(entry)
+    entries.sort(key=lambda item: item.version)
+    return entries
+
+
+def write_version_history(
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+    entries: Iterable[VersionHistoryEntry],
+) -> None:
+    """Write one version-history TSV file."""
+    history_path = resolve_version_history_path(data_root, species, public_model_name)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=list(VERSION_HISTORY_COLUMNS),
+            delimiter="\t",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for entry in entries:
+            writer.writerow(entry.to_row())
+
+
+def resolve_latest_published_name(
+    data_root: Path,
+    species: str,
+    model_name: str,
+) -> str | None:
+    """Resolve the latest published name for one active model."""
+    public_model_name = normalize_public_model_name(model_name)
+    history = read_version_history(data_root, species, public_model_name)
+    if not history:
+        return None
+    return history[-1].published_name
+
+
+def ensure_publication_seed(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+) -> str | None:
+    """Seed the initial ``.01`` publication when history does not exist yet."""
+    public_model_name = normalize_public_model_name(model_name)
+    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
+        return None
+
+    data_root = _resolve_data_root(project_root)
+    history = read_version_history(data_root, species, public_model_name)
+    if history:
+        return history[-1].published_name
+    published = publish_latest_best_version(
+        project_root=project_root,
+        species=species,
+        model_name=public_model_name,
+        updated_side="seed",
+    )
+    return published.published_name if published is not None else None
+
+
+def publish_latest_best_version(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+    updated_side: str,
+) -> VersionHistoryEntry | None:
+    """Publish the current canonical best state as the next public version."""
+    public_model_name = normalize_public_model_name(model_name)
+    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
+        return None
+
+    data_root = _resolve_data_root(project_root)
+    model_root = _resolve_model_root(project_root)
+    history = read_version_history(data_root, species, public_model_name)
+    next_version = (
+        INITIAL_VERSION_NUMBER if not history else history[-1].version + 1
+    )
+    published_name = format_published_name(public_model_name, next_version)
+    published_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if public_model_name == "cnn_v2":
+        entry = _publish_cnn_v2_version(
+            project_root=project_root,
+            data_root=data_root,
+            model_root=model_root,
+            species=species,
+            history=history,
+            published_name=published_name,
+            published_at=published_at,
+            updated_side=updated_side,
+        )
+    else:
+        entry = _publish_cnn_pair_v2_version(
+            project_root=project_root,
+            data_root=data_root,
+            model_root=model_root,
+            species=species,
+            history=history,
+            published_name=published_name,
+            published_at=published_at,
+            updated_side=updated_side,
+        )
+    if entry is None:
+        return None
+
+    updated_history = [*history, entry]
+    _archive_old_versions(
+        project_root=project_root,
+        data_root=data_root,
+        model_root=model_root,
+        species=species,
+        public_model_name=public_model_name,
+        history_entries=updated_history,
+    )
+    return updated_history[-1]
+
+
+def _publish_cnn_v2_version(
+    *,
+    project_root: Path,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    history: list[VersionHistoryEntry],
+    published_name: str,
+    published_at: str,
+    updated_side: str,
+) -> VersionHistoryEntry | None:
+    donor_path = data_root / species / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    acceptor_path = (
+        data_root / species / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
+    )
+    donor_payload = read_json_object(donor_path)
+    acceptor_payload = read_json_object(acceptor_path)
+    if donor_payload is None or acceptor_payload is None:
+        return None
+    if donor_payload.get("status") != "ok" or acceptor_payload.get("status") != "ok":
+        return None
+
+    previous_entry = history[-1] if history else None
+    updated_side_normalized = updated_side.strip().lower()
+    carry_forward_side = ""
+    donor_source = _resolve_task_checkpoint_from_payload(
+        payload=donor_payload,
+        task="donor",
+        base_dir=donor_path.parent,
+        model_root=model_root,
+    )
+    acceptor_source = _resolve_task_checkpoint_from_payload(
+        payload=acceptor_payload,
+        task="acceptor",
+        base_dir=acceptor_path.parent,
+        model_root=model_root,
+    )
+    if donor_source is None or acceptor_source is None:
+        return None
+
+    donor_destination = model_root / species / "donor" / f"{published_name}.pt"
+    acceptor_destination = model_root / species / "acceptor" / f"{published_name}.pt"
+    if updated_side_normalized == "seed":
+        _move_checkpoint_file(donor_source, donor_destination)
+        _move_checkpoint_file(acceptor_source, acceptor_destination)
+        source_best_config = str(donor_path.resolve())
+        objective_metric = str(donor_payload.get("objective_metric", "")).strip()
+        objective_score = _stringify_scalar(donor_payload.get("objective_score"))
+        metrics_json = str(donor_payload.get("metrics_json", "")).strip()
+    elif updated_side_normalized == "acceptor":
+        carry_forward_side = "donor"
+        donor_source = _resolve_carry_forward_checkpoint(
+            previous_entry=previous_entry,
+            fallback=donor_source,
+            task="donor",
+        )
+        _copy_checkpoint_file(donor_source, donor_destination)
+        _move_checkpoint_file(acceptor_source, acceptor_destination)
+        source_best_config = str(acceptor_path.resolve())
+        objective_metric = str(acceptor_payload.get("objective_metric", "")).strip()
+        objective_score = _stringify_scalar(acceptor_payload.get("objective_score"))
+        metrics_json = str(acceptor_payload.get("metrics_json", "")).strip()
+    else:
+        if updated_side_normalized == "donor":
+            carry_forward_side = "acceptor"
+        donor_source = _resolve_carry_forward_checkpoint(
+            previous_entry=previous_entry if updated_side_normalized != "donor" else None,
+            fallback=donor_source,
+            task="donor",
+        )
+        acceptor_source = _resolve_carry_forward_checkpoint(
+            previous_entry=previous_entry,
+            fallback=acceptor_source,
+            task="acceptor",
+        )
+        if updated_side_normalized == "donor":
+            _move_checkpoint_file(donor_source, donor_destination)
+        else:
+            _copy_checkpoint_file(donor_source, donor_destination)
+        _copy_checkpoint_file(acceptor_source, acceptor_destination)
+        source_best_config = str(donor_path.resolve())
+        objective_metric = str(donor_payload.get("objective_metric", "")).strip()
+        objective_score = _stringify_scalar(donor_payload.get("objective_score"))
+        metrics_json = str(donor_payload.get("metrics_json", "")).strip()
+
+    donor_payload["donor_checkpoint_path"] = str(donor_destination.resolve())
+    donor_payload["acceptor_checkpoint_path"] = str(acceptor_destination.resolve())
+    donor_payload["published_name"] = published_name
+    donor_payload["published_at"] = published_at
+    acceptor_payload["donor_checkpoint_path"] = str(donor_destination.resolve())
+    acceptor_payload["acceptor_checkpoint_path"] = str(acceptor_destination.resolve())
+    acceptor_payload["published_name"] = published_name
+    acceptor_payload["published_at"] = published_at
+    _write_json_object(donor_path, donor_payload)
+    _write_json_object(acceptor_path, acceptor_payload)
+
+    _seed_unversioned_outputs_if_needed(
+        data_root=data_root,
+        species=species,
+        public_model_name="cnn_v2",
+        published_name=published_name,
+    )
+    snapshot_payload = {
+        "public_model": "cnn_v2",
+        "published_name": published_name,
+        "published_at": published_at,
+        "updated_side": updated_side_normalized,
+        "carry_forward_side": carry_forward_side,
+        "best_configs": {
+            "donor": donor_payload,
+            "acceptor": acceptor_payload,
+        },
+    }
+    _write_snapshot(
+        data_root=data_root,
+        species=species,
+        public_model_name="cnn_v2",
+        published_name=published_name,
+        payload=snapshot_payload,
+    )
+    return VersionHistoryEntry(
+        version=_parse_version_number(published_name, "cnn_v2"),
+        published_name=published_name,
+        published_at=published_at,
+        source_best_config=source_best_config,
+        objective_metric=objective_metric,
+        objective_score=objective_score,
+        updated_side=updated_side_normalized,
+        carry_forward_side=carry_forward_side,
+        donor_checkpoint_path=str(donor_destination.resolve()),
+        acceptor_checkpoint_path=str(acceptor_destination.resolve()),
+        pair_checkpoint_path="",
+        metrics_json=metrics_json,
+        archive_status="live",
+    )
+
+
+def _publish_cnn_pair_v2_version(
+    *,
+    project_root: Path,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    history: list[VersionHistoryEntry],
+    published_name: str,
+    published_at: str,
+    updated_side: str,
+) -> VersionHistoryEntry | None:
+    pair_path = _resolve_pair_best_config_path(data_root, species)
+    pair_payload = read_json_object(pair_path)
+    if pair_payload is None or pair_payload.get("status") != "ok":
+        return None
+
+    pair_source = _resolve_task_checkpoint_from_payload(
+        payload=pair_payload,
+        task="pair",
+        base_dir=pair_path.parent,
+        model_root=model_root,
+    )
+    if pair_source is None:
+        return None
+
+    pair_destination = model_root / species / "pair" / f"{published_name}.pt"
+    _move_checkpoint_file(pair_source, pair_destination)
+    pair_payload["pair_checkpoint_path"] = str(pair_destination.resolve())
+    pair_payload["published_name"] = published_name
+    pair_payload["published_at"] = published_at
+    public_pair_path = (
+        data_root / species / "tuning" / PAIR_PUBLIC_MODEL_NAME / "pair" / "best_config.json"
+    )
+    _write_json_object(public_pair_path, pair_payload)
+    if pair_path != public_pair_path:
+        _write_json_object(pair_path, pair_payload)
+
+    _seed_unversioned_outputs_if_needed(
+        data_root=data_root,
+        species=species,
+        public_model_name=PAIR_PUBLIC_MODEL_NAME,
+        published_name=published_name,
+    )
+    snapshot_payload = {
+        "public_model": PAIR_PUBLIC_MODEL_NAME,
+        "published_name": published_name,
+        "published_at": published_at,
+        "updated_side": updated_side.strip().lower(),
+        "carry_forward_side": "",
+        "best_config": pair_payload,
+    }
+    _write_snapshot(
+        data_root=data_root,
+        species=species,
+        public_model_name=PAIR_PUBLIC_MODEL_NAME,
+        published_name=published_name,
+        payload=snapshot_payload,
+    )
+    return VersionHistoryEntry(
+        version=_parse_version_number(published_name, PAIR_PUBLIC_MODEL_NAME),
+        published_name=published_name,
+        published_at=published_at,
+        source_best_config=str(pair_path.resolve()),
+        objective_metric=str(pair_payload.get("objective_metric", "")).strip(),
+        objective_score=_stringify_scalar(pair_payload.get("objective_score")),
+        updated_side=updated_side.strip().lower(),
+        carry_forward_side="",
+        donor_checkpoint_path="",
+        acceptor_checkpoint_path="",
+        pair_checkpoint_path=str(pair_destination.resolve()),
+        metrics_json=str(pair_payload.get("metrics_json", "")).strip(),
+        archive_status="live",
+    )
+
+
+def _archive_old_versions(
+    *,
+    project_root: Path,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    public_model_name: str,
+    history_entries: list[VersionHistoryEntry],
+) -> None:
+    if len(history_entries) <= LIVE_VERSION_KEEP_COUNT:
+        write_version_history(data_root, species, public_model_name, history_entries)
+        return
+
+    live_entries = history_entries[-LIVE_VERSION_KEEP_COUNT:]
+    live_names = {entry.published_name for entry in live_entries}
+    archive_root = (
+        project_root
+        / "archive"
+        / "versioned_artifacts"
+        / species
+        / public_model_name
+    )
+    updated_entries: list[VersionHistoryEntry] = []
+    for entry in history_entries:
+        archive_status = "live" if entry.published_name in live_names else "archived"
+        if archive_status == "archived":
+            _archive_one_version(
+                archive_root=archive_root / entry.published_name,
+                data_root=data_root,
+                model_root=model_root,
+                species=species,
+                public_model_name=public_model_name,
+                published_name=entry.published_name,
+            )
+        updated_entries.append(
+            VersionHistoryEntry(
+                version=entry.version,
+                published_name=entry.published_name,
+                published_at=entry.published_at,
+                source_best_config=entry.source_best_config,
+                objective_metric=entry.objective_metric,
+                objective_score=entry.objective_score,
+                updated_side=entry.updated_side,
+                carry_forward_side=entry.carry_forward_side,
+                donor_checkpoint_path=entry.donor_checkpoint_path,
+                acceptor_checkpoint_path=entry.acceptor_checkpoint_path,
+                pair_checkpoint_path=entry.pair_checkpoint_path,
+                metrics_json=entry.metrics_json,
+                archive_status=archive_status,
+            )
+        )
+    write_version_history(data_root, species, public_model_name, updated_entries)
+
+
+def _archive_one_version(
+    *,
+    archive_root: Path,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+) -> None:
+    for live_path, relative_path in _iter_public_artifact_paths(
+        data_root=data_root,
+        model_root=model_root,
+        species=species,
+        public_model_name=public_model_name,
+        published_name=published_name,
+    ):
+        if not live_path.exists():
+            continue
+        destination = archive_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(live_path), str(destination))
+
+
+def _seed_unversioned_outputs_if_needed(
+    *,
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+) -> None:
+    for source_stem in _iter_public_output_stem_candidates(public_model_name):
+        for src_path, dst_path in _iter_public_data_output_moves(
+            data_root=data_root,
+            species=species,
+            source_stem=source_stem,
+            destination_stem=published_name,
+        ):
+            if not src_path.exists() or dst_path.exists():
+                continue
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src_path), str(dst_path))
+
+
+def _iter_public_output_stem_candidates(public_model_name: str) -> tuple[str, ...]:
+    if public_model_name == PAIR_PUBLIC_MODEL_NAME:
+        return ("cnn_v2_pair", PAIR_PUBLIC_MODEL_NAME)
+    return (public_model_name,)
+
+
+def _iter_public_data_output_moves(
+    *,
+    data_root: Path,
+    species: str,
+    source_stem: str,
+    destination_stem: str,
+) -> Iterable[tuple[Path, Path]]:
+    yield (
+        data_root / species / "site_score" / f"{source_stem}.tsv",
+        data_root / species / "site_score" / f"{destination_stem}.tsv",
+    )
+    yield (
+        data_root / species / "intron_score" / f"{source_stem}.tsv",
+        data_root / species / "intron_score" / f"{destination_stem}.tsv",
+    )
+    yield (
+        data_root / species / "trans_score" / f"{source_stem}.tsv",
+        data_root / species / "trans_score" / f"{destination_stem}.tsv",
+    )
+    yield (
+        data_root / species / "eval_score" / f"{source_stem}.txt",
+        data_root / species / "eval_score" / f"{destination_stem}.txt",
+    )
+    yield (
+        data_root / species / "learning_metric" / f"{source_stem}.train.json",
+        data_root / species / "learning_metric" / f"{destination_stem}.train.json",
+    )
+    yield (
+        data_root / species / "learning_metric" / f"{source_stem}_learning_curve.png",
+        data_root
+        / species
+        / "learning_metric"
+        / f"{destination_stem}_learning_curve.png",
+    )
+
+
+def _write_snapshot(
+    *,
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+    payload: Mapping[str, object],
+) -> None:
+    snapshot_path = (
+        resolve_versions_dir(data_root, species, public_model_name)
+        / f"{published_name}.json"
+    )
+    _write_json_object(snapshot_path, payload)
+
+
+def _resolve_pair_best_config_path(data_root: Path, species: str) -> Path:
+    new_path = (
+        data_root / species / "tuning" / PAIR_PUBLIC_MODEL_NAME / "pair" / "best_config.json"
+    )
+    if new_path.is_file():
+        return new_path
+    return data_root / species / "tuning" / "cnn_v2_pair" / "pair" / "best_config.json"
+
+
+def _resolve_task_checkpoint_from_payload(
+    *,
+    payload: Mapping[str, object],
+    task: str,
+    base_dir: Path,
+    model_root: Path,
+) -> Path | None:
+    raw_path = extract_task_checkpoint_path(payload, task=task, base_dir=base_dir)
+    if raw_path is None:
+        return None
+    return resolve_existing_checkpoint_path(raw_path, model_root_dir=model_root)
+
+
+def _resolve_carry_forward_checkpoint(
+    *,
+    previous_entry: VersionHistoryEntry | None,
+    fallback: Path,
+    task: str,
+) -> Path:
+    if previous_entry is None:
+        return fallback
+    raw_value = ""
+    if task == "donor":
+        raw_value = previous_entry.donor_checkpoint_path
+    elif task == "acceptor":
+        raw_value = previous_entry.acceptor_checkpoint_path
+    elif task == "pair":
+        raw_value = previous_entry.pair_checkpoint_path
+    candidate = Path(raw_value) if raw_value != "" else fallback
+    if candidate.exists():
+        return candidate.resolve()
+    return fallback.resolve()
+
+
+def _move_checkpoint_file(source: Path, destination: Path) -> None:
+    source_resolved = source.resolve()
+    destination_resolved = destination.resolve()
+    if source_resolved == destination_resolved:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    shutil.move(str(source_resolved), str(destination))
+
+
+def _copy_checkpoint_file(source: Path, destination: Path) -> None:
+    source_resolved = source.resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source_resolved == destination.resolve():
+        return
+    if destination.exists():
+        destination.unlink()
+    try:
+        os.link(source_resolved, destination)
+    except OSError:
+        shutil.copy2(source_resolved, destination)
+
+
+def _iter_public_artifact_paths(
+    *,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+) -> Iterable[tuple[Path, Path]]:
+    if public_model_name == "cnn_v2":
+        yield (
+            model_root / species / "donor" / f"{published_name}.pt",
+            Path("model") / "donor" / f"{published_name}.pt",
+        )
+        yield (
+            model_root / species / "acceptor" / f"{published_name}.pt",
+            Path("model") / "acceptor" / f"{published_name}.pt",
+        )
+    else:
+        yield (
+            model_root / species / "pair" / f"{published_name}.pt",
+            Path("model") / "pair" / f"{published_name}.pt",
+        )
+    for directory_name, suffix in (
+        ("site_score", ".tsv"),
+        ("intron_score", ".tsv"),
+        ("trans_score", ".tsv"),
+        ("eval_score", ".txt"),
+    ):
+        yield (
+            data_root / species / directory_name / f"{published_name}{suffix}",
+            Path("data") / directory_name / f"{published_name}{suffix}",
+        )
+    yield (
+        data_root / species / "learning_metric" / f"{published_name}.train.json",
+        Path("data") / "learning_metric" / f"{published_name}.train.json",
+    )
+    yield (
+        data_root
+        / species
+        / "learning_metric"
+        / f"{published_name}_learning_curve.png",
+        Path("data") / "learning_metric" / f"{published_name}_learning_curve.png",
+    )
+
+
+def _write_json_object(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(payload), indent=2) + "\n", encoding="utf-8")
+
+
+def _parse_version_number(published_name: str, public_model_name: str) -> int:
+    prefix = f"{public_model_name}."
+    if not published_name.startswith(prefix):
+        raise ValueError(
+            f"Published name does not match public model '{public_model_name}': "
+            f"{published_name}"
+        )
+    return int(published_name[len(prefix) :])
+
+
+def _stringify_scalar(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _resolve_data_root(project_root: Path) -> Path:
+    return (project_root / "data").resolve()
+
+
+def _resolve_model_root(project_root: Path) -> Path:
+    return (project_root / "model").resolve()

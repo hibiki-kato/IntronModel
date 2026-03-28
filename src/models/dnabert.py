@@ -648,11 +648,12 @@ def _load_tokenizer_uncached(
     pretrained_revision: Optional[str],
     trust_remote_code: bool,
 ) -> object:
-    """Load DNABERT tokenizer without using the process-local cache."""
+    """Load a cached-local DNABERT tokenizer without process-local reuse."""
     _require_transformers()
     assert AutoTokenizer is not None
     tokenizer_kwargs = _without_none_kwargs(
         {
+            "local_files_only": True,
             "revision": pretrained_revision,
             "trust_remote_code": trust_remote_code,
         }
@@ -1123,7 +1124,7 @@ def _load_backbone_template_uncached(
     pretrained_revision: Optional[str],
     trust_remote_code: bool,
 ) -> _CachedBackboneTemplate:
-    """Load one pretrained DNABERT backbone template without cache reuse."""
+    """Load one cached-local DNABERT backbone template without cache reuse."""
     _require_transformers()
     assert AutoConfig is not None
     assert AutoModel is not None
@@ -1132,6 +1133,7 @@ def _load_backbone_template_uncached(
     )
     config_kwargs = _without_none_kwargs(
         {
+            "local_files_only": True,
             "trust_remote_code": trust_remote_code,
             "revision": pretrained_revision,
         }
@@ -1151,6 +1153,7 @@ def _load_backbone_template_uncached(
     )
     model_kwargs = _without_none_kwargs(
         {
+            "local_files_only": True,
             "trust_remote_code": trust_remote_code,
             "config": config,
             "low_cpu_mem_usage": False,

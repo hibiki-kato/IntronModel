@@ -50,9 +50,23 @@ intronmodel_resolve_tuned_config_path() {
 		return 0
 	fi
 
+	local legacy_tuned_model_name="${tuned_model_name}"
+	case "${tuned_model_name}" in
+		cnn_pair_v2)
+			legacy_tuned_model_name="cnn_v2_pair"
+			;;
+	esac
+	if [[ "${legacy_tuned_model_name}" != "${tuned_model_name}" ]]; then
+		local legacy_task_path="${data_root}/${species}/tuning/${legacy_tuned_model_name}/${tuned_target}/${best_config_filename}"
+		if [[ -f "${legacy_task_path}" ]]; then
+			printf '%s\n' "${legacy_task_path}"
+			return 0
+		fi
+	fi
+
 	local use_task_only_configs="0"
 	case "${tuned_model_name}" in
-		cnn_v2 | cnn_v2_pair)
+		cnn_v2 | cnn_v2_pair | cnn_pair_v2)
 			use_task_only_configs="1"
 			;;
 	esac

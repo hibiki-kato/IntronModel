@@ -148,6 +148,8 @@ def test_build_sequence_encoder_kmer3_returns_shifted_ids() -> None:
 
 
 def test_build_sequence_encoder_bpe_shifts_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_kwargs: dict[str, object] = {}
+
     class _FakeTokenizer:
         vocab_size = 10
 
@@ -157,6 +159,7 @@ def test_build_sequence_encoder_bpe_shifts_ids(monkeypatch: pytest.MonkeyPatch) 
     class _FakeAutoTokenizer:
         @staticmethod
         def from_pretrained(*_args: object, **_kwargs: object) -> _FakeTokenizer:
+            captured_kwargs.update(_kwargs)
             return _FakeTokenizer()
 
     monkeypatch.setattr(bilstm_pair, "AutoTokenizer", _FakeAutoTokenizer)
@@ -173,3 +176,5 @@ def test_build_sequence_encoder_bpe_shifts_ids(monkeypatch: pytest.MonkeyPatch) 
     assert tokens == [3, 6, 10]
     assert encoder.vocab_size == 12
     assert encoder.sep_token_id == 11
+    assert captured_kwargs["local_files_only"] is True
+    assert captured_kwargs["trust_remote_code"] is False

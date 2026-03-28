@@ -19,7 +19,11 @@ import torch
 
 from models.cnn import load_task_model, score_sequences
 from util.data_proc import model_root
-from util.checkpoint_io import extract_task_checkpoint_path, read_json_object
+from util.checkpoint_io import (
+    extract_task_checkpoint_path,
+    read_json_object,
+    resolve_existing_checkpoint_path,
+)
 from util.model_runtime import pick_device
 
 CandidateKind = Literal["gt", "ag"]
@@ -260,38 +264,6 @@ def _resolve_json_path(raw_path: str, base_dir: Path) -> Path:
         return path.resolve()
     return (base_dir / path).resolve()
 
-
-def _resolve_existing_checkpoint_path(
-    checkpoint_path: Path,
-    *,
-    model_root_dir: Path,
-) -> Path:
-    """Resolve one checkpoint path, falling back to the local model root."""
-    if checkpoint_path.is_file():
-        return checkpoint_path.resolve()
-
-    path_parts = checkpoint_path.parts
-    if "model" in path_parts:
-        model_index = path_parts.index("model")
-        relative_parts = path_parts[model_index + 1 :]
-        if relative_parts:
-            candidate = model_root_dir.joinpath(*relative_parts)
-            if candidate.is_file():
-                return candidate.resolve()
-
-    basename = checkpoint_path.name
-    if basename != "":
-        candidates = sorted(
-            model_root_dir.rglob(basename),
-            key=lambda path: (len(path.parts), str(path)),
-        )
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate.resolve()
-
-    raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-
 def load_task_checkpoint_path(best_config_path: Path, task: str) -> Path:
     """Load one task checkpoint path from a best-config payload.
 
@@ -354,7 +326,7 @@ def load_task_checkpoint_path(best_config_path: Path, task: str) -> Path:
                 f"Unable to resolve {task} checkpoint path from {best_config_path}."
             )
     root_dir = Path(model_root()).resolve()
-    return _resolve_existing_checkpoint_path(
+    return resolve_existing_checkpoint_path(
         checkpoint,
         model_root_dir=root_dir,
     )

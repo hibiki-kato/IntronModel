@@ -183,7 +183,7 @@ def _load_bpe_tokenizer(
     pretrained_revision: Optional[str],
     trust_remote_code: bool,
 ) -> object:
-    """Load and cache BPE tokenizer from Hugging Face source."""
+    """Load and cache a local-only BPE tokenizer."""
     if AutoTokenizer is None:
         raise RuntimeError(
             "transformers is required for --input_mode=bpe but is not installed."
@@ -193,6 +193,7 @@ def _load_bpe_tokenizer(
     if tokenizer is not None:
         return tokenizer
     tokenizer_kwargs: dict[str, object] = {
+        "local_files_only": True,
         "trust_remote_code": trust_remote_code,
     }
     if pretrained_revision is not None:

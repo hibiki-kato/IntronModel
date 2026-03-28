@@ -800,16 +800,16 @@ fi
 
 if model_is_selected "cnn_pair"; then
 	if all_tuned_configs_exist "${CNN_PAIR_CFG}"; then
-		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_v2_pair.sh" "cnn_v2_pair.sh" \
-			"MODEL=cnn_v2_pair" \
+		run_wrapper_infer "${PROJECT_ROOT}/run/run_cnn_pair_v2.sh" "cnn_pair_v2.sh" \
+			"MODEL=cnn_pair_v2" \
 			"MASK_MODE=on" \
 			"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
 	else
 		missing_text="$(missing_tuned_configs_text "${CNN_PAIR_CFG}")"
 		action="$(missing_action_for_model "cnn_pair" "${missing_text}" "1")"
 		if [[ "${action}" == "train" ]]; then
-			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_v2_pair.sh" "cnn_v2_pair.sh" \
-				"MODEL=cnn_v2_pair" \
+			run_wrapper_train_fallback "${PROJECT_ROOT}/run/run_cnn_pair_v2.sh" "cnn_pair_v2.sh" \
+				"MODEL=cnn_pair_v2" \
 				"MASK_MODE=on" \
 				"PAIR_TUNED_CONFIG_PATH=${CNN_PAIR_CFG}"
 		fi

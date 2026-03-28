@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from util.versioned_artifacts import ensure_publication_seed
+from util.versioned_artifacts import publish_latest_best_version
+from util.versioned_artifacts import read_version_history
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _best_payload(
+    *,
+    checkpoint_path: Path,
+    objective_metric: str,
+    objective_score: float,
+) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "objective_metric": objective_metric,
+        "objective_score": objective_score,
+        "metrics_json": "",
+        "sampled_params": {},
+        "pair": {
+            "checkpoint": str(checkpoint_path),
+        },
+    }
+
+
+def _site_best_payload(
+    *,
+    task: str,
+    checkpoint_path: Path,
+    objective_metric: str,
+    objective_score: float,
+) -> dict[str, object]:
+    payload = {
+        "status": "ok",
+        "objective_metric": objective_metric,
+        "objective_score": objective_score,
+        "metrics_json": "",
+        "sampled_params": {
+            "train_target": task,
+        },
+        f"{task}_checkpoint_path": str(checkpoint_path),
+    }
+    return payload
+
+
+def _touch_public_outputs(base_dir: Path, stem: str) -> None:
+    for directory_name, suffix in (
+        ("site_score", ".tsv"),
+        ("intron_score", ".tsv"),
+        ("trans_score", ".tsv"),
+        ("eval_score", ".txt"),
+    ):
+        path = base_dir / directory_name / f"{stem}{suffix}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{stem}\n", encoding="utf-8")
+    learning_metric = base_dir / "learning_metric"
+    learning_metric.mkdir(parents=True, exist_ok=True)
+    (learning_metric / f"{stem}.train.json").write_text("{}", encoding="utf-8")
+    (learning_metric / f"{stem}_learning_curve.png").write_bytes(b"png")
+
+
+def test_ensure_publication_seed_migrates_live_cnn_v2_outputs(tmp_path: Path) -> None:
+    donor_checkpoint = tmp_path / "model" / "SpX" / "donor" / "donor_raw.pt"
+    acceptor_checkpoint = (
+        tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw.pt"
+    )
+    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    donor_checkpoint.write_bytes(b"donor")
+    acceptor_checkpoint.write_bytes(b"acceptor")
+
+    donor_best = (
+        tmp_path / "data" / "SpX" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    )
+    acceptor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_v2"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_checkpoint,
+            objective_metric="donor_pr_auc",
+            objective_score=0.91,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_checkpoint,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.87,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_v2")
+
+    published_name = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+    )
+
+    assert published_name == "cnn_v2.01"
+    assert not donor_checkpoint.exists()
+    assert not acceptor_checkpoint.exists()
+    assert (tmp_path / "model" / "SpX" / "donor" / "cnn_v2.01.pt").exists()
+    assert (tmp_path / "model" / "SpX" / "acceptor" / "cnn_v2.01.pt").exists()
+    assert (tmp_path / "data" / "SpX" / "trans_score" / "cnn_v2.01.tsv").exists()
+    assert not (tmp_path / "data" / "SpX" / "trans_score" / "cnn_v2.tsv").exists()
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_v2")
+    assert len(history) == 1
+    assert history[0].published_name == "cnn_v2.01"
+    assert history[0].archive_status == "live"
+
+
+def test_publish_latest_best_version_carries_forward_other_site_checkpoint(
+    tmp_path: Path,
+) -> None:
+    donor_raw_1 = tmp_path / "model" / "SpX" / "donor" / "donor_raw_1.pt"
+    acceptor_raw_1 = (
+        tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw_1.pt"
+    )
+    donor_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    donor_raw_1.write_bytes(b"donor-1")
+    acceptor_raw_1.write_bytes(b"acceptor-1")
+    donor_best = (
+        tmp_path / "data" / "SpX" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    )
+    acceptor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_v2"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw_1,
+            objective_metric="donor_pr_auc",
+            objective_score=0.91,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_raw_1,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.87,
+        ),
+    )
+    _ = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+    )
+
+    donor_raw_2 = tmp_path / "model" / "SpX" / "donor" / "donor_raw_2.pt"
+    donor_raw_2.write_bytes(b"donor-2")
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw_2,
+            objective_metric="donor_pr_auc",
+            objective_score=0.95,
+        ),
+    )
+    entry = publish_latest_best_version(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+        updated_side="donor",
+    )
+
+    assert entry is not None
+    assert entry.published_name == "cnn_v2.02"
+    donor_v2 = tmp_path / "model" / "SpX" / "donor" / "cnn_v2.02.pt"
+    acceptor_v2 = tmp_path / "model" / "SpX" / "acceptor" / "cnn_v2.02.pt"
+    assert donor_v2.read_bytes() == b"donor-2"
+    assert acceptor_v2.read_bytes() == b"acceptor-1"
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_v2")
+    assert [row.published_name for row in history] == ["cnn_v2.01", "cnn_v2.02"]
+    assert history[-1].carry_forward_side == "acceptor"
+
+
+def test_ensure_publication_seed_promotes_legacy_pair_outputs(tmp_path: Path) -> None:
+    pair_checkpoint = tmp_path / "model" / "SpX" / "pair" / "pair_raw.pt"
+    pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    pair_checkpoint.write_bytes(b"pair")
+    pair_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_v2_pair"
+        / "pair"
+        / "best_config.json"
+    )
+    _write_json(
+        pair_best,
+        _best_payload(
+            checkpoint_path=pair_checkpoint,
+            objective_metric="pair_pr_auc",
+            objective_score=0.88,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_v2_pair")
+
+    published_name = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v2",
+    )
+
+    assert published_name == "cnn_pair_v2.01"
+    assert (
+        tmp_path / "model" / "SpX" / "pair" / "cnn_pair_v2.01.pt"
+    ).read_bytes() == b"pair"
+    assert (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_pair_v2"
+        / "pair"
+        / "best_config.json"
+    ).is_file()
+    assert (
+        tmp_path / "data" / "SpX" / "trans_score" / "cnn_pair_v2.01.tsv"
+    ).exists()

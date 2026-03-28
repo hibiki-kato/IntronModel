@@ -348,13 +348,19 @@ def test_train_pair_model_rejects_invalid_validation_metric() -> None:
 
 
 def test_bpe_encoder_uses_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_kwargs: dict[str, object] = {}
+
     class _FakeAutoTokenizer:
         @staticmethod
         def from_pretrained(*args: object, **kwargs: object) -> object:
+            del args
+            captured_kwargs.update(kwargs)
+
             class _Tok:
                 vocab_size = 321
 
                 def __call__(self, text: str, **kw: object) -> dict[str, list[int]]:
+                    del text
                     max_length = int(kw["max_length"])
                     return {"input_ids": [1] * max_length}
 
@@ -371,6 +377,8 @@ def test_bpe_encoder_uses_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
     encoded = encoder.encode("ACGT")
     assert encoded.shape == (7,)
     assert encoder.vocab_size == 321
+    assert captured_kwargs["local_files_only"] is True
+    assert captured_kwargs["trust_remote_code"] is False
 
 
 def test_infer_site_independent_returns_site_rows(
@@ -541,7 +549,7 @@ def test_train_independent_rejects_pair_target(
         mask="on",
     )
 
-    with pytest.raises(ValueError, match="donor or acceptor"):
+    with pytest.raises(ValueError, match="both, donor, or acceptor"):
         cnn_v2.train(common_args, model_args)
 
 

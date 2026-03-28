@@ -579,7 +579,7 @@ def _add_cnn_v2_fallback_train_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_cnn_v2_pair_fallback_train_args(parser: argparse.ArgumentParser) -> None:
-    """Add cnn_v2_pair train args without importing torch-dependent modules."""
+    """Add cnn_v2 pair train args without importing torch-dependent modules."""
     _add_cnn_pair_fallback_train_args(parser)
     parser.add_argument(
         "--pair_mode",
@@ -655,7 +655,7 @@ def _build_parser(
     elif selected_model == "cnn_v2":
         _add_cnn_v2_fallback_train_args(parser)
         _add_cnn_pair_fallback_infer_args(parser)
-    elif selected_model == "cnn_v2_pair":
+    elif selected_model in {"cnn_v2_pair", "cnn_pair_v2"}:
         _add_cnn_v2_pair_fallback_train_args(parser)
         _add_cnn_pair_fallback_infer_args(parser)
     elif selected_model == "cnn_v3":
@@ -1273,7 +1273,7 @@ def _attach_validation_metadata(
     include_pair_mixed_negatives = False
     if train_target == "pair":
         include_pair_mixed_negatives = True
-    elif model_name == "cnn_v2_pair":
+    elif model_name in {"cnn_v2_pair", "cnn_pair_v2"}:
         include_pair_mixed_negatives = True
     elif model_name in {"cnn_pair", "bilstm_pair", "cnn_v3"}:
         include_pair_mixed_negatives = True
@@ -1364,7 +1364,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if args.model == "cnn_v2":
         args.pair_mode = "independent"
         model_tasks = ("donor", "acceptor")
-    elif args.model == "cnn_v2_pair":
+    elif args.model in {"cnn_v2_pair", "cnn_pair_v2"}:
         args.pair_mode = "pair"
         model_tasks = ("pair",)
     default_train_target = (
@@ -1375,7 +1375,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
     )
-    if args.model == "cnn_v2_pair":
+    if args.model in {"cnn_v2_pair", "cnn_pair_v2"}:
         if train_target != "pair":
             train_target = "pair"
             args.train_target = "pair"

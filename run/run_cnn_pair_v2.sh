@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[cnn_v2_pair.sh] This script is config-only." \
+	echo "[cnn_pair_v2.sh] This script is config-only." \
 		"Edit top CONFIG and run without args." >&2
 	exit 1
 fi
@@ -11,9 +11,9 @@ fi
 # CONFIG (edit here)
 # --------------------------
 set -a
-MODEL="cnn_v2_pair"
+MODEL="cnn_pair_v2"
 SPECIES="${SPECIES:-Mmus,Athal,Dmel,Hsap}"
-INTRONMODEL_AUTO_TMUX="${INTRONMODEL_AUTO_TMUX:-on}"  # off | on | auto
+INTRONMODEL_AUTO_TMUX="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRAIN_POS_PATH=""
@@ -37,7 +37,7 @@ FC_HIDDEN="128"
 WEIGHT_DECAY="0.01"
 ETA_MIN_RATIO="0.01"
 VAL_FRAC="0.25"
-VALIDATION_METRIC="pr_auc"  # pr_auc | roc_auc | max_f1 | acc@0.5
+VALIDATION_METRIC="max_f1"  # pr_auc | roc_auc | max_f1 | acc@0.5
 GRAD_CLIP="5.0"
 POS_WEIGHT_CAP="20.0"
 FOCAL_GAMMA="2.0"
@@ -81,7 +81,6 @@ TRANSCRIPT_SCORE_AGG="min"
 SOFTMIN_TAU="1.0"
 SEED="1337"
 TAG=""
-SYNTHESIZE_MODE="off"
 VISUALIZE="true"
 SKIP_TRAINING="0"
 CONTINUE_TRAINING="0"
@@ -129,36 +128,52 @@ append_flag_if_truthy() {
 	esac
 }
 
+
+append_versioned_output_args() {
+	local script_tag="$1"
+	local species="$2"
+	local model_name="$3"
+	local published_name=""
+
+	published_name="$(
+		intronmodel_resolve_latest_published_name \
+			"${script_tag}" \
+			"${species}" \
+			"${model_name}"
+	)"
+	if [[ -z "${published_name}" ]]; then
+		return 0
+	fi
+
+	args+=(
+		--site_output_tsv "${DATA_ROOT}/${species}/site_score/${published_name}.tsv"
+		--intron_output_tsv "${DATA_ROOT}/${species}/intron_score/${published_name}.tsv"
+		--transcript_output_tsv "${DATA_ROOT}/${species}/trans_score/${published_name}.tsv"
+		--eval_output_txt "${DATA_ROOT}/${species}/eval_score/${published_name}.txt"
+		--metrics_json "${DATA_ROOT}/${species}/learning_metric/${published_name}.train.json"
+	)
+}
+
 run_species_once() {
 	local species="$1"
 	local assigned_gpu_id="${2-}"
 	local tuned_model_name
 	local best_config_filename
-	local synthesize_resolved
 	local resolved_tag
 	local resolved_train_pos_path
 	local resolved_train_neg_path
+	local use_wrapper_hparams="1"
 
-	tuned_model_name="$(
-		intronmodel_resolve_pair_tuning_model_name "${SYNTHESIZE_MODE}"
-	)"
+	tuned_model_name="$(intronmodel_resolve_pair_tuning_model_name)"
 	best_config_filename="$(
-		intronmodel_resolve_pair_best_config_filename "${SYNTHESIZE_MODE}"
+		intronmodel_resolve_pair_best_config_filename
 	)"
-
-	synthesize_resolved="$(
-		intronmodel_resolve_pair_synthesize_defaults \
-			"${species}" \
-			"${SYNTHESIZE_MODE}" \
-			"${TAG}" \
-			"${TRAIN_POS_PATH}" \
-			"${TRAIN_NEG_PATH}"
-	)"
-	IFS=$'\t' read -r resolved_tag resolved_train_pos_path \
-		resolved_train_neg_path <<<"${synthesize_resolved}"
+	resolved_tag="${TAG}"
+	resolved_train_pos_path="${TRAIN_POS_PATH}"
+	resolved_train_neg_path="${TRAIN_NEG_PATH}"
 	resolved_train_paths="$(
 		intronmodel_resolve_and_validate_train_paths \
-			"run_cnn_v2_pair.sh" \
+			"run_cnn_pair_v2.sh" \
 			"${species}" \
 			"${resolved_train_pos_path}" \
 			"${resolved_train_neg_path}"
@@ -169,10 +184,7 @@ run_species_once() {
 	args=(
 		--model "${MODEL}"
 		--species "${species}"
-		--donor_len "${DONOR_LEN}"
-		--acceptor_len "${ACCEPTOR_LEN}"
 		--device "${DEVICE}"
-		--seed "${SEED}"
 		--name_fields "${NAME_FIELDS}"
 		--use_amp "${USE_AMP}"
 		--amp_dtype "${AMP_DTYPE}"
@@ -186,32 +198,8 @@ run_species_once() {
 		--pin_memory "${PIN_MEMORY}"
 		--min_batch_size "${MIN_BATCH_SIZE}"
 		--max_oom_retries "${MAX_OOM_RETRIES}"
-		--val_frac "${VAL_FRAC}"
-		--epochs "${EPOCHS}"
-		--max_epochs "${MAX_EPOCHS}"
-		--early_stop_patience "${EARLY_STOP_PATIENCE}"
-		--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
-		--batch_size "${BATCH_SIZE}"
-		--lr "${LR}"
-		--loss "${LOSS}"
-		--conv_channels "${CONV_CHANNELS}"
-		--kernel_sizes "${KERNEL_SIZES}"
-		--max_pool_size "${MAX_POOL_SIZE}"
-		--head_type "${HEAD_TYPE}"
-		--dropout "${DROPOUT}"
-		--fc_hidden "${FC_HIDDEN}"
-		--weight_decay "${WEIGHT_DECAY}"
-		--eta_min_ratio "${ETA_MIN_RATIO}"
-		--grad_clip "${GRAD_CLIP}"
-		--pos_weight_cap "${POS_WEIGHT_CAP}"
-		--focal_gamma "${FOCAL_GAMMA}"
-		--focal_alpha_pos "${FOCAL_ALPHA_POS}"
-		--asym_gamma_pos "${ASYM_GAMMA_POS}"
-		--asym_gamma_neg "${ASYM_GAMMA_NEG}"
-		--asym_alpha_pos "${ASYM_ALPHA_POS}"
 		--transcript_score_agg "${TRANSCRIPT_SCORE_AGG}"
 		--softmin_tau "${SOFTMIN_TAU}"
-		--train_target "${TRAIN_TARGET}"
 		--validation_metric "${VALIDATION_METRIC}"
 		--intron_score_op "${INTRON_SCORE_OP}"
 		--visualize "${VISUALIZE}"
@@ -234,6 +222,9 @@ run_species_once() {
 	append_arg_if_set "test_tsv" "${TEST_TSV_PATH}"
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
+	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
+		append_versioned_output_args "cnn_pair_v2.sh" "${species}" "${MODEL}"
+	fi
 
 	tuned_path=""
 	tuned_output=""
@@ -251,18 +242,18 @@ run_species_once() {
 		)"
 		if [[ -z "${tuned_path}" ]]; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2_pair.sh] tuned config is required but not found: "\
+				echo "[cnn_pair_v2.sh] tuned config is required but not found: "\
 					"species=${species} target=${RESOLVED_TUNED_TARGET}" >&2
 				exit 1
 			fi
-			echo "[cnn_v2_pair.sh] tuned config not found; "\
+			echo "[cnn_pair_v2.sh] tuned config not found; "\
 				"using CONFIG defaults for species=${species}." >&2
 		elif [[ ! -f "${tuned_path}" ]]; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2_pair.sh] tuned config path not found: ${tuned_path}" >&2
+				echo "[cnn_pair_v2.sh] tuned config path not found: ${tuned_path}" >&2
 				exit 1
 			fi
-			echo "[cnn_v2_pair.sh] tuned config path not found: ${tuned_path}; "\
+			echo "[cnn_pair_v2.sh] tuned config path not found: ${tuned_path}; "\
 				"using CONFIG defaults for species=${species}." >&2
 			tuned_path=""
 		fi
@@ -271,13 +262,14 @@ run_species_once() {
 	if [[ -n "${tuned_path}" ]]; then
 		if ! tuned_output="$(intronmodel_load_tuned_overrides "${tuned_path}" 2>&1)"; then
 			if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
-				echo "[cnn_v2_pair.sh] failed to load tuned config: ${tuned_path}" >&2
-				echo "[cnn_v2_pair.sh] detail: ${tuned_output}" >&2
+				echo "[cnn_pair_v2.sh] failed to load tuned config: ${tuned_path}" >&2
+				echo "[cnn_pair_v2.sh] detail: ${tuned_output}" >&2
 				exit 1
 			fi
-			echo "[cnn_v2_pair.sh] failed to load tuned config: ${tuned_path}; "\
+			echo "[cnn_pair_v2.sh] failed to load tuned config: ${tuned_path}; "\
 				"using CONFIG defaults for species=${species}." >&2
 		else
+			use_wrapper_hparams="0"
 			loaded_count=0
 			while IFS= read -r line; do
 				if [[ -z "${line}" ]]; then
@@ -287,23 +279,55 @@ run_species_once() {
 				if [[ -z "${tuned_key}" || -z "${tuned_value}" ]]; then
 					continue
 				fi
-				# Keep wrapper-controlled tag handling so synth does not leak in.
+				# Keep wrapper-controlled tag handling centralized in this wrapper.
 				if [[ "${tuned_key}" == "tag" ]]; then
 					continue
 				fi
 				tuned_args+=(--"${tuned_key}" "${tuned_value}")
 				loaded_count=$((loaded_count + 1))
 			done <<<"${tuned_output}"
-			echo "[cnn_v2_pair.sh] tuned params loaded from ${tuned_path} "\
+			echo "[cnn_pair_v2.sh] tuned params loaded from ${tuned_path} "\
 				"(species=${species}, count=${loaded_count})"
 		fi
+	fi
+
+	if [[ "${use_wrapper_hparams}" == "1" ]]; then
+		args+=(
+			--donor_len "${DONOR_LEN}"
+			--acceptor_len "${ACCEPTOR_LEN}"
+			--seed "${SEED}"
+			--val_frac "${VAL_FRAC}"
+			--epochs "${EPOCHS}"
+			--max_epochs "${MAX_EPOCHS}"
+			--early_stop_patience "${EARLY_STOP_PATIENCE}"
+			--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
+			--batch_size "${BATCH_SIZE}"
+			--lr "${LR}"
+			--loss "${LOSS}"
+			--conv_channels "${CONV_CHANNELS}"
+			--kernel_sizes "${KERNEL_SIZES}"
+			--max_pool_size "${MAX_POOL_SIZE}"
+			--head_type "${HEAD_TYPE}"
+			--dropout "${DROPOUT}"
+			--fc_hidden "${FC_HIDDEN}"
+			--weight_decay "${WEIGHT_DECAY}"
+			--eta_min_ratio "${ETA_MIN_RATIO}"
+			--grad_clip "${GRAD_CLIP}"
+			--pos_weight_cap "${POS_WEIGHT_CAP}"
+			--focal_gamma "${FOCAL_GAMMA}"
+			--asym_gamma_pos "${ASYM_GAMMA_POS}"
+			--asym_gamma_neg "${ASYM_GAMMA_NEG}"
+			--train_target "${TRAIN_TARGET}"
+		)
+		append_arg_if_set "focal_alpha_pos" "${FOCAL_ALPHA_POS}"
+		append_arg_if_set "asym_alpha_pos" "${ASYM_ALPHA_POS}"
 	fi
 
 	if [[ ${#tuned_args[@]} -gt 0 ]]; then
 		args+=("${tuned_args[@]}")
 	fi
 
-	echo "[cnn_v2_pair.sh] species=${species}"
+	echo "[cnn_pair_v2.sh] species=${species}"
 	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 	if [[ -n "${assigned_gpu_id}" ]]; then
 		CUDA_VISIBLE_DEVICES="${assigned_gpu_id}" \
@@ -316,7 +340,7 @@ run_species_once() {
 }
 
 USE_TUNED_HPARAMS_MODE="$(
-	intronmodel_normalize_use_tuned_mode "${USE_TUNED_HPARAMS}" "cnn_v2_pair.sh"
+	intronmodel_normalize_use_tuned_mode "${USE_TUNED_HPARAMS}" "cnn_pair_v2.sh"
 )"
 if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
 	RESOLVED_TUNED_TARGET="$(
@@ -326,16 +350,16 @@ fi
 
 IFS=',' read -r -a SPECIES_LIST_RESOLVED <<<"${SPECIES}"
 mapfile -t GPU_ID_LIST < <(
-	intronmodel_resolve_gpu_ids "cnn_v2_pair.sh" "${GPU_IDS}" "${DEVICE}"
+	intronmodel_resolve_gpu_ids "cnn_pair_v2.sh" "${GPU_IDS}" "${DEVICE}"
 )
 PARALLEL_SLOT_COUNT="$(
 	intronmodel_resolve_parallel_slots \
-		"cnn_v2_pair.sh" \
+		"cnn_pair_v2.sh" \
 		"${MAX_PARALLEL_TRIALS}" \
 		"${#GPU_ID_LIST[@]}"
 )"
 if [[ ${#SPECIES_LIST_RESOLVED[@]} -eq 0 ]]; then
-	echo "[cnn_v2_pair.sh] SPECIES resolved to an empty list." >&2
+	echo "[cnn_pair_v2.sh] SPECIES resolved to an empty list." >&2
 	exit 1
 fi
 if [[ ${#SPECIES_LIST_RESOLVED[@]} -le 1 || ${#GPU_ID_LIST[@]} -le 1 || ${PARALLEL_SLOT_COUNT} -le 1 ]]; then
@@ -353,7 +377,7 @@ if [[ ${#SPECIES_LIST_RESOLVED[@]} -le 1 || ${#GPU_ID_LIST[@]} -le 1 || ${PARALL
 else
 	selected_gpu_ids=("${GPU_ID_LIST[@]:0:${PARALLEL_SLOT_COUNT}}")
 	gpu_csv="$(IFS=,; echo "${selected_gpu_ids[*]}")"
-	echo "[cnn_v2_pair.sh] species-parallel run across GPUs: ${gpu_csv}"
+	echo "[cnn_pair_v2.sh] species-parallel run across GPUs: ${gpu_csv}"
 	declare -A pid_to_species=()
 	declare -A pid_to_gpu=()
 	available_gpu_ids=("${selected_gpu_ids[@]}")
@@ -371,7 +395,7 @@ else
 			fi
 			gpu_id="${available_gpu_ids[0]}"
 			available_gpu_ids=("${available_gpu_ids[@]:1}")
-			echo "[cnn_v2_pair.sh] species dispatch: ${species} -> gpu=${gpu_id}"
+			echo "[cnn_pair_v2.sh] species dispatch: ${species} -> gpu=${gpu_id}"
 			run_species_once "${species}" "${gpu_id}" &
 			pid=$!
 			pid_to_species["${pid}"]="${species}"
@@ -397,7 +421,7 @@ else
 		fi
 		running_count=$((running_count - 1))
 		if [[ -n "${completed_species}" ]]; then
-			echo "[cnn_v2_pair.sh] species complete: ${completed_species} gpu=${completed_gpu} exit=${completed_code}"
+			echo "[cnn_pair_v2.sh] species complete: ${completed_species} gpu=${completed_gpu} exit=${completed_code}"
 		fi
 		if [[ ${completed_code} -ne 0 && ${first_error_code} -eq 0 ]]; then
 			first_error_code="${completed_code}"
