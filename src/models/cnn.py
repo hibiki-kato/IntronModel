@@ -37,6 +37,7 @@ from models.cnn_common import (
     CNN_HEAD_TYPE_CHOICES,
     normalize_cnn_head_type as _normalize_cnn_head_type,
     one_hot_encode_dna as _one_hot_encode_dna,
+    _resolve_loader_batch_size_and_drop_last,
     parse_conv_channels as _parse_conv_channels,
     parse_kernel_sizes as _parse_kernel_sizes,
     score_sequences as _score_sequences,
@@ -869,28 +870,45 @@ def train_task_model(
         saw_training_batch = False
         compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
         compile_selected_mode: str | None = None
+        fixed_shape_loader = compile_enabled
         loader_generator = torch.Generator()
         loader_generator.manual_seed(seed)
+        train_loader_batch_size, train_loader_drop_last = (
+            _resolve_loader_batch_size_and_drop_last(
+                requested_batch_size=effective_batch_size,
+                dataset_size=len(train_ds),
+                fixed_shape=fixed_shape_loader,
+            )
+        )
         train_loader_kwargs: dict[str, object] = {
             "dataset": train_ds,
-            "batch_size": effective_batch_size,
+            "batch_size": train_loader_batch_size,
             "shuffle": True,
             "num_workers": resolved_num_workers,
             "pin_memory": use_pin_memory,
             "worker_init_fn": _seed_worker if resolved_num_workers > 0 else None,
             "generator": loader_generator,
+            "drop_last": train_loader_drop_last,
         }
         if resolved_num_workers > 0:
             train_loader_kwargs["prefetch_factor"] = prefetch_factor
             train_loader_kwargs["persistent_workers"] = use_persistent_workers
         train_loader = DataLoader(**train_loader_kwargs)
+        val_loader_batch_size, val_loader_drop_last = (
+            _resolve_loader_batch_size_and_drop_last(
+                requested_batch_size=effective_batch_size,
+                dataset_size=len(val_ds),
+                fixed_shape=fixed_shape_loader,
+            )
+        )
 
         val_loader_kwargs: dict[str, object] = {
             "dataset": val_ds,
-            "batch_size": effective_batch_size,
+            "batch_size": val_loader_batch_size,
             "shuffle": False,
             "num_workers": resolved_num_workers,
             "pin_memory": use_pin_memory,
+            "drop_last": val_loader_drop_last,
         }
         if resolved_num_workers > 0:
             val_loader_kwargs["prefetch_factor"] = prefetch_factor
@@ -899,12 +917,20 @@ def train_task_model(
 
         train_eval_loader: Optional[DataLoader] = None
         if report_train_metrics_bool:
+            train_eval_loader_batch_size, train_eval_loader_drop_last = (
+                _resolve_loader_batch_size_and_drop_last(
+                    requested_batch_size=effective_batch_size,
+                    dataset_size=len(train_ds),
+                    fixed_shape=fixed_shape_loader,
+                )
+            )
             train_eval_loader_kwargs: dict[str, object] = {
                 "dataset": train_ds,
-                "batch_size": effective_batch_size,
+                "batch_size": train_eval_loader_batch_size,
                 "shuffle": False,
                 "num_workers": resolved_num_workers,
                 "pin_memory": use_pin_memory,
+                "drop_last": train_eval_loader_drop_last,
             }
             if resolved_num_workers > 0:
                 train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
@@ -914,7 +940,8 @@ def train_task_model(
             f"[{task}] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
             f"workers={resolved_num_workers} "
-            f"train_eval={'on' if report_train_metrics_bool else 'off'}"
+            f"train_eval={'on' if report_train_metrics_bool else 'off'} "
+            f"fixed_shape={'on' if fixed_shape_loader else 'off'}"
         )
 
         try:
@@ -1159,22 +1186,25 @@ def train_task_model(
                     total_epochs=epochs,
                 )
 
-                mark = "*" if improved else "-"
-                train_score_text = (
-                    "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
-                )
-                val_score_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
-                objective_text = (
-                    "" if score_name == "pr_auc" else f"{score_name}={score:.4f} "
-                )
-                print(
-                    f"[{task}] {mark} epoch {epoch}/{epochs} "
-                    f"loss={train_loss:.4f} train_score={train_score_text} "
-                    f"val_score={val_score_text} "
-                    f"elapsed={epoch_elapsed_sec:.2f}s "
-                    f"{objective_text}best={best_score:.4f} "
-                    f"(ep {best_epoch})"
-                )
+                if report_train_metrics_bool:
+                    mark = "*" if improved else "-"
+                    train_score_text = (
+                        "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
+                    )
+                    val_score_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
+                    objective_text = (
+                        ""
+                        if score_name == "pr_auc"
+                        else f"{score_name}={score:.4f} "
+                    )
+                    print(
+                        f"[{task}] {mark} epoch {epoch}/{epochs} "
+                        f"loss={train_loss:.4f} train_score={train_score_text} "
+                        f"val_score={val_score_text} "
+                        f"elapsed={epoch_elapsed_sec:.2f}s "
+                        f"{objective_text}best={best_score:.4f} "
+                        f"(ep {best_epoch})"
+                    )
 
                 if (
                     early_stop_patience > 0
@@ -1183,7 +1213,8 @@ def train_task_model(
                     stopped_early = True
                     print(
                         f"[{task}] early stop at epoch {epoch} "
-                        f"(patience={early_stop_patience}, min_delta={early_stop_min_delta:g})"
+                        f"(patience={early_stop_patience}, "
+                        f"min_delta={early_stop_min_delta:g})"
                     )
                     break
 

@@ -2619,8 +2619,17 @@ def _run_trial_with_command_runner(
     model_name = merged_args.get("model")
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("base_args.model must be a non-empty string.")
-    if model_name.strip().lower() == "cnn":
-        merged_args.setdefault("report_train_metrics", 0)
+    supported_report_models = {
+        "cnn",
+        "cnn_pair",
+        "cnn_v2",
+        "cnn_v2_pair",
+    }
+    if (
+        _ACTIVE_MAX_PARALLEL_TRIALS > 1
+        and model_name.strip().lower() in supported_report_models
+    ):
+        merged_args["report_train_metrics"] = 0
     merged_args["species"] = config.species
     trial_artifact_base = metrics_json.parent / metrics_json.stem
     is_test_max_f1_objective = config.objective_metric == "test_max_f1"
@@ -3460,6 +3469,26 @@ def _apply_cnn_length_schedule(
     return current
 
 
+def _resolve_cnn_effective_input_length(
+    *,
+    window_len: int,
+    input_mode: object,
+) -> int:
+    """Resolve the effective CNN input length for one encoded sequence.
+
+    The current CNN-family encoders use the raw window length for one-hot and
+    BPE input, but ``kmer3`` compression shortens the sequence to
+    ``window_len - 2`` tokens. This helper keeps the architecture validation in
+    sync with the actual model-side preprocessing.
+    """
+    if window_len <= 0:
+        return 0
+    normalized_mode = str(input_mode).strip().lower()
+    if normalized_mode == "kmer3":
+        return max(1, window_len - 2)
+    return window_len
+
+
 def _apply_cnn_resdil_length_schedule(
     length: int,
     kernel_sizes: Sequence[int],
@@ -3518,6 +3547,10 @@ def _is_valid_cnn_architecture(
 
     donor_len = _to_positive_int(donor_len_raw)
     acceptor_len = _to_positive_int(acceptor_len_raw)
+    input_mode_raw = sampled_params.get("input_mode")
+    if input_mode_raw is None:
+        input_mode_raw = base_args.get("input_mode", "onehot")
+    input_mode = str(input_mode_raw).strip().lower()
 
     if validation_model_name in {"cnn", "cnn_resdil"}:
         train_target_raw = sampled_params.get("train_target")
@@ -3630,6 +3663,18 @@ def _is_valid_cnn_architecture(
     if acceptor_conv_channels is None:
         lightweight = _to_bool(base_args.get("lightweight"))
         acceptor_conv_channels = [64, 128] if lightweight else [64, 128, 256]
+
+    if validation_model_name == "cnn_pair":
+        if donor_len is not None:
+            donor_len = _resolve_cnn_effective_input_length(
+                window_len=donor_len,
+                input_mode=input_mode,
+            )
+        if acceptor_len is not None:
+            acceptor_len = _resolve_cnn_effective_input_length(
+                window_len=acceptor_len,
+                input_mode=input_mode,
+            )
 
     donor_depth = len(donor_conv_channels)
     acceptor_depth = len(acceptor_conv_channels)

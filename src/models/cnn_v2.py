@@ -28,6 +28,7 @@ from models.cnn_common import (
     _apply_split_fusion_head,
     _encode_cnn_features,
     _pad_batch_to_fixed_size,
+    _resolve_loader_batch_size_and_drop_last,
     _readout_sequence_features,
     normalize_cnn_head_type,
     one_hot_encode_dna,
@@ -1105,7 +1106,8 @@ def train_pair_model(
     min_batch_size: int,
     max_oom_retries: int,
     quick_phase: bool,
-    gpu_id: Optional[int],
+    report_train_metrics: Union[bool, int] = 1,
+    gpu_id: Optional[int] = None,
 ) -> Dict[str, object]:
     """Train the pair CNN model."""
     if train_params.embedding_dim <= 0:
@@ -1301,54 +1303,86 @@ def train_pair_model(
 
     oom_retries = 0
     use_non_blocking = device == "cuda"
+    report_train_metrics_bool = _bool_from_flag(report_train_metrics)
     while True:
         saw_training_batch = False
         compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
         compile_selected_mode: str | None = None
+        fixed_shape_loader = compile_enabled
 
         loader_generator = torch.Generator()
         loader_generator.manual_seed(seed)
+        train_loader_batch_size, train_loader_drop_last = (
+            _resolve_loader_batch_size_and_drop_last(
+                requested_batch_size=effective_batch_size,
+                dataset_size=len(train_ds),
+                fixed_shape=fixed_shape_loader,
+            )
+        )
         train_loader_kwargs: dict[str, object] = {
             "dataset": train_ds,
-            "batch_size": effective_batch_size,
+            "batch_size": train_loader_batch_size,
             "shuffle": True,
             "num_workers": resolved_num_workers,
             "pin_memory": use_pin_memory,
             "worker_init_fn": _seed_worker if resolved_num_workers > 0 else None,
             "generator": loader_generator,
+            "drop_last": train_loader_drop_last,
         }
         if resolved_num_workers > 0:
             train_loader_kwargs["prefetch_factor"] = prefetch_factor
             train_loader_kwargs["persistent_workers"] = use_persistent_workers
         train_loader = DataLoader(**train_loader_kwargs)
+        val_loader_batch_size, val_loader_drop_last = (
+            _resolve_loader_batch_size_and_drop_last(
+                requested_batch_size=effective_batch_size,
+                dataset_size=len(val_ds),
+                fixed_shape=fixed_shape_loader,
+            )
+        )
 
         val_loader_kwargs: dict[str, object] = {
             "dataset": val_ds,
-            "batch_size": effective_batch_size,
+            "batch_size": val_loader_batch_size,
             "shuffle": False,
             "num_workers": resolved_num_workers,
             "pin_memory": use_pin_memory,
+            "drop_last": val_loader_drop_last,
         }
         if resolved_num_workers > 0:
             val_loader_kwargs["prefetch_factor"] = prefetch_factor
             val_loader_kwargs["persistent_workers"] = use_persistent_workers
         val_loader = DataLoader(**val_loader_kwargs)
-        train_eval_loader_kwargs: dict[str, object] = {
-            "dataset": train_ds,
-            "batch_size": effective_batch_size,
-            "shuffle": False,
-            "num_workers": resolved_num_workers,
-            "pin_memory": use_pin_memory,
-        }
-        if resolved_num_workers > 0:
-            train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-            train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
-        train_eval_loader = DataLoader(**train_eval_loader_kwargs)
+        train_eval_loader: Optional[DataLoader] = None
+        if report_train_metrics_bool:
+            train_eval_loader_batch_size, train_eval_loader_drop_last = (
+                _resolve_loader_batch_size_and_drop_last(
+                    requested_batch_size=effective_batch_size,
+                    dataset_size=len(train_ds),
+                    fixed_shape=fixed_shape_loader,
+                )
+            )
+            train_eval_loader_kwargs: dict[str, object] = {
+                "dataset": train_ds,
+                "batch_size": train_eval_loader_batch_size,
+                "shuffle": False,
+                "num_workers": resolved_num_workers,
+                "pin_memory": use_pin_memory,
+                "drop_last": train_eval_loader_drop_last,
+            }
+            if resolved_num_workers > 0:
+                train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
+                train_eval_loader_kwargs["persistent_workers"] = (
+                    use_persistent_workers
+                )
+            train_eval_loader = DataLoader(**train_eval_loader_kwargs)
 
         print(
             f"[pair] loader train_batches={len(train_loader)} "
             f"val_batches={len(val_loader)} batch_size={effective_batch_size} "
-            f"workers={resolved_num_workers}"
+            f"workers={resolved_num_workers} "
+            f"train_eval={'on' if report_train_metrics_bool else 'off'} "
+            f"fixed_shape={'on' if fixed_shape_loader else 'off'}"
         )
 
         try:
@@ -1509,18 +1543,20 @@ def train_pair_model(
                     use_amp=use_amp_bool,
                     amp_dtype=amp_dtype_resolved,
                 )
-                train_metrics = evaluate_pair(
-                    model=model,
-                    loader=train_eval_loader,
-                    device=device,
-                    use_amp=use_amp_bool,
-                    amp_dtype=amp_dtype_resolved,
-                )
                 pr_auc = val_metrics.get("pr_auc")
                 roc_auc = val_metrics.get("roc_auc")
                 max_f1 = val_metrics.get("max_f1")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
-                train_pr_auc = train_metrics.get("pr_auc")
+                train_pr_auc: Optional[float] = None
+                if report_train_metrics_bool and train_eval_loader is not None:
+                    train_metrics = evaluate_pair(
+                        model=model,
+                        loader=train_eval_loader,
+                        device=device,
+                        use_amp=use_amp_bool,
+                        amp_dtype=amp_dtype_resolved,
+                    )
+                    train_pr_auc = train_metrics.get("pr_auc")
                 epoch_elapsed_sec = time.perf_counter() - epoch_started_at
 
                 if pr_auc is not None:
@@ -1641,22 +1677,25 @@ def train_pair_model(
                     total_epochs=epochs,
                 )
 
-                mark = "*" if improved else "-"
-                train_score_text = (
-                    "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
-                )
-                val_score_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
-                objective_text = (
-                    "" if score_name == "pr_auc" else f"{score_name}={score:.4f} "
-                )
-                print(
-                    f"[pair] {mark} epoch {epoch}/{epochs} "
-                    f"loss={train_loss:.4f} train_score={train_score_text} "
-                    f"val_score={val_score_text} "
-                    f"elapsed={epoch_elapsed_sec:.2f}s "
-                    f"{objective_text}best={best_score:.4f} "
-                    f"(ep {best_epoch})"
-                )
+                if report_train_metrics_bool:
+                    mark = "*" if improved else "-"
+                    train_score_text = (
+                        "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
+                    )
+                    val_score_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
+                    objective_text = (
+                        ""
+                        if score_name == "pr_auc"
+                        else f"{score_name}={score:.4f} "
+                    )
+                    print(
+                        f"[pair] {mark} epoch {epoch}/{epochs} "
+                        f"loss={train_loss:.4f} train_score={train_score_text} "
+                        f"val_score={val_score_text} "
+                        f"elapsed={epoch_elapsed_sec:.2f}s "
+                        f"{objective_text}best={best_score:.4f} "
+                        f"(ep {best_epoch})"
+                    )
 
                 if (
                     early_stop_patience > 0
@@ -2202,6 +2241,16 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prefetch_factor", type=int, default=4)
     parser.add_argument("--persistent_workers", type=int, choices=[0, 1], default=1)
     parser.add_argument("--pin_memory", type=int, choices=[0, 1], default=1)
+    parser.add_argument(
+        "--report_train_metrics",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help=(
+            "Compute train-split PR-AUC every epoch when set to 1. "
+            "Set to 0 to skip extra train-eval and per-epoch reporting."
+        ),
+    )
     parser.add_argument("--min_batch_size", type=int, default=64)
     parser.add_argument("--max_oom_retries", type=int, default=8)
     parser.add_argument(
@@ -2417,6 +2466,7 @@ def train(
         min_batch_size=model_args.min_batch_size,
         max_oom_retries=model_args.max_oom_retries,
         quick_phase=bool(getattr(common_args, "quick_phase", False)),
+        report_train_metrics=getattr(model_args, "report_train_metrics", 1),
         gpu_id=getattr(common_args, "gpu_id", None),
     )
 

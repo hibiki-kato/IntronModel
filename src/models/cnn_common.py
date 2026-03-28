@@ -210,6 +210,42 @@ def _pad_batch_to_fixed_size(
     return torch.cat((batch, padding), dim=0), actual_batch_size
 
 
+def _resolve_loader_batch_size_and_drop_last(
+    *,
+    requested_batch_size: int,
+    dataset_size: int,
+    fixed_shape: bool,
+) -> tuple[int, bool]:
+    """Resolve a loader batch size that keeps compile-time shapes static.
+
+    Parameters
+    ----------
+    requested_batch_size : int
+        User-requested batch size before any compile-time adjustment.
+    dataset_size : int
+        Number of available samples in the dataset.
+    fixed_shape : bool
+        Whether tail batches should be dropped to keep shapes static.
+
+    Returns
+    -------
+    tuple[int, bool]
+        Effective batch size and ``drop_last`` flag for ``DataLoader``.
+
+    Raises
+    ------
+    ValueError
+        If ``requested_batch_size`` or ``dataset_size`` is not positive.
+    """
+    if requested_batch_size <= 0:
+        raise ValueError("requested_batch_size must be positive.")
+    if dataset_size <= 0:
+        raise ValueError("dataset_size must be positive.")
+    if not fixed_shape:
+        return requested_batch_size, False
+    return min(requested_batch_size, dataset_size), True
+
+
 def _apply_split_fusion_head(
     head: nn.Sequential,
     left_features: torch.Tensor,

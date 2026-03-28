@@ -729,6 +729,7 @@ def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
         "KERNEL_SIZES",
         "MARKOV_CACHE_DIR",
         "N_DIM",
+        "REPORT_TRAIN_METRICS",
         "TAG",
     )
     for key in optional_global:
@@ -1907,6 +1908,18 @@ def _apply_species_parallel_env_overrides(
             f"[{script_name}] species-parallel auto NUM_WORKERS override: "
             f"auto -> {resolved_num_workers} "
             f"(parallel_species={parallel_species}, cpu_count={cpu_count})"
+        )
+    model_name = resolved_env.get("MODEL", "").strip().lower()
+    if parallel_species > 1 and model_name in {
+        "cnn",
+        "cnn_pair",
+        "cnn_v2",
+        "cnn_v2_pair",
+    }:
+        resolved_env["REPORT_TRAIN_METRICS"] = "0"
+        print(
+            f"[{script_name}] species-parallel report_train_metrics override: "
+            f"auto -> 0 (parallel_species={parallel_species})"
         )
     return resolved_env
 

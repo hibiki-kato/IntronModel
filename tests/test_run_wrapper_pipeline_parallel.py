@@ -31,7 +31,7 @@ def test_resolve_species_gpu_slots_prefers_visible_env(
     """Use CUDA_VISIBLE_DEVICES ordering when available."""
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5,2")
-    assert _resolve_species_gpu_slots("auto") == ["5", "2"]
+    assert _resolve_species_gpu_slots("auto", "auto") == ["5", "2"]
 
 
 def test_run_species_batch_parallel_assigns_gpu_per_species(
@@ -69,7 +69,7 @@ def test_run_species_batch_parallel_assigns_gpu_per_species(
     monkeypatch.setattr(
         run_wrapper_pipeline,
         "_resolve_species_gpu_slots",
-        lambda _device: ["0", "1"],
+        lambda _device, _gpu_ids_setting: ["0", "1"],
     )
     monkeypatch.setattr(
         run_wrapper_pipeline,
@@ -109,24 +109,38 @@ def test_apply_species_parallel_env_overrides_resolves_auto_num_workers(
     )
 
     resolved = _apply_species_parallel_env_overrides(
-        env={"NUM_WORKERS": "auto", "DEVICE": "auto"},
+        env={"MODEL": "cnn", "NUM_WORKERS": "auto", "DEVICE": "auto"},
         parallel_species=2,
         script_name="unit.sh",
     )
 
     assert resolved["NUM_WORKERS"] == "5"
+    assert resolved["REPORT_TRAIN_METRICS"] == "0"
 
 
 def test_apply_species_parallel_env_overrides_keeps_explicit_num_workers() -> None:
     """Leave explicit worker settings unchanged."""
 
     resolved = _apply_species_parallel_env_overrides(
-        env={"NUM_WORKERS": "6", "DEVICE": "auto"},
+        env={"MODEL": "cnn", "NUM_WORKERS": "6", "DEVICE": "auto"},
         parallel_species=3,
         script_name="unit.sh",
     )
 
     assert resolved["NUM_WORKERS"] == "6"
+    assert resolved["REPORT_TRAIN_METRICS"] == "0"
+
+
+def test_apply_species_parallel_env_overrides_leaves_serial_reporting_alone() -> None:
+    """Do not touch train reporting when only one GPU slot is active."""
+
+    resolved = _apply_species_parallel_env_overrides(
+        env={"MODEL": "cnn", "NUM_WORKERS": "auto", "DEVICE": "auto"},
+        parallel_species=1,
+        script_name="unit.sh",
+    )
+
+    assert "REPORT_TRAIN_METRICS" not in resolved
 
 
 def test_resolve_parallel_auto_num_workers_uses_cpu_and_gpu_process_count(
@@ -175,7 +189,7 @@ def test_run_species_batch_uses_serial_fallback_for_single_gpu(
     monkeypatch.setattr(
         run_wrapper_pipeline,
         "_resolve_species_gpu_slots",
-        lambda _device: ["0"],
+        lambda _device, _gpu_ids_setting: ["0"],
     )
 
     result = _run_species_batch(

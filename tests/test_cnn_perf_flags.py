@@ -111,6 +111,32 @@ def test_cnn_feature_readout_gap_uses_mean_pooling() -> None:
     )
 
 
+def test_resolve_loader_batch_size_and_drop_last_prefers_static_shapes() -> None:
+    batch_size, drop_last = cnn_common._resolve_loader_batch_size_and_drop_last(
+        requested_batch_size=256,
+        dataset_size=1000,
+        fixed_shape=True,
+    )
+    assert batch_size == 256
+    assert drop_last is True
+
+    batch_size, drop_last = cnn_common._resolve_loader_batch_size_and_drop_last(
+        requested_batch_size=256,
+        dataset_size=100,
+        fixed_shape=True,
+    )
+    assert batch_size == 100
+    assert drop_last is True
+
+    batch_size, drop_last = cnn_common._resolve_loader_batch_size_and_drop_last(
+        requested_batch_size=256,
+        dataset_size=100,
+        fixed_shape=False,
+    )
+    assert batch_size == 256
+    assert drop_last is False
+
+
 def test_score_sequences_pads_final_batch_to_fixed_size() -> None:
     class RecordingModel(torch.nn.Module):
         def __init__(self) -> None:

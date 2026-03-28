@@ -1177,6 +1177,94 @@ def test_run_trial_preserves_explicit_report_train_metrics_override(
     assert captured_report_train_metrics == ["1"]
 
 
+@pytest.mark.parametrize("model_name", ["cnn", "cnn_v2", "cnn_pair", "cnn_v2_pair"])
+def test_run_trial_disables_train_metrics_for_parallel_trials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+) -> None:
+    config_dict = _base_config_dict(tmp_path)
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=1,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=0,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": model_name,
+            "species": "Dmel",
+            "batch_size": 512,
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=hparam_search._validate_search_space(config_dict["search_space"]),
+    )
+
+    captured_report_train_metrics: list[str] = []
+
+    def _fake_run_command_with_streaming(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        phase: str,
+        trial_id: int,
+    ) -> tuple[int, str]:
+        del cwd, env, phase, trial_id
+        for index, token in enumerate(cmd):
+            if token == "--report_train_metrics":
+                captured_report_train_metrics.append(cmd[index + 1])
+                break
+        metrics_path: Optional[Path] = None
+        for index, token in enumerate(cmd):
+            if token == "--metrics_json":
+                metrics_path = Path(cmd[index + 1])
+                break
+        assert metrics_path is not None
+        payload = {
+            "donor": {"best_pr_auc": 0.8},
+            "acceptor": {"best_pr_auc": 0.7},
+        }
+        metrics_path.write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_run_command_with_streaming",
+        _fake_run_command_with_streaming,
+    )
+    previous_parallel = hparam_search._set_active_max_parallel_trials(4)
+    try:
+        _ = hparam_search.run_trial(
+            config=config,
+            phase="quick",
+            trial_id=0,
+            sampled_params={"batch_size": 512, "lr": 1e-4},
+            overrides={"epochs": 1},
+            assigned_gpu_id="0",
+            metrics_json=tmp_path / "metrics.json",
+            log_file=tmp_path / "trial.log",
+        )
+    finally:
+        _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
+
+    assert captured_report_train_metrics == ["0"]
+
+
 def test_find_cuda_header_supports_conda_targets_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4715,6 +4803,104 @@ def test_build_trial_params_resamples_invalid_cnn_v2_pair_onehot_pool_shape(
             "batch_size": 256,
             "conv_channels": "64,128,256",
             "kernel_sizes": "7,7,7",
+            "max_pool_size": 2,
+        }
+    ]
+
+
+def test_build_trial_params_resamples_invalid_cnn_v2_pair_kmer3_pool_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [256]},
+            "input_mode": {"type": "categorical", "values": ["kmer3"]},
+            "conv_channels": {
+                "type": "categorical",
+                "values": ["64,128,256,256"],
+            },
+            "kernel_sizes": {
+                "type": "categorical",
+                "values": ["7,7,7,7"],
+            },
+            "max_pool_size": {"type": "categorical", "values": [4, 2]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=11,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={
+            "model": "cnn_v2_pair",
+            "species": "Dmel",
+            "batch_size": 256,
+            "donor_len": 100,
+            "acceptor_len": 100,
+            "input_mode": "kmer3",
+            "pair_mode": "pair",
+        },
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    sampled_rows = iter(
+        [
+            {
+                "batch_size": 256,
+                "input_mode": "kmer3",
+                "conv_channels": "64,128,256,256",
+                "kernel_sizes": "7,7,7,7",
+                "max_pool_size": 4,
+            },
+            {
+                "batch_size": 256,
+                "input_mode": "kmer3",
+                "conv_channels": "64,128,256,256",
+                "kernel_sizes": "7,7,7,7",
+                "max_pool_size": 2,
+            },
+        ]
+    )
+    call_count = {"value": 0}
+
+    def _fake_sample(
+        _search_space: dict[str, hparam_search.SearchDimension],
+        _rng: object,
+    ) -> dict[str, hparam_search.Scalar]:
+        call_count["value"] += 1
+        return next(sampled_rows)
+
+    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+    )
+
+    assert call_count["value"] == 2
+    assert params == [
+        {
+            "batch_size": 256,
+            "input_mode": "kmer3",
+            "conv_channels": "64,128,256,256",
+            "kernel_sizes": "7,7,7,7",
             "max_pool_size": 2,
         }
     ]
