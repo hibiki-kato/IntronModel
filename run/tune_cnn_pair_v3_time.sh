@@ -610,6 +610,121 @@ JSON
 	return 0
 }
 
+write_cycle_template_config() {
+	local template_path="$1"
+	local species="$2"
+	local base_seed="$3"
+	local resolved_tag="$4"
+	local train_pos_path_json="$5"
+	local train_neg_path_json="$6"
+	local target_search_space_json="$7"
+	local objective_metric="$8"
+	local global_best_path="$9"
+
+	cat > "${template_path}" <<JSON
+{
+  "project_root": "${PROJECT_ROOT}",
+  "species": "${species}",
+  "quick_trials": ${QUICK_TRIALS},
+  "quick_epochs": ${QUICK_EPOCHS},
+  "top_k": ${TOP_K},
+  "full_epochs": ${FULL_EPOCHS},
+  "base_seed": ${base_seed},
+  "trial_stream_mode": "${TRIAL_STREAM_MODE}",
+  "enable_phase_overlap": true,
+  "objective_metric": "${objective_metric}",
+  "global_best_config_path": "${global_best_path}",
+  "seed_best_config_path": null,
+  "search_algo": "${SEARCH_ALGO}",
+  "history_top_n": ${HISTORY_TOP_N},
+  "guided_random_fraction": ${GUIDED_RANDOM_FRACTION},
+  "guided_mutation_rate": ${GUIDED_MUTATION_RATE},
+  "reinforce_temperature": ${REINFORCE_TEMPERATURE},
+  "min_batch_size": ${MIN_BATCH_SIZE},
+  "max_oom_retries": ${MAX_OOM_RETRIES},
+  "base_args": {
+    "model": "cnn_pair_v3",
+    "species": "${species}",
+    "train_target": "pair",
+    "seed": ${base_seed},
+    "donor_len": ${DONOR_LEN},
+    "acceptor_len": ${ACCEPTOR_LEN},
+    "val_frac": ${VAL_FRAC},
+    "input_mode": "onehot",
+    "pair_mode": "pair",
+    "max_pool_size": ${MAX_POOL_SIZE},
+    "pool_every": ${POOL_EVERY},
+    "head_type": "${HEAD_TYPE}",
+    "embedding_dim": 32,
+    "bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
+    "bpe_trust_remote_code": 0,
+    "device": "${DEVICE}",
+    "visualize": "${VISUALIZE}",
+    "tag": "${resolved_tag}",
+    "name_fields": "${NAME_FIELDS}",
+    "use_amp": ${USE_AMP},
+    "amp_dtype": "${AMP_DTYPE}",
+    "allow_tf32": ${ALLOW_TF32},
+    "cudnn_benchmark": ${CUDNN_BENCHMARK},
+    "deterministic": ${DETERMINISTIC},
+    "num_workers": "${NUM_WORKERS}",
+    "prefetch_factor": ${PREFETCH_FACTOR},
+    "persistent_workers": ${PERSISTENT_WORKERS},
+    "pin_memory": ${PIN_MEMORY},
+    "min_batch_size": ${MIN_BATCH_SIZE},
+    "max_oom_retries": ${MAX_OOM_RETRIES},
+    "train_pos_path": ${train_pos_path_json},
+    "train_neg_path": ${train_neg_path_json}
+  },
+  "quick_overrides": {
+    "epochs": ${QUICK_EPOCHS},
+    "compile_mode": "${QUICK_COMPILE_MODE}"
+  },
+  "full_overrides": {
+    "epochs": ${FULL_EPOCHS},
+    "compile_mode": "${FULL_COMPILE_MODE}"
+  },
+  "search_space": ${target_search_space_json}
+}
+JSON
+}
+
+append_scheduler_job_entry() {
+	local jobs_file="$1"
+	local species="$2"
+	local base_seed="$3"
+	local template_path="$4"
+	local output_parent_dir="$5"
+
+	"${PYTHON_BIN}" - \
+		"${jobs_file}" \
+		"${species}" \
+		"${base_seed}" \
+		"${TUNING_MODEL_NAME}" \
+		"${template_path}" \
+		"${output_parent_dir}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+jobs_file = Path(sys.argv[1])
+payload = {
+    "species": sys.argv[2],
+    "target_name": "pair",
+    "seed": int(sys.argv[3]),
+    "tuning_model_name": sys.argv[4],
+    "template_config_path": sys.argv[5],
+    "output_parent_dir": sys.argv[6],
+    "plot_target_name": None,
+}
+with jobs_file.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, ensure_ascii=False))
+    handle.write("\n")
+PY
+}
+
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
 	|| [[ "${TIME_BUDGET_MINUTES}" -le 0 ]]; then
 	echo "[tune_cnn_pair_v3_time.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
@@ -743,212 +858,154 @@ PARALLEL_SLOT_COUNT="$(
 		"${MAX_PARALLEL_TRIALS}" \
 		"${#GPU_ID_LIST[@]}"
 )"
+mkdir -p "${PROJECT_ROOT}/temp"
+scheduler_root="$(mktemp -d "${PROJECT_ROOT}/temp/${TUNING_MODEL_NAME}_scheduler_XXXXXX")"
+jobs_file="${scheduler_root}/jobs.jsonl"
+: > "${jobs_file}"
+selected_gpu_ids=("${GPU_ID_LIST[@]:0:${PARALLEL_SLOT_COUNT}}")
 
-job_index=0
-if [[ ${#GPU_ID_LIST[@]} -le 1 || "${PARALLEL_SLOT_COUNT}" -le 1 ]]; then
-	while [[ $((SECONDS - START_SECONDS)) -lt "${BUDGET_SECONDS}" ]]; do
-		elapsed_seconds=$((SECONDS - START_SECONDS))
-		remaining_seconds=$((BUDGET_SECONDS - elapsed_seconds))
-		if ! should_dispatch_next_cycle "${remaining_seconds}"; then
-			break
-		fi
-		remaining_hms="$(format_elapsed "${remaining_seconds}")"
-		serial_gpu_csv="${GPU_IDS}"
-		if [[ ${#GPU_ID_LIST[@]} -gt 0 ]]; then
-			serial_gpu_csv="${GPU_ID_LIST[0]}"
-		fi
-		if ! dispatch_cycle \
-			"${job_index}" \
-			"${serial_gpu_csv}" \
-			"1" \
-			"${elapsed_seconds}" \
-			"${remaining_seconds}" \
-			"${remaining_hms}"; then
-			exit 1
-		fi
-		if wait "${LAST_DISPATCH_PID}"; then
-			completed_code=0
-		else
-			completed_code=$?
-		fi
-		if [[ "${completed_code}" -eq 124 ]]; then
-			exit 124
-		fi
-		cycle_duration_seconds=$((SECONDS - START_SECONDS - elapsed_seconds))
-		TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))
-		COMPLETED_CYCLES=$((COMPLETED_CYCLES + 1))
-		avg_cycle_seconds=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
-		remaining_seconds=$((BUDGET_SECONDS - (SECONDS - START_SECONDS)))
-		if [[ "${remaining_seconds}" -lt 0 ]]; then
-			remaining_seconds=0
-		fi
-		estimated_cycles_left=0
-		if [[ "${avg_cycle_seconds}" -gt 0 ]]; then
-			estimated_cycles_left=$((remaining_seconds / avg_cycle_seconds))
-		fi
-		printf '[tune_cnn_pair_v3_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
-			"${job_index}" \
-			"$(format_elapsed "${cycle_duration_seconds}")" \
-			"$(format_elapsed "${avg_cycle_seconds}")"
-		printf 'ETA_cycles_left=%s log=%s exit=%s\n' \
-			"${estimated_cycles_left}" \
-			"${LAST_DISPATCH_STDOUT_LOG}" \
-			"${completed_code}"
-		job_index=$((job_index + 1))
-	done
-else
-	selected_gpu_ids=("${GPU_ID_LIST[@]:0:${PARALLEL_SLOT_COUNT}}")
-	gpu_csv="$(IFS=,; echo "${selected_gpu_ids[*]}")"
-	echo "[tune_cnn_pair_v3_time.sh] cycle-parallel scheduler across GPUs: ${gpu_csv}"
-	declare -A pid_to_cycle=()
-	declare -A pid_to_start_seconds=()
-	declare -A pid_to_owned_gpu_csv=()
-	declare -A pid_to_release_file=()
-	declare -A pid_to_cursor_file=()
-	declare -A pid_to_stdout_log=()
-	running_pids=()
-	available_gpu_ids=("${selected_gpu_ids[@]}")
-	stop_submitting=0
-	first_error_code=0
-	while [[ ${#running_pids[@]} -gt 0 || ${stop_submitting} -eq 0 ]]; do
-		progress=0
-		elapsed_seconds=$((SECONDS - START_SECONDS))
-		remaining_seconds=$((BUDGET_SECONDS - elapsed_seconds))
-		if [[ "${remaining_seconds}" -lt 0 ]]; then
-			remaining_seconds=0
-		fi
-
-		for pid in "${running_pids[@]}"; do
-			release_file="${pid_to_release_file[$pid]:-}"
-			cursor_file="${pid_to_cursor_file[$pid]:-}"
-			if [[ -z "${release_file}" || -z "${cursor_file}" ]]; then
-				continue
-			fi
-			mapfile -t released_gpu_ids < <(
-				intronmodel_collect_gpu_release_ids \
+for base_seed in "${SEED_VALUES[@]}"; do
+	for raw_species in "${JOB_ORDER[@]}"; do
+		species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
+		resolved_tag="${TAG}"
+		resolved_train_paths="$(
+			intronmodel_resolve_and_validate_train_paths \
+				"tune_cnn_pair_v3_time.sh" \
+				"${species}" \
+				"${TRAIN_POS_PATH}" \
+				"${TRAIN_NEG_PATH}"
+		)" || exit 1
+		TRAIN_POS_PATH_RESOLVED=""
+		TRAIN_NEG_PATH_RESOLVED=""
+		IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
+			"${resolved_train_paths}"
+		TRAIN_POS_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"${TRAIN_POS_PATH_RESOLVED}"
+		)"
+		TRAIN_NEG_PATH_JSON="$(
+			intronmodel_json_string_or_null \
+				"${PYTHON_BIN}" \
+				"${TRAIN_NEG_PATH_RESOLVED}"
+		)"
+		target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_PAIR}"
+		search_space_path=""
+		if search_space_resolved="$(
+			resolve_search_space_file \
+				"${SEARCH_SPACE_FILE}" \
+				"${species}" \
+				"${TUNING_MODEL_NAME}"
+		)"; then
+			search_space_path="${search_space_resolved}"
+			if ! target_space_json="$(
+				normalize_json_object_file \
 					"${PYTHON_BIN}" \
-					"${release_file}" \
-					"${cursor_file}"
-			)
-			if [[ ${#released_gpu_ids[@]} -eq 0 ]]; then
-				continue
-			fi
-			append_unique_gpu_ids available_gpu_ids "${released_gpu_ids[@]}"
-			for released_gpu_id in "${released_gpu_ids[@]}"; do
-				pid_to_owned_gpu_csv["${pid}"]="$(remove_gpu_from_csv \
-					"${pid_to_owned_gpu_csv[$pid]:-}" \
-					"${released_gpu_id}")"
-			done
-			progress=1
-		done
-
-		if [[ ${stop_submitting} -eq 0 ]] \
-			&& ! should_dispatch_next_cycle "${remaining_seconds}"; then
-			stop_submitting=1
-		fi
-
-		while [[ ${stop_submitting} -eq 0 && ${#available_gpu_ids[@]} -gt 0 ]]; do
-			assigned_parallel_slots="$(
-				intronmodel_resolve_parallel_slots \
-					"tune_cnn_pair_v3_time.sh" \
-					"${MAX_PARALLEL_TRIALS}" \
-					"${#available_gpu_ids[@]}"
-			)" || exit 1
-			if [[ "${assigned_parallel_slots}" -le 0 ]]; then
-				break
-			fi
-			assigned_gpu_ids=("${available_gpu_ids[@]:0:${assigned_parallel_slots}}")
-			available_gpu_ids=("${available_gpu_ids[@]:${assigned_parallel_slots}}")
-			assigned_gpu_csv="$(IFS=,; echo "${assigned_gpu_ids[*]}")"
-			remaining_hms="$(format_elapsed "${remaining_seconds}")"
-			if ! dispatch_cycle \
-				"${job_index}" \
-				"${assigned_gpu_csv}" \
-				"${assigned_parallel_slots}" \
-				"${elapsed_seconds}" \
-				"${remaining_seconds}" \
-				"${remaining_hms}"; then
+					"${search_space_path}" 2>&1
+			)"; then
+				echo "[tune_cnn_pair_v3_time.sh] failed to parse search-space file: "\
+					"${search_space_path}" >&2
+				echo "[tune_cnn_pair_v3_time.sh] parse detail: ${target_space_json}" >&2
 				exit 1
 			fi
-			pid="${LAST_DISPATCH_PID}"
-			running_pids+=("${pid}")
-			pid_to_cycle["${pid}"]="${job_index}"
-			pid_to_start_seconds["${pid}"]="${SECONDS}"
-			pid_to_owned_gpu_csv["${pid}"]="${LAST_DISPATCH_GPU_CSV}"
-			pid_to_release_file["${pid}"]="${LAST_DISPATCH_RELEASE_FILE}"
-			pid_to_cursor_file["${pid}"]="${LAST_DISPATCH_CURSOR_FILE}"
-			pid_to_stdout_log["${pid}"]="${LAST_DISPATCH_STDOUT_LOG}"
-			job_index=$((job_index + 1))
-			progress=1
-		done
-
-		next_running_pids=()
-		for pid in "${running_pids[@]}"; do
-			if kill -0 "${pid}" 2>/dev/null; then
-				next_running_pids+=("${pid}")
-				continue
+			target_search_space_json="${target_space_json}"
+		else
+			search_space_status=$?
+			if [[ "${search_space_status}" -eq 2 ]]; then
+				exit 1
 			fi
-			if wait "${pid}"; then
-				completed_code=0
-			else
-				completed_code=$?
-			fi
-			owned_gpu_csv="${pid_to_owned_gpu_csv[$pid]:-}"
-			if [[ -n "${owned_gpu_csv}" ]]; then
-				IFS=',' read -r -a owned_gpu_ids <<< "${owned_gpu_csv}"
-				append_unique_gpu_ids available_gpu_ids "${owned_gpu_ids[@]}"
-			fi
-			cycle_index="${pid_to_cycle[$pid]:-0}"
-			cycle_duration_seconds=$((SECONDS - ${pid_to_start_seconds[$pid]:-${SECONDS}}))
-			if [[ "${completed_code}" -eq 124 ]]; then
-				if [[ "${first_error_code}" -eq 0 ]]; then
-					first_error_code="${completed_code}"
-				fi
-				stop_submitting=1
-			else
-				TOTAL_CYCLE_SECONDS=$((TOTAL_CYCLE_SECONDS + cycle_duration_seconds))
-				COMPLETED_CYCLES=$((COMPLETED_CYCLES + 1))
-			fi
-			avg_cycle_seconds=0
-			if [[ "${COMPLETED_CYCLES}" -gt 0 ]]; then
-				avg_cycle_seconds=$((TOTAL_CYCLE_SECONDS / COMPLETED_CYCLES))
-			fi
-			remaining_seconds=$((BUDGET_SECONDS - (SECONDS - START_SECONDS)))
-			if [[ "${remaining_seconds}" -lt 0 ]]; then
-				remaining_seconds=0
-			fi
-			estimated_cycles_left=0
-			if [[ "${avg_cycle_seconds}" -gt 0 ]]; then
-				estimated_cycles_left=$((remaining_seconds / avg_cycle_seconds))
-			fi
-			printf '[tune_cnn_pair_v3_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
-				"${cycle_index}" \
-				"$(format_elapsed "${cycle_duration_seconds}")" \
-				"$(format_elapsed "${avg_cycle_seconds}")"
-			printf 'ETA_cycles_left=%s log=%s exit=%s\n' \
-				"${estimated_cycles_left}" \
-				"${pid_to_stdout_log[$pid]:-}" \
-				"${completed_code}"
-			unset "pid_to_cycle[${pid}]"
-			unset "pid_to_start_seconds[${pid}]"
-			unset "pid_to_owned_gpu_csv[${pid}]"
-			unset "pid_to_release_file[${pid}]"
-			unset "pid_to_cursor_file[${pid}]"
-			unset "pid_to_stdout_log[${pid}]"
-			progress=1
-		done
-		running_pids=("${next_running_pids[@]}")
-
-		if [[ ${#running_pids[@]} -eq 0 && ${stop_submitting} -ne 0 ]]; then
-			break
 		fi
-		if [[ "${progress}" -eq 0 ]]; then
-			sleep 0.1
+		objective_metric="pair_${OBJECTIVE_METRIC}"
+		if [[ "${CHEAT_MODE}" == "on" ]]; then
+			objective_metric="test_${OBJECTIVE_METRIC}"
 		fi
+		global_best_path="$(
+			intronmodel_resolve_pair_best_config_path \
+				"${DATA_ROOT}" \
+				"${species}" \
+				"${TUNING_MODEL_NAME}"
+		)"
+		template_path="${scheduler_root}/${species}_pair_seed${base_seed}.template.json"
+		output_parent_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair"
+		write_cycle_template_config \
+			"${template_path}" \
+			"${species}" \
+			"${base_seed}" \
+			"${resolved_tag}" \
+			"${TRAIN_POS_PATH_JSON}" \
+			"${TRAIN_NEG_PATH_JSON}" \
+			"${target_search_space_json}" \
+			"${objective_metric}" \
+			"${global_best_path}"
+		append_scheduler_job_entry \
+			"${jobs_file}" \
+			"${species}" \
+			"${base_seed}" \
+			"${template_path}" \
+			"${output_parent_dir}"
 	done
-	if [[ "${first_error_code}" -ne 0 ]]; then
-		exit "${first_error_code}"
-	fi
+done
+
+scheduler_config_path="${scheduler_root}/scheduler_config.json"
+"${PYTHON_BIN}" - \
+	"${scheduler_config_path}" \
+	"${jobs_file}" \
+	"${PROJECT_ROOT}" \
+	"${DATA_ROOT}" \
+	"${MODEL_ROOT}" \
+	"${PYTHON_BIN}" \
+	"${PROJECT_ROOT}/src/tools/hparam_search.py" \
+	"${TIME_BUDGET_MINUTES}" \
+	"${TIMEOUT_GRACE_SECONDS}" \
+	"${START_EPOCH}" \
+	"${PARALLEL_SLOT_COUNT}" \
+	"${selected_gpu_ids[@]}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+jobs_file = sys.argv[2]
+project_root = sys.argv[3]
+data_root = sys.argv[4]
+model_root = sys.argv[5]
+python_bin = sys.argv[6]
+hparam_search_path = sys.argv[7]
+time_budget_minutes = int(sys.argv[8])
+timeout_grace_seconds = int(sys.argv[9])
+start_epoch = sys.argv[10]
+parallel_slot_count = int(sys.argv[11])
+selected_gpu_ids = sys.argv[12:]
+
+payload = {
+    "script_name": "tune_cnn_pair_v3_time.sh",
+    "project_root": project_root,
+    "data_root": data_root,
+    "model_root": model_root,
+    "python_bin": python_bin,
+    "hparam_search_path": hparam_search_path,
+    "time_budget_minutes": time_budget_minutes,
+    "timeout_grace_seconds": timeout_grace_seconds,
+    "selected_gpu_ids": selected_gpu_ids,
+    "parallel_slot_count": max(1, parallel_slot_count),
+    "start_epoch": start_epoch,
+    "jobs_file": jobs_file,
+}
+config_path.write_text(
+    json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+PY
+
+PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+	"${PYTHON_BIN}" \
+	"${PROJECT_ROOT}/src/tools/tune_time_scheduler.py" \
+	--config "${scheduler_config_path}"
+scheduler_exit_code=$?
+if [[ "${scheduler_exit_code}" -ne 0 ]]; then
+	exit "${scheduler_exit_code}"
 fi
 
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
@@ -961,9 +1018,3 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 			"${TUNING_MODEL_NAME}"
 	done
 fi
-
-END_EPOCH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-TOTAL_SECONDS=$((SECONDS - START_SECONDS))
-TOTAL_HMS="$(format_elapsed "${TOTAL_SECONDS}")"
-echo "[tune_cnn_pair_v3_time.sh] done start=${START_EPOCH} end=${END_EPOCH} "\
-	"elapsed=${TOTAL_HMS} cycles=${job_index}"
