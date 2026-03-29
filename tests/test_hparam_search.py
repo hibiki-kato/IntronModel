@@ -2379,6 +2379,65 @@ def test_maybe_update_global_best_skips_same_sampled_params_recheck(
     assert publish_calls == []
 
 
+def test_maybe_update_global_best_skips_publish_on_missing_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "cnn_v2" / "acceptor" / "best_config.json"
+    row = hparam_search.TrialResult(
+        phase="full",
+        trial_id=1,
+        status="success",
+        gpu_id=None,
+        sampled_params={"batch_size": 512},
+        effective_batch_size=512,
+        oom_retries=0,
+        donor_pr_auc=None,
+        acceptor_pr_auc=0.95,
+        mean_pr_auc=None,
+        objective_metric="acceptor_pr_auc",
+        objective_score=0.95,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json=str(tmp_path / "metrics.json"),
+        log_file="trial.log",
+    )
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_read_best_objective_score",
+        lambda *args, **kwargs: 0.94,
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "write_best_config",
+        lambda *args, **kwargs: None,
+    )
+
+    def _raise_missing_checkpoint(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise FileNotFoundError("Checkpoint not found: missing.pt")
+
+    monkeypatch.setattr(
+        hparam_search,
+        "publish_latest_best_version",
+        _raise_missing_checkpoint,
+    )
+
+    hparam_search.maybe_update_global_best(
+        global_best_path=output_path,
+        best_row=row,
+        hparam_context={"fixed_run_args": {"model": "cnn_v2", "species": "SpX"}},
+    )
+
+    captured = capsys.readouterr()
+    assert "Updated global best config" in captured.out
+    assert "skipped versioned publication" in captured.out
+    assert "Checkpoint not found: missing.pt" in captured.out
+
+
 def test_print_trial_result_includes_failure_reason(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

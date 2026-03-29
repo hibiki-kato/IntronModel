@@ -6813,12 +6813,20 @@ def maybe_update_global_best(
     if species is None:
         return
     updated_side = global_best_path.parent.name
-    published = publish_latest_best_version(
-        project_root=config_project_root_from_best_path(global_best_path),
-        species=species,
-        model_name=normalize_public_model_name(model_name),
-        updated_side=updated_side,
-    )
+    try:
+        published = publish_latest_best_version(
+            project_root=config_project_root_from_best_path(global_best_path),
+            species=species,
+            model_name=normalize_public_model_name(model_name),
+            updated_side=updated_side,
+        )
+    except FileNotFoundError as exc:
+        print(
+            "[hparam_search] Global best updated, but skipped versioned "
+            f"publication because a checkpoint was missing: {exc}",
+            flush=True,
+        )
+        return
     if published is not None:
         print(
             "[hparam_search] Published versioned best: "

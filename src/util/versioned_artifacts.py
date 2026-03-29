@@ -357,11 +357,14 @@ def _publish_independent_public_version(
     elif updated_side_normalized == "acceptor":
         carry_forward_side = "donor"
         donor_source = _resolve_carry_forward_or_payload_checkpoint(
+            project_root=project_root,
             previous_entry=previous_entry,
             payload=donor_payload,
             task="donor",
             base_dir=donor_path.parent,
             model_root=model_root,
+            species=species,
+            public_model_name=public_model_name,
         )
         acceptor_source = _resolve_task_checkpoint_from_payload(
             payload=acceptor_payload,
@@ -387,11 +390,14 @@ def _publish_independent_public_version(
             model_root=model_root,
         )
         acceptor_source = _resolve_carry_forward_or_payload_checkpoint(
+            project_root=project_root,
             previous_entry=previous_entry,
             payload=acceptor_payload,
             task="acceptor",
             base_dir=acceptor_path.parent,
             model_root=model_root,
+            species=species,
+            public_model_name=public_model_name,
         )
         if donor_source is None or acceptor_source is None:
             return None
@@ -740,11 +746,14 @@ def _resolve_updated_or_payload_checkpoint(
 
 def _resolve_carry_forward_or_payload_checkpoint(
     *,
+    project_root: Path,
     previous_entry: VersionHistoryEntry | None,
     payload: Mapping[str, object],
     task: str,
     base_dir: Path,
     model_root: Path,
+    species: str,
+    public_model_name: str,
 ) -> Path | None:
     """Resolve a carried-forward checkpoint with payload fallback.
 
@@ -762,15 +771,54 @@ def _resolve_carry_forward_or_payload_checkpoint(
         elif task == "pair":
             raw_value = previous_entry.pair_checkpoint_path
         if raw_value != "":
-            candidate = Path(raw_value)
-            if candidate.exists():
-                return candidate.resolve()
+            try:
+                return resolve_existing_checkpoint_path(
+                    Path(raw_value),
+                    model_root_dir=model_root,
+                )
+            except FileNotFoundError:
+                archived_candidate = _resolve_archived_public_checkpoint(
+                    project_root=project_root,
+                    species=species,
+                    public_model_name=public_model_name,
+                    published_name=previous_entry.published_name,
+                    task=task,
+                )
+                if archived_candidate is not None:
+                    return archived_candidate
     return _resolve_task_checkpoint_from_payload(
         payload=payload,
         task=task,
         base_dir=base_dir,
         model_root=model_root,
     )
+
+
+def _resolve_archived_public_checkpoint(
+    *,
+    project_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+    task: str,
+) -> Path | None:
+    """Return one archived published checkpoint when it still exists."""
+    if task not in {"donor", "acceptor", "pair"}:
+        return None
+    archived_path = (
+        project_root
+        / "archive"
+        / "versioned_artifacts"
+        / species
+        / public_model_name
+        / published_name
+        / "model"
+        / task
+        / f"{published_name}.pt"
+    )
+    if archived_path.is_file():
+        return archived_path.resolve()
+    return None
 
 
 def _resolve_carry_forward_checkpoint(

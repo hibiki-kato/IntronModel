@@ -171,19 +171,17 @@ def resolve_existing_checkpoint_path(
                 scoped_root = model_root_dir.joinpath(relative_parts[0], relative_parts[1])
                 search_roots.append(scoped_root)
     search_roots.append(model_root_dir)
+    preferred_roots = [scoped_root] if scoped_root is not None else search_roots
 
     basename = checkpoint_path.name
     if basename != "":
-        exact_match = _find_checkpoint_candidate(search_roots, basename)
+        exact_match = _find_checkpoint_candidate(preferred_roots, basename)
         if exact_match is not None:
             return exact_match
 
         pattern = _build_relaxed_checkpoint_glob(basename)
         if pattern is not None:
-            relaxed_roots = search_roots
-            if scoped_root is not None:
-                relaxed_roots = [scoped_root]
-            relaxed_match = _find_checkpoint_candidate(relaxed_roots, pattern)
+            relaxed_match = _find_checkpoint_candidate(preferred_roots, pattern)
             if relaxed_match is not None:
                 return relaxed_match
 
