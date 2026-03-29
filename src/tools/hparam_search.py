@@ -46,7 +46,7 @@ from util.validation_protocol import (
     build_validation_protocol,
 )
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
-from util.process_title import PROCESS_TITLE_ENV, apply_process_title_from_env
+from util.process_title import apply_process_title_from_env
 from util.versioned_artifacts import (
     is_active_public_model,
     normalize_public_model_name,
@@ -2611,18 +2611,6 @@ def trial_log_prefix(prefix: str) -> Iterator[None]:
         _ACTIVE_LOG_PREFIX.reset(token)
 
 
-def _build_trial_process_title(
-    *,
-    model_name: str,
-    phase: str,
-    trial_id: int,
-) -> str:
-    """Build one non-ETA process title for a trial subprocess."""
-    normalized_model = model_name.strip().lower() or "model"
-    normalized_phase = phase.strip().lower() or "phase"
-    return f"trial:{normalized_model}:{normalized_phase}:{trial_id:04d}"
-
-
 def _resolve_phase_execution_mode(
     *,
     process_mode: str,
@@ -2987,11 +2975,6 @@ def _run_trial_with_command_runner(
         env = os.environ.copy()
         if assigned_gpu_id is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(assigned_gpu_id)
-        env[PROCESS_TITLE_ENV] = _build_trial_process_title(
-            model_name=model_name,
-            phase=phase,
-            trial_id=trial_id,
-        )
 
         attempt_index = oom_retries + 1
         attempt_header = (

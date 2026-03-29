@@ -383,6 +383,8 @@ def test_tune_cnn_pair_v3_time_overlaps_full_into_next_quick(
     assert cycle_zero_full_start["time"] <= cycle_one_quick_start["time"]
     assert cycle_one_quick_start["time"] < cycle_zero_full_end["time"]
     assert "trial scheduler across GPUs: 0,1,2,3" in stdout
+    assert "[hparam_search] quick trial 0000 started on gpu:0." in stdout
+    assert "[hparam_search] full trial 0000 success" in stdout
 
 
 def test_tune_cnn_pair_v3_time_grows_next_cycle_slot_budget_after_more_gpus_free(
@@ -432,6 +434,8 @@ def test_tune_cnn_pair_v3_time_grows_next_cycle_slot_budget_after_more_gpus_free
     assert cycle_one_quick_starts[2]["time"] < cycle_zero_full_end["time"]
     assert cycle_zero_full_end["time"] <= cycle_one_quick_starts[3]["time"]
     assert len({str(row["gpu_id"]) for row in cycle_one_quick_starts[:4]}) == 4
+    assert "[hparam_search] quick trial 0000 started on gpu:0." in stdout
+    assert "[hparam_search] quick trial 0003 started on gpu:3." in stdout
 
 
 @pytest.mark.parametrize(

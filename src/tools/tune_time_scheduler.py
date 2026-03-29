@@ -261,6 +261,66 @@ def _emit_cycle_line(cycle: CycleState, text: str) -> None:
         handle.write(rendered + "\n")
 
 
+def _cycle_log_prefix(cycle: CycleState) -> str:
+    """Return the stable log prefix used for one cycle."""
+    return (
+        f"[{cycle.config.base_args.get('script_name', 'tune_time_scheduler')}]"
+        f"[cycle={cycle.cycle_index}]"
+        f"[species={cycle.template.species}]"
+        f"[target={cycle.template.target_name}]"
+        f"[seed={cycle.template.seed}]"
+    )
+
+
+def _emit_trial_start_line(
+    *,
+    cycle: CycleState,
+    task: ScheduledTrialTask,
+    assigned_gpu_id: str | None,
+) -> None:
+    """Emit one trial-start line using the historical hparam_search format."""
+    if not hparam_search._should_print_trial_start(cycle.resolved_trial_stream_mode):
+        return
+    with hparam_search.trial_log_prefix(_cycle_log_prefix(cycle)):
+        hparam_search._print_trial_start(
+            phase=task.phase,
+            trial_id=task.trial_id,
+            assigned_gpu=assigned_gpu_id,
+        )
+
+
+def _emit_trial_result_line(
+    *,
+    cycle: CycleState,
+    task: ScheduledTrialTask,
+    result: TrialResult,
+) -> None:
+    """Emit one trial-result line using the historical hparam_search format."""
+    if not hparam_search._should_print_trial_result_line(
+        cycle.resolved_trial_stream_mode
+    ):
+        return
+    total_count: int
+    completed_count: int
+    if task.phase == "quick":
+        total_count = len(cycle.quick_params)
+        completed_count = len(cycle.quick_rows)
+    else:
+        total_count = (
+            len(cycle.full_rows)
+            + len(cycle.pending_full_tasks)
+            + cycle.full_running_count
+        )
+        completed_count = len(cycle.full_rows)
+    with hparam_search.trial_log_prefix(_cycle_log_prefix(cycle)):
+        hparam_search._print_trial_result(
+            phase=task.phase,
+            trial_count=max(1, total_count),
+            completed_count=completed_count,
+            result=result,
+        )
+
+
 def _build_cycle_runtime_paths(
     *,
     template: CycleTemplate,
@@ -840,15 +900,7 @@ def _run_trial_for_cycle(
     assigned_gpu_id: str | None,
 ) -> TrialResult:
     """Run one trial while attaching the cycle-scoped log prefix."""
-    with hparam_search.trial_log_prefix(
-        (
-            f"[{cycle.config.base_args.get('script_name', 'tune_time_scheduler')}]"
-            f"[cycle={cycle.cycle_index}]"
-            f"[species={cycle.template.species}]"
-            f"[target={cycle.template.target_name}]"
-            f"[seed={cycle.template.seed}]"
-        )
-    ):
+    with hparam_search.trial_log_prefix(_cycle_log_prefix(cycle)):
         return hparam_search.run_trial(
             config=cycle.config,
             phase=task.phase,
@@ -1303,6 +1355,11 @@ def run_scheduler(config: SchedulerConfig) -> int:
                         cycle.quick_running_count += 1
                     else:
                         cycle.full_running_count += 1
+                    _emit_trial_start_line(
+                        cycle=cycle,
+                        task=task,
+                        assigned_gpu_id=assigned_gpu_id,
+                    )
                     scheduled_progress = True
 
             if not running_trials:
@@ -1323,6 +1380,11 @@ def run_scheduler(config: SchedulerConfig) -> int:
                 )
                 result = future.result()
                 _handle_completed_trial(cycle, running_trial.task, result)
+                _emit_trial_result_line(
+                    cycle=cycle,
+                    task=running_trial.task,
+                    result=result,
+                )
                 if not _cycle_has_pending_work(cycle):
                     cycle_duration_seconds = max(
                         0,
