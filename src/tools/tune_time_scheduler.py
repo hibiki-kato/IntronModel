@@ -836,25 +836,13 @@ def _build_non_overlap_full_queue(cycle: CycleState) -> None:
         )
         cycle.next_full_trial_id += 1
         _queue_full_task(cycle, task)
-    _emit_cycle_line(
-        cycle,
-        (
-            f"[hparam_search] Full phase: top_k={cycle.config.top_k}, "
-            f"selected={len(selected_for_full)}, "
-            f"skipped_same_best_epoch={cycle.skipped_same_best_epoch}, "
-            "skipped_seed_context_match="
-            f"{cycle.skipped_seed_context_match}, "
-            f"injected_best_full_recheck={cycle.full_priority_inserted}, "
-            f"epochs={cycle.full_overrides.get('epochs')}, "
-            f"objective={cycle.config.objective_metric}, "
-            "execution_mode=subprocess."
-        ),
-    )
 
 
 def _ensure_post_quick_state(cycle: CycleState) -> None:
     """Ensure full-phase work is materialized once quick work fully drains."""
     if cycle.has_quick_work:
+        return
+    if cycle.full_queue_built:
         return
     if cycle.config.skip_full_phase:
         cycle.full_queue_built = True
@@ -940,8 +928,12 @@ def _snapshot_trial_count(cycle: CycleState, task: ScheduledTrialTask) -> int:
     """Return the best-known phase trial count at dispatch time."""
     if task.phase == "quick":
         return len(cycle.quick_params)
+    planned_full_count = cycle.config.top_k
+    if cycle.full_priority_params is not None:
+        planned_full_count += 1
     return max(
         1,
+        planned_full_count,
         len(cycle.full_rows) + len(cycle.pending_full_tasks) + cycle.full_running_count + 1,
     )
 

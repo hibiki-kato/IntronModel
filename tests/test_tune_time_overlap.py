@@ -383,6 +383,7 @@ def test_tune_cnn_pair_v3_time_overlaps_full_into_next_quick(
     assert cycle_one_quick_start["time"] < cycle_zero_full_end["time"]
     assert "trial scheduler across GPUs: 0,1,2,3" in stdout
     assert "[hparam_search] quick trial 0000 started on gpu:0." in stdout
+    assert "[hparam_search] full trial 0000 success (1/2)" in stdout
     assert "[hparam_search] full trial 0000 success" in stdout
 
 
@@ -465,7 +466,7 @@ def test_tune_cnn_pair_v3_time_prefills_two_cycles_ahead(
     assert "[tune_cnn_pair_v3_time.sh] cycle=1 elapsed=" not in stdout
 
 
-def test_tune_cnn_pair_v3_time_freezes_full_progress_denominator(
+def test_tune_cnn_pair_v3_time_uses_top_k_for_full_progress_denominator(
     tmp_path: Path,
 ) -> None:
     project_root, tune_dst = _prepare_script_project(
@@ -489,7 +490,8 @@ def test_tune_cnn_pair_v3_time_freezes_full_progress_denominator(
     )
 
     assert stderr == ""
-    assert "[hparam_search] full trial 0000 success (1/4)" not in stdout
+    assert "[hparam_search] full trial 0000 success (1/4)" in stdout
+    assert "[hparam_search] full trial 0000 success (1/1)" not in stdout
 
 
 @pytest.mark.parametrize(
