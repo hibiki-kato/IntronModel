@@ -869,8 +869,6 @@ def _ensure_post_quick_state(cycle: CycleState) -> None:
 def _pop_next_task(cycle: CycleState) -> ScheduledTrialTask | None:
     """Pop the next schedulable task for one cycle."""
     _ensure_post_quick_state(cycle)
-    if cycle.config.enable_phase_overlap and cycle.pending_full_tasks:
-        return cycle.pending_full_tasks.pop(0)
     if cycle.quick_pending_indices:
         trial_id = cycle.quick_pending_indices.pop(0)
         return ScheduledTrialTask(
