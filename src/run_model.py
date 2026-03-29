@@ -623,6 +623,8 @@ def _add_cnn_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
         default=2,
         help="Apply pooling after every N residual blocks.",
     )
+    parser.add_argument("--donor_pool_every", type=int, default=None)
+    parser.add_argument("--acceptor_pool_every", type=int, default=None)
 
 
 def _add_cnn_pair_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
@@ -650,6 +652,8 @@ def _add_cnn_pair_v3_fallback_train_args(parser: argparse.ArgumentParser) -> Non
         default=2,
         help="Apply pooling after every N residual blocks.",
     )
+    parser.add_argument("--donor_pool_every", type=int, default=None)
+    parser.add_argument("--acceptor_pool_every", type=int, default=None)
 
 
 def _add_cnn_v3_meta_fallback_train_args(parser: argparse.ArgumentParser) -> None:

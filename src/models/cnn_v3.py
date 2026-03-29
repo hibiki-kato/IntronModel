@@ -99,6 +99,12 @@ def _resolve_task_arch_params(
     if task not in {"donor", "acceptor"}:
         raise ValueError(f"Unsupported task: {task}")
 
+    prefix = f"{task}_"
+
+    def _override_or_default(name: str, default: object) -> object:
+        override = getattr(model_args, f"{prefix}{name}", None)
+        return default if override is None else override
+
     shared_channels = _coerce_optional_int_list(
         getattr(model_args, "conv_channels", None),
         arg_name="--conv_channels",
@@ -181,20 +187,20 @@ def _resolve_task_arch_params(
     )
 
     max_pool_size = _coerce_positive_int(
-        getattr(model_args, "max_pool_size", 2),
-        arg_name="--max_pool_size",
+        _override_or_default("max_pool_size", getattr(model_args, "max_pool_size", 2)),
+        arg_name=f"--{prefix}max_pool_size",
     )
     pool_every = _coerce_positive_int(
-        getattr(model_args, "pool_every", 2),
-        arg_name="--pool_every",
+        _override_or_default("pool_every", getattr(model_args, "pool_every", 2)),
+        arg_name=f"--{prefix}pool_every",
     )
     head_type = cnn._normalize_cnn_head_type(
-        getattr(model_args, "head_type", "gap"),
-        arg_name="--head_type",
+        _override_or_default("head_type", getattr(model_args, "head_type", "gap")),
+        arg_name=f"--{prefix}head_type",
     )
     fc_hidden = _coerce_positive_int(
-        getattr(model_args, "fc_hidden", 192),
-        arg_name="--fc_hidden",
+        _override_or_default("fc_hidden", getattr(model_args, "fc_hidden", 192)),
+        arg_name=f"--{prefix}fc_hidden",
     )
     return TaskOrganicArchParams(
         layout=OrganicBranchLayout(
@@ -1062,6 +1068,18 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=2,
         help="Apply max-pooling after every N residual blocks.",
+    )
+    parser.add_argument(
+        "--donor_pool_every",
+        type=int,
+        default=None,
+        help="Donor-only override for --pool_every.",
+    )
+    parser.add_argument(
+        "--acceptor_pool_every",
+        type=int,
+        default=None,
+        help="Acceptor-only override for --pool_every.",
     )
 
 

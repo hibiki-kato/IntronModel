@@ -23,9 +23,17 @@ def test_resolve_task_arch_params_prefers_task_overrides() -> None:
         donor_residual_channels="48,80,128,160",
         acceptor_residual_channels=None,
         max_pool_size=2,
+        donor_max_pool_size=3,
+        acceptor_max_pool_size=4,
         pool_every=2,
+        donor_pool_every=1,
+        acceptor_pool_every=3,
         head_type="gap",
+        donor_head_type="center",
+        acceptor_head_type="gap",
         fc_hidden=192,
+        donor_fc_hidden=320,
+        acceptor_fc_hidden=224,
     )
 
     donor_arch = cnn_v3._resolve_task_arch_params("donor", args)
@@ -39,10 +47,35 @@ def test_resolve_task_arch_params_prefers_task_overrides() -> None:
     assert acceptor_arch.layout.dilations == [1, 2, 4]
     assert donor_arch.layout.residual_channels == [48, 80, 128, 160]
     assert acceptor_arch.layout.residual_channels == [32, 64, 96]
-    assert donor_arch.max_pool_size == 2
-    assert donor_arch.pool_every == 2
-    assert donor_arch.head_type == "gap"
-    assert donor_arch.fc_hidden == 192
+    assert donor_arch.max_pool_size == 3
+    assert acceptor_arch.max_pool_size == 4
+    assert donor_arch.pool_every == 1
+    assert acceptor_arch.pool_every == 3
+    assert donor_arch.head_type == "center"
+    assert acceptor_arch.head_type == "gap"
+    assert donor_arch.fc_hidden == 320
+    assert acceptor_arch.fc_hidden == 224
+
+
+def test_add_train_args_accepts_task_specific_pool_every() -> None:
+    parser = argparse.ArgumentParser()
+
+    cnn_v3.add_train_args(parser)
+
+    args = parser.parse_args(
+        [
+            "--pool_every",
+            "2",
+            "--donor_pool_every",
+            "1",
+            "--acceptor_pool_every",
+            "3",
+        ]
+    )
+
+    assert args.pool_every == 2
+    assert args.donor_pool_every == 1
+    assert args.acceptor_pool_every == 3
 
 
 def test_organic_site_cnn_forward_onehot() -> None:
@@ -130,9 +163,17 @@ def test_train_task_model_forwards_requested_task_to_arch_resolution(
         donor_residual_channels=None,
         acceptor_residual_channels=None,
         max_pool_size=2,
+        donor_max_pool_size=None,
+        acceptor_max_pool_size=None,
         pool_every=2,
+        donor_pool_every=None,
+        acceptor_pool_every=None,
         head_type="gap",
+        donor_head_type=None,
+        acceptor_head_type=None,
         fc_hidden=64,
+        donor_fc_hidden=None,
+        acceptor_fc_hidden=None,
     )
 
     with pytest.raises(_StopAfterArchResolution):

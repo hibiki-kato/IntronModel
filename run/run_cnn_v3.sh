@@ -12,7 +12,7 @@ fi
 # --------------------------
 set -a
 MODEL="cnn_v3"
-SPECIES="Athal"
+SPECIES="Athal, Dmel, Hsap, Mmus"
 INTRONMODEL_AUTO_TMUX="off"
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.

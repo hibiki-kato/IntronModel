@@ -380,9 +380,9 @@ dispatch_cycle() {
 	local remaining_hms="$6"
 
 	local schedule_index=$((cycle_index % (${#JOB_ORDER[@]} * ${#TARGET_ORDER[@]} * ${#SEED_VALUES[@]})))
-	local species_index=$((schedule_index % ${#JOB_ORDER[@]}))
-	local target_index=$(((schedule_index / ${#JOB_ORDER[@]}) % ${#TARGET_ORDER[@]}))
-	local seed_index=$((schedule_index / (${#JOB_ORDER[@]} * ${#TARGET_ORDER[@]})))
+	local target_index=$((schedule_index % ${#TARGET_ORDER[@]}))
+	local species_index=$(((schedule_index / ${#TARGET_ORDER[@]}) % ${#JOB_ORDER[@]}))
+	local seed_index=$((schedule_index / (${#TARGET_ORDER[@]} * ${#JOB_ORDER[@]})))
 	local raw_species="${JOB_ORDER[${species_index}]}"
 	local species
 	species="$(resolve_species_case "${raw_species}" "${DATA_ROOT}")"
@@ -761,6 +761,7 @@ else
 	selected_gpu_ids=("${GPU_ID_LIST[@]:0:${PARALLEL_SLOT_COUNT}}")
 	gpu_csv="$(IFS=,; echo "${selected_gpu_ids[*]}")"
 	echo "[tune_cnn_v3_time.sh] cycle-parallel scheduler across GPUs: ${gpu_csv}"
+	max_active_cycles=2
 	declare -A pid_to_cycle=()
 	declare -A pid_to_start_seconds=()
 	declare -A pid_to_owned_gpu_csv=()
@@ -775,6 +776,13 @@ else
 		progress=0
 		elapsed_seconds=$((SECONDS - START_SECONDS))
 		remaining_seconds=$((BUDGET_SECONDS - elapsed_seconds))
+		min_dispatch_slots=1
+		if [[ ${#running_pids[@]} -gt 0 && "${PARALLEL_SLOT_COUNT}" -gt 1 ]]; then
+			# Avoid launching the adjacent cycle on a single leaked GPU. A cycle's
+			# GPU budget is fixed at dispatch time, so trickling one slot at a time
+			# fragments the schedule and often drops aggregate utilization.
+			min_dispatch_slots=2
+		fi
 		if [[ "${remaining_seconds}" -lt 0 ]]; then
 			remaining_seconds=0
 		fi
@@ -808,7 +816,27 @@ else
 			stop_submitting=1
 		fi
 
-		while [[ ${stop_submitting} -eq 0 && ${#available_gpu_ids[@]} -gt 0 ]]; do
+		# Keep overlap local to adjacent cycles only. One active cycle may leak
+		# spare GPUs into the immediate next cycle, but we avoid cascading into
+		# later species/targets before the queue advances.
+		while true; do
+			can_launch_next_cycle=1
+			if [[ ${stop_submitting} -ne 0 ]]; then
+				can_launch_next_cycle=0
+			elif [[ ${#available_gpu_ids[@]} -lt "${min_dispatch_slots}" ]]; then
+				can_launch_next_cycle=0
+			elif [[ ${#running_pids[@]} -ge "${max_active_cycles}" ]]; then
+				can_launch_next_cycle=0
+			elif [[ ${#running_pids[@]} -eq 1 ]]; then
+				active_cycle="${pid_to_cycle[${running_pids[0]}]:-}"
+				if [[ -n "${active_cycle}" ]] \
+					&& [[ "${job_index}" -ne $((active_cycle + 1)) ]]; then
+					can_launch_next_cycle=0
+				fi
+			fi
+			if [[ "${can_launch_next_cycle}" -ne 1 ]]; then
+				break
+			fi
 			assigned_parallel_slots="$(
 				intronmodel_resolve_parallel_slots \
 					"tune_cnn_v3_time.sh" \
