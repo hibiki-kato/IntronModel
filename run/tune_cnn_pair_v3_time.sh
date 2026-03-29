@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="700"
+TIME_BUDGET_MINUTES="120"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -34,8 +34,8 @@ QUICK_TRIALS="16"
 QUICK_EPOCHS="2"
 TOP_K="4"
 FULL_EPOCHS="10"
-QUICK_COMPILE_MODE="off"
-FULL_COMPILE_MODE="on"
+QUICK_COMPILE_MODE="quick"
+FULL_COMPILE_MODE="full"
 TRIAL_STREAM_MODE="errors"
 
 GPU_IDS="4,5,6,7"
@@ -782,14 +782,18 @@ if ! [[ "${FULL_EPOCHS}" =~ ^[0-9]+$ ]] || [[ "${FULL_EPOCHS}" -le 0 ]]; then
 fi
 if [[ "${QUICK_COMPILE_MODE}" != "off" \
 	&& "${QUICK_COMPILE_MODE}" != "on" \
-	&& "${QUICK_COMPILE_MODE}" != "auto" ]]; then
-	echo "[tune_cnn_pair_v3_time.sh] QUICK_COMPILE_MODE must be off|on|auto." >&2
+	&& "${QUICK_COMPILE_MODE}" != "auto" \
+	&& "${QUICK_COMPILE_MODE}" != "quick" \
+	&& "${QUICK_COMPILE_MODE}" != "full" ]]; then
+	echo "[tune_cnn_pair_v3_time.sh] QUICK_COMPILE_MODE must be off|on|auto|quick|full." >&2
 	exit 1
 fi
 if [[ "${FULL_COMPILE_MODE}" != "off" \
 	&& "${FULL_COMPILE_MODE}" != "on" \
-	&& "${FULL_COMPILE_MODE}" != "auto" ]]; then
-	echo "[tune_cnn_pair_v3_time.sh] FULL_COMPILE_MODE must be off|on|auto." >&2
+	&& "${FULL_COMPILE_MODE}" != "auto" \
+	&& "${FULL_COMPILE_MODE}" != "quick" \
+	&& "${FULL_COMPILE_MODE}" != "full" ]]; then
+	echo "[tune_cnn_pair_v3_time.sh] FULL_COMPILE_MODE must be off|on|auto|quick|full." >&2
 	exit 1
 fi
 if [[ "${TRIAL_STREAM_MODE}" != "auto" \

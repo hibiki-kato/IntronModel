@@ -11,6 +11,7 @@ import torch
 
 import util.model_runtime as model_runtime
 from util.model_runtime import (
+    HIGH_LEVEL_COMPILE_MODE_CHOICES,
     bool_from_flag,
     compile_model_with_fallback,
     configure_torch_compile_runtime,
@@ -21,6 +22,7 @@ from util.model_runtime import (
     is_compile_runtime_error,
     log10_sigmoid_np,
     normalize_checkpoint_state_dict,
+    normalize_high_level_compile_mode,
     probabilities_to_log10_scores_np,
     resolve_compile_enabled,
     resolve_auto_num_workers,
@@ -157,6 +159,45 @@ def test_resolve_compile_enabled_auto_no_epoch_floor(
     assert enabled is True
 
 
+def test_high_level_compile_mode_choices_include_phase_aliases() -> None:
+    assert HIGH_LEVEL_COMPILE_MODE_CHOICES == (
+        "off",
+        "on",
+        "auto",
+        "quick",
+        "full",
+    )
+
+
+def test_normalize_high_level_compile_mode_supports_aliases() -> None:
+    assert normalize_high_level_compile_mode("quick") == "quick"
+    assert normalize_high_level_compile_mode("reduce_overhead") == "quick"
+    assert normalize_high_level_compile_mode("full") == "full"
+    assert normalize_high_level_compile_mode("max-autotune") == "full"
+
+
+def test_resolve_compile_enabled_quick_forces_compile_on_cuda() -> None:
+    enabled = resolve_compile_enabled(
+        compile_mode="quick",
+        compile_flag=False,
+        quick_phase=True,
+        device="cuda",
+        epochs=1,
+    )
+    assert enabled is True
+
+
+def test_resolve_compile_enabled_full_forces_compile_on_cuda() -> None:
+    enabled = resolve_compile_enabled(
+        compile_mode="full",
+        compile_flag=False,
+        quick_phase=True,
+        device="cuda",
+        epochs=1,
+    )
+    assert enabled is True
+
+
 def test_compile_model_with_fallback_uses_default_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -178,6 +219,63 @@ def test_compile_model_with_fallback_uses_default_strategy(
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
     assert mode_calls == [("default", False)]
+
+
+def test_compile_model_with_fallback_quick_alias_uses_default_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mode_calls: list[tuple[str | None, bool | None]] = []
+    model = torch.nn.Linear(4, 2)
+
+    def _fake_compile(
+        module: torch.nn.Module,
+        mode: str | None = None,
+        dynamic: bool | None = None,
+    ) -> torch.nn.Module:
+        mode_calls.append((mode, dynamic))
+        return module
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    compiled, enabled, selected_mode, setup_error = compile_model_with_fallback(
+        model,
+        compile_mode="quick",
+    )
+    assert compiled is model
+    assert enabled is True
+    assert selected_mode == "reduce-overhead"
+    assert setup_error is None
+    assert mode_calls == [("default", False)]
+
+
+def test_compile_model_with_fallback_full_alias_prefers_max_autotune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mode_calls: list[tuple[str | None, bool | None]] = []
+    model = torch.nn.Linear(4, 2)
+
+    def _fake_compile(
+        module: torch.nn.Module,
+        mode: str | None = None,
+        dynamic: bool | None = None,
+    ) -> torch.nn.Module:
+        mode_calls.append((mode, dynamic))
+        return module
+
+    monkeypatch.setattr(torch, "compile", _fake_compile)
+    monkeypatch.setattr(
+        model_runtime,
+        "_can_use_max_autotune_mode",
+        lambda: True,
+    )
+    compiled, enabled, selected_mode, setup_error = compile_model_with_fallback(
+        model,
+        compile_mode="full",
+    )
+    assert compiled is model
+    assert enabled is True
+    assert selected_mode == "max-autotune"
+    assert setup_error is None
+    assert mode_calls == [("max-autotune-no-cudagraphs", False)]
 
 
 def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> None:

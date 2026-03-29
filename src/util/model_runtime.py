@@ -17,6 +17,13 @@ import torch.nn as nn
 _COMPILE_MODE_OFF: str = "off"
 _COMPILE_MODE_REDUCE_OVERHEAD: str = "reduce-overhead"
 _COMPILE_MODE_MAX_AUTOTUNE: str = "max-autotune"
+HIGH_LEVEL_COMPILE_MODE_CHOICES: tuple[str, ...] = (
+    "off",
+    "on",
+    "auto",
+    "quick",
+    "full",
+)
 
 _COMPILE_MODE_CHOICES: tuple[str, ...] = (
     _COMPILE_MODE_REDUCE_OVERHEAD,
@@ -274,13 +281,11 @@ def resolve_compile_enabled(
         return False
     if compile_flag:
         return True
-    mode = compile_mode.strip().lower()
-    if mode == "on":
+    mode = normalize_high_level_compile_mode(compile_mode)
+    if mode in {"on", "quick", "full"}:
         return True
     if mode == "off":
         return False
-    if mode != "auto":
-        raise ValueError("--compile_mode must be one of: off, on, auto.")
     if quick_phase:
         return False
     ptxas_env = os.environ.get("TRITON_PTXAS_PATH")
@@ -288,6 +293,46 @@ def resolve_compile_enabled(
     if ptxas_env or ptxas_blackwell_env:
         return True
     return shutil.which("ptxas") is not None
+
+
+def normalize_high_level_compile_mode(compile_mode: str) -> str:
+    """Normalize user-facing compile-mode aliases.
+
+    Parameters
+    ----------
+    compile_mode : str
+        User-facing compile mode token.
+
+    Returns
+    -------
+    str
+        One of ``HIGH_LEVEL_COMPILE_MODE_CHOICES``.
+
+    Raises
+    ------
+    ValueError
+        If ``compile_mode`` is unsupported.
+    """
+    token = compile_mode.strip().lower().replace("_", "-")
+    if token in HIGH_LEVEL_COMPILE_MODE_CHOICES:
+        return token
+
+    aliases = {
+        "none": "off",
+        "false": "off",
+        "default": "quick",
+        "normal": "quick",
+        "reduce": "quick",
+        "reduce-overhead": "quick",
+        "max": "full",
+        "max-autotune": "full",
+    }
+    resolved = aliases.get(token)
+    if resolved is not None:
+        return resolved
+
+    choices = ", ".join(HIGH_LEVEL_COMPILE_MODE_CHOICES)
+    raise ValueError(f"--compile_mode must be one of: {choices}.")
 
 
 def _normalize_compile_mode_token(raw: str) -> str | None:
@@ -498,9 +543,10 @@ def compile_model_with_fallback(
         Model to compile with ``torch.compile``.
     compile_mode : str, default="auto"
         High-level compile policy passed from the training or inference
-        function.  Any enabled mode (``"auto"`` or ``"on"``) is capped to
-        ``"default-then-off"`` (i.e. ``reduce-overhead`` only), ignoring
-        ``INTRONMODEL_TORCH_COMPILE_STRATEGY``.
+        function. ``"on"`` and ``"quick"`` use a light
+        ``reduce-overhead``-only strategy, while ``"full"`` prefers
+        ``max-autotune`` before falling back to ``reduce-overhead``.
+        Legacy environment strategy overrides still apply to other modes.
 
     Returns
     -------
@@ -519,9 +565,11 @@ def compile_model_with_fallback(
     configure_torch_compile_runtime()
 
     _load_compile_runtime_cache_from_env()
-    normalized_compile_mode = compile_mode.strip().lower()
-    if normalized_compile_mode in {"auto", "on"}:
+    normalized_compile_mode = normalize_high_level_compile_mode(compile_mode)
+    if normalized_compile_mode in {"auto", "on", "quick"}:
         strategy = "default-then-off"
+    elif normalized_compile_mode == "full":
+        strategy = "max-then-default-then-off"
     else:
         strategy_raw = os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
         strategy = _normalize_compile_strategy(strategy_raw)

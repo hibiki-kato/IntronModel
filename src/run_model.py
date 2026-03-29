@@ -37,6 +37,7 @@ from util.data_proc import (
 )
 from util.model_task_paths import checkpoint_tasks_for_model
 from util.model_runtime import (
+    HIGH_LEVEL_COMPILE_MODE_CHOICES,
     is_compile_runtime_error as _is_compile_runtime_error,
     record_compile_runtime_failure as _record_compile_runtime_failure,
 )
@@ -377,9 +378,13 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--compile", action="store_true")
     parser.add_argument(
         "--compile_mode",
-        choices=["off", "on", "auto"],
+        choices=list(HIGH_LEVEL_COMPILE_MODE_CHOICES),
         default="auto",
-        help="Compilation mode for torch.compile.",
+        help=(
+            "Compilation mode for torch.compile. "
+            "Use quick for reduce-overhead only, or full for "
+            "max-autotune-first compilation."
+        ),
     )
     parser.add_argument(
         "--use_amp",

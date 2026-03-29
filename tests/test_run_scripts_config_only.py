@@ -377,6 +377,7 @@ def test_tune_cnn_v3_time_sh_uses_reinforce_search_defaults() -> None:
     assert '"arch_mutation_steps"' in content
     assert '"arch_add_block_prob"' in content
     assert '"pool_every": ${POOL_EVERY}' in content
+    assert '"validation_metric": "${OBJECTIVE_METRIC}"' in content
     assert 'intronmodel_run_with_process_title \\' in content
     assert '"${RUNTIME_PROCESS_TITLE}" \\' in content
 

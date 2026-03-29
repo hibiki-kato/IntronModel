@@ -6,15 +6,17 @@ import sys
 import pytest
 
 
-ANALYSIS_SRC = Path(__file__).resolve().parents[1] / "analysis" / "src"
-if str(ANALYSIS_SRC) not in sys.path:
-    sys.path.insert(0, str(ANALYSIS_SRC))
+ANALYSIS_SCRIPT = Path(__file__).resolve().parents[1] / "analysis" / "script"
+if str(ANALYSIS_SCRIPT) not in sys.path:
+    sys.path.insert(0, str(ANALYSIS_SCRIPT))
 
 from raw.raw_data_notebook_lib import (  # noqa: E402
     AnnotationCoverageRow,
     EvaluationTranscriptIntronCountRow,
     EvaluationTranscriptGroupIntronCountRow,
     FalseTranscriptIntronLabelRow,
+    IntronOverlapGroupRow,
+    IntronOverlapGroupSummaryRow,
     TranscriptTrainingPositiveIntronOverlapRow,
     SiteLabelCountRow,
     BinaryLabelCountRow,
@@ -33,12 +35,15 @@ from raw.raw_data_notebook_lib import (  # noqa: E402
     build_species_overlap_sets,
     build_train_test_site_label_consistency_rows,
     build_duplicate_rate_rows,
+    build_intron_overlap_group_rows,
+    build_intron_overlap_group_summary_rows,
     collect_species_intron_length_profiles,
     parse_final_score_intron_lengths,
     parse_negative_pair_count,
     parse_training_pair_records,
     parse_training_intron_lengths,
     plot_false_transcript_false_intron_scatter,
+    plot_intron_overlap_group_true_label_summary,
     plot_evaluation_transcript_training_positive_intron_ratio_by_count,
     plot_evaluation_transcript_training_positive_intron_ratio_by_fraction,
     plot_site_label_count_comparison,
@@ -436,6 +441,139 @@ def test_build_false_transcript_intron_label_rows(tmp_path: Path) -> None:
     ]
 
 
+def test_build_intron_overlap_group_rows_and_summary_rows(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    species_a_dir = data_root / "SpeciesA" / "processed"
+    species_b_dir = data_root / "SpeciesB" / "processed"
+    species_a_dir.mkdir(parents=True)
+    species_b_dir.mkdir(parents=True)
+
+    (species_a_dir / "intron_eval_flank10.unique.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "transcript_id\tchrom\tstrand\tintron_start\tintron_end\tlabel"
+                ),
+                "u1\tchr1\t+\t1\t5\t1",
+                "u2\tchr1\t+\t4\t8\t0",
+                "u3\tchr1\t+\t7\t9\t1",
+                "u4\tchr1\t+\t20\t25\t0",
+                "u5\tchr2\t+\t100\t110\t1",
+                "u6\tchr2\t+\t103\t115\t0",
+                "u7\tchr2\t+\t108\t120\t1",
+                "u8\tchr1\t-\t4\t6\t1",
+                "u9\tchr1\t-\t6\t7\t0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (species_b_dir / "intron_eval_flank10.unique.tsv").write_text(
+        "\n".join(
+            [
+                (
+                    "transcript_id\tchrom\tstrand\tintron_start\tintron_end\tlabel"
+                ),
+                "v1\tchr3\t+\t100\t110\t1",
+                "v2\tchr3\t+\t200\t210\t0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    group_rows = build_intron_overlap_group_rows(data_root)
+    summary_rows = build_intron_overlap_group_summary_rows(data_root)
+
+    assert group_rows == [
+        IntronOverlapGroupRow(
+            species="SpeciesA",
+            group_id="SpeciesA_overlap_group_000001",
+            chrom="chr1",
+            strand="+",
+            group_start=4,
+            group_end=5,
+            intron_count=2,
+            true_intron_count=1,
+            false_intron_count=1,
+            member_introns=(
+                "u1:1-5:label=1",
+                "u2:4-8:label=0",
+            ),
+        ),
+        IntronOverlapGroupRow(
+            species="SpeciesA",
+            group_id="SpeciesA_overlap_group_000002",
+            chrom="chr1",
+            strand="+",
+            group_start=7,
+            group_end=8,
+            intron_count=2,
+            true_intron_count=1,
+            false_intron_count=1,
+            member_introns=(
+                "u2:4-8:label=0",
+                "u3:7-9:label=1",
+            ),
+        ),
+        IntronOverlapGroupRow(
+            species="SpeciesA",
+            group_id="SpeciesA_overlap_group_000003",
+            chrom="chr1",
+            strand="-",
+            group_start=6,
+            group_end=6,
+            intron_count=2,
+            true_intron_count=1,
+            false_intron_count=1,
+            member_introns=(
+                "u8:4-6:label=1",
+                "u9:6-7:label=0",
+            ),
+        ),
+        IntronOverlapGroupRow(
+            species="SpeciesA",
+            group_id="SpeciesA_overlap_group_000004",
+            chrom="chr2",
+            strand="+",
+            group_start=108,
+            group_end=110,
+            intron_count=3,
+            true_intron_count=2,
+            false_intron_count=1,
+            member_introns=(
+                "u5:100-110:label=1",
+                "u6:103-115:label=0",
+                "u7:108-120:label=1",
+            ),
+        ),
+    ]
+    assert summary_rows == [
+        IntronOverlapGroupSummaryRow(
+            species="SpeciesA",
+            overlap_group_count=4,
+            overlapped_intron_count=8,
+            groups_with_zero_true_introns=0,
+            groups_with_one_true_intron=3,
+            groups_with_multiple_true_introns=1,
+            max_true_intron_count_per_group=2,
+            max_group_size=3,
+        ),
+        IntronOverlapGroupSummaryRow(
+            species="SpeciesB",
+            overlap_group_count=0,
+            overlapped_intron_count=0,
+            groups_with_zero_true_introns=0,
+            groups_with_one_true_intron=0,
+            groups_with_multiple_true_introns=0,
+            max_true_intron_count_per_group=0,
+            max_group_size=0,
+        ),
+    ]
+
+
 def test_build_evaluation_transcript_training_positive_intron_overlap_rows(
     tmp_path: Path,
 ) -> None:
@@ -556,6 +694,39 @@ def test_plot_false_transcript_false_intron_scatter_validation() -> None:
         match="No false-transcript intron-label rows were provided.",
     ):
         plot_false_transcript_false_intron_scatter([])
+
+
+def test_plot_intron_overlap_group_true_label_summary(tmp_path: Path) -> None:
+    output_path = tmp_path / "intron_overlap_group_true_label_summary.png"
+
+    plot_intron_overlap_group_true_label_summary(
+        [
+            IntronOverlapGroupSummaryRow(
+                species="SpeciesA",
+                overlap_group_count=3,
+                overlapped_intron_count=7,
+                groups_with_zero_true_introns=0,
+                groups_with_one_true_intron=2,
+                groups_with_multiple_true_introns=1,
+                max_true_intron_count_per_group=2,
+                max_group_size=3,
+            ),
+            IntronOverlapGroupSummaryRow(
+                species="SpeciesB",
+                overlap_group_count=1,
+                overlapped_intron_count=2,
+                groups_with_zero_true_introns=1,
+                groups_with_one_true_intron=0,
+                groups_with_multiple_true_introns=0,
+                max_true_intron_count_per_group=0,
+                max_group_size=2,
+            ),
+        ],
+        output_path=output_path,
+    )
+
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0
 
 
 def test_plot_evaluation_transcript_training_positive_intron_ratio_by_count(
