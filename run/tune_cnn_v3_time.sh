@@ -675,6 +675,7 @@ append_scheduler_job_entry() {
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -951,6 +952,7 @@ scheduler_config_path="${scheduler_root}/scheduler_config.json"
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
