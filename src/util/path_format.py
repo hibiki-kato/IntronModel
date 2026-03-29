@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+PathLike = str | Path
 _REPOSITORY_ROOT_HINTS: frozenset[str] = frozenset(
     {
         ".",
@@ -38,15 +39,14 @@ def repository_root() -> Path:
 
 
 def relativize_path_string(
-    raw_path: str,
+    raw_path: PathLike,
     *,
     project_root: Path | None = None,
 ) -> str:
     """Return one path string relative to the repository root when possible."""
-    stripped = raw_path.strip()
-    if stripped == "":
+    path = _coerce_path(raw_path)
+    if str(path).strip() == "":
         return ""
-    path = Path(stripped)
     if not path.is_absolute():
         return os.path.normpath(str(path))
     root = repository_root() if project_root is None else project_root.resolve()
@@ -55,17 +55,16 @@ def relativize_path_string(
 
 
 def resolve_path_string(
-    raw_path: str,
+    raw_path: PathLike,
     *,
     base_dir: Path,
     project_root: Path | None = None,
 ) -> Path:
     """Resolve one serialized path string from repository root or ``base_dir``."""
-    stripped = raw_path.strip()
-    if stripped == "":
+    path = _coerce_path(raw_path)
+    if str(path).strip() == "":
         raise ValueError("Path string must not be empty.")
-
-    path = Path(os.path.normpath(stripped))
+    path = Path(os.path.normpath(str(path)))
     if path.is_absolute():
         return path.resolve(strict=False)
 
@@ -128,3 +127,10 @@ def _looks_like_path_field(field_name: str | None) -> bool:
     if field_name in _PATH_FIELD_NAMES:
         return True
     return field_name.endswith("_path") or field_name.endswith("_paths")
+
+
+def _coerce_path(raw_path: PathLike) -> Path:
+    """Normalize one path-like value into ``Path``."""
+    if isinstance(raw_path, Path):
+        return raw_path
+    return Path(raw_path.strip())

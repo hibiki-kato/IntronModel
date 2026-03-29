@@ -138,6 +138,8 @@ independent_mode = (
 )
 if isinstance(fixed_run_args, dict):
     for key in sorted(fixed_run_args):
+        if key == "script_name":
+            continue
         if independent_mode and key in {"mask", "sequence_transform"}:
             continue
         value = fixed_run_args[key]

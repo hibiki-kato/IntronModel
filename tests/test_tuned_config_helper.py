@@ -66,6 +66,40 @@ def test_load_tuned_overrides_merges_fixed_and_sampled_params(
     ]
 
 
+def test_load_tuned_overrides_ignores_script_name_metadata(
+    tmp_path: Path,
+) -> None:
+    """Best-config loader should not forward scheduler-only metadata keys."""
+
+    config_path = tmp_path / "best_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "hparam_context": {
+                    "fixed_run_args": {
+                        "model": "cnn_pair_v3",
+                        "script_name": "tune_cnn_pair_v3_time.sh",
+                        "train_target": "pair",
+                    }
+                },
+                "sampled_params": {
+                    "batch_size": 512,
+                    "lr": 0.0005,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run_tuned_config_helper(config_path) == [
+        "model\tcnn_pair_v3",
+        "train_target\tpair",
+        "batch_size\t512",
+        "lr\t0.0005",
+    ]
+
+
 def test_load_tuned_overrides_disables_mask_for_independent_cnn_v2(
     tmp_path: Path,
 ) -> None:

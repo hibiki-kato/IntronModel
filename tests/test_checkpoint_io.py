@@ -114,6 +114,15 @@ def test_normalize_checkpoint_path_supports_repository_relative_model_path(
     assert resolved == model_path.resolve()
 
 
+def test_normalize_checkpoint_path_accepts_path_objects(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "metrics.json"
+    checkpoint_path.write_text("{}", encoding="utf-8")
+
+    resolved = normalize_checkpoint_path(checkpoint_path, base_dir=tmp_path)
+
+    assert resolved == checkpoint_path.resolve()
+
+
 def test_resolve_existing_checkpoint_path_relaxes_trailing_hash(
     tmp_path: Path,
 ) -> None:

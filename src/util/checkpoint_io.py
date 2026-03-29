@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Mapping, Sequence
 
-from util.path_format import resolve_path_string
+from util.path_format import PathLike, resolve_path_string
 
 TaskName = str
 TASK_NAMES: tuple[TaskName, ...] = ("donor", "acceptor", "pair")
@@ -36,12 +36,12 @@ def read_json_object(path: Path) -> dict[str, object] | None:
     return raw
 
 
-def normalize_checkpoint_path(raw_path: str, *, base_dir: Path) -> Path:
+def normalize_checkpoint_path(raw_path: PathLike, *, base_dir: Path) -> Path:
     """Normalize one checkpoint path string to an absolute path.
 
     Parameters
     ----------
-    raw_path : str
+    raw_path : str | Path
         Raw checkpoint path from JSON.
     base_dir : Path
         Base directory for resolving relative paths.
