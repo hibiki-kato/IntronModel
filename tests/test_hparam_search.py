@@ -715,6 +715,24 @@ def test_build_run_model_command_skips_mask_helper_key(tmp_path: Path) -> None:
     assert cmd.count("--sequence_transform") == 1
 
 
+def test_build_run_model_command_respects_trial_python_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTRONMODEL_TRIAL_PYTHON_BIN", "/tmp/fake-python")
+
+    cmd = hparam_search._build_run_model_command(
+        tmp_path,
+        {
+            "model": "cnn",
+            "species": "Dmel",
+            "batch_size": 256,
+        },
+    )
+
+    assert cmd[0] == "/tmp/fake-python"
+
+
 def test_extract_sampled_params_from_best_config_converts_legacy_sequence_transform_value(
 ) -> None:
     params = hparam_search._extract_sampled_params_from_best_config(

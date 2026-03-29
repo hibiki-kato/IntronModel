@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 import inspect
 import io
@@ -45,12 +46,12 @@ from util.validation_protocol import (
     build_validation_protocol,
 )
 from util.checkpoint_io import extract_checkpoint_paths, read_json_object
+from util.process_title import PROCESS_TITLE_ENV, apply_process_title_from_env
 from util.versioned_artifacts import (
     is_active_public_model,
     normalize_public_model_name,
     publish_latest_best_version,
 )
-from util.process_title import apply_process_title_from_env
 from util.model_runtime import resolve_auto_num_workers
 
 _ = apply_process_title_from_env()
@@ -68,6 +69,10 @@ _ACTIVE_TRIAL_STREAM_MODE: str = "full"
 _ACTIVE_MAX_PARALLEL_TRIALS: int = 1
 _ACTIVE_TRIAL_PROCESSES: set[subprocess.Popen[str]] = set()
 _ACTIVE_TRIAL_PROCESSES_LOCK = threading.Lock()
+_ACTIVE_LOG_PREFIX: ContextVar[str] = ContextVar(
+    "hparam_search_active_log_prefix",
+    default="",
+)
 _DEFAULT_PHASE_EXECUTION_MODE: str = "subprocess"
 _PERSISTENT_PHASE_EXECUTION_MODE: str = "persistent"
 SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
@@ -2187,7 +2192,8 @@ def _build_run_model_command(
         "acceptor_kernel_order",
         "mask",
     }
-    cmd = [sys.executable, "-u", str(project_root / "src" / "run_model.py")]
+    python_bin = os.environ.get("INTRONMODEL_TRIAL_PYTHON_BIN", sys.executable)
+    cmd = [python_bin, "-u", str(project_root / "src" / "run_model.py")]
     for key in sorted(args):
         if key in helper_keys:
             continue
@@ -2586,6 +2592,36 @@ def _resolve_trial_stream_mode(setting: str, max_parallel_trials: int) -> str:
     return "full"
 
 
+def _compose_prefixed_log_line(message: str) -> str:
+    """Compose one log line with the active optional cycle prefix."""
+    prefix = _ACTIVE_LOG_PREFIX.get().strip()
+    if prefix == "":
+        return message
+    return f"{prefix} {message}"
+
+
+@contextmanager
+def trial_log_prefix(prefix: str) -> Iterator[None]:
+    """Temporarily prepend one stable prefix to hparam_search log lines."""
+    token: Token[str] = _ACTIVE_LOG_PREFIX.set(prefix.strip())
+    try:
+        yield
+    finally:
+        _ACTIVE_LOG_PREFIX.reset(token)
+
+
+def _build_trial_process_title(
+    *,
+    model_name: str,
+    phase: str,
+    trial_id: int,
+) -> str:
+    """Build one non-ETA process title for a trial subprocess."""
+    normalized_model = model_name.strip().lower() or "model"
+    normalized_phase = phase.strip().lower() or "phase"
+    return f"trial:{normalized_model}:{normalized_phase}:{trial_id:04d}"
+
+
 def _resolve_phase_execution_mode(
     *,
     process_mode: str,
@@ -2659,12 +2695,14 @@ def _emit_trial_output_lines(
     stream_mode: str,
 ) -> None:
     """Mirror collected trial output lines to stdout based on stream mode."""
-    prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+    prefix = _compose_prefixed_log_line(
+        f"[hparam_search][{phase} {trial_id:04d}]"
+    )
     for raw_line in output_text.splitlines():
         if raw_line == "":
             continue
         if _should_stream_trial_line(raw_line, stream_mode):
-            print(f"{prefix}{raw_line}", flush=True)
+            print(f"{prefix} {raw_line}", flush=True)
 
 
 def _emit_trial_failure_output_excerpt(
@@ -2681,13 +2719,15 @@ def _emit_trial_failure_output_excerpt(
     if not lines:
         return
     excerpt = lines[-max_lines:]
-    prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+    prefix = _compose_prefixed_log_line(
+        f"[hparam_search][{phase} {trial_id:04d}]"
+    )
     print(
-        f"{prefix}failure log excerpt (last {len(excerpt)} lines):",
+        f"{prefix} failure log excerpt (last {len(excerpt)} lines):",
         flush=True,
     )
     for line in excerpt:
-        print(f"{prefix}{line}", flush=True)
+        print(f"{prefix} {line}", flush=True)
 
 
 def _should_print_trial_start(stream_mode: str) -> bool:
@@ -2761,14 +2801,16 @@ def _run_command_with_streaming(
     try:
         collected: list[str] = []
         stream_mode = _ACTIVE_TRIAL_STREAM_MODE
-        prefix = f"[hparam_search][{phase} {trial_id:04d}] "
+        prefix = _compose_prefixed_log_line(
+            f"[hparam_search][{phase} {trial_id:04d}]"
+        )
         for line in _iter_stream_lines(proc.stdout):
             collected.append(line)
             stripped = line.rstrip("\n")
             if not stripped:
                 continue
             if _should_stream_trial_line(stripped, stream_mode):
-                print(f"{prefix}{stripped}", flush=True)
+                print(f"{prefix} {stripped}", flush=True)
 
         return_code = int(proc.wait())
         return return_code, "".join(collected)
@@ -2944,6 +2986,11 @@ def _run_trial_with_command_runner(
         env = os.environ.copy()
         if assigned_gpu_id is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(assigned_gpu_id)
+        env[PROCESS_TITLE_ENV] = _build_trial_process_title(
+            model_name=model_name,
+            phase=phase,
+            trial_id=trial_id,
+        )
 
         attempt_index = oom_retries + 1
         attempt_header = (
@@ -5843,7 +5890,10 @@ def _print_trial_start(
     """Print one standardized trial start line."""
     slot_label = "cpu" if assigned_gpu is None else f"gpu:{assigned_gpu}"
     print(
-        f"[hparam_search] {phase} trial {trial_id:04d} started on {slot_label}.",
+        _compose_prefixed_log_line(
+            f"[hparam_search] {phase} trial {trial_id:04d} started on "
+            f"{slot_label}."
+        ),
         flush=True,
     )
 
@@ -5866,9 +5916,11 @@ def _print_trial_result(
             error_text = error_text[:117] + "..."
         error_suffix = f" reason={error_text} log={result.log_file}"
     print(
-        f"[hparam_search] {phase} trial {result.trial_id:04d} "
-        f"{result.status} ({completed_count}/{trial_count}) "
-        f"{result.objective_metric}={metric_text}.{error_suffix}",
+        _compose_prefixed_log_line(
+            f"[hparam_search] {phase} trial {result.trial_id:04d} "
+            f"{result.status} ({completed_count}/{trial_count}) "
+            f"{result.objective_metric}={metric_text}.{error_suffix}"
+        ),
         flush=True,
     )
 

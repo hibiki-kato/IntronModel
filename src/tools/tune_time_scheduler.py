@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
-import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import sys
-import threading
 import time
-from typing import Any
+from typing import TypeAlias
+
+from tools import hparam_search
+
+Scalar: TypeAlias = hparam_search.Scalar
+ArgValue: TypeAlias = hparam_search.ArgValue
+TrialResult: TypeAlias = hparam_search.TrialResult
+ScheduledTrialTask: TypeAlias = hparam_search.ScheduledTrialTask
 
 
 @dataclass(frozen=True)
@@ -37,7 +42,6 @@ class SchedulerConfig:
     data_root: Path
     model_root: Path
     python_bin: str
-    hparam_search_path: Path
     time_budget_minutes: int
     timeout_grace_seconds: int
     selected_gpu_ids: list[str]
@@ -47,51 +51,102 @@ class SchedulerConfig:
 
 
 @dataclass
-class RunningCycle:
-    """Mutable runtime state for one active tuning cycle."""
+class CycleState:
+    """Mutable state for one active tuning cycle."""
 
     cycle_index: int
     template: CycleTemplate
-    assigned_gpu_ids: list[str]
+    config: hparam_search.SearchConfig
     output_dir: Path
     config_path: Path
     stdout_log: Path
-    release_file: Path
-    process: subprocess.Popen[str]
-    stream_thread: threading.Thread
     start_time: float
-    release_cursor: int = 0
-    owned_gpu_ids: list[str] | None = None
+    baseline_validation_protocol: dict[str, object]
+    current_hparam_context: dict[str, object]
+    previous_global_best_score: float | None
+    quick_overrides: dict[str, ArgValue]
+    full_overrides: dict[str, ArgValue]
+    full_epochs_value: int
+    quick_params: list[dict[str, Scalar]]
+    quick_pending_indices: list[int]
+    quick_rows: list[TrialResult] = field(default_factory=list)
+    full_rows: list[TrialResult] = field(default_factory=list)
+    completed_quick_rows: list[TrialResult] = field(default_factory=list)
+    pending_full_tasks: list[ScheduledTrialTask] = field(default_factory=list)
+    full_consumed_keys: set[str] = field(default_factory=set)
+    seed_best_params: dict[str, Scalar] | None = None
+    seed_best_key: str | None = None
+    seed_best_context_mismatch: bool = False
+    global_best_recheck_params: dict[str, Scalar] | None = None
+    global_best_recheck_context_mismatch: bool = False
+    full_priority_params: dict[str, Scalar] | None = None
+    full_priority_inserted: bool = False
+    next_full_trial_id: int = 0
+    skipped_same_best_epoch: int = 0
+    skipped_seed_context_match: int = 0
+    quick_running_count: int = 0
+    full_running_count: int = 0
+    slot_limit: int = 0
+    full_queue_built: bool = False
+    resolved_trial_stream_mode: str = "full"
+    finalized: bool = False
+    exit_code: int = 0
 
-    def __post_init__(self) -> None:
-        if self.owned_gpu_ids is None:
-            self.owned_gpu_ids = list(self.assigned_gpu_ids)
+    @property
+    def prefix(self) -> str:
+        """Return the stable log prefix for one active cycle."""
+        return (
+            f"[{self.config.base_args.get('script_name', 'tune_time_scheduler')}]"
+            f"[cycle={self.cycle_index}]"
+            f"[species={self.template.species}]"
+            f"[target={self.template.target_name}]"
+            f"[seed={self.template.seed}]"
+        )
+
+    @property
+    def running_count(self) -> int:
+        """Return the number of currently running trials for the cycle."""
+        return self.quick_running_count + self.full_running_count
+
+    @property
+    def has_quick_work(self) -> bool:
+        """Return whether the cycle still owns quick-phase work."""
+        return bool(self.quick_pending_indices) or self.quick_running_count > 0
+
+
+@dataclass(frozen=True)
+class RunningTrial:
+    """One globally scheduled active trial."""
+
+    cycle_index: int
+    task: ScheduledTrialTask
+    assigned_gpu_id: str | None
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Centralized queue scheduler for tune_*_time wrappers."
+        description="Centralized direct-trial scheduler for tune_*_time wrappers."
     )
     parser.add_argument("--config", required=True, help="Path to scheduler JSON.")
     return parser.parse_args(argv)
 
 
-def _require_str(raw: Any, field_name: str) -> str:
+def _require_str(raw: object, field_name: str) -> str:
     """Return one required non-empty string."""
     if not isinstance(raw, str) or raw.strip() == "":
         raise ValueError(f"{field_name} must be a non-empty string.")
     return raw
 
 
-def _require_positive_int(raw: Any, field_name: str) -> int:
+def _require_positive_int(raw: object, field_name: str) -> int:
     """Return one required positive integer."""
     if not isinstance(raw, int) or raw <= 0:
         raise ValueError(f"{field_name} must be a positive integer.")
     return raw
 
 
-def _require_non_negative_int(raw: Any, field_name: str) -> int:
+def _require_non_negative_int(raw: object, field_name: str) -> int:
     """Return one required non-negative integer."""
     if not isinstance(raw, int) or raw < 0:
         raise ValueError(f"{field_name} must be a non-negative integer.")
@@ -158,9 +213,6 @@ def _load_config(path: Path) -> SchedulerConfig:
         data_root=Path(_require_str(raw.get("data_root"), "data_root")),
         model_root=Path(_require_str(raw.get("model_root"), "model_root")),
         python_bin=_require_str(raw.get("python_bin"), "python_bin"),
-        hparam_search_path=Path(
-            _require_str(raw.get("hparam_search_path"), "hparam_search_path")
-        ),
         time_budget_minutes=_require_positive_int(
             raw.get("time_budget_minutes"),
             "time_budget_minutes",
@@ -180,7 +232,7 @@ def _load_config(path: Path) -> SchedulerConfig:
 
 
 def _format_elapsed(seconds: int) -> str:
-    """Return one compact ``HH:MM:SS`` or ``MM:SS`` duration string."""
+    """Return one compact duration string."""
     if seconds < 0:
         seconds = 0
     hours, remainder = divmod(seconds, 3600)
@@ -190,251 +242,692 @@ def _format_elapsed(seconds: int) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _append_unique_gpu_ids(target: list[str], candidates: list[str]) -> None:
-    """Append unseen GPU ids while preserving order."""
-    for candidate in candidates:
-        if candidate == "" or candidate in target:
-            continue
-        target.append(candidate)
+def _emit_scheduler_line(config: SchedulerConfig, text: str) -> None:
+    """Emit one scheduler-scoped log line."""
+    print(f"[{config.script_name}] {text}", flush=True)
 
 
-def _collect_released_gpu_ids(
-    release_file: Path,
-    cursor: int,
-) -> tuple[list[str], int]:
-    """Collect newly released GPU ids from one JSONL file cursor."""
-    if not release_file.is_file():
-        return [], cursor
-    lines = release_file.read_text(encoding="utf-8").splitlines()
-    released: list[str] = []
-    for line in lines[cursor:]:
-        text = line.strip()
-        if text == "":
-            continue
-        payload = json.loads(text)
-        if not isinstance(payload, dict):
-            continue
-        if payload.get("event") != "gpu_released":
-            continue
-        gpu_id = payload.get("gpu_id")
-        if isinstance(gpu_id, str) and gpu_id != "":
-            released.append(gpu_id)
-    return released, len(lines)
+def _emit_cycle_line(cycle: CycleState, text: str) -> None:
+    """Emit one cycle-scoped log line and mirror it to the cycle log."""
+    rendered = (
+        f"[{cycle.config.base_args.get('script_name', 'tune_time_scheduler')}]"
+        f"[cycle={cycle.cycle_index}]"
+        f"[species={cycle.template.species}]"
+        f"[target={cycle.template.target_name}]"
+        f"[seed={cycle.template.seed}] {text}"
+    )
+    print(rendered, flush=True)
+    with cycle.stdout_log.open("a", encoding="utf-8") as handle:
+        handle.write(rendered + "\n")
 
 
-def _write_cycle_config(
+def _build_cycle_runtime_paths(
     *,
     template: CycleTemplate,
     cycle_index: int,
-    assigned_gpu_ids: list[str],
-    assigned_parallel_slots: int,
 ) -> tuple[Path, Path, Path]:
-    """Materialize one per-cycle hparam_search config from a template."""
-    payload = json.loads(template.template_config_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("Template config must contain a JSON object.")
+    """Create per-cycle output paths."""
     run_stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     run_id = f"{run_stamp}_seed{template.seed}_c{cycle_index:03d}"
     output_dir = template.output_parent_dir / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "hparam_search_config.json"
-    release_file = output_dir / "gpu_release_events.jsonl"
+    stdout_log = output_dir / "cycle_stdout.log"
+    stdout_log.touch()
+    return output_dir, config_path, stdout_log
+
+
+def _write_materialized_cycle_config(
+    *,
+    template: CycleTemplate,
+    scheduler_config: SchedulerConfig,
+    cycle_index: int,
+) -> tuple[hparam_search.SearchConfig, Path, Path, Path]:
+    """Write one materialized per-cycle config for reproducibility."""
+    output_dir, config_path, stdout_log = _build_cycle_runtime_paths(
+        template=template,
+        cycle_index=cycle_index,
+    )
+    payload = json.loads(template.template_config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Template config must contain a JSON object.")
     payload["output_dir"] = str(output_dir)
-    payload["gpu_ids"] = ",".join(assigned_gpu_ids)
-    payload["max_parallel_trials"] = str(assigned_parallel_slots)
-    payload["gpu_release_events_path"] = str(release_file)
+    payload["gpu_ids"] = scheduler_config.selected_gpu_ids
+    payload["max_parallel_trials"] = scheduler_config.parallel_slot_count
     config_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    return output_dir, config_path, release_file
+    cycle_config = hparam_search.load_config(config_path)
+    cycle_config.base_args["script_name"] = scheduler_config.script_name
+    return cycle_config, output_dir, config_path, stdout_log
 
 
-def _build_cycle_prefix(script_name: str, cycle_index: int, template: CycleTemplate) -> str:
-    """Build the stable log prefix for one running cycle."""
-    return (
-        f"[{script_name}][cycle={cycle_index}]"
-        f"[species={template.species}]"
-        f"[target={template.target_name}]"
-        f"[seed={template.seed}]"
-    )
-
-
-def _stream_cycle_output(
+def _prepare_cycle_state(
     *,
-    prefix: str,
-    process: subprocess.Popen[str],
-    stdout_log: Path,
-) -> None:
-    """Stream one subprocess's merged stdout/stderr with a cycle prefix."""
-    assert process.stdout is not None
-    with stdout_log.open("a", encoding="utf-8") as log_handle:
-        for line in process.stdout:
-            text = line.rstrip("\n")
-            rendered = f"{prefix} {text}" if text != "" else prefix
-            print(rendered, flush=True)
-            log_handle.write(rendered + "\n")
-            log_handle.flush()
-
-
-def _launch_cycle(
-    *,
-    config: SchedulerConfig,
-    cycle_index: int,
+    scheduler_config: SchedulerConfig,
     template: CycleTemplate,
-    assigned_gpu_ids: list[str],
-    assigned_parallel_slots: int,
-    elapsed_seconds: int,
-    remaining_seconds: int,
-) -> RunningCycle:
-    """Launch one hparam_search subprocess for a scheduled cycle."""
-    output_dir, config_path, release_file = _write_cycle_config(
+    cycle_index: int,
+    initial_slot_limit: int,
+    total_slot_count: int,
+) -> CycleState:
+    """Initialize one cycle state from the materialized hparam_search config."""
+    cycle_config, output_dir, config_path, stdout_log = _write_materialized_cycle_config(
         template=template,
+        scheduler_config=scheduler_config,
         cycle_index=cycle_index,
-        assigned_gpu_ids=assigned_gpu_ids,
-        assigned_parallel_slots=assigned_parallel_slots,
     )
-    stdout_log = output_dir / "cycle_stdout.log"
-    remaining_hms = _format_elapsed(remaining_seconds)
-    print(
-        f"[{config.script_name}] cycle={cycle_index} "
-        f"elapsed={_format_elapsed(elapsed_seconds)} "
-        f"start={datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')} "
-        f"ETA:{remaining_hms} species={template.species} "
-        f"target={template.target_name} seed={template.seed} "
-        f"gpus={','.join(assigned_gpu_ids)} log={stdout_log}",
-        flush=True,
+    if cycle_config.trial_process_mode != "subprocess":
+        raise ValueError(
+            "Direct tune-time scheduler currently requires "
+            "trial_process_mode=subprocess."
+        )
+
+    baseline_validation_protocol = hparam_search._derive_validation_protocol_from_args(
+        merged_args=dict(cycle_config.base_args),
+        objective_metric=cycle_config.objective_metric,
     )
-    env = os.environ.copy()
-    pythonpath_items = [str(config.project_root / "src")]
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    if existing_pythonpath != "":
-        pythonpath_items.append(existing_pythonpath)
-    env["PYTHONPATH"] = ":".join(pythonpath_items)
-    process = subprocess.Popen(
-        [config.python_bin, str(config.hparam_search_path), "--config", str(config_path)],
-        cwd=config.project_root,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
+    full_overrides = dict(cycle_config.full_overrides)
+    full_overrides.setdefault("epochs", cycle_config.full_epochs)
+    full_overrides.setdefault("compile_mode", "auto")
+    full_epochs_value = hparam_search._to_positive_int(full_overrides.get("epochs"))
+    if full_epochs_value is None:
+        full_epochs_value = cycle_config.full_epochs
+    fixed_run_args = hparam_search._build_fixed_run_args_context(
+        base_args=dict(cycle_config.base_args),
+        full_overrides=full_overrides,
+        search_space=cycle_config.search_space,
     )
-    prefix = _build_cycle_prefix(config.script_name, cycle_index, template)
-    stream_thread = threading.Thread(
-        target=_stream_cycle_output,
-        kwargs={
-            "prefix": prefix,
-            "process": process,
-            "stdout_log": stdout_log,
-        },
-        daemon=True,
+    current_hparam_context = hparam_search._build_hparam_context(
+        objective_metric=cycle_config.objective_metric,
+        full_epochs=full_epochs_value,
+        validation_protocol=baseline_validation_protocol,
+        fixed_run_args=fixed_run_args,
     )
-    stream_thread.start()
-    return RunningCycle(
+    previous_global_best_score = hparam_search._read_best_objective_score(
+        cycle_config.global_best_config_path,
+        cycle_config.objective_metric,
+        expected_hparam_context=current_hparam_context,
+    )
+
+    history_trials: list[tuple[float, dict[str, Scalar]]] = []
+    if cycle_config.search_algo in {"history_guided", "reinforce"}:
+        history_trials = hparam_search.load_historical_trials(
+            output_dir=cycle_config.output_dir,
+            search_space=cycle_config.search_space,
+            objective_metric=cycle_config.objective_metric,
+            top_n=cycle_config.history_top_n,
+            base_args=cycle_config.base_args,
+        )
+
+    seed_best_params: dict[str, Scalar] | None = None
+    seed_best_key: str | None = None
+    seed_best_context_mismatch = False
+    if cycle_config.seed_best_config_path is not None:
+        try:
+            seed_best_config = hparam_search.load_seed_best_config(
+                path=cycle_config.seed_best_config_path,
+                search_space=cycle_config.search_space,
+                base_args=cycle_config.base_args,
+                default_objective_metric=cycle_config.objective_metric,
+            )
+        except ValueError as exc:
+            _emit_scheduler_line(
+                scheduler_config,
+                (
+                    "seed best config ignored due to parse error "
+                    f"(cycle={cycle_index}): {exc}"
+                ),
+            )
+        else:
+            if seed_best_config is not None:
+                seed_best_params = dict(seed_best_config.sampled_params)
+                seed_best_key = json.dumps(
+                    seed_best_params,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                seed_best_context_mismatch = not hparam_search._contexts_match(
+                    seed_best_config.hparam_context,
+                    current_hparam_context,
+                )
+
+    global_best_recheck_params: dict[str, Scalar] | None = None
+    global_best_recheck_context_mismatch = False
+    if (
+        cycle_config.seed_best_config_path is None
+        and cycle_config.global_best_config_path is not None
+    ):
+        try:
+            global_best_config = hparam_search.load_seed_best_config(
+                path=cycle_config.global_best_config_path,
+                search_space=cycle_config.search_space,
+                base_args=cycle_config.base_args,
+                default_objective_metric=cycle_config.objective_metric,
+            )
+        except ValueError as exc:
+            _emit_scheduler_line(
+                scheduler_config,
+                (
+                    "global best config ignored due to parse error "
+                    f"(cycle={cycle_index}): {exc}"
+                ),
+            )
+        else:
+            if (
+                global_best_config is not None
+                and global_best_config.hparam_context is not None
+            ):
+                global_best_recheck_context_mismatch = not hparam_search._contexts_match(
+                    global_best_config.hparam_context,
+                    current_hparam_context,
+                )
+                if global_best_recheck_context_mismatch:
+                    global_best_recheck_params = dict(
+                        global_best_config.sampled_params
+                    )
+
+    full_priority_params: dict[str, Scalar] | None = None
+    next_full_trial_id = 0
+    if seed_best_params is not None and seed_best_context_mismatch:
+        full_priority_params = dict(seed_best_params)
+        next_full_trial_id = 1
+    elif (
+        global_best_recheck_params is not None
+        and global_best_recheck_context_mismatch
+    ):
+        full_priority_params = dict(global_best_recheck_params)
+        next_full_trial_id = 1
+
+    quick_params = hparam_search.build_trial_params(
+        config=cycle_config,
+        phase="quick",
+        count=cycle_config.quick_trials,
+        seed_offset=0,
+        history_trials=history_trials,
+    )
+    if seed_best_params is not None and quick_params:
+        quick_params[0] = dict(seed_best_params)
+
+    quick_overrides = dict(cycle_config.quick_overrides)
+    quick_overrides.setdefault("epochs", cycle_config.quick_epochs)
+    quick_overrides.setdefault("compile_mode", "off")
+
+    full_compile_mode = str(full_overrides.get("compile_mode", "auto")).strip().lower()
+    if full_compile_mode == "auto" and scheduler_config.selected_gpu_ids:
+        if hparam_search._find_cuda_header() is None:
+            full_overrides["compile_mode"] = "off"
+
+    resolved_trial_stream_mode = hparam_search._resolve_trial_stream_mode(
+        cycle_config.trial_stream_mode,
+        total_slot_count,
+    )
+
+    cycle = CycleState(
         cycle_index=cycle_index,
         template=template,
-        assigned_gpu_ids=list(assigned_gpu_ids),
+        config=cycle_config,
         output_dir=output_dir,
         config_path=config_path,
         stdout_log=stdout_log,
-        release_file=release_file,
-        process=process,
-        stream_thread=stream_thread,
         start_time=time.monotonic(),
+        baseline_validation_protocol=baseline_validation_protocol,
+        current_hparam_context=current_hparam_context,
+        previous_global_best_score=previous_global_best_score,
+        quick_overrides=quick_overrides,
+        full_overrides=full_overrides,
+        full_epochs_value=full_epochs_value,
+        quick_params=quick_params,
+        quick_pending_indices=list(range(len(quick_params))),
+        seed_best_params=seed_best_params,
+        seed_best_key=seed_best_key,
+        seed_best_context_mismatch=seed_best_context_mismatch,
+        global_best_recheck_params=global_best_recheck_params,
+        global_best_recheck_context_mismatch=global_best_recheck_context_mismatch,
+        full_priority_params=full_priority_params,
+        next_full_trial_id=next_full_trial_id,
+        slot_limit=max(1, initial_slot_limit),
+        resolved_trial_stream_mode=resolved_trial_stream_mode,
+    )
+    return cycle
+
+
+def _emit_cycle_start(
+    *,
+    scheduler_config: SchedulerConfig,
+    cycle: CycleState,
+    elapsed_seconds: int,
+    remaining_seconds: int,
+    initial_slot_limit: int,
+) -> None:
+    """Emit the user-facing cycle-start summary and initialization details."""
+    assigned_gpu_text = (
+        ",".join(scheduler_config.selected_gpu_ids[:initial_slot_limit])
+        if scheduler_config.selected_gpu_ids
+        else "cpu-fallback"
+    )
+    _emit_scheduler_line(
+        scheduler_config,
+        (
+            f"cycle={cycle.cycle_index} elapsed={_format_elapsed(elapsed_seconds)} "
+            f"start={datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')} "
+            f"ETA:{_format_elapsed(remaining_seconds)} species={cycle.template.species} "
+            f"target={cycle.template.target_name} seed={cycle.template.seed} "
+            f"gpus={assigned_gpu_text} log={cycle.stdout_log}"
+        ),
+    )
+    _emit_cycle_line(
+        cycle,
+        (
+            "[hparam_search] Using GPU slots: "
+            f"{assigned_gpu_text} (parallel={initial_slot_limit})."
+            if scheduler_config.selected_gpu_ids
+            else "[hparam_search] No GPU detected; using CPU (parallel=1)."
+        ),
+    )
+    _emit_cycle_line(
+        cycle,
+        (
+            "[hparam_search] Trial stdout stream mode: "
+            f"{cycle.resolved_trial_stream_mode} "
+            "(logs are still saved per trial)."
+        ),
+    )
+    _emit_cycle_line(
+        cycle,
+        "[hparam_search] Trial process mode: subprocess "
+        "(owned by tune_time_scheduler, direct trial dispatch).",
+    )
+    if cycle.previous_global_best_score is not None:
+        _emit_cycle_line(
+            cycle,
+            (
+                "[hparam_search] Reference global best "
+                f"{cycle.config.objective_metric}="
+                f"{cycle.previous_global_best_score:.6f}."
+            ),
+        )
+    if cycle.config.search_algo == "history_guided":
+        history_trials = hparam_search.load_historical_trials(
+            output_dir=cycle.config.output_dir,
+            search_space=cycle.config.search_space,
+            objective_metric=cycle.config.objective_metric,
+            top_n=cycle.config.history_top_n,
+            base_args=cycle.config.base_args,
+        )
+        _emit_cycle_line(
+            cycle,
+            (
+                "[hparam_search] Search algorithm: history_guided "
+                f"(history_candidates={len(history_trials)}, "
+                f"top_n={cycle.config.history_top_n}, "
+                f"random_fraction={cycle.config.guided_random_fraction:.2f}, "
+                f"mutation_rate={cycle.config.guided_mutation_rate:.2f})."
+            ),
+        )
+    elif cycle.config.search_algo == "reinforce":
+        history_trials = hparam_search.load_historical_trials(
+            output_dir=cycle.config.output_dir,
+            search_space=cycle.config.search_space,
+            objective_metric=cycle.config.objective_metric,
+            top_n=cycle.config.history_top_n,
+            base_args=cycle.config.base_args,
+        )
+        _emit_cycle_line(
+            cycle,
+            (
+                "[hparam_search] Search algorithm: reinforce "
+                f"(history_candidates={len(history_trials)}, "
+                f"top_n={cycle.config.history_top_n}, "
+                f"random_fraction={cycle.config.guided_random_fraction:.2f}, "
+                f"mutation_rate={cycle.config.guided_mutation_rate:.2f}, "
+                f"temperature={cycle.config.reinforce_temperature:.2f})."
+            ),
+        )
+    else:
+        _emit_cycle_line(cycle, "[hparam_search] Search algorithm: random.")
+    if cycle.seed_best_params is not None:
+        _emit_cycle_line(
+            cycle,
+            (
+                "[hparam_search] Loaded seed best sampled params from "
+                f"{cycle.config.seed_best_config_path}."
+            ),
+        )
+    if cycle.seed_best_context_mismatch and cycle.full_priority_params is not None:
+        _emit_cycle_line(
+            cycle,
+            "[hparam_search] Seed best context changed. "
+            "Schedule one full-phase recheck with stored seed.",
+        )
+    if (
+        cycle.global_best_recheck_context_mismatch
+        and cycle.global_best_recheck_params is not None
+    ):
+        _emit_cycle_line(
+            cycle,
+            "[hparam_search] Global best context changed. "
+            "Schedule one full-phase recheck with stored best.",
+        )
+    _emit_cycle_line(
+        cycle,
+        (
+            f"[hparam_search] Quick phase: {cycle.config.quick_trials} trials, "
+            f"epochs={cycle.quick_overrides.get('epochs')}."
+        ),
+    )
+    if cycle.config.skip_full_phase:
+        _emit_cycle_line(
+            cycle,
+            "[hparam_search] Full phase skipped by config (skip_full_phase=true).",
+        )
+    elif cycle.config.enable_phase_overlap:
+        _emit_cycle_line(
+            cycle,
+            "[hparam_search] Phase overlap enabled: quick and full share slots.",
+        )
+
+
+def _queue_full_task(cycle: CycleState, task: ScheduledTrialTask) -> None:
+    """Insert one full-phase task by descending priority."""
+    cycle.pending_full_tasks.append(task)
+    cycle.pending_full_tasks.sort(
+        key=lambda item: (-item.priority_score, item.trial_id)
     )
 
 
-def _terminate_process_group(
-    process: subprocess.Popen[str],
-    *,
-    grace_seconds: int,
-) -> None:
-    """Terminate one process group and escalate to SIGKILL if needed."""
-    if process.poll() is not None:
+def _maybe_queue_priority_recheck(cycle: CycleState) -> None:
+    """Queue the priority full-phase recheck once it becomes schedulable."""
+    if cycle.full_priority_inserted or cycle.full_priority_params is None:
         return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            return
-        time.sleep(0.1)
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
+    task = ScheduledTrialTask(
+        phase="full",
+        trial_id=0,
+        priority_score=float("inf"),
+        sampled_params=dict(cycle.full_priority_params),
+        overrides=dict(cycle.full_overrides),
+        metrics_json=str(cycle.output_dir / "full_trial_0000.metrics.json"),
+        log_file=str(cycle.output_dir / "full_trial_0000.log.txt"),
+    )
+    _queue_full_task(cycle, task)
+    cycle.full_priority_inserted = True
+    cycle.next_full_trial_id = max(cycle.next_full_trial_id, 1)
 
 
-def _prune_timeout_artifacts(
-    *,
-    config: SchedulerConfig,
-    running_cycle: RunningCycle,
-) -> None:
-    """Remove partial timeout outputs and prune dangling rank checkpoints."""
-    if running_cycle.output_dir.is_dir():
-        shutil.rmtree(running_cycle.output_dir)
-        print(
-            f"[{config.script_name}] removed partial output dir: "
-            f"{running_cycle.output_dir}",
-            flush=True,
+def _maybe_promote_locked_rows(cycle: CycleState) -> None:
+    """Promote mathematically locked quick rows into full tasks."""
+    unfinished_quick_count = len(cycle.quick_pending_indices) + cycle.quick_running_count
+    locked_rows = hparam_search._select_locked_quick_trials(
+        completed_quick_rows=cycle.completed_quick_rows,
+        unfinished_quick_count=unfinished_quick_count,
+        top_k=cycle.config.top_k,
+    )
+    if locked_rows:
+        _maybe_queue_priority_recheck(cycle)
+    for row in locked_rows:
+        row_key = json.dumps(
+            row.sampled_params,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-    subprocess.run(
-        [
-            config.python_bin,
-            str(config.project_root / "src" / "tools" / "prune_missing_rank_checkpoints.py"),
-            "--data_root",
-            str(config.data_root),
-            "--model_root",
-            str(config.model_root),
-            "--species",
-            running_cycle.template.species,
-            "--model",
-            running_cycle.template.tuning_model_name,
-            "--dry_run",
-            "0",
-        ],
-        cwd=config.project_root,
-        check=False,
+        if row_key in cycle.full_consumed_keys:
+            continue
+        if (
+            cycle.seed_best_key is not None
+            and row_key == cycle.seed_best_key
+            and not cycle.seed_best_context_mismatch
+        ):
+            cycle.skipped_seed_context_match += 1
+            cycle.full_consumed_keys.add(row_key)
+            continue
+        quick_best_epoch = hparam_search._read_objective_best_epoch_from_metrics(
+            metrics_json_path=Path(row.metrics_json),
+            objective_metric=cycle.config.objective_metric,
+        )
+        if (
+            quick_best_epoch is not None
+            and quick_best_epoch == cycle.full_epochs_value
+        ):
+            cycle.skipped_same_best_epoch += 1
+            cycle.full_consumed_keys.add(row_key)
+            continue
+        task = ScheduledTrialTask(
+            phase="full",
+            trial_id=cycle.next_full_trial_id,
+            priority_score=(
+                float(row.objective_score)
+                if row.objective_score is not None
+                else float("-inf")
+            ),
+            sampled_params=dict(row.sampled_params),
+            overrides=dict(cycle.full_overrides),
+            metrics_json=str(
+                cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.metrics.json"
+            ),
+            log_file=str(
+                cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.log.txt"
+            ),
+        )
+        cycle.next_full_trial_id += 1
+        cycle.full_consumed_keys.add(row_key)
+        _queue_full_task(cycle, task)
+
+
+def _build_non_overlap_full_queue(cycle: CycleState) -> None:
+    """Build the full-phase queue after the quick phase fully finishes."""
+    if cycle.full_queue_built:
+        return
+    cycle.full_queue_built = True
+    if cycle.config.skip_full_phase:
+        return
+    ranked_quick = hparam_search.rank_successful_trials(cycle.quick_rows)
+    selected_for_full: list[TrialResult] = []
+    selected_for_full_keys: set[str] = set()
+    for row in ranked_quick:
+        row_key = json.dumps(
+            row.sampled_params,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if row_key in selected_for_full_keys:
+            continue
+        if (
+            cycle.seed_best_key is not None
+            and row_key == cycle.seed_best_key
+            and not cycle.seed_best_context_mismatch
+        ):
+            cycle.skipped_seed_context_match += 1
+            continue
+        quick_best_epoch = hparam_search._read_objective_best_epoch_from_metrics(
+            metrics_json_path=Path(row.metrics_json),
+            objective_metric=cycle.config.objective_metric,
+        )
+        if (
+            quick_best_epoch is not None
+            and quick_best_epoch == cycle.full_epochs_value
+        ):
+            cycle.skipped_same_best_epoch += 1
+            continue
+        selected_for_full.append(row)
+        selected_for_full_keys.add(row_key)
+        if len(selected_for_full) >= cycle.config.top_k:
+            break
+    if cycle.seed_best_params is not None and cycle.seed_best_context_mismatch:
+        _maybe_queue_priority_recheck(cycle)
+    elif (
+        cycle.global_best_recheck_params is not None
+        and cycle.global_best_recheck_context_mismatch
+    ):
+        _maybe_queue_priority_recheck(cycle)
+    for row in selected_for_full:
+        task = ScheduledTrialTask(
+            phase="full",
+            trial_id=cycle.next_full_trial_id,
+            priority_score=(
+                float(row.objective_score)
+                if row.objective_score is not None
+                else float("-inf")
+            ),
+            sampled_params=dict(row.sampled_params),
+            overrides=dict(cycle.full_overrides),
+            metrics_json=str(
+                cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.metrics.json"
+            ),
+            log_file=str(
+                cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.log.txt"
+            ),
+        )
+        cycle.next_full_trial_id += 1
+        _queue_full_task(cycle, task)
+    _emit_cycle_line(
+        cycle,
+        (
+            f"[hparam_search] Full phase: top_k={cycle.config.top_k}, "
+            f"selected={len(selected_for_full)}, "
+            f"skipped_same_best_epoch={cycle.skipped_same_best_epoch}, "
+            "skipped_seed_context_match="
+            f"{cycle.skipped_seed_context_match}, "
+            f"injected_best_full_recheck={cycle.full_priority_inserted}, "
+            f"epochs={cycle.full_overrides.get('epochs')}, "
+            f"objective={cycle.config.objective_metric}, "
+            "execution_mode=subprocess."
+        ),
     )
 
 
-def _run_cycle_plot(
-    *,
-    config: SchedulerConfig,
-    running_cycle: RunningCycle,
-) -> None:
-    """Update the optional double-descent plot for one completed cycle."""
-    plot_target_name = running_cycle.template.plot_target_name
-    if plot_target_name is None:
+def _ensure_post_quick_state(cycle: CycleState) -> None:
+    """Ensure full-phase work is materialized once quick work fully drains."""
+    if cycle.has_quick_work:
         return
-    command = [
-        config.python_bin,
-        str(config.project_root / "src" / "tools" / "plot_tuning_double_descent.py"),
-        "--project_root",
-        str(config.project_root),
-        "--species",
-        running_cycle.template.species,
-        "--target",
-        plot_target_name,
-        "--model",
-        running_cycle.template.tuning_model_name,
-    ]
-    with running_cycle.stdout_log.open("a", encoding="utf-8") as handle:
-        result = subprocess.run(
-            command,
-            cwd=config.project_root,
-            check=False,
-            capture_output=True,
-            text=True,
+    if cycle.config.skip_full_phase:
+        cycle.full_queue_built = True
+        return
+    if cycle.config.enable_phase_overlap:
+        _maybe_queue_priority_recheck(cycle)
+        _maybe_promote_locked_rows(cycle)
+        cycle.full_queue_built = True
+        return
+    _build_non_overlap_full_queue(cycle)
+
+
+def _pop_next_task(cycle: CycleState) -> ScheduledTrialTask | None:
+    """Pop the next schedulable task for one cycle."""
+    if cycle.running_count >= cycle.slot_limit:
+        return None
+    _ensure_post_quick_state(cycle)
+    if cycle.config.enable_phase_overlap and cycle.pending_full_tasks:
+        return cycle.pending_full_tasks.pop(0)
+    if cycle.quick_pending_indices:
+        trial_id = cycle.quick_pending_indices.pop(0)
+        return ScheduledTrialTask(
+            phase="quick",
+            trial_id=trial_id,
+            priority_score=0.0,
+            sampled_params=dict(cycle.quick_params[trial_id]),
+            overrides=dict(cycle.quick_overrides),
+            metrics_json=str(cycle.output_dir / f"quick_trial_{trial_id:04d}.metrics.json"),
+            log_file=str(cycle.output_dir / f"quick_trial_{trial_id:04d}.log.txt"),
         )
-        if result.stdout:
-            handle.write(result.stdout)
-        if result.stderr:
-            handle.write(result.stderr)
+    if cycle.pending_full_tasks:
+        return cycle.pending_full_tasks.pop(0)
+    return None
+
+
+def _run_trial_for_cycle(
+    *,
+    cycle: CycleState,
+    task: ScheduledTrialTask,
+    assigned_gpu_id: str | None,
+) -> TrialResult:
+    """Run one trial while attaching the cycle-scoped log prefix."""
+    with hparam_search.trial_log_prefix(
+        (
+            f"[{cycle.config.base_args.get('script_name', 'tune_time_scheduler')}]"
+            f"[cycle={cycle.cycle_index}]"
+            f"[species={cycle.template.species}]"
+            f"[target={cycle.template.target_name}]"
+            f"[seed={cycle.template.seed}]"
+        )
+    ):
+        return hparam_search.run_trial(
+            config=cycle.config,
+            phase=task.phase,
+            trial_id=task.trial_id,
+            sampled_params=task.sampled_params,
+            overrides=task.overrides,
+            assigned_gpu_id=assigned_gpu_id,
+            metrics_json=Path(task.metrics_json),
+            log_file=Path(task.log_file),
+        )
+
+
+def _handle_completed_trial(
+    cycle: CycleState,
+    task: ScheduledTrialTask,
+    result: TrialResult,
+) -> None:
+    """Update one cycle with a newly completed trial result."""
+    if task.phase == "quick":
+        cycle.quick_running_count -= 1
+        cycle.quick_rows.append(result)
+        if result.status == "success":
+            cycle.completed_quick_rows.append(result)
+        if cycle.config.enable_phase_overlap:
+            _maybe_promote_locked_rows(cycle)
+    else:
+        cycle.full_running_count -= 1
+        cycle.full_rows.append(result)
+    _ensure_post_quick_state(cycle)
+
+
+def _cycle_has_pending_work(cycle: CycleState) -> bool:
+    """Return whether one cycle still has queued or running work."""
+    _ensure_post_quick_state(cycle)
+    return bool(
+        cycle.quick_pending_indices
+        or cycle.quick_running_count > 0
+        or cycle.pending_full_tasks
+        or cycle.full_running_count > 0
+    )
+
+
+def _required_slot_limit(cycle: CycleState) -> int:
+    """Return the minimum slot budget this cycle currently needs."""
+    _ensure_post_quick_state(cycle)
+    if cycle.has_quick_work:
+        return max(cycle.running_count, cycle.slot_limit)
+    pending_full_count = len(cycle.pending_full_tasks)
+    return max(cycle.running_count, pending_full_count)
+
+
+def _rebalance_slot_limits(
+    active_cycles: list[CycleState],
+    total_slot_count: int,
+) -> int:
+    """Rebalance cycle slot budgets and return currently unallocated slots."""
+    for cycle in active_cycles:
+        if cycle.has_quick_work:
+            cycle.slot_limit = max(cycle.slot_limit, cycle.running_count)
+        else:
+            cycle.slot_limit = _required_slot_limit(cycle)
+    allocated = sum(cycle.slot_limit for cycle in active_cycles)
+    unallocated = max(0, total_slot_count - allocated)
+    for cycle in active_cycles:
+        if unallocated <= 0:
+            break
+        if not _cycle_has_pending_work(cycle):
+            continue
+        if cycle.has_quick_work:
+            cycle.slot_limit += unallocated
+            unallocated = 0
+            break
+        desired = _required_slot_limit(cycle)
+        if desired <= cycle.slot_limit:
+            continue
+        extra = min(unallocated, desired - cycle.slot_limit)
+        cycle.slot_limit += extra
+        unallocated -= extra
+    return unallocated
 
 
 def _should_dispatch_next_cycle(
@@ -444,7 +937,7 @@ def _should_dispatch_next_cycle(
     total_cycle_seconds: int,
     completed_cycles: int,
 ) -> bool:
-    """Return whether one new cycle should be dispatched."""
+    """Return whether one new cycle should be launched."""
     if completed_cycles <= 0:
         return True
     avg_cycle_seconds = total_cycle_seconds // completed_cycles
@@ -459,194 +952,438 @@ def _should_dispatch_next_cycle(
     return True
 
 
-def _resolve_parallel_slots(max_parallel_trials: int, available_slots: int) -> int:
-    """Cap requested parallel slots to currently available slots."""
-    if available_slots <= 0:
-        return 0
-    return min(max_parallel_trials, available_slots)
+def _prune_timeout_artifacts(
+    *,
+    scheduler_config: SchedulerConfig,
+    cycle: CycleState,
+) -> None:
+    """Remove partial timeout outputs and prune dangling rank checkpoints."""
+    if cycle.output_dir.is_dir():
+        shutil.rmtree(cycle.output_dir)
+        _emit_scheduler_line(
+            scheduler_config,
+            f"removed partial output dir: {cycle.output_dir}",
+        )
+
+    subprocess.run(
+        [
+            scheduler_config.python_bin,
+            str(
+                scheduler_config.project_root
+                / "src"
+                / "tools"
+                / "prune_missing_rank_checkpoints.py"
+            ),
+            "--data_root",
+            str(scheduler_config.data_root),
+            "--model_root",
+            str(scheduler_config.model_root),
+            "--species",
+            cycle.template.species,
+            "--model",
+            cycle.template.tuning_model_name,
+            "--dry_run",
+            "0",
+        ],
+        cwd=scheduler_config.project_root,
+        check=False,
+    )
+
+
+def _run_cycle_plot(
+    *,
+    scheduler_config: SchedulerConfig,
+    cycle: CycleState,
+) -> None:
+    """Update the optional double-descent plot for one completed cycle."""
+    plot_target_name = cycle.template.plot_target_name
+    if plot_target_name is None:
+        return
+
+    command = [
+        scheduler_config.python_bin,
+        str(
+            scheduler_config.project_root
+            / "src"
+            / "tools"
+            / "plot_tuning_double_descent.py"
+        ),
+        "--project_root",
+        str(scheduler_config.project_root),
+        "--species",
+        cycle.template.species,
+        "--target",
+        plot_target_name,
+        "--model",
+        cycle.template.tuning_model_name,
+    ]
+    with cycle.stdout_log.open("a", encoding="utf-8") as handle:
+        result = subprocess.run(
+            command,
+            cwd=scheduler_config.project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout:
+            handle.write(result.stdout)
+        if result.stderr:
+            handle.write(result.stderr)
+
+
+def _finalize_cycle(
+    *,
+    scheduler_config: SchedulerConfig,
+    cycle: CycleState,
+    gpu_ids: list[str],
+) -> int:
+    """Write cycle artifacts and return the cycle exit code."""
+    hparam_search.write_trials_tsv(cycle.output_dir / "quick_trials.tsv", cycle.quick_rows)
+    ranked_quick = hparam_search.rank_successful_trials(cycle.quick_rows)
+    hparam_search.write_trials_tsv(cycle.output_dir / "full_trials.tsv", cycle.full_rows)
+
+    excluded_ranking_param_keys: set[str] = set()
+    if cycle.seed_best_params is not None and cycle.seed_best_context_mismatch:
+        excluded_ranking_param_keys.add(
+            hparam_search._sampled_params_key(cycle.seed_best_params)
+        )
+    elif (
+        cycle.global_best_recheck_params is not None
+        and cycle.global_best_recheck_context_mismatch
+    ):
+        excluded_ranking_param_keys.add(
+            hparam_search._sampled_params_key(cycle.global_best_recheck_params)
+        )
+
+    ranked_full = hparam_search.rank_successful_trials(cycle.full_rows)
+    ranked_quick_for_export = hparam_search._exclude_recheck_rows_from_ranking(
+        ranked_quick,
+        excluded_param_keys=excluded_ranking_param_keys,
+    )
+    ranked_full_for_export = hparam_search._exclude_recheck_rows_from_ranking(
+        ranked_full,
+        excluded_param_keys=excluded_ranking_param_keys,
+    )
+    if ranked_full_for_export:
+        best_row = ranked_full_for_export[0]
+        ranked_for_export = ranked_full_for_export
+    elif ranked_quick_for_export:
+        best_row = ranked_quick_for_export[0]
+        ranked_for_export = ranked_quick_for_export
+    else:
+        best_row = None
+        ranked_for_export = []
+
+    hparam_search.write_best_config(
+        cycle.output_dir / "best_config.json",
+        best_row,
+        top_rows=ranked_for_export,
+        top_k=cycle.config.top_k,
+        fallback_validation_protocol=cycle.baseline_validation_protocol,
+        hparam_context=cycle.current_hparam_context,
+    )
+    hparam_search._write_tuning_leaderboard(
+        config=cycle.config,
+        ranked_rows=ranked_for_export,
+        best_row=best_row,
+    )
+    pruned_count = hparam_search._prune_non_best_trial_checkpoints(
+        project_root=cycle.config.project_root,
+        trial_rows=cycle.quick_rows + cycle.full_rows,
+        best_row=best_row,
+        min_mtime_epoch=time.time(),
+    )
+    if pruned_count > 0:
+        _emit_cycle_line(
+            cycle,
+            (
+                "[hparam_search] Pruned non-best trial checkpoints: "
+                f"deleted={pruned_count}."
+            ),
+        )
+    hparam_search.maybe_update_global_best(
+        global_best_path=cycle.config.global_best_config_path,
+        best_row=best_row,
+        fallback_validation_protocol=cycle.baseline_validation_protocol,
+        hparam_context=cycle.current_hparam_context,
+    )
+    if cycle.config.enable_visualization:
+        viz_path = cycle.output_dir / f"{cycle.config.species}_snpr.png"
+        viz_error = hparam_search.write_visualization(
+            viz_path,
+            model_name=str(cycle.config.base_args.get("model", "cnn")),
+            species=cycle.config.species,
+            objective_metric=cycle.config.objective_metric,
+            quick_rows=cycle.quick_rows,
+            full_rows=cycle.full_rows,
+            base_args=cycle.config.base_args,
+        )
+        if viz_error is None:
+            _emit_cycle_line(
+                cycle,
+                f"[hparam_search] Wrote tuning visualization: {viz_path}",
+            )
+        else:
+            _emit_cycle_line(
+                cycle,
+                f"[hparam_search] Visualization skipped: {viz_error}",
+            )
+    else:
+        _emit_cycle_line(
+            cycle,
+            (
+                "[hparam_search] Visualization disabled by config "
+                "(enable_visualization=false)."
+            ),
+        )
+    hparam_search.write_summary_markdown(
+        cycle.output_dir / "run_summary.md",
+        config=cycle.config,
+        gpu_ids=gpu_ids,
+        quick_rows=cycle.quick_rows,
+        full_rows=cycle.full_rows,
+        best_row=best_row,
+        previous_global_best_score=cycle.previous_global_best_score,
+    )
+    if best_row is None:
+        _emit_cycle_line(cycle, "[hparam_search] No successful trial found.")
+        cycle.finalized = True
+        cycle.exit_code = 1
+        return 1
+    if (
+        cycle.previous_global_best_score is not None
+        and best_row.objective_score is not None
+    ):
+        delta = best_row.objective_score - cycle.previous_global_best_score
+        delta_text = f"+{delta:.6f}" if delta >= 0.0 else f"{delta:.6f}"
+        _emit_cycle_line(
+            cycle,
+            f"[hparam_search] Comparison to previous global best: {delta_text}.",
+        )
+    _emit_cycle_line(
+        cycle,
+        (
+            f"[hparam_search] Best {best_row.objective_metric} "
+            f"{best_row.objective_score:.6f} from {best_row.phase} "
+            f"trial {best_row.trial_id}."
+        ),
+    )
+    cycle.finalized = True
+    cycle.exit_code = 0
+    return 0
 
 
 def run_scheduler(config: SchedulerConfig) -> int:
-    """Run the centralized cycle queue until the time budget is exhausted."""
+    """Run the centralized direct-trial scheduler until the time budget ends."""
     if not config.jobs:
         raise ValueError("At least one scheduler job is required.")
-    start_time = time.monotonic()
-    budget_seconds = config.time_budget_minutes * 60
-    deadline = start_time + budget_seconds
-    total_cycle_seconds = 0
-    completed_cycles = 0
-    cycle_index = 0
-    first_error_code = 0
-    max_active_cycles = 2
-    running_cycles: list[RunningCycle] = []
-    available_gpu_ids = list(config.selected_gpu_ids)
-    if available_gpu_ids:
-        print(
-            f"[{config.script_name}] cycle-parallel scheduler across GPUs: "
-            f"{','.join(available_gpu_ids[: config.parallel_slot_count])}",
-            flush=True,
+    total_slot_count = max(
+        1,
+        min(
+            config.parallel_slot_count,
+            len(config.selected_gpu_ids) if config.selected_gpu_ids else 1,
+        ),
+    )
+    if config.selected_gpu_ids:
+        _emit_scheduler_line(
+            config,
+            (
+                "trial scheduler across GPUs: "
+                f"{','.join(config.selected_gpu_ids[:total_slot_count])}"
+            ),
         )
     else:
-        print(
-            f"[{config.script_name}] cycle scheduler using CPU fallback.",
-            flush=True,
-        )
+        _emit_scheduler_line(config, "trial scheduler using CPU fallback.")
+
+    start_time = time.monotonic()
+    deadline = start_time + (config.time_budget_minutes * 60)
+    completed_cycles = 0
+    total_cycle_seconds = 0
+    cycle_cursor = 0
+    first_error_code = 0
+    max_active_cycles = 2
     stop_submitting = False
-    while running_cycles or not stop_submitting:
-        progress = False
-        released_gpu_progress = False
-        elapsed_seconds = int(time.monotonic() - start_time)
-        remaining_seconds = max(0, int(deadline - time.monotonic()))
-        min_dispatch_slots = 1
-        if running_cycles and config.parallel_slot_count > 1:
-            min_dispatch_slots = 2
 
-        for running_cycle in running_cycles:
-            released_gpu_ids, next_cursor = _collect_released_gpu_ids(
-                running_cycle.release_file,
-                running_cycle.release_cursor,
-            )
-            running_cycle.release_cursor = next_cursor
-            if not released_gpu_ids:
-                continue
-            _append_unique_gpu_ids(available_gpu_ids, released_gpu_ids)
-            released_gpu_progress = True
-            running_cycle.owned_gpu_ids = [
-                gpu_id
-                for gpu_id in running_cycle.owned_gpu_ids or []
-                if gpu_id not in released_gpu_ids
-            ]
-            progress = True
+    active_cycles: list[CycleState] = []
+    running_trials: dict[Future[TrialResult], RunningTrial] = {}
+    executor = ThreadPoolExecutor(max_workers=total_slot_count)
+    free_gpu_ids: list[str | None]
+    if config.selected_gpu_ids:
+        free_gpu_ids = list(config.selected_gpu_ids[:total_slot_count])
+    else:
+        free_gpu_ids = [None]
 
-        if not stop_submitting and not _should_dispatch_next_cycle(
-            script_name=config.script_name,
-            remaining_seconds=remaining_seconds,
-            total_cycle_seconds=total_cycle_seconds,
-            completed_cycles=completed_cycles,
-        ):
-            stop_submitting = True
+    previous_parallel = hparam_search._set_active_max_parallel_trials(total_slot_count)
+    previous_stream = hparam_search._set_active_trial_stream_mode("errors")
+    try:
+        while active_cycles or not stop_submitting:
+            now = time.monotonic()
+            elapsed_seconds = int(now - start_time)
+            remaining_seconds = max(0, int(deadline - now))
 
-        if time.monotonic() >= deadline and running_cycles:
-            stop_submitting = True
-            if first_error_code == 0:
-                first_error_code = 124
-            for running_cycle in running_cycles:
-                _terminate_process_group(
-                    running_cycle.process,
-                    grace_seconds=config.timeout_grace_seconds,
+            if (
+                not stop_submitting
+                and not _should_dispatch_next_cycle(
+                    script_name=config.script_name,
+                    remaining_seconds=remaining_seconds,
+                    total_cycle_seconds=total_cycle_seconds,
+                    completed_cycles=completed_cycles,
                 )
-                running_cycle.stream_thread.join(timeout=5.0)
-                _prune_timeout_artifacts(
-                    config=config,
-                    running_cycle=running_cycle,
-                )
-            running_cycles.clear()
-            break
+            ):
+                stop_submitting = True
 
-        while True:
-            can_launch_next_cycle = True
-            if stop_submitting:
-                can_launch_next_cycle = False
-            elif running_cycles and not released_gpu_progress:
-                can_launch_next_cycle = False
-            elif available_gpu_ids and len(available_gpu_ids) < min_dispatch_slots:
-                can_launch_next_cycle = False
-            elif not available_gpu_ids and running_cycles:
-                can_launch_next_cycle = False
-            elif len(running_cycles) >= max_active_cycles:
-                can_launch_next_cycle = False
-            elif len(running_cycles) == 1:
-                active_cycle = running_cycles[0].cycle_index
-                if cycle_index != active_cycle + 1:
-                    can_launch_next_cycle = False
-            if not can_launch_next_cycle:
+            if now >= deadline:
+                stop_submitting = True
+                if first_error_code == 0:
+                    first_error_code = 124
+                hparam_search._interrupt_active_trial_processes(
+                    wait_timeout_sec=float(config.timeout_grace_seconds)
+                )
+                for cycle in active_cycles:
+                    _prune_timeout_artifacts(
+                        scheduler_config=config,
+                        cycle=cycle,
+                    )
                 break
-            if available_gpu_ids:
-                assigned_parallel_slots = _resolve_parallel_slots(
-                    config.parallel_slot_count,
-                    len(available_gpu_ids),
-                )
-                if assigned_parallel_slots <= 0:
-                    break
-                assigned_gpu_ids = available_gpu_ids[:assigned_parallel_slots]
-                del available_gpu_ids[:assigned_parallel_slots]
-            else:
-                if running_cycles:
-                    break
-                assigned_parallel_slots = 1
-                assigned_gpu_ids = []
-            template = config.jobs[cycle_index % len(config.jobs)]
-            running_cycles.append(
-                _launch_cycle(
-                    config=config,
-                    cycle_index=cycle_index,
+
+            active_cycles = [cycle for cycle in active_cycles if not cycle.finalized]
+            unallocated_slots = _rebalance_slot_limits(active_cycles, total_slot_count)
+
+            while (
+                not stop_submitting
+                and len(active_cycles) < max_active_cycles
+                and unallocated_slots > 0
+            ):
+                next_cycle_index = cycle_cursor
+                template = config.jobs[next_cycle_index % len(config.jobs)]
+                cycle = _prepare_cycle_state(
+                    scheduler_config=config,
                     template=template,
-                    assigned_gpu_ids=assigned_gpu_ids,
-                    assigned_parallel_slots=assigned_parallel_slots,
+                    cycle_index=next_cycle_index,
+                    initial_slot_limit=unallocated_slots,
+                    total_slot_count=total_slot_count,
+                )
+                if cycle_cursor == 0:
+                    hparam_search._set_active_trial_stream_mode(
+                        cycle.resolved_trial_stream_mode
+                    )
+                _emit_cycle_start(
+                    scheduler_config=config,
+                    cycle=cycle,
                     elapsed_seconds=elapsed_seconds,
                     remaining_seconds=remaining_seconds,
+                    initial_slot_limit=unallocated_slots,
                 )
-            )
-            cycle_index += 1
-            progress = True
+                active_cycles.append(cycle)
+                cycle_cursor += 1
+                unallocated_slots = _rebalance_slot_limits(active_cycles, total_slot_count)
+                if len(active_cycles) == 1:
+                    continue
+                break
 
-        next_running_cycles: list[RunningCycle] = []
-        for running_cycle in running_cycles:
-            return_code = running_cycle.process.poll()
-            if return_code is None:
-                next_running_cycles.append(running_cycle)
+            scheduled_progress = False
+            for cycle in active_cycles:
+                while free_gpu_ids and cycle.running_count < cycle.slot_limit:
+                    task = _pop_next_task(cycle)
+                    if task is None:
+                        break
+                    assigned_gpu_id = free_gpu_ids.pop(0)
+                    future = executor.submit(
+                        _run_trial_for_cycle,
+                        cycle=cycle,
+                        task=task,
+                        assigned_gpu_id=assigned_gpu_id,
+                    )
+                    running_trials[future] = RunningTrial(
+                        cycle_index=cycle.cycle_index,
+                        task=task,
+                        assigned_gpu_id=assigned_gpu_id,
+                    )
+                    if task.phase == "quick":
+                        cycle.quick_running_count += 1
+                    else:
+                        cycle.full_running_count += 1
+                    scheduled_progress = True
+
+            if not running_trials:
+                if stop_submitting and not active_cycles:
+                    break
+                if not scheduled_progress:
+                    time.sleep(0.1)
                 continue
-            running_cycle.stream_thread.join(timeout=5.0)
-            _append_unique_gpu_ids(
-                available_gpu_ids,
-                list(running_cycle.owned_gpu_ids or []),
-            )
-            cycle_duration_seconds = max(
-                0,
-                int(time.monotonic() - running_cycle.start_time),
-            )
-            if return_code in {124, 130}:
-                if first_error_code == 0:
-                    first_error_code = return_code
-                stop_submitting = True
-            else:
-                total_cycle_seconds += cycle_duration_seconds
-                completed_cycles += 1
-                _run_cycle_plot(
-                    config=config,
-                    running_cycle=running_cycle,
-                )
-            avg_cycle_seconds = (
-                total_cycle_seconds // completed_cycles if completed_cycles > 0 else 0
-            )
-            remaining_seconds = max(0, int(deadline - time.monotonic()))
-            estimated_cycles_left = (
-                remaining_seconds // avg_cycle_seconds if avg_cycle_seconds > 0 else 0
-            )
-            print(
-                f"[{config.script_name}] cycle_done={running_cycle.cycle_index} "
-                f"cycle_time={_format_elapsed(cycle_duration_seconds)} "
-                f"avg_cycle={_format_elapsed(avg_cycle_seconds)} "
-                f"ETA_cycles_left={estimated_cycles_left} "
-                f"log={running_cycle.stdout_log} exit={return_code}",
-                flush=True,
-            )
-            progress = True
-        running_cycles = next_running_cycles
 
-        if not running_cycles and stop_submitting:
-            break
-        if not progress:
-            time.sleep(0.1)
+            done, _ = wait(running_trials.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                running_trial = running_trials.pop(future)
+                free_gpu_ids.append(running_trial.assigned_gpu_id)
+                cycle = next(
+                    candidate
+                    for candidate in active_cycles
+                    if candidate.cycle_index == running_trial.cycle_index
+                )
+                result = future.result()
+                _handle_completed_trial(cycle, running_trial.task, result)
+                if not _cycle_has_pending_work(cycle):
+                    cycle_duration_seconds = max(
+                        0,
+                        int(time.monotonic() - cycle.start_time),
+                    )
+                    cycle_exit_code = _finalize_cycle(
+                        scheduler_config=config,
+                        cycle=cycle,
+                        gpu_ids=config.selected_gpu_ids[:total_slot_count],
+                    )
+                    if cycle_exit_code != 0 and first_error_code == 0:
+                        first_error_code = cycle_exit_code
+                    if cycle_exit_code == 0:
+                        total_cycle_seconds += cycle_duration_seconds
+                        completed_cycles += 1
+                    _run_cycle_plot(
+                        scheduler_config=config,
+                        cycle=cycle,
+                    )
+                    avg_cycle_seconds = (
+                        total_cycle_seconds // completed_cycles
+                        if completed_cycles > 0
+                        else 0
+                    )
+                    remaining_seconds = max(0, int(deadline - time.monotonic()))
+                    estimated_cycles_left = (
+                        remaining_seconds // avg_cycle_seconds
+                        if avg_cycle_seconds > 0
+                        else 0
+                    )
+                    _emit_scheduler_line(
+                        config,
+                        (
+                            f"cycle_done={cycle.cycle_index} "
+                            f"cycle_time={_format_elapsed(cycle_duration_seconds)} "
+                            f"avg_cycle={_format_elapsed(avg_cycle_seconds)} "
+                            f"ETA_cycles_left={estimated_cycles_left} "
+                            f"log={cycle.stdout_log} exit={cycle_exit_code}"
+                        ),
+                    )
+            active_cycles = [cycle for cycle in active_cycles if not cycle.finalized]
+    except KeyboardInterrupt:
+        hparam_search._interrupt_active_trial_processes(
+            wait_timeout_sec=float(config.timeout_grace_seconds)
+        )
+        return 130
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+        hparam_search._set_active_trial_stream_mode(previous_stream)
+        hparam_search._set_active_max_parallel_trials(previous_parallel)
 
     if first_error_code != 0:
         return first_error_code
     total_seconds = int(time.monotonic() - start_time)
-    print(
-        f"[{config.script_name}] done start={config.start_epoch} "
-        f"end={datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')} "
-        f"elapsed={_format_elapsed(total_seconds)} cycles={cycle_index}",
-        flush=True,
+    _emit_scheduler_line(
+        config,
+        (
+            f"done start={config.start_epoch} "
+            f"end={datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')} "
+            f"elapsed={_format_elapsed(total_seconds)} cycles={cycle_cursor}"
+        ),
     )
     return 0
 
@@ -656,11 +1393,7 @@ def main(argv: list[str] | None = None) -> int:
     actual_argv = sys.argv[1:] if argv is None else argv
     args = _parse_args(actual_argv)
     config = _load_config(Path(args.config))
-    try:
-        return run_scheduler(config)
-    except KeyboardInterrupt:
-        print("[tune_time_scheduler] Interrupted by user.", flush=True)
-        return 130
+    return run_scheduler(config)
 
 
 if __name__ == "__main__":
