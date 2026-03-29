@@ -2191,6 +2191,7 @@ def _build_run_model_command(
         "donor_kernel_order",
         "acceptor_kernel_order",
         "mask",
+        "script_name",
     }
     python_bin = os.environ.get("INTRONMODEL_TRIAL_PYTHON_BIN", sys.executable)
     cmd = [python_bin, "-u", str(project_root / "src" / "run_model.py")]

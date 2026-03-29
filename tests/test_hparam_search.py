@@ -707,11 +707,13 @@ def test_build_run_model_command_skips_mask_helper_key(tmp_path: Path) -> None:
             "species": "Dmel",
             "batch_size": 256,
             "mask": "on",
+            "script_name": "tune_cnn_pair_v3_time.sh",
             "sequence_transform": "none",
         },
     )
 
     assert "--mask" not in cmd
+    assert "--script_name" not in cmd
     assert cmd.count("--sequence_transform") == 1
 
 
