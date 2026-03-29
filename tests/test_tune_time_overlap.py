@@ -461,10 +461,8 @@ def test_tune_cnn_pair_v3_time_prefills_two_cycles_ahead(
     )
 
     assert stderr == ""
-    assert "[tune_cnn_pair_v3_time.sh] cycle=0 " in stdout
-    assert "[tune_cnn_pair_v3_time.sh] cycle=1 " in stdout
-    assert "[tune_cnn_pair_v3_time.sh] cycle=2 " in stdout
-    assert "[tune_cnn_pair_v3_time.sh] cycle=3 " not in stdout
+    assert "[tune_cnn_pair_v3_time.sh] cycle=0 elapsed=" in stdout
+    assert "[tune_cnn_pair_v3_time.sh] cycle=1 elapsed=" not in stdout
 
 
 def test_tune_cnn_pair_v3_time_freezes_full_progress_denominator(

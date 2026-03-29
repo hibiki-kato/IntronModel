@@ -91,6 +91,7 @@ class CycleState:
     full_running_count: int = 0
     full_queue_built: bool = False
     resolved_trial_stream_mode: str = "full"
+    start_logged: bool = False
     finalized: bool = False
     exit_code: int = 0
 
@@ -983,10 +984,7 @@ def _append_next_cycle(
     config: SchedulerConfig,
     cycle_queue: list[CycleState],
     cycle_cursor: int,
-    elapsed_seconds: int,
-    remaining_seconds: int,
     total_slot_count: int,
-    worker_gpu_ids: list[str],
 ) -> int:
     """Append one new cycle to the admitted queue and return the next cursor."""
     template = config.jobs[cycle_cursor % len(config.jobs)]
@@ -998,13 +996,6 @@ def _append_next_cycle(
     )
     if cycle_cursor == 0:
         hparam_search._set_active_trial_stream_mode(cycle.resolved_trial_stream_mode)
-    _emit_cycle_start(
-        scheduler_config=config,
-        cycle=cycle,
-        elapsed_seconds=elapsed_seconds,
-        remaining_seconds=remaining_seconds,
-        worker_gpu_ids=worker_gpu_ids,
-    )
     cycle_queue.append(cycle)
     return cycle_cursor + 1
 
@@ -1280,10 +1271,7 @@ def run_scheduler(config: SchedulerConfig) -> int:
                 config=config,
                 cycle_queue=cycle_queue,
                 cycle_cursor=cycle_cursor,
-                elapsed_seconds=0,
-                remaining_seconds=int(deadline - start_time),
                 total_slot_count=total_slot_count,
-                worker_gpu_ids=worker_gpu_ids,
             )
 
         while cycle_queue or not stop_submitting:
@@ -1324,6 +1312,15 @@ def run_scheduler(config: SchedulerConfig) -> int:
                 if next_item is None:
                     break
                 cycle, task = next_item
+                if not cycle.start_logged:
+                    _emit_cycle_start(
+                        scheduler_config=config,
+                        cycle=cycle,
+                        elapsed_seconds=elapsed_seconds,
+                        remaining_seconds=remaining_seconds,
+                        worker_gpu_ids=worker_gpu_ids,
+                    )
+                    cycle.start_logged = True
                 assigned_gpu_id = free_gpu_ids.pop(0)
                 known_trial_count = _snapshot_trial_count(cycle, task)
                 future = executor.submit(
@@ -1423,10 +1420,7 @@ def run_scheduler(config: SchedulerConfig) -> int:
                             config=config,
                             cycle_queue=cycle_queue,
                             cycle_cursor=cycle_cursor,
-                            elapsed_seconds=elapsed_seconds,
-                            remaining_seconds=remaining_seconds,
                             total_slot_count=total_slot_count,
-                            worker_gpu_ids=worker_gpu_ids,
                         )
             cycle_queue = [cycle for cycle in cycle_queue if not cycle.finalized]
     except KeyboardInterrupt:
