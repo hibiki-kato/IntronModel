@@ -36,7 +36,7 @@ TOP_K="4"
 FULL_EPOCHS="10"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
-TRIAL_STREAM_MODE="silent"
+TRIAL_STREAM_MODE="errors"
 
 GPU_IDS="4,5,6,7"
 # Keep default conservative for single-GPU runs.
@@ -365,15 +365,27 @@ run_cycle_process() {
 	local config_path="$5"
 	local stdout_log="$6"
 	local run_status=0
+	local cycle_prefix="[tune_cnn_pair_v3_time.sh][cycle=${cycle_index}][species=${species}][target=pair][seed=${base_seed}]"
 
 	mkdir -p "$(dirname "${stdout_log}")"
+	: > "${stdout_log}"
 	if intronmodel_run_with_deadline \
 		"${ETA_DEADLINE_EPOCH}" \
 		"${TIMEOUT_GRACE_SECONDS}" \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \
 		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${config_path}" >"${stdout_log}" 2>&1; then
+		--config "${config_path}" \
+		> >(
+			while IFS= read -r line; do
+				printf '%s %s\n' "${cycle_prefix}" "${line}"
+			done | tee -a "${stdout_log}"
+		) \
+		2> >(
+			while IFS= read -r line; do
+				printf '%s %s\n' "${cycle_prefix}" "${line}" >&2
+			done | tee -a "${stdout_log}" >&2
+		); then
 		run_status=0
 	else
 		run_status=$?
@@ -512,7 +524,7 @@ dispatch_cycle() {
   "base_seed": ${base_seed},
   "gpu_ids": "${assigned_gpu_csv}",
   "max_parallel_trials": "${assigned_parallel_slots}",
-  "trial_stream_mode": "silent",
+  "trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "enable_phase_overlap": true,
   "gpu_release_events_path": "${gpu_release_events_path}",
   "objective_metric": "${objective_metric}",
@@ -931,7 +943,7 @@ else
 			break
 		fi
 		if [[ "${progress}" -eq 0 ]]; then
-			sleep 1
+			sleep 0.1
 		fi
 	done
 	if [[ "${first_error_code}" -ne 0 ]]; then

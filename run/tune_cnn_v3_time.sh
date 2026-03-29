@@ -12,8 +12,10 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="300"
+TIME_BUDGET_MINUTES="800"
 TIMEOUT_GRACE_SECONDS="30"
+GPU_IDS="0,4,6,7"
+MAX_PARALLEL_TRIALS="auto"
 
 INTRONMODEL_AUTO_TMUX="on"
 # Validation / objective controls.
@@ -33,14 +35,10 @@ TOP_K="4"
 FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
-TRIAL_STREAM_MODE="silent"
+TRIAL_STREAM_MODE="errors"
 REINFORCE_TEMPERATURE="0.75"
 POOL_EVERY="2"
 ENABLE_PHASE_OVERLAP="1"
-
-GPU_IDS="auto"
-# auto: use one concurrent trial per configured GPU_IDS entry.
-MAX_PARALLEL_TRIALS="auto"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -314,15 +312,27 @@ run_cycle_process() {
 	local config_path="$6"
 	local stdout_log="$7"
 	local run_status=0
+	local cycle_prefix="[tune_cnn_v3_time.sh][cycle=${cycle_index}][species=${species}][target=${target_name}][seed=${base_seed}]"
 
 	mkdir -p "$(dirname "${stdout_log}")"
+	: > "${stdout_log}"
 	if intronmodel_run_with_deadline \
 		"${ETA_DEADLINE_EPOCH}" \
 		"${TIMEOUT_GRACE_SECONDS}" \
 		"${RUNTIME_PROCESS_TITLE}" \
 		"${PYTHON_BIN}" \
 		"${PROJECT_ROOT}/src/tools/hparam_search.py" \
-		--config "${config_path}" >"${stdout_log}" 2>&1; then
+		--config "${config_path}" \
+		> >(
+			while IFS= read -r line; do
+				printf '%s %s\n' "${cycle_prefix}" "${line}"
+			done | tee -a "${stdout_log}"
+		) \
+		2> >(
+			while IFS= read -r line; do
+				printf '%s %s\n' "${cycle_prefix}" "${line}" >&2
+			done | tee -a "${stdout_log}" >&2
+		); then
 		run_status=0
 	else
 		run_status=$?
@@ -456,7 +466,7 @@ dispatch_cycle() {
   "base_seed": ${base_seed},
   "gpu_ids": "${assigned_gpu_csv}",
   "max_parallel_trials": "${assigned_parallel_slots}",
-  "trial_stream_mode": "silent",
+  "trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON},
   "gpu_release_events_path": "${gpu_release_events_path}",
   "objective_metric": "${objective_metric}",
@@ -894,7 +904,7 @@ else
 			break
 		fi
 		if [[ "${progress}" -eq 0 ]]; then
-			sleep 1
+			sleep 0.1
 		fi
 	done
 	if [[ "${first_error_code}" -ne 0 ]]; then
