@@ -331,3 +331,22 @@ def test_run_model_applies_process_title_from_env_on_import(
     importlib.reload(run_model)
 
     assert called == [True]
+
+
+def test_tune_time_scheduler_applies_process_title_from_env_on_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from tools import tune_time_scheduler
+
+    called: list[bool] = []
+
+    monkeypatch.setattr(
+        "util.process_title.apply_process_title_from_env",
+        lambda: called.append(True) or True,
+    )
+
+    importlib.reload(tune_time_scheduler)
+
+    assert called == [True]

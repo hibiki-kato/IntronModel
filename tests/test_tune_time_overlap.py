@@ -380,7 +380,6 @@ def test_tune_cnn_pair_v3_time_overlaps_full_into_next_quick(
         and row["phase"] == "quick"
     )
 
-    assert cycle_zero_full_start["time"] <= cycle_one_quick_start["time"]
     assert cycle_one_quick_start["time"] < cycle_zero_full_end["time"]
     assert "trial scheduler across GPUs: 0,1,2,3" in stdout
     assert "[hparam_search] quick trial 0000 started on gpu:0." in stdout
@@ -436,6 +435,63 @@ def test_tune_cnn_pair_v3_time_grows_next_cycle_slot_budget_after_more_gpus_free
     assert len({str(row["gpu_id"]) for row in cycle_one_quick_starts[:4]}) == 4
     assert "[hparam_search] quick trial 0000 started on gpu:0." in stdout
     assert "[hparam_search] quick trial 0003 started on gpu:3." in stdout
+
+
+def test_tune_cnn_pair_v3_time_prefills_two_cycles_ahead(
+    tmp_path: Path,
+) -> None:
+    project_root, tune_dst = _prepare_script_project(
+        tmp_path=tmp_path,
+        script_name="tune_cnn_pair_v3_time.sh",
+        patches={
+            "TIME_BUDGET_MINUTES": "1",
+            "INTRONMODEL_AUTO_TMUX": "off",
+            "GPU_IDS": "0,1",
+            "MAX_PARALLEL_TRIALS": "2",
+            "QUICK_TRIALS": "4",
+            "TOP_K": "2",
+        },
+    )
+    stdout, stderr, _ = _run_with_fake_model(
+        tmp_path=tmp_path,
+        project_root=project_root,
+        tune_dst=tune_dst,
+        scenario="no_release",
+        timeout_seconds=1.0,
+    )
+
+    assert stderr == ""
+    assert "[tune_cnn_pair_v3_time.sh] cycle=0 " in stdout
+    assert "[tune_cnn_pair_v3_time.sh] cycle=1 " in stdout
+    assert "[tune_cnn_pair_v3_time.sh] cycle=2 " in stdout
+    assert "[tune_cnn_pair_v3_time.sh] cycle=3 " not in stdout
+
+
+def test_tune_cnn_pair_v3_time_freezes_full_progress_denominator(
+    tmp_path: Path,
+) -> None:
+    project_root, tune_dst = _prepare_script_project(
+        tmp_path=tmp_path,
+        script_name="tune_cnn_pair_v3_time.sh",
+        patches={
+            "TIME_BUDGET_MINUTES": "1",
+            "INTRONMODEL_AUTO_TMUX": "off",
+            "GPU_IDS": "0,1,2,3",
+            "MAX_PARALLEL_TRIALS": "4",
+            "QUICK_TRIALS": "4",
+            "TOP_K": "4",
+        },
+    )
+    stdout, stderr, _ = _run_with_fake_model(
+        tmp_path=tmp_path,
+        project_root=project_root,
+        tune_dst=tune_dst,
+        scenario="overlap",
+        timeout_seconds=2.0,
+    )
+
+    assert stderr == ""
+    assert "[hparam_search] full trial 0000 success (1/4)" not in stdout
 
 
 @pytest.mark.parametrize(

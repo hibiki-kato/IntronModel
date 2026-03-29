@@ -13,6 +13,9 @@ import time
 from typing import TypeAlias
 
 from tools import hparam_search
+from util.process_title import apply_process_title_from_env
+
+_ = apply_process_title_from_env()
 
 Scalar: TypeAlias = hparam_search.Scalar
 ArgValue: TypeAlias = hparam_search.ArgValue
@@ -86,7 +89,6 @@ class CycleState:
     skipped_seed_context_match: int = 0
     quick_running_count: int = 0
     full_running_count: int = 0
-    slot_limit: int = 0
     full_queue_built: bool = False
     resolved_trial_stream_mode: str = "full"
     finalized: bool = False
@@ -121,6 +123,7 @@ class RunningTrial:
     cycle_index: int
     task: ScheduledTrialTask
     assigned_gpu_id: str | None
+    known_trial_count: int
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -294,28 +297,22 @@ def _emit_trial_result_line(
     cycle: CycleState,
     task: ScheduledTrialTask,
     result: TrialResult,
+    known_trial_count: int,
 ) -> None:
     """Emit one trial-result line using the historical hparam_search format."""
     if not hparam_search._should_print_trial_result_line(
         cycle.resolved_trial_stream_mode
     ):
         return
-    total_count: int
     completed_count: int
     if task.phase == "quick":
-        total_count = len(cycle.quick_params)
         completed_count = len(cycle.quick_rows)
     else:
-        total_count = (
-            len(cycle.full_rows)
-            + len(cycle.pending_full_tasks)
-            + cycle.full_running_count
-        )
         completed_count = len(cycle.full_rows)
     with hparam_search.trial_log_prefix(_cycle_log_prefix(cycle)):
         hparam_search._print_trial_result(
             phase=task.phase,
-            trial_count=max(1, total_count),
+            trial_count=max(1, known_trial_count),
             completed_count=completed_count,
             result=result,
         )
@@ -368,7 +365,6 @@ def _prepare_cycle_state(
     scheduler_config: SchedulerConfig,
     template: CycleTemplate,
     cycle_index: int,
-    initial_slot_limit: int,
     total_slot_count: int,
 ) -> CycleState:
     """Initialize one cycle state from the materialized hparam_search config."""
@@ -546,7 +542,6 @@ def _prepare_cycle_state(
         global_best_recheck_context_mismatch=global_best_recheck_context_mismatch,
         full_priority_params=full_priority_params,
         next_full_trial_id=next_full_trial_id,
-        slot_limit=max(1, initial_slot_limit),
         resolved_trial_stream_mode=resolved_trial_stream_mode,
     )
     return cycle
@@ -558,14 +553,15 @@ def _emit_cycle_start(
     cycle: CycleState,
     elapsed_seconds: int,
     remaining_seconds: int,
-    initial_slot_limit: int,
+    worker_gpu_ids: list[str],
 ) -> None:
     """Emit the user-facing cycle-start summary and initialization details."""
     assigned_gpu_text = (
-        ",".join(scheduler_config.selected_gpu_ids[:initial_slot_limit])
-        if scheduler_config.selected_gpu_ids
+        ",".join(worker_gpu_ids)
+        if worker_gpu_ids
         else "cpu-fallback"
     )
+    parallel_count = len(worker_gpu_ids) if worker_gpu_ids else 1
     _emit_scheduler_line(
         scheduler_config,
         (
@@ -580,8 +576,8 @@ def _emit_cycle_start(
         cycle,
         (
             "[hparam_search] Using GPU slots: "
-            f"{assigned_gpu_text} (parallel={initial_slot_limit})."
-            if scheduler_config.selected_gpu_ids
+            f"{assigned_gpu_text} (parallel={parallel_count})."
+            if worker_gpu_ids
             else "[hparam_search] No GPU detected; using CPU (parallel=1)."
         ),
     )
@@ -872,8 +868,6 @@ def _ensure_post_quick_state(cycle: CycleState) -> None:
 
 def _pop_next_task(cycle: CycleState) -> ScheduledTrialTask | None:
     """Pop the next schedulable task for one cycle."""
-    if cycle.running_count >= cycle.slot_limit:
-        return None
     _ensure_post_quick_state(cycle)
     if cycle.config.enable_phase_overlap and cycle.pending_full_tasks:
         return cycle.pending_full_tasks.pop(0)
@@ -943,43 +937,25 @@ def _cycle_has_pending_work(cycle: CycleState) -> bool:
     )
 
 
-def _required_slot_limit(cycle: CycleState) -> int:
-    """Return the minimum slot budget this cycle currently needs."""
-    _ensure_post_quick_state(cycle)
-    if cycle.has_quick_work:
-        return max(cycle.running_count, cycle.slot_limit)
-    pending_full_count = len(cycle.pending_full_tasks)
-    return max(cycle.running_count, pending_full_count)
+def _snapshot_trial_count(cycle: CycleState, task: ScheduledTrialTask) -> int:
+    """Return the best-known phase trial count at dispatch time."""
+    if task.phase == "quick":
+        return len(cycle.quick_params)
+    return max(
+        1,
+        len(cycle.full_rows) + len(cycle.pending_full_tasks) + cycle.full_running_count + 1,
+    )
 
 
-def _rebalance_slot_limits(
-    active_cycles: list[CycleState],
-    total_slot_count: int,
-) -> int:
-    """Rebalance cycle slot budgets and return currently unallocated slots."""
-    for cycle in active_cycles:
-        if cycle.has_quick_work:
-            cycle.slot_limit = max(cycle.slot_limit, cycle.running_count)
-        else:
-            cycle.slot_limit = _required_slot_limit(cycle)
-    allocated = sum(cycle.slot_limit for cycle in active_cycles)
-    unallocated = max(0, total_slot_count - allocated)
-    for cycle in active_cycles:
-        if unallocated <= 0:
-            break
-        if not _cycle_has_pending_work(cycle):
-            continue
-        if cycle.has_quick_work:
-            cycle.slot_limit += unallocated
-            unallocated = 0
-            break
-        desired = _required_slot_limit(cycle)
-        if desired <= cycle.slot_limit:
-            continue
-        extra = min(unallocated, desired - cycle.slot_limit)
-        cycle.slot_limit += extra
-        unallocated -= extra
-    return unallocated
+def _pop_next_global_task(
+    cycle_queue: list[CycleState],
+) -> tuple[CycleState, ScheduledTrialTask] | None:
+    """Pop the next immediately runnable task from the admitted cycle queue."""
+    for cycle in cycle_queue:
+        task = _pop_next_task(cycle)
+        if task is not None:
+            return cycle, task
+    return None
 
 
 def _should_dispatch_next_cycle(
@@ -1002,6 +978,37 @@ def _should_dispatch_next_cycle(
         )
         return False
     return True
+
+
+def _append_next_cycle(
+    *,
+    config: SchedulerConfig,
+    cycle_queue: list[CycleState],
+    cycle_cursor: int,
+    elapsed_seconds: int,
+    remaining_seconds: int,
+    total_slot_count: int,
+    worker_gpu_ids: list[str],
+) -> int:
+    """Append one new cycle to the admitted queue and return the next cursor."""
+    template = config.jobs[cycle_cursor % len(config.jobs)]
+    cycle = _prepare_cycle_state(
+        scheduler_config=config,
+        template=template,
+        cycle_index=cycle_cursor,
+        total_slot_count=total_slot_count,
+    )
+    if cycle_cursor == 0:
+        hparam_search._set_active_trial_stream_mode(cycle.resolved_trial_stream_mode)
+    _emit_cycle_start(
+        scheduler_config=config,
+        cycle=cycle,
+        elapsed_seconds=elapsed_seconds,
+        remaining_seconds=remaining_seconds,
+        worker_gpu_ids=worker_gpu_ids,
+    )
+    cycle_queue.append(cycle)
+    return cycle_cursor + 1
 
 
 def _prune_timeout_artifacts(
@@ -1237,14 +1244,16 @@ def run_scheduler(config: SchedulerConfig) -> int:
         ),
     )
     if config.selected_gpu_ids:
+        worker_gpu_ids = list(config.selected_gpu_ids[:total_slot_count])
         _emit_scheduler_line(
             config,
             (
                 "trial scheduler across GPUs: "
-                f"{','.join(config.selected_gpu_ids[:total_slot_count])}"
+                f"{','.join(worker_gpu_ids)}"
             ),
         )
     else:
+        worker_gpu_ids = []
         _emit_scheduler_line(config, "trial scheduler using CPU fallback.")
 
     start_time = time.monotonic()
@@ -1253,22 +1262,33 @@ def run_scheduler(config: SchedulerConfig) -> int:
     total_cycle_seconds = 0
     cycle_cursor = 0
     first_error_code = 0
-    max_active_cycles = 2
+    max_queued_cycles = 3
     stop_submitting = False
 
-    active_cycles: list[CycleState] = []
+    cycle_queue: list[CycleState] = []
     running_trials: dict[Future[TrialResult], RunningTrial] = {}
     executor = ThreadPoolExecutor(max_workers=total_slot_count)
     free_gpu_ids: list[str | None]
-    if config.selected_gpu_ids:
-        free_gpu_ids = list(config.selected_gpu_ids[:total_slot_count])
+    if worker_gpu_ids:
+        free_gpu_ids = list(worker_gpu_ids)
     else:
         free_gpu_ids = [None]
 
     previous_parallel = hparam_search._set_active_max_parallel_trials(total_slot_count)
     previous_stream = hparam_search._set_active_trial_stream_mode("errors")
     try:
-        while active_cycles or not stop_submitting:
+        while not stop_submitting and len(cycle_queue) < max_queued_cycles:
+            cycle_cursor = _append_next_cycle(
+                config=config,
+                cycle_queue=cycle_queue,
+                cycle_cursor=cycle_cursor,
+                elapsed_seconds=0,
+                remaining_seconds=int(deadline - start_time),
+                total_slot_count=total_slot_count,
+                worker_gpu_ids=worker_gpu_ids,
+            )
+
+        while cycle_queue or not stop_submitting:
             now = time.monotonic()
             elapsed_seconds = int(now - start_time)
             remaining_seconds = max(0, int(deadline - now))
@@ -1291,79 +1311,48 @@ def run_scheduler(config: SchedulerConfig) -> int:
                 hparam_search._interrupt_active_trial_processes(
                     wait_timeout_sec=float(config.timeout_grace_seconds)
                 )
-                for cycle in active_cycles:
+                for cycle in cycle_queue:
                     _prune_timeout_artifacts(
                         scheduler_config=config,
                         cycle=cycle,
                     )
                 break
 
-            active_cycles = [cycle for cycle in active_cycles if not cycle.finalized]
-            unallocated_slots = _rebalance_slot_limits(active_cycles, total_slot_count)
-
-            while (
-                not stop_submitting
-                and len(active_cycles) < max_active_cycles
-                and unallocated_slots > 0
-            ):
-                next_cycle_index = cycle_cursor
-                template = config.jobs[next_cycle_index % len(config.jobs)]
-                cycle = _prepare_cycle_state(
-                    scheduler_config=config,
-                    template=template,
-                    cycle_index=next_cycle_index,
-                    initial_slot_limit=unallocated_slots,
-                    total_slot_count=total_slot_count,
-                )
-                if cycle_cursor == 0:
-                    hparam_search._set_active_trial_stream_mode(
-                        cycle.resolved_trial_stream_mode
-                    )
-                _emit_cycle_start(
-                    scheduler_config=config,
-                    cycle=cycle,
-                    elapsed_seconds=elapsed_seconds,
-                    remaining_seconds=remaining_seconds,
-                    initial_slot_limit=unallocated_slots,
-                )
-                active_cycles.append(cycle)
-                cycle_cursor += 1
-                unallocated_slots = _rebalance_slot_limits(active_cycles, total_slot_count)
-                if len(active_cycles) == 1:
-                    continue
-                break
+            cycle_queue = [cycle for cycle in cycle_queue if not cycle.finalized]
 
             scheduled_progress = False
-            for cycle in active_cycles:
-                while free_gpu_ids and cycle.running_count < cycle.slot_limit:
-                    task = _pop_next_task(cycle)
-                    if task is None:
-                        break
-                    assigned_gpu_id = free_gpu_ids.pop(0)
-                    future = executor.submit(
-                        _run_trial_for_cycle,
-                        cycle=cycle,
-                        task=task,
-                        assigned_gpu_id=assigned_gpu_id,
-                    )
-                    running_trials[future] = RunningTrial(
-                        cycle_index=cycle.cycle_index,
-                        task=task,
-                        assigned_gpu_id=assigned_gpu_id,
-                    )
-                    if task.phase == "quick":
-                        cycle.quick_running_count += 1
-                    else:
-                        cycle.full_running_count += 1
-                    _emit_trial_start_line(
-                        cycle=cycle,
-                        task=task,
-                        assigned_gpu_id=assigned_gpu_id,
-                    )
-                    scheduled_progress = True
+            while free_gpu_ids:
+                next_item = _pop_next_global_task(cycle_queue)
+                if next_item is None:
+                    break
+                cycle, task = next_item
+                assigned_gpu_id = free_gpu_ids.pop(0)
+                known_trial_count = _snapshot_trial_count(cycle, task)
+                future = executor.submit(
+                    _run_trial_for_cycle,
+                    cycle=cycle,
+                    task=task,
+                    assigned_gpu_id=assigned_gpu_id,
+                )
+                running_trials[future] = RunningTrial(
+                    cycle_index=cycle.cycle_index,
+                    task=task,
+                    assigned_gpu_id=assigned_gpu_id,
+                    known_trial_count=known_trial_count,
+                )
+                if task.phase == "quick":
+                    cycle.quick_running_count += 1
+                else:
+                    cycle.full_running_count += 1
+                _emit_trial_start_line(
+                    cycle=cycle,
+                    task=task,
+                    assigned_gpu_id=assigned_gpu_id,
+                )
+                scheduled_progress = True
 
             if not running_trials:
-                if stop_submitting and not active_cycles:
+                if stop_submitting and not cycle_queue:
                     break
                 if not scheduled_progress:
                     time.sleep(0.1)
@@ -1375,7 +1364,7 @@ def run_scheduler(config: SchedulerConfig) -> int:
                 free_gpu_ids.append(running_trial.assigned_gpu_id)
                 cycle = next(
                     candidate
-                    for candidate in active_cycles
+                    for candidate in cycle_queue
                     if candidate.cycle_index == running_trial.cycle_index
                 )
                 result = future.result()
@@ -1384,6 +1373,7 @@ def run_scheduler(config: SchedulerConfig) -> int:
                     cycle=cycle,
                     task=running_trial.task,
                     result=result,
+                    known_trial_count=running_trial.known_trial_count,
                 )
                 if not _cycle_has_pending_work(cycle):
                     cycle_duration_seconds = max(
@@ -1393,7 +1383,7 @@ def run_scheduler(config: SchedulerConfig) -> int:
                     cycle_exit_code = _finalize_cycle(
                         scheduler_config=config,
                         cycle=cycle,
-                        gpu_ids=config.selected_gpu_ids[:total_slot_count],
+                        gpu_ids=worker_gpu_ids,
                     )
                     if cycle_exit_code != 0 and first_error_code == 0:
                         first_error_code = cycle_exit_code
@@ -1425,7 +1415,22 @@ def run_scheduler(config: SchedulerConfig) -> int:
                             f"log={cycle.stdout_log} exit={cycle_exit_code}"
                         ),
                     )
-            active_cycles = [cycle for cycle in active_cycles if not cycle.finalized]
+                    cycle_queue = [
+                        queued_cycle
+                        for queued_cycle in cycle_queue
+                        if not queued_cycle.finalized
+                    ]
+                    while not stop_submitting and len(cycle_queue) < max_queued_cycles:
+                        cycle_cursor = _append_next_cycle(
+                            config=config,
+                            cycle_queue=cycle_queue,
+                            cycle_cursor=cycle_cursor,
+                            elapsed_seconds=elapsed_seconds,
+                            remaining_seconds=remaining_seconds,
+                            total_slot_count=total_slot_count,
+                            worker_gpu_ids=worker_gpu_ids,
+                        )
+            cycle_queue = [cycle for cycle in cycle_queue if not cycle.finalized]
     except KeyboardInterrupt:
         hparam_search._interrupt_active_trial_processes(
             wait_timeout_sec=float(config.timeout_grace_seconds)

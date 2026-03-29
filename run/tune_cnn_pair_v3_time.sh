@@ -999,11 +999,16 @@ config_path.write_text(
 )
 PY
 
-PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+if PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+	intronmodel_run_with_process_title \
+	"${RUNTIME_PROCESS_TITLE}" \
 	"${PYTHON_BIN}" \
 	"${PROJECT_ROOT}/src/tools/tune_time_scheduler.py" \
-	--config "${scheduler_config_path}"
-scheduler_exit_code=$?
+	--config "${scheduler_config_path}"; then
+	scheduler_exit_code=0
+else
+	scheduler_exit_code=$?
+fi
 if [[ "${scheduler_exit_code}" -ne 0 ]]; then
 	exit "${scheduler_exit_code}"
 fi

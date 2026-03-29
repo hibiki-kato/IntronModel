@@ -377,6 +377,16 @@ def test_tune_cnn_v3_time_sh_uses_reinforce_search_defaults() -> None:
     assert '"arch_mutation_steps"' in content
     assert '"arch_add_block_prob"' in content
     assert '"pool_every": ${POOL_EVERY}' in content
+    assert 'intronmodel_run_with_process_title \\' in content
+    assert '"${RUNTIME_PROCESS_TITLE}" \\' in content
+
+
+def test_tune_cnn_pair_v3_time_sh_uses_eta_process_title_for_scheduler() -> None:
+    content = (_project_root() / "run" / "tune_cnn_pair_v3_time.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'intronmodel_run_with_process_title \\' in content
+    assert '"${RUNTIME_PROCESS_TITLE}" \\' in content
 
 
 def test_cnn_v3_scripts_have_valid_bash_syntax() -> None:
