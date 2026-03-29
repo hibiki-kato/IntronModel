@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from util.versioned_artifacts import ensure_publication_seed
 from util.versioned_artifacts import publish_latest_best_version
 from util.versioned_artifacts import read_version_history
@@ -453,3 +455,69 @@ def test_publish_latest_best_version_for_cnn_pair_v3_uses_its_own_namespace(
         "cnn_pair_v3.01",
         "cnn_pair_v3.02",
     ]
+
+
+def test_publish_latest_best_version_uses_root_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    external_data_root = tmp_path / "external_data"
+    external_model_root = tmp_path / "external_model"
+    donor_raw = external_model_root / "SpX" / "donor" / "donor_raw.pt"
+    acceptor_raw = external_model_root / "SpX" / "acceptor" / "acceptor_raw.pt"
+    donor_raw.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_raw.parent.mkdir(parents=True, exist_ok=True)
+    donor_raw.write_bytes(b"donor")
+    acceptor_raw.write_bytes(b"acceptor")
+
+    donor_best = (
+        external_data_root
+        / "SpX"
+        / "tuning"
+        / "cnn_v3"
+        / "donor"
+        / "best_config.json"
+    )
+    acceptor_best = (
+        external_data_root
+        / "SpX"
+        / "tuning"
+        / "cnn_v3"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw,
+            objective_metric="donor_pr_auc",
+            objective_score=0.89,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_raw,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.87,
+        ),
+    )
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(external_data_root))
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(external_model_root))
+
+    published_name = ensure_publication_seed(
+        project_root=project_root,
+        species="SpX",
+        model_name="cnn_v3",
+    )
+
+    assert published_name == "cnn_v3.01"
+    assert not donor_raw.exists()
+    assert not acceptor_raw.exists()
+    assert (external_model_root / "SpX" / "donor" / "cnn_v3.01.pt").exists()
+    assert (external_model_root / "SpX" / "acceptor" / "cnn_v3.01.pt").exists()
+    history = read_version_history(external_data_root, "SpX", "cnn_v3")
+    assert [row.published_name for row in history] == ["cnn_v3.01"]

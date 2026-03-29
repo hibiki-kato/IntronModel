@@ -886,8 +886,32 @@ def _stringify_scalar(value: object) -> str:
 
 
 def _resolve_data_root(project_root: Path) -> Path:
-    return (project_root / "data").resolve()
+    return _resolve_root_from_env(
+        project_root=project_root,
+        env_name="INTRONMODEL_DATA_ROOT",
+        default_dirname="data",
+    )
 
 
 def _resolve_model_root(project_root: Path) -> Path:
-    return (project_root / "model").resolve()
+    return _resolve_root_from_env(
+        project_root=project_root,
+        env_name="INTRONMODEL_MODEL_ROOT",
+        default_dirname="model",
+    )
+
+
+def _resolve_root_from_env(
+    *,
+    project_root: Path,
+    env_name: str,
+    default_dirname: str,
+) -> Path:
+    """Resolve a data/model root from one environment override when available."""
+    raw_value = os.environ.get(env_name, "").strip()
+    if raw_value == "":
+        return (project_root / default_dirname).resolve()
+    root_path = Path(raw_value)
+    if not root_path.is_absolute():
+        root_path = project_root / root_path
+    return root_path.resolve()
