@@ -37,6 +37,9 @@ PAIR_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
 ACTIVE_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
     {*INDEPENDENT_PUBLIC_MODEL_NAMES, *PAIR_PUBLIC_MODEL_NAMES}
 )
+LEGACY_PUBLIC_OUTPUT_STEMS: dict[str, tuple[str, ...]] = {
+    "cnn_pair_v2": ("cnn_v2_pair",),
+}
 VERSION_HISTORY_COLUMNS: tuple[str, ...] = (
     "version",
     "published_name",
@@ -214,10 +217,93 @@ def resolve_latest_published_name(
 ) -> str | None:
     """Resolve the latest published name for one active model."""
     public_model_name = normalize_public_model_name(model_name)
+    latest_entry = resolve_latest_live_history_entry(
+        data_root=data_root,
+        species=species,
+        model_name=public_model_name,
+    )
+    if latest_entry is None:
+        return None
+    return latest_entry.published_name
+
+
+def resolve_latest_live_history_entry(
+    data_root: Path,
+    species: str,
+    model_name: str,
+) -> VersionHistoryEntry | None:
+    """Resolve the newest live published entry for one active public model."""
+    public_model_name = normalize_public_model_name(model_name)
     history = read_version_history(data_root, species, public_model_name)
     if not history:
         return None
-    return history[-1].published_name
+    for entry in reversed(history):
+        if entry.archive_status == "live":
+            return entry
+    return history[-1]
+
+
+def resolve_latest_published_run_assets(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+) -> dict[str, str] | None:
+    """Resolve latest published checkpoints and output paths for one run."""
+    public_model_name = normalize_public_model_name(model_name)
+    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
+        return None
+
+    data_root = _resolve_data_root(project_root)
+    model_root = _resolve_model_root(project_root)
+    latest_entry = resolve_latest_live_history_entry(
+        data_root=data_root,
+        species=species,
+        model_name=public_model_name,
+    )
+    if latest_entry is None:
+        return None
+
+    assets: dict[str, str] = {
+        "published_name": latest_entry.published_name,
+        "site_output_tsv": str(
+            data_root / species / "site_score" / f"{latest_entry.published_name}.tsv"
+        ),
+        "intron_output_tsv": str(
+            data_root / species / "intron_score" / f"{latest_entry.published_name}.tsv"
+        ),
+        "transcript_output_tsv": str(
+            data_root / species / "trans_score" / f"{latest_entry.published_name}.tsv"
+        ),
+        "eval_output_txt": str(
+            data_root / species / "eval_score" / f"{latest_entry.published_name}.txt"
+        ),
+        "metrics_json": str(
+            data_root
+            / species
+            / "learning_metric"
+            / f"{latest_entry.published_name}.train.json"
+        ),
+    }
+
+    if public_model_name in INDEPENDENT_PUBLIC_MODEL_NAMES:
+        donor_path = _resolve_version_history_checkpoint_path(
+            raw_path=latest_entry.donor_checkpoint_path,
+            model_root=model_root,
+        )
+        acceptor_path = _resolve_version_history_checkpoint_path(
+            raw_path=latest_entry.acceptor_checkpoint_path,
+            model_root=model_root,
+        )
+        assets["donor_checkpoint_path"] = str(donor_path)
+        assets["acceptor_checkpoint_path"] = str(acceptor_path)
+    else:
+        pair_path = _resolve_version_history_checkpoint_path(
+            raw_path=latest_entry.pair_checkpoint_path,
+            model_root=model_root,
+        )
+        assets["pair_checkpoint_path"] = str(pair_path)
+    return assets
 
 
 def ensure_publication_seed(
@@ -656,7 +742,8 @@ def _seed_unversioned_outputs_if_needed(
 
 
 def _iter_public_output_stem_candidates(public_model_name: str) -> tuple[str, ...]:
-    return (public_model_name,)
+    legacy_stems = LEGACY_PUBLIC_OUTPUT_STEMS.get(public_model_name, ())
+    return (public_model_name, *legacy_stems)
 
 
 def _iter_public_data_output_moves(
@@ -926,6 +1013,18 @@ def _write_json_object(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     normalized = relativize_path_fields(dict(payload))
     path.write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
+
+
+def _resolve_version_history_checkpoint_path(
+    *,
+    raw_path: str,
+    model_root: Path,
+) -> Path:
+    """Resolve one checkpoint path stored in version history."""
+    stripped = raw_path.strip()
+    if stripped == "":
+        raise FileNotFoundError("Version history is missing a checkpoint path.")
+    return resolve_existing_checkpoint_path(Path(stripped), model_root_dir=model_root)
 
 
 def _parse_version_number(published_name: str, public_model_name: str) -> int:

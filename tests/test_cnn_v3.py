@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 import torch
@@ -212,6 +213,116 @@ def test_train_task_model_forwards_requested_task_to_arch_resolution(
     assert captured["task"] == "acceptor"
     assert captured["model_args"] is model_args
     assert captured["lightweight"] is False
+
+
+def test_train_task_model_logs_selected_validation_metric_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    examples = [("ACGT" * 25, 1), ("TGCA" * 25, 0)] * 10
+
+    def _fake_load_task_examples_with_transform(
+        *,
+        pos_path: str,
+        neg_path: str,
+        task: str,
+        donor_len: int | None,
+        acceptor_len: int | None,
+        sequence_transform: str,
+    ) -> list[tuple[str, int]]:
+        del pos_path, neg_path, task, donor_len, acceptor_len, sequence_transform
+        return examples
+
+    eval_calls = iter(
+        [
+            {"pr_auc": 0.9228, "max_f1": 0.8849, "acc@0.5": 0.90},
+            {"pr_auc": 0.9491, "max_f1": 0.9012, "acc@0.5": 0.93},
+        ]
+    )
+
+    def _fake_evaluate(
+        model: torch.nn.Module,
+        loader: torch.utils.data.DataLoader[object],
+        device: str,
+        use_amp: bool,
+        amp_dtype: torch.dtype | None,
+    ) -> dict[str, float]:
+        del model, loader, device, use_amp, amp_dtype
+        return next(eval_calls)
+
+    monkeypatch.setattr(
+        cnn,
+        "_load_task_examples_with_transform",
+        _fake_load_task_examples_with_transform,
+    )
+    monkeypatch.setattr(cnn, "evaluate", _fake_evaluate)
+
+    model_args = argparse.Namespace(
+        conv_channels="16,32",
+        donor_conv_channels=None,
+        acceptor_conv_channels=None,
+        kernel_sizes="7,5",
+        donor_kernel_sizes=None,
+        acceptor_kernel_sizes=None,
+        block_dilations="1,2",
+        donor_block_dilations=None,
+        acceptor_block_dilations=None,
+        residual_channels="8,16",
+        donor_residual_channels=None,
+        acceptor_residual_channels=None,
+        max_pool_size=2,
+        donor_max_pool_size=None,
+        acceptor_max_pool_size=None,
+        pool_every=1,
+        donor_pool_every=None,
+        acceptor_pool_every=None,
+        head_type="gap",
+        donor_head_type=None,
+        acceptor_head_type=None,
+        fc_hidden=32,
+        donor_fc_hidden=None,
+        acceptor_fc_hidden=None,
+    )
+
+    summary = cnn_v3.train_task_model(
+        task="acceptor",
+        pos_path="pos.tsv",
+        neg_path="neg.tsv",
+        checkpoint_path=str(tmp_path / "acceptor.pt"),
+        window_len=100,
+        donor_len=100,
+        acceptor_len=100,
+        model_args=model_args,
+        task_params=build_task_train_params(),
+        epochs=1,
+        early_stop_patience=0,
+        early_stop_min_delta=0.0,
+        validation_metric="max_f1",
+        seed=1337,
+        lightweight=False,
+        compile_model=False,
+        compile_mode="off",
+        device="cpu",
+        use_amp=0,
+        amp_dtype="auto",
+        allow_tf32=0,
+        cudnn_benchmark=0,
+        deterministic=1,
+        num_workers=0,
+        prefetch_factor=2,
+        persistent_workers=0,
+        pin_memory=0,
+        min_batch_size=1,
+        max_oom_retries=0,
+        quick_phase=False,
+    )
+
+    captured = capsys.readouterr().out
+    assert "score_metric=max_f1" in captured
+    assert "train_score=0.9012" in captured
+    assert "val_score=0.8849" in captured
+    assert summary["epoch_history"][0]["train_score"] == pytest.approx(0.9012)
 
 
 def build_task_train_params() -> cnn.TaskTrainParams:

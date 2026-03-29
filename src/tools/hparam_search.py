@@ -684,11 +684,59 @@ def _normalize_context_object(value: object) -> object:
     return value
 
 
-def _context_digest(context: dict[str, object]) -> str:
-    """Serialize one context mapping to a canonical digest string."""
+def _normalize_context_path_alias(value: object) -> object:
+    """Collapse legacy empty-path aliases used by stored validation contexts."""
+    if isinstance(value, str) and value.strip() in {"", "."}:
+        return ""
+    return value
+
+
+def _canonicalize_hparam_context(context: dict[str, object]) -> dict[str, object]:
+    """Canonicalize one HPO context for backward-compatible comparisons."""
     normalized = _normalize_context_object(context)
     if not isinstance(normalized, dict):
         raise ValueError("context must normalize to an object.")
+
+    fixed_run_args = normalized.get("fixed_run_args")
+    if isinstance(fixed_run_args, dict):
+        # Older best-config payloads persisted the launcher script name even
+        # though it does not affect model comparability.
+        fixed_run_args.pop("script_name", None)
+
+    validation_protocol = normalized.get("validation_protocol")
+    if isinstance(validation_protocol, dict):
+        train_source = validation_protocol.get("train_source")
+        if isinstance(train_source, dict):
+            for key in ("train_neg_path", "train_pos_path"):
+                if key in train_source:
+                    train_source[key] = _normalize_context_path_alias(
+                        train_source[key]
+                    )
+
+        train_source_signature = validation_protocol.get("train_source_signature")
+        if isinstance(train_source_signature, dict):
+            for key in ("train_neg", "train_pos"):
+                source_entry = train_source_signature.get(key)
+                if isinstance(source_entry, dict) and "path" in source_entry:
+                    source_entry["path"] = _normalize_context_path_alias(
+                        source_entry["path"]
+                    )
+            pair_extra_negatives = train_source_signature.get(
+                "pair_extra_negatives"
+            )
+            if isinstance(pair_extra_negatives, list):
+                for entry in pair_extra_negatives:
+                    if isinstance(entry, dict) and "path" in entry:
+                        entry["path"] = _normalize_context_path_alias(
+                            entry["path"]
+                        )
+
+    return normalized
+
+
+def _context_digest(context: dict[str, object]) -> str:
+    """Serialize one context mapping to a canonical digest string."""
+    normalized = _canonicalize_hparam_context(context)
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
@@ -763,10 +811,7 @@ def _extract_hparam_context(raw: dict[str, object]) -> Optional[dict[str, object
     context_obj = raw.get("hparam_context")
     if not isinstance(context_obj, dict):
         return None
-    normalized = _normalize_context_object(context_obj)
-    if not isinstance(normalized, dict):
-        return None
-    return normalized
+    return _canonicalize_hparam_context(context_obj)
 
 
 def _extract_scalar_search_value(

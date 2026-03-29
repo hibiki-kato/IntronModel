@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from util.training_control import (
+    get_metric_value,
     resolve_validation_metric,
     select_validation_score,
 )
@@ -43,3 +44,19 @@ def test_select_validation_score_falls_back_for_pr_auc() -> None:
 
     assert score == pytest.approx(0.74)
     assert metric_name == "roc_auc"
+
+
+def test_get_metric_value_returns_float_for_existing_metric() -> None:
+    value = get_metric_value(
+        metrics={
+            "max_f1": 0.81,
+            "pr_auc": 0.92,
+        },
+        metric_name="max_f1",
+    )
+
+    assert value == pytest.approx(0.81)
+
+
+def test_get_metric_value_returns_none_for_missing_metric() -> None:
+    assert get_metric_value(metrics={"pr_auc": 0.92}, metric_name="max_f1") is None

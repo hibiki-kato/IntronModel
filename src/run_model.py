@@ -68,6 +68,10 @@ from util.unique_intron import (
     invert_unique_map,
     load_unique_map,
 )
+from util.versioned_artifacts import (
+    is_active_public_model,
+    resolve_latest_published_run_assets,
+)
 
 try:
     from util.losses import LOSS_NAME_CHOICES
@@ -912,15 +916,21 @@ def _latest_checkpoint_for_task(
 
     candidates: list[str] = []
     normalized_model = None
+    allowed_prefixes: tuple[str, ...] | None = None
     if model_name is not None:
         stripped = model_name.strip()
         if stripped != "":
             normalized_model = stripped
+            allowed_prefixes = (f"{normalized_model}_",)
+            if is_active_public_model(normalized_model):
+                allowed_prefixes = (*allowed_prefixes, f"{normalized_model}.")
     for file_name in os.listdir(task_dir):
         if not file_name.endswith(".pt"):
             continue
-        if normalized_model is not None and not file_name.startswith(
-            f"{normalized_model}_"
+        if (
+            normalized_model is not None
+            and allowed_prefixes is not None
+            and not file_name.startswith(allowed_prefixes)
         ):
             continue
         path = os.path.join(task_dir, file_name)
@@ -1035,6 +1045,54 @@ def _resolve_pipeline_paths(
         transcript_output_tsv,
         eval_output_txt,
     )
+
+
+def _apply_skip_train_published_version(
+    *,
+    args: argparse.Namespace,
+    checkpoint_paths: dict[str, str],
+    model_tasks: Sequence[str],
+) -> dict[str, str]:
+    """Attach latest published paths when skip-train runs load canonical best."""
+    if not bool(getattr(args, "skip_train", False)):
+        return checkpoint_paths
+    if not is_active_public_model(str(getattr(args, "model", ""))):
+        return checkpoint_paths
+
+    published_assets = resolve_latest_published_run_assets(
+        project_root=Path(project_root()),
+        species=str(args.species),
+        model_name=str(args.model),
+    )
+    if published_assets is None:
+        return checkpoint_paths
+
+    if not args.site_output_tsv:
+        args.site_output_tsv = published_assets["site_output_tsv"]
+    if not args.intron_output_tsv:
+        args.intron_output_tsv = published_assets["intron_output_tsv"]
+    if not args.transcript_output_tsv:
+        args.transcript_output_tsv = published_assets["transcript_output_tsv"]
+    if not args.eval_output_txt:
+        args.eval_output_txt = published_assets["eval_output_txt"]
+    if getattr(args, "metrics_json", None) is None:
+        args.metrics_json = published_assets["metrics_json"]
+
+    resolved_paths = dict(checkpoint_paths)
+    for task in model_tasks:
+        asset_key = f"{task}_checkpoint_path"
+        raw_path = published_assets.get(asset_key)
+        if not isinstance(raw_path, str) or raw_path.strip() == "":
+            continue
+        resolved_paths[task] = raw_path
+        setattr(args, asset_key, raw_path)
+
+    published_name = str(published_assets["published_name"])
+    print(
+        "[pipeline] Skip training uses published version: "
+        f"{published_name}"
+    )
+    return resolved_paths
 
 
 def _load_optional_intron_labels(
@@ -1501,6 +1559,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     for task in model_tasks:
         setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
         setattr(args, f"{task}_init_checkpoint_path", "")
+    checkpoint_paths = _apply_skip_train_published_version(
+        args=args,
+        checkpoint_paths=checkpoint_paths,
+        model_tasks=model_tasks,
+    )
 
     (
         args.test_tsv,

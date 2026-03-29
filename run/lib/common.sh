@@ -481,7 +481,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from util.versioned_artifacts import ensure_publication_seed
 from util.versioned_artifacts import resolve_latest_published_name
 
 
@@ -489,14 +488,8 @@ project_root = Path(sys.argv[1]).resolve()
 species = sys.argv[2]
 model_name = sys.argv[3]
 
-published_name = ensure_publication_seed(
-    project_root=project_root,
-    species=species,
-    model_name=model_name,
-)
-if published_name is None:
-    data_root = project_root / "data"
-    published_name = resolve_latest_published_name(data_root, species, model_name)
+data_root = project_root / "data"
+published_name = resolve_latest_published_name(data_root, species, model_name)
 if published_name is None:
     published_name = model_name
 print(published_name)

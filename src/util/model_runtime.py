@@ -41,6 +41,9 @@ _COMPILE_RUNTIME_CACHE_LOADED: bool = False
 _COMPILE_STICKY_MODE_CACHE: str | None = None
 _COMPILE_DISABLED_MODES_CACHE: set[str] = set()
 
+_AUTO_NUM_WORKERS_MIN_PER_GPU: int = 4
+_AUTO_NUM_WORKERS_MAX_PER_GPU: int = 8
+
 
 def binary_clf_curve(
     labels: np.ndarray,
@@ -160,8 +163,9 @@ def resolve_auto_num_workers(
     Returns
     -------
     int
-        Conservative worker count per trial. The result is capped at ``8`` and
-        never exceeds the per-trial CPU budget.
+        Worker count per trial. The resolver targets roughly ``4`` to ``8``
+        workers per concurrently active GPU/process when CPU budget allows,
+        while never exceeding the per-trial CPU budget.
 
     Raises
     ------
@@ -185,10 +189,14 @@ def resolve_auto_num_workers(
         raise ValueError("max_parallel_trials must be >= 1.")
 
     per_trial_cpu_budget = max(1, resolved_cpu_count // parallel)
-    workers = max(1, per_trial_cpu_budget // 4)
-    if resolved_cpu_count >= 64 and parallel >= 4:
-        workers = max(workers, 4)
-    current_default = min(8, workers)
+    if per_trial_cpu_budget < _AUTO_NUM_WORKERS_MIN_PER_GPU:
+        return per_trial_cpu_budget
+
+    target_workers = max(
+        _AUTO_NUM_WORKERS_MIN_PER_GPU,
+        per_trial_cpu_budget // 2,
+    )
+    current_default = min(_AUTO_NUM_WORKERS_MAX_PER_GPU, target_workers)
     return min(current_default, per_trial_cpu_budget)
 
 

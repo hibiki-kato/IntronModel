@@ -8,6 +8,9 @@ import pytest
 from util.versioned_artifacts import ensure_publication_seed
 from util.versioned_artifacts import publish_latest_best_version
 from util.versioned_artifacts import read_version_history
+from util.versioned_artifacts import resolve_latest_published_run_assets
+from util.versioned_artifacts import write_version_history
+from util.versioned_artifacts import VersionHistoryEntry
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -612,3 +615,59 @@ def test_publish_latest_best_version_uses_root_overrides(
     assert [row.published_name for row in history] == ["cnn_v3.01"]
     assert not Path(history[0].donor_checkpoint_path).is_absolute()
     assert not Path(history[0].acceptor_checkpoint_path).is_absolute()
+
+
+def test_resolve_latest_published_run_assets_handles_pair_version(
+    tmp_path: Path,
+) -> None:
+    pair_checkpoint = tmp_path / "model" / "SpX" / "pair" / "cnn_pair_v3.02.pt"
+    pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    pair_checkpoint.write_bytes(b"pair-v3")
+    write_version_history(
+        tmp_path / "data",
+        "SpX",
+        "cnn_pair_v3",
+        [
+            VersionHistoryEntry(
+                version=1,
+                published_name="cnn_pair_v3.01",
+                published_at="2026-03-29T00:00:00Z",
+                source_best_config="data/SpX/tuning/cnn_pair_v3/pair/best_config.json",
+                objective_metric="pair_max_f1",
+                objective_score="0.80",
+                updated_side="pair",
+                carry_forward_side="",
+                donor_checkpoint_path="",
+                acceptor_checkpoint_path="",
+                pair_checkpoint_path="model/SpX/pair/cnn_pair_v3.01.pt",
+                metrics_json="data/SpX/learning_metric/cnn_pair_v3.01.train.json",
+                archive_status="archived",
+            ),
+            VersionHistoryEntry(
+                version=2,
+                published_name="cnn_pair_v3.02",
+                published_at="2026-03-29T01:00:00Z",
+                source_best_config="data/SpX/tuning/cnn_pair_v3/pair/best_config.json",
+                objective_metric="pair_max_f1",
+                objective_score="0.81",
+                updated_side="pair",
+                carry_forward_side="",
+                donor_checkpoint_path="",
+                acceptor_checkpoint_path="",
+                pair_checkpoint_path="model/SpX/pair/cnn_pair_v3.02.pt",
+                metrics_json="data/SpX/learning_metric/cnn_pair_v3.02.train.json",
+                archive_status="live",
+            ),
+        ],
+    )
+
+    assets = resolve_latest_published_run_assets(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v3",
+    )
+
+    assert assets is not None
+    assert assets["published_name"] == "cnn_pair_v3.02"
+    assert assets["pair_checkpoint_path"] == str(pair_checkpoint.resolve())
+    assert assets["transcript_output_tsv"].endswith("cnn_pair_v3.02.tsv")

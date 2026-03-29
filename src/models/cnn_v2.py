@@ -86,6 +86,7 @@ from util.sequence_transform import (
     apply_pair_sequence_transform,
 )
 from util.training_control import (
+    get_metric_value,
     resolve_early_stopping_params,
     resolve_training_epoch_budget,
     resolve_validation_metric,
@@ -1555,6 +1556,7 @@ def train_pair_model(
                 roc_auc = val_metrics.get("roc_auc")
                 max_f1 = val_metrics.get("max_f1")
                 acc_at_0_5 = val_metrics.get("acc@0.5")
+                train_metrics: dict[str, float] = {}
                 train_pr_auc: Optional[float] = None
                 if report_train_metrics_bool and train_eval_loader is not None:
                     train_metrics = evaluate_pair(
@@ -1590,6 +1592,7 @@ def train_pair_model(
                     metrics=val_metrics,
                     validation_metric=resolved_validation_metric,
                 )
+                train_score = get_metric_value(train_metrics, score_name)
 
                 improved = score > (best_score + early_stop_min_delta)
                 if improved:
@@ -1660,6 +1663,7 @@ def train_pair_model(
                         "epoch": epoch,
                         "train_loss": train_loss,
                         "train_pr_auc": train_pr_auc,
+                        "train_score": train_score,
                         "test_pr_auc": pr_auc,
                         "pr_auc": pr_auc,
                         "roc_auc": roc_auc,
@@ -1683,20 +1687,16 @@ def train_pair_model(
                 if report_train_metrics_bool:
                     mark = "*" if improved else "-"
                     train_score_text = (
-                        "nan" if train_pr_auc is None else f"{train_pr_auc:.4f}"
+                        "nan" if train_score is None else f"{train_score:.4f}"
                     )
-                    val_score_text = "nan" if pr_auc is None else f"{pr_auc:.4f}"
-                    objective_text = (
-                        ""
-                        if score_name == "pr_auc"
-                        else f"{score_name}={score:.4f} "
-                    )
+                    val_score_text = f"{score:.4f}"
                     print(
                         f"[pair] {mark} epoch {epoch}/{epochs} "
-                        f"loss={train_loss:.4f} train_score={train_score_text} "
+                        f"loss={train_loss:.4f} score_metric={score_name} "
+                        f"train_score={train_score_text} "
                         f"val_score={val_score_text} "
                         f"elapsed={epoch_elapsed_sec:.2f}s "
-                        f"{objective_text}best={best_score:.4f} "
+                        f"best={best_score:.4f} "
                         f"(ep {best_epoch})"
                     )
 

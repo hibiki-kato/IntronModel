@@ -33,6 +33,7 @@ from util.checkpoint_io import (
     read_json_object,
 )
 from util.data_proc import build_output_stem, parse_name_fields
+from util.model_runtime import resolve_auto_num_workers
 from util.model_task_paths import checkpoint_tasks_for_model
 from util.unique_intron import (
     UNIQUE_TRANSCRIPTS_MASK_TSV_NAME,
@@ -1872,7 +1873,8 @@ def _resolve_parallel_auto_num_workers(concurrent_gpu_processes: int) -> int:
     Returns
     -------
     int
-        Conservative per-process ``num_workers`` override.
+        Per-process ``num_workers`` override aligned with the shared training
+        runtime default, with an extra file-descriptor safety cap.
 
     Raises
     ------
@@ -1888,13 +1890,10 @@ def _resolve_parallel_auto_num_workers(concurrent_gpu_processes: int) -> int:
         raise ValueError("concurrent_gpu_processes must be positive.")
 
     cpu_count = os.cpu_count() or 4
-    per_process_cpu_budget = max(1, cpu_count // concurrent_gpu_processes)
-
-    # One training process typically owns multiple DataLoaders at once
-    # (train/val/train-eval). Keep worker allocation well below the raw
-    # per-process CPU budget so aggregate workers scale with GPU process count
-    # without oversubscribing CPU or file descriptors.
-    cpu_cap = max(1, min(4, per_process_cpu_budget // 8))
+    cpu_cap = resolve_auto_num_workers(
+        cpu_count=cpu_count,
+        max_parallel_trials=concurrent_gpu_processes,
+    )
 
     soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft_limit <= 0 or soft_limit == resource.RLIM_INFINITY:

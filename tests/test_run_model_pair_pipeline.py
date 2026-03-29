@@ -10,6 +10,8 @@ import pytest
 import evaluate_scores
 import run_model
 from util.unique_intron import UniqueMapMember
+from util.versioned_artifacts import VersionHistoryEntry
+from util.versioned_artifacts import write_version_history
 
 
 class _DummyPairModelModule:
@@ -168,6 +170,17 @@ class _DummyCnnV2PairRowsModule:
         ]
 
 
+class _DummyPublishedPairModelModule(_DummyPairModelModule):
+    def infer_site(
+        self,
+        common_args: argparse.Namespace,
+        model_args: argparse.Namespace,
+    ) -> list[dict[str, object]]:
+        del model_args
+        assert str(common_args.pair_checkpoint_path).endswith("cnn_pair_v3.02.pt")
+        return super().infer_site(common_args=common_args, model_args=argparse.Namespace())
+
+
 def test_expand_unique_site_rows_maps_back_members() -> None:
     """Expand one unique site row into multiple original transcript introns."""
     unique_rows: list[dict[str, object]] = [
@@ -320,6 +333,26 @@ def test_collapse_site_rows_to_unique_raises_on_conflicting_scores() -> None:
             site_score_rows=site_rows,
             unique_map=unique_map,
         )
+
+
+def test_latest_checkpoint_for_task_accepts_versioned_public_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pair_dir = tmp_path / "model" / "Dmel" / "pair"
+    pair_dir.mkdir(parents=True, exist_ok=True)
+    published = pair_dir / "cnn_pair_v3.02.pt"
+    published.write_bytes(b"pair")
+
+    monkeypatch.setattr(run_model, "model_root", lambda: str(tmp_path / "model"))
+
+    resolved = run_model._latest_checkpoint_for_task(
+        species="Dmel",
+        task="pair",
+        model_name="cnn_pair_v3",
+    )
+
+    assert resolved == str(published)
 
 
 def test_uses_default_unique_test_tsv_true_for_processed_default(
@@ -747,6 +780,134 @@ def test_run_pipeline_pair_model_retries_infer_without_compile_on_failure(
 
     assert "Retry once with infer_compile=0" in captured.out
     assert retry_module.infer_calls == [(1, "on"), (0, "off")]
+
+
+def test_run_pipeline_skip_train_uses_published_version_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    pair_checkpoint = model_root / "Dmel" / "pair" / "cnn_pair_v3.02.pt"
+    pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    pair_checkpoint.write_bytes(b"pair-v3")
+    write_version_history(
+        data_root,
+        "Dmel",
+        "cnn_pair_v3",
+        [
+            VersionHistoryEntry(
+                version=2,
+                published_name="cnn_pair_v3.02",
+                published_at="2026-03-29T01:00:00Z",
+                source_best_config="data/Dmel/tuning/cnn_pair_v3/pair/best_config.json",
+                objective_metric="pair_max_f1",
+                objective_score="0.81",
+                updated_side="pair",
+                carry_forward_side="",
+                donor_checkpoint_path="",
+                acceptor_checkpoint_path="",
+                pair_checkpoint_path="model/Dmel/pair/cnn_pair_v3.02.pt",
+                metrics_json="data/Dmel/learning_metric/cnn_pair_v3.02.train.json",
+                archive_status="live",
+            )
+        ],
+    )
+
+    metrics_json = data_root / "Dmel" / "learning_metric" / "cnn_pair_v3.02.train.json"
+    metrics_json.parent.mkdir(parents=True, exist_ok=True)
+    metrics_json.write_text("{}", encoding="utf-8")
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("tx1\t1\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+
+    parser = run_model._build_parser(
+        selected_model="cnn_pair_v3",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_pair_v3",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--train_target",
+            "pair",
+            "--skip_train",
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--ref_gff",
+            str(ref_gff),
+        ]
+    )
+
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: _DummyPublishedPairModelModule(),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("tx1", 2): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 0, ("tx1", 2): 1},
+    )
+
+    run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+
+    assert "Skip training uses published version: cnn_pair_v3.02" in captured.out
+    assert (data_root / "Dmel" / "site_score" / "cnn_pair_v3.02.tsv").exists()
+    assert (data_root / "Dmel" / "intron_score" / "cnn_pair_v3.02.tsv").exists()
+    assert (data_root / "Dmel" / "trans_score" / "cnn_pair_v3.02.tsv").exists()
+    assert (data_root / "Dmel" / "eval_score" / "cnn_pair_v3.02.txt").exists()
 
 
 def test_run_pipeline_pair_model_uses_unique_intron_scores_and_maps_back(

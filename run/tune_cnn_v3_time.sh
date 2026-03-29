@@ -12,9 +12,9 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="700"
+TIME_BUDGET_MINUTES="120"
 TIMEOUT_GRACE_SECONDS="30"
-GPU_IDS="0,4,6,7"
+GPU_IDS="0,1,6,7"
 MAX_PARALLEL_TRIALS="auto"
 
 INTRONMODEL_AUTO_TMUX="on"

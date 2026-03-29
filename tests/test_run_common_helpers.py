@@ -250,6 +250,55 @@ def test_common_resolve_pair_tuning_model_name_is_public_pair_name() -> None:
     assert run.stdout.strip().splitlines() == ["cnn_pair_v2"]
 
 
+def test_common_resolve_latest_published_name_does_not_seed_when_history_missing(
+    tmp_path: Path,
+) -> None:
+    project_root = _project_root()
+    data_root = tmp_path / "external_data"
+    model_root = tmp_path / "external_model"
+    donor_checkpoint = model_root / "SpX" / "donor" / "donor_raw.pt"
+    acceptor_checkpoint = model_root / "SpX" / "acceptor" / "acceptor_raw.pt"
+    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    donor_checkpoint.write_bytes(b"donor")
+    acceptor_checkpoint.write_bytes(b"acceptor")
+    donor_best = (
+        data_root / "SpX" / "tuning" / "cnn_v3" / "donor" / "best_config.json"
+    )
+    acceptor_best = (
+        data_root / "SpX" / "tuning" / "cnn_v3" / "acceptor" / "best_config.json"
+    )
+    donor_best.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_best.parent.mkdir(parents=True, exist_ok=True)
+    donor_best.write_text(
+        '{"status":"ok","donor_checkpoint_path":"'
+        + str(donor_checkpoint)
+        + '"}\n',
+        encoding="utf-8",
+    )
+    acceptor_best.write_text(
+        '{"status":"ok","acceptor_checkpoint_path":"'
+        + str(acceptor_checkpoint)
+        + '"}\n',
+        encoding="utf-8",
+    )
+
+    run = _run_common_shell(
+        f'PROJECT_ROOT={shlex.quote(str(project_root))}\n'
+        f'INTRONMODEL_DATA_ROOT={shlex.quote(str(data_root))}\n'
+        f'INTRONMODEL_MODEL_ROOT={shlex.quote(str(model_root))}\n'
+        'printf "%s\\n" '
+        '"$(intronmodel_resolve_latest_published_name '
+        '"test_common.sh" "SpX" "cnn_v3")"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "cnn_v3"
+    assert not (
+        data_root / "SpX" / "tuning" / "cnn_v3" / "version_history.tsv"
+    ).exists()
+
+
 def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:
     run = _run_common_shell(
         'printf "%s\\n%s\\n" '

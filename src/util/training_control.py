@@ -163,3 +163,34 @@ def select_validation_score(
         "Validation metrics are missing all compatible scoring keys for "
         f"--validation_metric={normalized_metric}: {joined}."
     )
+
+
+def get_metric_value(
+    metrics: Mapping[str, object],
+    metric_name: object,
+) -> float | None:
+    """Return one named metric value as a float when it is available.
+
+    Parameters
+    ----------
+    metrics : Mapping[str, object]
+        Metric mapping produced by evaluation.
+    metric_name : object
+        Exact metric key to read from ``metrics``.
+
+    Returns
+    -------
+    float | None
+        Parsed metric value, or ``None`` when the key is missing or does not
+        contain a numeric scalar.
+    """
+    key = str(metric_name).strip()
+    if key == "":
+        return None
+    value = metrics.get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

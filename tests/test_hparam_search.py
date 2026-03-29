@@ -274,7 +274,7 @@ def test_resolve_hparam_auto_num_workers_caps_at_eight(
     monkeypatch.setattr(model_runtime.os, "cpu_count", lambda: 64)
 
     assert hparam_search._resolve_hparam_auto_num_workers(1) == 8
-    assert hparam_search._resolve_hparam_auto_num_workers(4) == 4
+    assert hparam_search._resolve_hparam_auto_num_workers(4) == 8
 
 
 def test_load_config_rejects_invalid_trial_process_mode(tmp_path: Path) -> None:
@@ -1048,7 +1048,7 @@ def test_resolve_trial_num_workers_auto_is_parallel_aware(
         resolved = hparam_search._resolve_trial_num_workers("auto")
     finally:
         _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
-    assert resolved == 4
+    assert resolved == 8
 
 
 def test_resolve_trial_num_workers_auto_has_floor_on_large_multi_gpu_nodes(
@@ -1166,7 +1166,7 @@ def test_run_trial_rewrites_auto_num_workers_to_effective_value(
     finally:
         _ = hparam_search._set_active_max_parallel_trials(previous_parallel)
 
-    assert captured_num_workers == ["4"]
+    assert captured_num_workers == ["8"]
     assert captured_report_train_metrics == ["0"]
 
 
@@ -3014,6 +3014,206 @@ def test_run_search_excludes_context_mismatch_recheck_from_winner_selection(
         (config.output_dir / "best_config.json").read_text(encoding="utf-8")
     )
     assert payload["sampled_params"] != forced
+
+
+def test_contexts_match_legacy_script_name_and_empty_train_paths() -> None:
+    current_context = hparam_search._build_hparam_context(
+        objective_metric="acceptor_max_f1",
+        full_epochs=15,
+        validation_protocol={
+            "include_pair_mixed_negatives": False,
+            "metric_primary": "acceptor_max_f1",
+            "seed": 1337,
+            "split_type": "stratified_site",
+            "train_source": {
+                "train_neg_path": "",
+                "train_pos_path": "",
+            },
+            "train_source_signature": {
+                "pair_extra_negatives": [],
+                "train_neg": {"path": ""},
+                "train_pos": {"path": ""},
+            },
+            "val_frac": 0.2,
+        },
+        fixed_run_args={
+            "model": "cnn_v3",
+            "pair_mode": "independent",
+            "seed": 1337,
+            "species": "Hsap",
+            "train_target": "acceptor",
+            "val_frac": 0.2,
+        },
+    )
+    legacy_context = cast(
+        dict[str, object],
+        json.loads(json.dumps(current_context)),
+    )
+    legacy_fixed_run_args = cast(dict[str, object], legacy_context["fixed_run_args"])
+    legacy_fixed_run_args["script_name"] = "tune_cnn_v3_time.sh"
+    legacy_validation_protocol = cast(
+        dict[str, object], legacy_context["validation_protocol"]
+    )
+    legacy_train_source = cast(
+        dict[str, object], legacy_validation_protocol["train_source"]
+    )
+    legacy_train_source["train_neg_path"] = "."
+    legacy_train_source["train_pos_path"] = "."
+    legacy_signature = cast(
+        dict[str, object], legacy_validation_protocol["train_source_signature"]
+    )
+    cast(dict[str, object], legacy_signature["train_neg"])["path"] = "."
+    cast(dict[str, object], legacy_signature["train_pos"])["path"] = "."
+
+    assert hparam_search._contexts_match(legacy_context, current_context)
+
+
+def test_run_search_skips_global_best_recheck_for_legacy_equivalent_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        _base_config_dict(tmp_path)["search_space"]
+    )
+    forced = {
+        "batch_size": 1024,
+        "kernel_size": 9,
+        "lr": 1.5e-4,
+    }
+    global_best_path = tmp_path / "global_best_legacy_context.json"
+    global_best_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "objective_metric": "mean_pr_auc",
+                "objective_score": 0.93,
+                "objective_best_epoch": 6,
+                "sampled_params": forced,
+                "hparam_context": {
+                    "version": 2,
+                    "objective_metric": "mean_pr_auc",
+                    "full_epochs": 4,
+                    "validation_protocol": {
+                        "include_pair_mixed_negatives": False,
+                        "metric_primary": "mean_pr_auc",
+                        "seed": None,
+                        "split_type": "stratified_site",
+                        "train_source": {
+                            "train_neg_path": ".",
+                            "train_pos_path": ".",
+                        },
+                        "train_source_signature": {
+                            "pair_extra_negatives": [],
+                            "train_neg": {"path": "."},
+                            "train_pos": {"path": "."},
+                        },
+                        "val_frac": None,
+                    },
+                    "fixed_run_args": {
+                        "model": "cnn",
+                        "script_name": "tune_cnn_v3_time.sh",
+                        "species": "Dmel",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=3,
+        quick_epochs=2,
+        top_k=2,
+        full_epochs=4,
+        base_seed=1337,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=2,
+        max_model_params=None,
+        objective_metric="mean_pr_auc",
+        global_best_config_path=global_best_path,
+        seed_best_config_path=None,
+        base_args={"model": "cnn", "species": "Dmel", "batch_size": 512},
+        quick_overrides={"compile_mode": "off"},
+        full_overrides={"compile_mode": "auto"},
+        search_space=search_space,
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_detect_gpu_ids(setting: object) -> list[str]:
+        del setting
+        return []
+
+    def _fake_run_phase(
+        *,
+        phase: str,
+        config: hparam_search.SearchConfig,
+        trial_count: int,
+        trial_params: list[dict[str, hparam_search.Scalar]],
+        overrides: dict[str, hparam_search.ArgValue],
+        gpu_ids: list[str],
+        max_parallel_trials: int,
+        out_dir: Path,
+        execution_mode: str,
+    ) -> list[hparam_search.TrialResult]:
+        del config, overrides, gpu_ids, max_parallel_trials, out_dir
+        assert execution_mode == "subprocess"
+        if phase == "full":
+            captured["full_params"] = [dict(params) for params in trial_params]
+        rows: list[hparam_search.TrialResult] = []
+        for trial_id in range(trial_count):
+            if phase == "quick":
+                score = 0.99 - (0.01 * trial_id)
+            else:
+                score = 0.81 + (0.01 * trial_id)
+            rows.append(
+                hparam_search.TrialResult(
+                    phase=phase,
+                    trial_id=trial_id,
+                    status="success",
+                    gpu_id=None,
+                    sampled_params=dict(trial_params[trial_id]),
+                    effective_batch_size=512,
+                    oom_retries=0,
+                    donor_pr_auc=score,
+                    acceptor_pr_auc=score,
+                    mean_pr_auc=score,
+                    objective_metric="mean_pr_auc",
+                    objective_score=score,
+                    error_message=None,
+                    return_code=0,
+                    duration_sec=0.1,
+                    metrics_json=str(tmp_path / f"{phase}_{trial_id}.metrics.json"),
+                    log_file=f"{phase}_{trial_id}.log",
+                )
+            )
+        return rows
+
+    monkeypatch.setattr(hparam_search, "detect_gpu_ids", _fake_detect_gpu_ids)
+    monkeypatch.setattr(hparam_search, "run_phase", _fake_run_phase)
+    monkeypatch.setattr(
+        hparam_search,
+        "write_visualization",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "maybe_update_global_best",
+        lambda *args, **kwargs: None,
+    )
+
+    exit_code = hparam_search.run_search(config)
+
+    captured_stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Global best context changed" not in captured_stdout
+    full_params = cast(list[dict[str, object]], captured["full_params"])
+    assert forced not in full_params
+    assert len(full_params) == 2
 
 
 def test_run_search_adds_full_recheck_as_extra_trial_when_global_best_is_selected(

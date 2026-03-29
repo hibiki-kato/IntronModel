@@ -108,12 +108,17 @@ def test_resolve_num_workers_auto_for_cuda_caps_at_eight(
     assert resolved == 8
 
 
-def test_resolve_auto_num_workers_respects_parallel_budget(
+def test_resolve_auto_num_workers_targets_four_to_eight_per_parallel_trial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_runtime.os, "cpu_count", lambda: 32)
     assert resolve_auto_num_workers(max_parallel_trials=1) == 8
-    assert resolve_auto_num_workers(max_parallel_trials=4) == 2
+    assert resolve_auto_num_workers(max_parallel_trials=4) == 4
+
+
+def test_resolve_auto_num_workers_caps_by_per_trial_cpu_budget() -> None:
+    assert resolve_auto_num_workers(cpu_count=12, max_parallel_trials=4) == 3
+    assert resolve_auto_num_workers(cpu_count=64, max_parallel_trials=4) == 8
 
 
 def test_resolve_num_workers_rejects_invalid_text() -> None:

@@ -157,7 +157,7 @@ def test_resolve_parallel_auto_num_workers_uses_cpu_and_gpu_process_count(
 
     resolved = _resolve_parallel_auto_num_workers(4)
 
-    assert resolved == 2
+    assert resolved == 8
 
 
 def test_run_species_batch_uses_serial_fallback_for_single_gpu(
