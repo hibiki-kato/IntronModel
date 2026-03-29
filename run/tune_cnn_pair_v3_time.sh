@@ -1018,12 +1018,18 @@ def _relpath(raw_path: str) -> str:
     return os.path.relpath(Path(raw_path).resolve(), Path(project_root).resolve())
 
 
+def _serialize_command_or_path(raw_value: str) -> str:
+    if "/" not in raw_value and raw_value not in {".", ".."}:
+        return raw_value
+    return _relpath(raw_value)
+
+
 payload = {
     "script_name": "tune_cnn_pair_v3_time.sh",
     "project_root": ".",
     "data_root": _relpath(data_root),
     "model_root": _relpath(model_root),
-    "python_bin": _relpath(python_bin),
+    "python_bin": _serialize_command_or_path(python_bin),
     "hparam_search_path": _relpath(hparam_search_path),
     "time_budget_minutes": time_budget_minutes,
     "timeout_grace_seconds": timeout_grace_seconds,

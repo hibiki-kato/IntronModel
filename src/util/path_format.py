@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 PathLike = str | Path
@@ -81,6 +82,61 @@ def resolve_path_string(
     return base_candidate
 
 
+def resolve_command_string(
+    raw_command: PathLike,
+    *,
+    base_dir: Path,
+    project_root: Path | None = None,
+) -> str:
+    """Resolve one executable setting without misclassifying command names.
+
+    Parameters
+    ----------
+    raw_command:
+        Serialized executable value from configuration. This may be an absolute
+        path, a repository-relative path, or a bare command name such as
+        ``python3``.
+    base_dir:
+        Directory used to resolve relative filesystem paths.
+    project_root:
+        Optional repository root override for repository-relative paths.
+
+    Returns
+    -------
+    str
+        Resolved executable path when the value is path-like, or the original
+        command name when it is a PATH-resolved executable token.
+
+    Raises
+    ------
+    ValueError
+        If ``raw_command`` is empty after trimming whitespace.
+    """
+    if isinstance(raw_command, Path):
+        return str(
+            resolve_path_string(
+                raw_command,
+                base_dir=base_dir,
+                project_root=project_root,
+            )
+        )
+
+    stripped = raw_command.strip()
+    if stripped == "":
+        raise ValueError("Command string must not be empty.")
+    if _looks_like_filesystem_path(stripped):
+        return str(
+            resolve_path_string(
+                stripped,
+                base_dir=base_dir,
+                project_root=project_root,
+            )
+        )
+    if shutil.which(stripped) is not None:
+        return stripped
+    return stripped
+
+
 def relativize_path_fields(
     value: object,
     *,
@@ -134,3 +190,16 @@ def _coerce_path(raw_path: PathLike) -> Path:
     if isinstance(raw_path, Path):
         return raw_path
     return Path(raw_path.strip())
+
+
+def _looks_like_filesystem_path(raw_value: str) -> bool:
+    """Return whether one serialized value should be treated as a path."""
+    if raw_value in {".", ".."}:
+        return True
+    if raw_value.startswith("./") or raw_value.startswith("../"):
+        return True
+    if os.path.sep in raw_value:
+        return True
+    if os.path.altsep is not None and os.path.altsep in raw_value:
+        return True
+    return Path(raw_value).is_absolute()

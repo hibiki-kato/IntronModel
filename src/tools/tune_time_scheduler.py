@@ -13,7 +13,11 @@ import time
 from typing import TypeAlias
 
 from tools import hparam_search
-from util.path_format import relativize_path_string, resolve_path_string
+from util.path_format import (
+    relativize_path_string,
+    resolve_command_string,
+    resolve_path_string,
+)
 from util.process_title import apply_process_title_from_env
 
 _ = apply_process_title_from_env()
@@ -236,11 +240,9 @@ def _load_config(path: Path) -> SchedulerConfig:
             _require_str(raw.get("model_root"), "model_root"),
             base_dir=project_root,
         ),
-        python_bin=str(
-            resolve_path_string(
-                _require_str(raw.get("python_bin"), "python_bin"),
-                base_dir=project_root,
-            )
+        python_bin=resolve_command_string(
+            _require_str(raw.get("python_bin"), "python_bin"),
+            base_dir=project_root,
         ),
         time_budget_minutes=_require_positive_int(
             raw.get("time_budget_minutes"),
