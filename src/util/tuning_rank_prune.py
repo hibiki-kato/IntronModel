@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from util.checkpoint_io import extract_checkpoint_paths, read_json_object
+from util.checkpoint_io import (
+    extract_checkpoint_paths,
+    normalize_checkpoint_path,
+    read_json_object,
+)
 
 
 @dataclass(frozen=True)
@@ -32,10 +36,7 @@ def _is_path_within(path: Path, root: Path) -> bool:
 
 def _resolve_metrics_path(metrics_json: str, *, base_dir: Path) -> Path:
     """Resolve one metrics JSON path from a raw string."""
-    metrics_path = Path(metrics_json.strip())
-    if not metrics_path.is_absolute():
-        metrics_path = (base_dir / metrics_path).resolve()
-    return metrics_path.resolve()
+    return normalize_checkpoint_path(metrics_json, base_dir=base_dir)
 
 
 def _collect_checkpoint_paths_from_entry(

@@ -180,6 +180,10 @@ def test_run_pipeline_train_only_skips_infer_and_eval(
     assert summary["validation_protocol"]["split_type"] == "stratified_site"
     assert isinstance(summary["validation_signature"], str)
     assert len(summary["validation_signature"]) == 12
+    train_source = summary["validation_protocol"]["train_source"]
+    assert isinstance(train_source, dict)
+    assert not Path(str(train_source["train_pos_path"])).is_absolute()
+    assert not Path(str(train_source["train_neg_path"])).is_absolute()
 
 
 def test_plot_range_defaults_are_none_for_species_specific_bounds() -> None:

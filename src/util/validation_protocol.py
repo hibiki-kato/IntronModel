@@ -12,6 +12,12 @@ import os
 from pathlib import Path
 from typing import Mapping
 
+from util.path_format import (
+    relativize_path_string,
+    repository_root,
+    resolve_path_string,
+)
+
 LEGACY_VALIDATION_SIGNATURE: str = "legacy_unknown"
 VALIDATION_SIGNATURE_CHARS: int = 12
 
@@ -59,16 +65,19 @@ def _normalize_source_path(path: str | None) -> str:
     stripped = path.strip()
     if not stripped:
         return ""
-    return os.path.normpath(stripped)
+    return relativize_path_string(os.path.normpath(stripped))
 
 
 def _build_file_signature(path: str) -> dict[str, object]:
     """Build one compact file-signature mapping for protocol comparison."""
     normalized_path = _normalize_source_path(path)
-    resolved_path = os.path.realpath(normalized_path)
-    signature: dict[str, object] = {"path": resolved_path}
+    resolved_path = resolve_path_string(
+        normalized_path,
+        base_dir=repository_root(),
+    )
+    signature: dict[str, object] = {"path": normalized_path}
     try:
-        stat_result = Path(resolved_path).stat()
+        stat_result = resolved_path.stat()
     except OSError:
         signature["exists"] = False
         return signature

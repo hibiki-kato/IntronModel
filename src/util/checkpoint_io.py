@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 from typing import Mapping, Sequence
 
+from util.path_format import resolve_path_string
+
 TaskName = str
 TASK_NAMES: tuple[TaskName, ...] = ("donor", "acceptor", "pair")
 _HASHED_CHECKPOINT_RE = re.compile(r"^(?P<prefix>.+)_h[0-9a-f]+(?P<suffix>\.pt)$")
@@ -49,12 +51,7 @@ def normalize_checkpoint_path(raw_path: str, *, base_dir: Path) -> Path:
     Path
         Absolute normalized path.
     """
-    path = Path(raw_path.strip())
-    if not path.is_absolute():
-        path = (base_dir / path).resolve()
-    else:
-        path = path.resolve()
-    return path
+    return resolve_path_string(raw_path, base_dir=base_dir)
 
 
 def extract_task_checkpoint_path(
@@ -154,12 +151,19 @@ def resolve_existing_checkpoint_path(
     FileNotFoundError
         If no matching local checkpoint file can be found.
     """
-    if checkpoint_path.is_file():
-        return checkpoint_path.resolve()
+    normalized_checkpoint_path = checkpoint_path
+    if not normalized_checkpoint_path.is_absolute():
+        normalized_checkpoint_path = resolve_path_string(
+            str(normalized_checkpoint_path),
+            base_dir=model_root_dir,
+        )
+
+    if normalized_checkpoint_path.is_file():
+        return normalized_checkpoint_path.resolve()
 
     search_roots: list[Path] = []
     scoped_root: Path | None = None
-    path_parts = checkpoint_path.parts
+    path_parts = normalized_checkpoint_path.parts
     if "model" in path_parts:
         model_index = path_parts.index("model")
         relative_parts = path_parts[model_index + 1 :]
@@ -173,7 +177,7 @@ def resolve_existing_checkpoint_path(
     search_roots.append(model_root_dir)
     preferred_roots = [scoped_root] if scoped_root is not None else search_roots
 
-    basename = checkpoint_path.name
+    basename = normalized_checkpoint_path.name
     if basename != "":
         exact_match = _find_checkpoint_candidate(preferred_roots, basename)
         if exact_match is not None:
@@ -185,7 +189,7 @@ def resolve_existing_checkpoint_path(
             if relaxed_match is not None:
                 return relaxed_match
 
-    raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    raise FileNotFoundError(f"Checkpoint not found: {normalized_checkpoint_path}")
 
 
 def _find_checkpoint_candidate(

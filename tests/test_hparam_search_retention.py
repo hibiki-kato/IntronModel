@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from tools import hparam_search
+from util.path_format import relativize_path_string
 
 
 def _make_trial_result(
@@ -91,8 +92,10 @@ def test_write_best_config_includes_top_trials(tmp_path: Path) -> None:
     assert top_trials[0]["trial_id"] == 0
     assert top_trials[1]["rank"] == 2
     assert top_trials[1]["trial_id"] == 1
-    assert payload["donor_checkpoint_path"] == str(donor_ckpt)
-    assert payload["acceptor_checkpoint_path"] == str(acceptor_ckpt)
+    assert payload["donor_checkpoint_path"] == relativize_path_string(str(donor_ckpt))
+    assert payload["acceptor_checkpoint_path"] == relativize_path_string(
+        str(acceptor_ckpt)
+    )
 
 
 def test_prune_non_best_trial_checkpoints_keeps_best_and_external(

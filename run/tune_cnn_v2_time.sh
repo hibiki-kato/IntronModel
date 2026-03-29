@@ -418,16 +418,38 @@ dispatch_cycle() {
 	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
 		"${resolved_train_paths}"
 	local TRAIN_POS_PATH_JSON
+	local TRAIN_POS_PATH_CONFIG=""
+	if [[ -n "${TRAIN_POS_PATH_RESOLVED}" ]]; then
+		TRAIN_POS_PATH_CONFIG="$(
+			intronmodel_relpath_from_project_root "${TRAIN_POS_PATH_RESOLVED}"
+		)"
+	fi
 	TRAIN_POS_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"${TRAIN_POS_PATH_RESOLVED}"
+			"${TRAIN_POS_PATH_CONFIG}"
 	)"
 	local TRAIN_NEG_PATH_JSON
+	local TRAIN_NEG_PATH_CONFIG=""
+	if [[ -n "${TRAIN_NEG_PATH_RESOLVED}" ]]; then
+		TRAIN_NEG_PATH_CONFIG="$(
+			intronmodel_relpath_from_project_root "${TRAIN_NEG_PATH_RESOLVED}"
+		)"
+	fi
 	TRAIN_NEG_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"${TRAIN_NEG_PATH_RESOLVED}"
+			"${TRAIN_NEG_PATH_CONFIG}"
+	)"
+	local output_dir_rel
+	output_dir_rel="$(intronmodel_relpath_from_project_root "${output_dir}")"
+	local gpu_release_events_path_rel
+	gpu_release_events_path_rel="$(
+		intronmodel_relpath_from_project_root "${gpu_release_events_path}"
+	)"
+	local global_best_path_rel
+	global_best_path_rel="$(
+		intronmodel_relpath_from_project_root "${global_best_path}"
 	)"
 	local target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_SITE}"
 	local search_space_path=""
@@ -459,9 +481,9 @@ dispatch_cycle() {
 
 	cat > "${config_path}" <<JSON
 {
-  "project_root": "${PROJECT_ROOT}",
+  "project_root": ".",
   "species": "${species}",
-  "output_dir": "${output_dir}",
+  "output_dir": "${output_dir_rel}",
   "quick_trials": ${QUICK_TRIALS},
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
@@ -471,9 +493,9 @@ dispatch_cycle() {
   "max_parallel_trials": "${assigned_parallel_slots}",
   "trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON},
-  "gpu_release_events_path": "${gpu_release_events_path}",
+  "gpu_release_events_path": "${gpu_release_events_path_rel}",
   "objective_metric": "${objective_metric}",
-  "global_best_config_path": "${global_best_path}",
+  "global_best_config_path": "${global_best_path_rel}",
   "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},

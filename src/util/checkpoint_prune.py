@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from util.checkpoint_io import extract_checkpoint_paths, read_json_object
+from util.checkpoint_io import (
+    extract_checkpoint_paths,
+    normalize_checkpoint_path,
+    read_json_object,
+)
 from util.validation_protocol import LEGACY_VALIDATION_SIGNATURE
 
 _TASKS: tuple[str, ...] = ("donor", "acceptor", "pair")
@@ -210,11 +214,10 @@ def _resolve_checkpoint_references_from_best_config(
 
     metrics_json_raw = payload.get("metrics_json")
     if isinstance(metrics_json_raw, str) and metrics_json_raw.strip():
-        metrics_path = Path(metrics_json_raw.strip())
-        if not metrics_path.is_absolute():
-            metrics_path = (
-                best_config_path.parent / metrics_json_raw.strip()
-            ).resolve()
+        metrics_path = normalize_checkpoint_path(
+            metrics_json_raw.strip(),
+            base_dir=best_config_path.parent,
+        )
         metrics_payload = read_json_object(metrics_path)
         if metrics_payload is not None:
             for path in extract_checkpoint_paths(

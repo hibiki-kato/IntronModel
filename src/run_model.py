@@ -49,6 +49,7 @@ from util.validation_protocol import (
     build_validation_protocol,
     compute_validation_signature,
 )
+from util.path_format import relativize_path_fields
 from util.transcript_eval import (
     INTRON_SCORE_OP_CHOICES,
     TRANSCRIPT_SCORE_AGG_CHOICES,
@@ -1547,8 +1548,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
             metrics_json_parent = Path(metrics_json).parent
             metrics_json_parent.mkdir(parents=True, exist_ok=True)
 
-        with open(metrics_json, "w") as f:
-            json.dump(summary, f, indent=2)
+        serializable_summary = relativize_path_fields(summary)
+        with open(metrics_json, "w", encoding="utf-8") as f:
+            json.dump(serializable_summary, f, indent=2)
         print(f"Saved training summary: {metrics_json}")
         for task in model_tasks:
             task_summary = summary.get(task)

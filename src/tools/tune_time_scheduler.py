@@ -13,6 +13,7 @@ import time
 from typing import TypeAlias
 
 from tools import hparam_search
+from util.path_format import relativize_path_string, resolve_path_string
 from util.process_title import apply_process_title_from_env
 
 _ = apply_process_title_from_env()
@@ -180,15 +181,21 @@ def _load_jobs(path: Path) -> list[CycleTemplate]:
                     "jobs[].tuning_model_name",
                 ),
                 template_config_path=Path(
-                    _require_str(
-                        raw.get("template_config_path"),
-                        "jobs[].template_config_path",
+                    resolve_path_string(
+                        _require_str(
+                            raw.get("template_config_path"),
+                            "jobs[].template_config_path",
+                        ),
+                        base_dir=path.parent,
                     )
                 ),
                 output_parent_dir=Path(
-                    _require_str(
-                        raw.get("output_parent_dir"),
-                        "jobs[].output_parent_dir",
+                    resolve_path_string(
+                        _require_str(
+                            raw.get("output_parent_dir"),
+                            "jobs[].output_parent_dir",
+                        ),
+                        base_dir=path.parent,
                     )
                 ),
                 plot_target_name=plot_target_raw,
@@ -210,13 +217,31 @@ def _load_config(path: Path) -> SchedulerConfig:
     selected_gpu_ids = [
         _require_str(item, "selected_gpu_ids[]") for item in selected_gpu_ids_raw
     ]
-    jobs_file = Path(_require_str(raw.get("jobs_file"), "jobs_file"))
+    project_root = resolve_path_string(
+        _require_str(raw.get("project_root"), "project_root"),
+        base_dir=path.parent,
+    )
+    jobs_file = resolve_path_string(
+        _require_str(raw.get("jobs_file"), "jobs_file"),
+        base_dir=project_root,
+    )
     return SchedulerConfig(
         script_name=_require_str(raw.get("script_name"), "script_name"),
-        project_root=Path(_require_str(raw.get("project_root"), "project_root")),
-        data_root=Path(_require_str(raw.get("data_root"), "data_root")),
-        model_root=Path(_require_str(raw.get("model_root"), "model_root")),
-        python_bin=_require_str(raw.get("python_bin"), "python_bin"),
+        project_root=project_root,
+        data_root=resolve_path_string(
+            _require_str(raw.get("data_root"), "data_root"),
+            base_dir=project_root,
+        ),
+        model_root=resolve_path_string(
+            _require_str(raw.get("model_root"), "model_root"),
+            base_dir=project_root,
+        ),
+        python_bin=str(
+            resolve_path_string(
+                _require_str(raw.get("python_bin"), "python_bin"),
+                base_dir=project_root,
+            )
+        ),
         time_budget_minutes=_require_positive_int(
             raw.get("time_budget_minutes"),
             "time_budget_minutes",
@@ -349,7 +374,7 @@ def _write_materialized_cycle_config(
     payload = json.loads(template.template_config_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Template config must contain a JSON object.")
-    payload["output_dir"] = str(output_dir)
+    payload["output_dir"] = relativize_path_string(str(output_dir))
     payload["gpu_ids"] = scheduler_config.selected_gpu_ids
     payload["max_parallel_trials"] = scheduler_config.parallel_slot_count
     config_path.write_text(

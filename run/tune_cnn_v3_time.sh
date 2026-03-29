@@ -217,6 +217,7 @@ normalize_json_object_file() {
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -415,16 +416,38 @@ dispatch_cycle() {
 	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
 		"${resolved_train_paths}"
 	local TRAIN_POS_PATH_JSON
+	local TRAIN_POS_PATH_CONFIG=""
+	if [[ -n "${TRAIN_POS_PATH_RESOLVED}" ]]; then
+		TRAIN_POS_PATH_CONFIG="$(
+			intronmodel_relpath_from_project_root "${TRAIN_POS_PATH_RESOLVED}"
+		)"
+	fi
 	TRAIN_POS_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"${TRAIN_POS_PATH_RESOLVED}"
+			"${TRAIN_POS_PATH_CONFIG}"
 	)"
 	local TRAIN_NEG_PATH_JSON
+	local TRAIN_NEG_PATH_CONFIG=""
+	if [[ -n "${TRAIN_NEG_PATH_RESOLVED}" ]]; then
+		TRAIN_NEG_PATH_CONFIG="$(
+			intronmodel_relpath_from_project_root "${TRAIN_NEG_PATH_RESOLVED}"
+		)"
+	fi
 	TRAIN_NEG_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"${TRAIN_NEG_PATH_RESOLVED}"
+			"${TRAIN_NEG_PATH_CONFIG}"
+	)"
+	local output_dir_rel
+	output_dir_rel="$(intronmodel_relpath_from_project_root "${output_dir}")"
+	local gpu_release_events_path_rel
+	gpu_release_events_path_rel="$(
+		intronmodel_relpath_from_project_root "${gpu_release_events_path}"
+	)"
+	local global_best_path_rel
+	global_best_path_rel="$(
+		intronmodel_relpath_from_project_root "${global_best_path}"
 	)"
 	local target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_SITE}"
 	local search_space_path=""
@@ -456,9 +479,9 @@ dispatch_cycle() {
 
 	cat > "${config_path}" <<JSON
 {
-  "project_root": "${PROJECT_ROOT}",
+  "project_root": ".",
   "species": "${species}",
-  "output_dir": "${output_dir}",
+  "output_dir": "${output_dir_rel}",
   "quick_trials": ${QUICK_TRIALS},
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
@@ -468,9 +491,9 @@ dispatch_cycle() {
   "max_parallel_trials": "${assigned_parallel_slots}",
   "trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON},
-  "gpu_release_events_path": "${gpu_release_events_path}",
+  "gpu_release_events_path": "${gpu_release_events_path_rel}",
   "objective_metric": "${objective_metric}",
-  "global_best_config_path": "${global_best_path}",
+  "global_best_config_path": "${global_best_path_rel}",
   "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
@@ -558,10 +581,14 @@ write_cycle_template_config() {
 	local target_search_space_json="$7"
 	local objective_metric="$8"
 	local global_best_path="$9"
+	local global_best_path_rel
+	global_best_path_rel="$(
+		intronmodel_relpath_from_project_root "${global_best_path}"
+	)"
 
 	cat > "${template_path}" <<JSON
 {
-  "project_root": "${PROJECT_ROOT}",
+  "project_root": ".",
   "species": "${species}",
   "quick_trials": ${QUICK_TRIALS},
   "quick_epochs": ${QUICK_EPOCHS},
@@ -571,7 +598,7 @@ write_cycle_template_config() {
   "trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON},
   "objective_metric": "${objective_metric}",
-  "global_best_config_path": "${global_best_path}",
+  "global_best_config_path": "${global_best_path_rel}",
   "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},
@@ -629,6 +656,12 @@ append_scheduler_job_entry() {
 	local template_path="$5"
 	local output_parent_dir="$6"
 	local plot_target_name="$7"
+	local template_path_rel
+	template_path_rel="$(intronmodel_relpath_from_project_root "${template_path}")"
+	local output_parent_dir_rel
+	output_parent_dir_rel="$(
+		intronmodel_relpath_from_project_root "${output_parent_dir}"
+	)"
 
 	"${PYTHON_BIN}" - \
 		"${jobs_file}" \
@@ -636,8 +669,8 @@ append_scheduler_job_entry() {
 		"${target_name}" \
 		"${base_seed}" \
 		"${TUNING_MODEL_NAME}" \
-		"${template_path}" \
-		"${output_parent_dir}" \
+		"${template_path_rel}" \
+		"${output_parent_dir_rel}" \
 		"${plot_target_name}" <<'PY'
 from __future__ import annotations
 
@@ -935,19 +968,23 @@ parallel_slot_count = int(sys.argv[11])
 script_name = "tune_cnn_v3_time.sh"
 selected_gpu_ids = sys.argv[12:]
 
+def _relpath(raw_path: str) -> str:
+    return os.path.relpath(Path(raw_path).resolve(), Path(project_root).resolve())
+
+
 payload = {
     "script_name": script_name,
-    "project_root": project_root,
-    "data_root": data_root,
-    "model_root": model_root,
-    "python_bin": python_bin,
-    "hparam_search_path": hparam_search_path,
+    "project_root": ".",
+    "data_root": _relpath(data_root),
+    "model_root": _relpath(model_root),
+    "python_bin": _relpath(python_bin),
+    "hparam_search_path": _relpath(hparam_search_path),
     "time_budget_minutes": time_budget_minutes,
     "timeout_grace_seconds": timeout_grace_seconds,
     "selected_gpu_ids": selected_gpu_ids,
     "parallel_slot_count": max(1, parallel_slot_count),
     "start_epoch": start_epoch,
-    "jobs_file": jobs_file,
+    "jobs_file": _relpath(jobs_file),
 }
 config_path.write_text(
     json.dumps(payload, indent=2, ensure_ascii=False) + "\n",

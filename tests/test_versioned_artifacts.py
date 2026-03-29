@@ -610,3 +610,5 @@ def test_publish_latest_best_version_uses_root_overrides(
     assert (external_model_root / "SpX" / "acceptor" / "cnn_v3.01.pt").exists()
     history = read_version_history(external_data_root, "SpX", "cnn_v3")
     assert [row.published_name for row in history] == ["cnn_v3.01"]
+    assert not Path(history[0].donor_checkpoint_path).is_absolute()
+    assert not Path(history[0].acceptor_checkpoint_path).is_absolute()

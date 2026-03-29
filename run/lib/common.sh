@@ -156,6 +156,26 @@ intronmodel_init_paths() {
 }
 
 
+intronmodel_relpath_from_project_root() {
+	local target_path="$1"
+	if [[ -z "${target_path}" ]]; then
+		printf '%s\n' ""
+		return 0
+	fi
+	python3 - "${PROJECT_ROOT}" "${target_path}" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+project_root = Path(sys.argv[1]).resolve()
+target_path = Path(sys.argv[2]).resolve(strict=False)
+print(os.path.relpath(target_path, project_root))
+PY
+}
+
+
 intronmodel_configure_compile_defaults() {
 	if [[ -z "${INTRONMODEL_TORCH_COMPILE_STRATEGY:-}" ]]; then
 		export INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"

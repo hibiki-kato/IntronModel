@@ -28,6 +28,7 @@ from util.checkpoint_io import (
     read_json_object,
     resolve_existing_checkpoint_path,
 )
+from util.path_format import relativize_path_fields, relativize_path_string
 
 INDEPENDENT_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset({"cnn_v2", "cnn_v3"})
 PAIR_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
@@ -200,7 +201,10 @@ def write_version_history(
         )
         writer.writeheader()
         for entry in entries:
-            writer.writerow(entry.to_row())
+            row = relativize_path_fields(entry.to_row())
+            if not isinstance(row, dict):
+                raise TypeError("Version-history row must serialize to one object.")
+            writer.writerow(row)
 
 
 def resolve_latest_published_name(
@@ -450,15 +454,17 @@ def _publish_independent_public_version(
         version=_parse_version_number(published_name, public_model_name),
         published_name=published_name,
         published_at=published_at,
-        source_best_config=source_best_config,
+        source_best_config=relativize_path_string(source_best_config),
         objective_metric=objective_metric,
         objective_score=objective_score,
         updated_side=updated_side_normalized,
         carry_forward_side=carry_forward_side,
-        donor_checkpoint_path=str(donor_destination.resolve()),
-        acceptor_checkpoint_path=str(acceptor_destination.resolve()),
+        donor_checkpoint_path=relativize_path_string(str(donor_destination.resolve())),
+        acceptor_checkpoint_path=relativize_path_string(
+            str(acceptor_destination.resolve())
+        ),
         pair_checkpoint_path="",
-        metrics_json=metrics_json,
+        metrics_json=relativize_path_string(metrics_json) if metrics_json else "",
         archive_status="live",
     )
 
@@ -535,15 +541,19 @@ def _publish_pair_public_version(
         version=_parse_version_number(published_name, public_model_name),
         published_name=published_name,
         published_at=published_at,
-        source_best_config=str(pair_path.resolve()),
+        source_best_config=relativize_path_string(str(pair_path.resolve())),
         objective_metric=str(pair_payload.get("objective_metric", "")).strip(),
         objective_score=_stringify_scalar(pair_payload.get("objective_score")),
         updated_side=updated_side.strip().lower(),
         carry_forward_side="",
         donor_checkpoint_path="",
         acceptor_checkpoint_path="",
-        pair_checkpoint_path=str(pair_destination.resolve()),
-        metrics_json=str(pair_payload.get("metrics_json", "")).strip(),
+        pair_checkpoint_path=relativize_path_string(str(pair_destination.resolve())),
+        metrics_json=(
+            relativize_path_string(str(pair_payload.get("metrics_json", "")).strip())
+            if str(pair_payload.get("metrics_json", "")).strip()
+            else ""
+        ),
         archive_status="live",
     )
 
@@ -914,7 +924,8 @@ def _iter_public_artifact_paths(
 
 def _write_json_object(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(payload), indent=2) + "\n", encoding="utf-8")
+    normalized = relativize_path_fields(dict(payload))
+    path.write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
 
 
 def _parse_version_number(published_name: str, public_model_name: str) -> int:

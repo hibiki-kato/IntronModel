@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from util.path_format import resolve_path_string
 from util.validation_protocol import build_validation_protocol
 
 
@@ -30,6 +31,8 @@ def test_build_validation_protocol_includes_train_source_signatures(
     assert isinstance(neg_signature, dict)
     assert pos_signature["exists"] is True
     assert neg_signature["exists"] is True
+    assert not Path(str(pos_signature["path"])).is_absolute()
+    assert not Path(str(neg_signature["path"])).is_absolute()
     assert int(pos_signature["size_bytes"]) == pos_path.stat().st_size
     assert int(neg_signature["size_bytes"]) == neg_path.stat().st_size
 
@@ -67,7 +70,11 @@ def test_build_validation_protocol_tracks_pair_mixed_negative_signatures(
     extra_signature = extra_negatives_obj[0]
     assert isinstance(extra_signature, dict)
     assert extra_signature["exists"] is True
-    assert Path(str(extra_signature["path"])) == mixed_neg_path.resolve()
+    assert not Path(str(extra_signature["path"])).is_absolute()
+    assert resolve_path_string(
+        str(extra_signature["path"]),
+        base_dir=Path.cwd(),
+    ) == mixed_neg_path.resolve()
 
 
 def test_build_validation_protocol_changes_when_train_source_changes(

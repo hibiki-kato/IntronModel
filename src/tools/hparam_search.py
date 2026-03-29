@@ -45,7 +45,16 @@ from util.validation_protocol import (
     LEGACY_VALIDATION_SIGNATURE,
     build_validation_protocol,
 )
-from util.checkpoint_io import extract_checkpoint_paths, read_json_object
+from util.checkpoint_io import (
+    extract_checkpoint_paths,
+    normalize_checkpoint_path,
+    read_json_object,
+)
+from util.path_format import (
+    relativize_path_fields,
+    relativize_path_string,
+    resolve_path_string,
+)
 from util.process_title import apply_process_title_from_env
 from util.versioned_artifacts import (
     is_active_public_model,
@@ -443,8 +452,8 @@ def load_config(path: Path) -> SearchConfig:
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("base_args.model must be a non-empty string.")
 
-    project_root = Path(project_root_raw).resolve()
-    output_dir = Path(output_dir_raw).resolve()
+    project_root = resolve_path_string(project_root_raw, base_dir=path.parent)
+    output_dir = resolve_path_string(output_dir_raw, base_dir=project_root)
     quick_trials = _validate_positive_int(raw.get("quick_trials"), "quick_trials")
     quick_epochs = _validate_positive_int(raw.get("quick_epochs"), "quick_epochs")
     top_k = _validate_positive_int(raw.get("top_k"), "top_k")
@@ -539,7 +548,10 @@ def load_config(path: Path) -> SearchConfig:
     else:
         if not isinstance(global_best_config_raw, str) or not global_best_config_raw:
             raise ValueError("global_best_config_path must be a non-empty string.")
-        global_best_config_path = Path(global_best_config_raw).resolve()
+        global_best_config_path = resolve_path_string(
+            global_best_config_raw,
+            base_dir=project_root,
+        )
     seed_best_config_raw = raw.get("seed_best_config_path")
     seed_best_config_path: Optional[Path]
     if seed_best_config_raw is None:
@@ -547,7 +559,10 @@ def load_config(path: Path) -> SearchConfig:
     else:
         if not isinstance(seed_best_config_raw, str) or not seed_best_config_raw:
             raise ValueError("seed_best_config_path must be a non-empty string.")
-        seed_best_config_path = Path(seed_best_config_raw).resolve()
+        seed_best_config_path = resolve_path_string(
+            seed_best_config_raw,
+            base_dir=project_root,
+        )
     quick_overrides = raw.get("quick_overrides", {})
     full_overrides = raw.get("full_overrides", {})
     if not isinstance(quick_overrides, dict):
@@ -566,7 +581,10 @@ def load_config(path: Path) -> SearchConfig:
             or not gpu_release_events_raw.strip()
         ):
             raise ValueError("gpu_release_events_path must be a non-empty string.")
-        gpu_release_events_path = Path(gpu_release_events_raw).resolve()
+        gpu_release_events_path = resolve_path_string(
+            gpu_release_events_raw,
+            base_dir=project_root,
+        )
     enable_visualization = _resolve_enable_visualization(
         raw.get("enable_visualization"),
         base_args=normalized_base_args,
@@ -2321,7 +2339,10 @@ def _extract_checkpoint_paths_from_metrics(
     metrics_json_path: str,
 ) -> dict[str, str]:
     """Extract donor/acceptor checkpoint paths from one metrics JSON file."""
-    metrics_path = Path(metrics_json_path).resolve()
+    metrics_path = normalize_checkpoint_path(
+        metrics_json_path,
+        base_dir=PROJECT_ROOT,
+    )
     raw = read_json_object(metrics_path)
     if raw is None:
         return {}
@@ -2331,7 +2352,7 @@ def _extract_checkpoint_paths_from_metrics(
         existing_only=False,
     )
     resolved: dict[str, str] = {
-        f"{task_name}_checkpoint_path": str(path)
+        f"{task_name}_checkpoint_path": relativize_path_string(str(path))
         for task_name, path in extracted.items()
     }
     return resolved
@@ -2362,7 +2383,7 @@ def _collect_checkpoint_paths_from_row(row: TrialResult) -> set[Path]:
     payload = _extract_checkpoint_paths_from_metrics(row.metrics_json)
     out: set[Path] = set()
     for raw_path in payload.values():
-        resolved = Path(raw_path).resolve()
+        resolved = normalize_checkpoint_path(raw_path, base_dir=PROJECT_ROOT)
         if resolved.exists():
             out.add(resolved)
     return out
@@ -2426,8 +2447,8 @@ def _serialize_top_trials(
                 "acceptor_pr_auc": row.acceptor_pr_auc,
                 "mean_pr_auc": row.mean_pr_auc,
                 "sampled_params": row.sampled_params,
-                "metrics_json": row.metrics_json,
-                "log_file": row.log_file,
+                "metrics_json": relativize_path_string(row.metrics_json),
+                "log_file": relativize_path_string(row.log_file),
             }
         )
     return serialized
@@ -2464,7 +2485,11 @@ def _write_tuning_leaderboard(
     }
 
     run_level_path = config.output_dir / f"leaderboard_top{config.top_k}.json"
-    run_level_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    normalized_payload = relativize_path_fields(payload)
+    run_level_path.write_text(
+        json.dumps(normalized_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     if config.output_dir.parent.name in {"donor", "acceptor", "both"}:
         model_tuning_dir = config.output_dir.parent.parent
@@ -2496,7 +2521,11 @@ def _write_tuning_leaderboard(
             "targets": {target: payload},
         }
     model_level_path.parent.mkdir(parents=True, exist_ok=True)
-    model_level_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    normalized_merged = relativize_path_fields(merged)
+    model_level_path.write_text(
+        json.dumps(normalized_merged, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _read_objective_best_epoch_from_metrics(
@@ -2506,7 +2535,11 @@ def _read_objective_best_epoch_from_metrics(
 ) -> Optional[int]:
     """Read objective-aligned best epoch from one trial metrics JSON."""
     try:
-        raw = json.loads(Path(metrics_json_path).read_text(encoding="utf-8"))
+        metrics_path = normalize_checkpoint_path(
+            metrics_json_path,
+            base_dir=PROJECT_ROOT,
+        )
+        raw = json.loads(metrics_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
@@ -6730,12 +6763,16 @@ def write_best_config(
         "objective_best_epoch": objective_best_epoch,
         "validation_protocol": validation_protocol,
         "hparam_context": hparam_context,
-        "metrics_json": row.metrics_json,
+        "metrics_json": relativize_path_string(row.metrics_json),
     }
     if top_rows is not None and top_k is not None and top_k > 0:
         payload["top_trials"] = _serialize_top_trials(top_rows, top_k)
     payload.update(_extract_checkpoint_paths_from_metrics(row.metrics_json))
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    normalized_payload = relativize_path_fields(payload)
+    path.write_text(
+        json.dumps(normalized_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def maybe_update_global_best(

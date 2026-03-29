@@ -10,6 +10,7 @@ from util.checkpoint_io import (
     read_json_object,
     resolve_existing_checkpoint_path,
 )
+from util.path_format import relativize_path_string
 
 
 def test_read_json_object_returns_object_for_valid_json(tmp_path: Path) -> None:
@@ -94,6 +95,23 @@ def test_extract_checkpoint_paths_supports_pair_task(tmp_path: Path) -> None:
     paths = extract_checkpoint_paths(payload, base_dir=tmp_path, existing_only=True)
 
     assert paths == {"pair": pair.resolve()}
+
+
+def test_normalize_checkpoint_path_supports_repository_relative_model_path(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "model" / "Dmel" / "donor" / "demo.pt"
+    base_dir = tmp_path / "data" / "Dmel" / "tuning" / "cnn_v3" / "donor"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"checkpoint")
+
+    resolved = normalize_checkpoint_path(
+        relativize_path_string(str(model_path)),
+        base_dir=base_dir,
+    )
+
+    assert resolved == model_path.resolve()
 
 
 def test_resolve_existing_checkpoint_path_relaxes_trailing_hash(
