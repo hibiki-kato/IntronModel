@@ -5912,6 +5912,83 @@ def test_build_trial_params_respects_max_model_params(
         assert complexity <= 1_000_000
 
 
+def test_build_trial_params_skips_excluded_sampled_params(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "batch_size": {"type": "categorical", "values": [128, 256]},
+            "dropout": {"type": "categorical", "values": [0.1, 0.2]},
+        }
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=1,
+        quick_epochs=1,
+        top_k=1,
+        full_epochs=1,
+        base_seed=13,
+        gpu_ids_setting="auto",
+        max_parallel_trials_setting="auto",
+        min_batch_size=64,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="pair_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "cnn_pair_v3", "species": "Dmel", "batch_size": 128},
+        quick_overrides={},
+        full_overrides={},
+        search_space=search_space,
+    )
+
+    sampled_rows = iter(
+        [
+            {"batch_size": 128, "dropout": 0.1},
+            {"batch_size": 256, "dropout": 0.2},
+        ]
+    )
+    call_count = {"value": 0}
+
+    def _fake_sample(
+        _search_space: dict[str, hparam_search.SearchDimension],
+        _rng: object,
+    ) -> dict[str, hparam_search.Scalar]:
+        call_count["value"] += 1
+        return next(sampled_rows)
+
+    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
+    monkeypatch.setattr(
+        hparam_search,
+        "_materialize_cnn_architecture_params",
+        lambda model_name, sampled_params, base_args, rng: dict(sampled_params),
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "_materialize_dnabert_readout_params",
+        lambda model_name, sampled_params, base_args: dict(sampled_params),
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "_is_valid_cnn_architecture",
+        lambda model_name, sampled_params, base_args: True,
+    )
+
+    params = hparam_search.build_trial_params(
+        config=config,
+        phase="quick",
+        count=1,
+        seed_offset=0,
+        excluded_sampled_params=[{"batch_size": 128, "dropout": 0.1}],
+    )
+
+    assert call_count["value"] == 2
+    assert params == [{"batch_size": 256, "dropout": 0.2}]
+
+
 def test_run_phase_subprocess_interrupt_triggers_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

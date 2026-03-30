@@ -1458,6 +1458,15 @@ def _sampled_params_match(
     return _sampled_params_key(left) == _sampled_params_key(right)
 
 
+def _build_excluded_sampled_param_keys(
+    excluded_sampled_params: Optional[list[dict[str, Scalar]]],
+) -> set[str]:
+    """Return canonical sampled-parameter keys that normal sampling should skip."""
+    if excluded_sampled_params is None:
+        return set()
+    return {_sampled_params_key(params) for params in excluded_sampled_params}
+
+
 def _exclude_recheck_rows_from_ranking(
     rows: list[TrialResult],
     *,
@@ -6648,12 +6657,14 @@ def build_trial_params(
     seed_offset: int,
     seed_source: Optional[list[TrialResult]] = None,
     history_trials: Optional[list[tuple[float, dict[str, Scalar]]]] = None,
+    excluded_sampled_params: Optional[list[dict[str, Scalar]]] = None,
 ) -> list[dict[str, Scalar]]:
     """Build sampled parameter sets for a phase."""
     if seed_source is not None:
         return [dict(row.sampled_params) for row in seed_source[:count]]
     sampled: list[dict[str, Scalar]] = []
     sampled_keys: set[str] = set()
+    excluded_param_keys = _build_excluded_sampled_param_keys(excluded_sampled_params)
     max_resample_attempts = 64
     model_name = str(config.base_args.get("model", ""))
     for trial_id in range(count):
@@ -6705,6 +6716,12 @@ def build_trial_params(
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            if params_key in excluded_param_keys:
+                last_invalid_reason = (
+                    "Failed to sample a non-excluded architecture after "
+                    f"{max_resample_attempts} attempts."
+                )
+                continue
             if params_key in sampled_keys:
                 last_invalid_reason = (
                     "Failed to sample a unique architecture after "
@@ -7248,6 +7265,7 @@ def run_search(config: SearchConfig) -> int:
 
     global_best_recheck_params: Optional[dict[str, Scalar]] = None
     global_best_recheck_context_mismatch = False
+    global_best_sampled_params: Optional[dict[str, Scalar]] = None
     if config.seed_best_config_path is None and config.global_best_config_path is not None:
         try:
             global_best_config = load_seed_best_config(
@@ -7262,6 +7280,8 @@ def run_search(config: SearchConfig) -> int:
                 flush=True,
             )
         else:
+            if global_best_config is not None:
+                global_best_sampled_params = dict(global_best_config.sampled_params)
             if (
                 global_best_config is not None
                 and global_best_config.hparam_context is not None
@@ -7289,12 +7309,18 @@ def run_search(config: SearchConfig) -> int:
                         flush=True,
                     )
 
+    excluded_quick_sampled_params: list[dict[str, Scalar]] = []
+    if seed_best_params is not None:
+        excluded_quick_sampled_params.append(dict(seed_best_params))
+    if global_best_sampled_params is not None:
+        excluded_quick_sampled_params.append(dict(global_best_sampled_params))
     quick_params = build_trial_params(
         config=config,
         phase="quick",
         count=config.quick_trials,
         seed_offset=0,
         history_trials=history_trials,
+        excluded_sampled_params=excluded_quick_sampled_params,
     )
     if seed_best_params is not None and quick_params:
         quick_params[0] = dict(seed_best_params)

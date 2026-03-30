@@ -478,6 +478,7 @@ def _prepare_cycle_state(
 
     global_best_recheck_params: dict[str, Scalar] | None = None
     global_best_recheck_context_mismatch = False
+    global_best_sampled_params: dict[str, Scalar] | None = None
     if (
         cycle_config.seed_best_config_path is None
         and cycle_config.global_best_config_path is not None
@@ -498,6 +499,8 @@ def _prepare_cycle_state(
                 ),
             )
         else:
+            if global_best_config is not None:
+                global_best_sampled_params = dict(global_best_config.sampled_params)
             if (
                 global_best_config is not None
                 and global_best_config.hparam_context is not None
@@ -523,12 +526,18 @@ def _prepare_cycle_state(
         full_priority_params = dict(global_best_recheck_params)
         next_full_trial_id = 1
 
+    excluded_quick_sampled_params: list[dict[str, Scalar]] = []
+    if seed_best_params is not None:
+        excluded_quick_sampled_params.append(dict(seed_best_params))
+    if global_best_sampled_params is not None:
+        excluded_quick_sampled_params.append(dict(global_best_sampled_params))
     quick_params = hparam_search.build_trial_params(
         config=cycle_config,
         phase="quick",
         count=cycle_config.quick_trials,
         seed_offset=0,
         history_trials=history_trials,
+        excluded_sampled_params=excluded_quick_sampled_params,
     )
     if seed_best_params is not None and quick_params:
         quick_params[0] = dict(seed_best_params)
