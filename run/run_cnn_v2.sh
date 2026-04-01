@@ -12,7 +12,7 @@ fi
 # --------------------------
 set -a
 MODEL="cnn_v2"
-SPECIES="Athal"
+SPECIES="Dmel, Hsap, Mmus"
 INTRONMODEL_AUTO_TMUX="off"
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
@@ -25,9 +25,9 @@ TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
 REF_GFF_PATH=""
 EPOCHS="20"
-MAX_EPOCHS="200"
-EARLY_STOP_PATIENCE="12"
-EARLY_STOP_MIN_DELTA="0.0"
+MAX_EPOCHS="20"
+EARLY_STOP_PATIENCE="3"
+EARLY_STOP_MIN_DELTA="0.001"
 BATCH_SIZE="512"
 LR="5e-4"
 LOSS="focal"
