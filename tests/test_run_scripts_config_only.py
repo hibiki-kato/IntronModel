@@ -286,7 +286,7 @@ def test_run_cnn_pair_v3_sh_uses_single_pair_tuning_namespace() -> None:
         encoding="utf-8"
     )
     assert 'MODEL="cnn_pair_v3"' in content
-    assert 'tuned_model_name="${MODEL}"' in content
+    assert 'intronmodel_resolve_pair_tuning_model_name "${MODEL}"' in content
     assert "intronmodel_resolve_pair_best_config_filename" in content
     assert "intronmodel_resolve_tuned_config_path" in content
     assert 'append_versioned_output_args "cnn_pair_v3.sh" "${species}" "${MODEL}"' in content

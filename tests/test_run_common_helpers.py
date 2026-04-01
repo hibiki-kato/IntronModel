@@ -241,13 +241,15 @@ def test_common_resolve_pair_best_config_path_supports_cnn_pair_v3(
     ]
 
 
-def test_common_resolve_pair_tuning_model_name_is_public_pair_name() -> None:
+def test_common_resolve_pair_tuning_model_name_supports_active_pair_models() -> None:
     run = _run_common_shell(
-        'printf "%s\\n" "$(intronmodel_resolve_pair_tuning_model_name)"\n'
+        'printf "%s\\n%s\\n" '
+        '"$(intronmodel_resolve_pair_tuning_model_name cnn_pair_v2)" '
+        '"$(intronmodel_resolve_pair_tuning_model_name cnn_pair_v3)"\n'
     )
 
     assert run.returncode == 0, run.stderr
-    assert run.stdout.strip().splitlines() == ["cnn_pair_v2"]
+    assert run.stdout.strip().splitlines() == ["cnn_pair_v2", "cnn_pair_v3"]
 
 
 def test_common_resolve_latest_published_name_does_not_seed_when_history_missing(
@@ -297,6 +299,66 @@ def test_common_resolve_latest_published_name_does_not_seed_when_history_missing
     assert not (
         data_root / "SpX" / "tuning" / "cnn_v3" / "version_history.tsv"
     ).exists()
+
+
+def test_common_resolve_latest_published_name_uses_data_root_override(
+    tmp_path: Path,
+) -> None:
+    project_root = _project_root()
+    data_root = tmp_path / "external_data"
+    tuning_root = data_root / "SpX" / "tuning" / "cnn_pair_v3"
+    history_path = tuning_root / "version_history.tsv"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        "\t".join(
+            [
+                "version",
+                "published_name",
+                "published_at",
+                "source_best_config",
+                "objective_metric",
+                "objective_score",
+                "updated_side",
+                "carry_forward_side",
+                "donor_checkpoint_path",
+                "acceptor_checkpoint_path",
+                "pair_checkpoint_path",
+                "metrics_json",
+                "archive_status",
+            ]
+        )
+        + "\n"
+        + "\t".join(
+            [
+                "2",
+                "cnn_pair_v3.02",
+                "2026-03-30T00:00:00Z",
+                "data/SpX/tuning/cnn_pair_v3/pair/best_config.json",
+                "pair_pr_auc",
+                "0.95",
+                "pair",
+                "",
+                "",
+                "",
+                "model/SpX/pair/cnn_pair_v3.02.pt",
+                "data/SpX/learning_metric/cnn_pair_v3.02.train.json",
+                "live",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run = _run_common_shell(
+        f'PROJECT_ROOT={shlex.quote(str(project_root))}\n'
+        f'DATA_ROOT={shlex.quote(str(data_root))}\n'
+        'printf "%s\\n" '
+        '"$(intronmodel_resolve_latest_published_name '
+        '"test_common.sh" "SpX" "cnn_pair_v3")"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "cnn_pair_v3.02"
 
 
 def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:

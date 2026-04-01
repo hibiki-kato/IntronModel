@@ -471,11 +471,24 @@ intronmodel_resolve_latest_published_name() {
 	local species="$2"
 	local model_name="$3"
 	local python_bin
+	local resolved_project_root="${PROJECT_ROOT:-}"
+	local resolved_data_root="${DATA_ROOT:-${INTRONMODEL_DATA_ROOT:-}}"
 
 	python_bin="$(intronmodel_resolve_python_bin "${script_tag}")" || return 1
+	if [[ -z "${resolved_project_root}" ]]; then
+		echo "[${script_tag}] PROJECT_ROOT is not set." >&2
+		return 1
+	fi
+	if [[ -z "${resolved_data_root}" ]]; then
+		resolved_data_root="${resolved_project_root}/data"
+	fi
 	(
 		export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-		"${python_bin}" - "${PROJECT_ROOT}" "${species}" "${model_name}" <<'PY'
+		"${python_bin}" - \
+			"${resolved_project_root}" \
+			"${resolved_data_root}" \
+			"${species}" \
+			"${model_name}" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -485,10 +498,9 @@ from util.versioned_artifacts import resolve_latest_published_name
 
 
 project_root = Path(sys.argv[1]).resolve()
-species = sys.argv[2]
-model_name = sys.argv[3]
-
-data_root = project_root / "data"
+data_root = Path(sys.argv[2]).resolve()
+species = sys.argv[3]
+model_name = sys.argv[4]
 published_name = resolve_latest_published_name(data_root, species, model_name)
 if published_name is None:
     published_name = model_name
@@ -701,7 +713,16 @@ intronmodel_resolve_synth_tuning_model_name() {
 
 
 intronmodel_resolve_pair_tuning_model_name() {
-	printf '%s\n' "cnn_pair_v2"
+	local requested_model_name="${1:-cnn_pair_v2}"
+	case "${requested_model_name}" in
+		cnn_pair_v2 | cnn_pair_v3)
+			printf '%s\n' "${requested_model_name}"
+			;;
+		*)
+			echo "[common.sh] unsupported pair tuning model: ${requested_model_name}" >&2
+			return 1
+			;;
+	esac
 }
 
 

@@ -36,7 +36,7 @@ FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="errors"
 ENABLE_PHASE_OVERLAP="1"
 
-GPU_IDS="4,5,6,7"
+GPU_IDS="0,1,2,3"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -77,13 +77,12 @@ JOB_ORDER=(
 # Tune site tasks independently.
 TARGET_ORDER=(
 	"acceptor"
-	"donor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "acceptor_len": {"type": "int", "min": 100, "max": 100, "step": 1},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
 	"batch_size": {
 		"type": "categorical",

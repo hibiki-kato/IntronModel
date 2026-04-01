@@ -732,7 +732,9 @@ if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
 	echo "[tune_cnn_pair_v2_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
 	exit 1
 fi
-TUNING_MODEL_NAME="$(intronmodel_resolve_pair_tuning_model_name)"
+TUNING_MODEL_NAME="$(
+	intronmodel_resolve_pair_tuning_model_name "cnn_pair_v2"
+)"
 
 PYTHON_BIN="$(resolve_python_bin)"
 mapfile -t SEED_VALUES < <(resolve_seed_list)

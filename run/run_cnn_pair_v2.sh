@@ -164,7 +164,9 @@ run_species_once() {
 	local resolved_train_neg_path
 	local use_wrapper_hparams="1"
 
-	tuned_model_name="$(intronmodel_resolve_pair_tuning_model_name)"
+	tuned_model_name="$(
+		intronmodel_resolve_pair_tuning_model_name "${MODEL}"
+	)"
 	best_config_filename="$(
 		intronmodel_resolve_pair_best_config_filename
 	)"
