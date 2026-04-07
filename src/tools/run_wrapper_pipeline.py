@@ -1434,7 +1434,15 @@ def _run_single_species(
     if raw_class_file_path != "":
         class_file = Path(raw_class_file_path)
     else:
-        class_file = data_root / species / "raw" / "transcript_class.txt"
+        processed_class_file = (
+            data_root / species / "processed" / "transcript_class.txt"
+        )
+        raw_class_file = data_root / species / "raw" / "transcript_class.txt"
+        class_file = (
+            processed_class_file
+            if processed_class_file.is_file()
+            else raw_class_file
+        )
     output_site_score_tsv = data_root / species / "site_score" / f"{output_stem}.tsv"
     output_intron_score_tsv = (
         data_root / species / "intron_score" / f"{output_stem}.tsv"

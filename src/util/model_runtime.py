@@ -545,9 +545,10 @@ def compile_model_with_fallback(
     compile_mode : str, default="auto"
         High-level compile policy passed from the training or inference
         function. ``"on"`` and ``"quick"`` use a light
-        ``reduce-overhead``-only strategy, while ``"full"`` prefers
-        ``max-autotune`` before falling back to ``reduce-overhead``.
-        Legacy environment strategy overrides still apply to other modes.
+        ``reduce-overhead``-only strategy. ``"full"`` also uses
+        ``reduce-overhead`` by default, unless
+        ``INTRONMODEL_TORCH_COMPILE_STRATEGY`` explicitly opts into a
+        max-autotune strategy.
 
     Returns
     -------
@@ -575,11 +576,15 @@ def compile_model_with_fallback(
         return model, False, None, None
 
     preferred_modes: list[str] = [_COMPILE_MODE_REDUCE_OVERHEAD]
-    if normalized_compile_mode == "full" and _can_use_max_autotune_mode():
-        preferred_modes = [
-            _COMPILE_MODE_MAX_AUTOTUNE,
-            _COMPILE_MODE_REDUCE_OVERHEAD,
-        ]
+    if normalized_compile_mode == "full":
+        compile_strategy = _normalize_compile_strategy(
+            os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
+        )
+        preferred_modes = list(_compile_modes_for_strategy(compile_strategy))
+        if _COMPILE_MODE_MAX_AUTOTUNE not in preferred_modes:
+            preferred_modes = [_COMPILE_MODE_REDUCE_OVERHEAD]
+        elif not _can_use_max_autotune_mode():
+            preferred_modes = [_COMPILE_MODE_REDUCE_OVERHEAD]
 
     candidate_modes: list[str] = []
     sticky_mode = _COMPILE_STICKY_MODE_CACHE

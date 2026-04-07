@@ -40,7 +40,7 @@ X_MAX=""
 Y_MIN=""
 Y_MAX=""
 TARGET_SPECIES=("Hsap")
-SCORE_INPUTS=("cnn_pair_v2")
+SCORE_INPUTS=("cnn_pair_v3.03")
 CLASS_FILE_OVERRIDE=""
 REF_GFF_OVERRIDE=""
 INTRONMODEL_AUTO_TMUX=off
@@ -227,6 +227,23 @@ resolve_ref_gff() {
 	return 0
 }
 
+resolve_class_file() {
+	local processed_dir="$1"
+	local raw_dir="$2"
+	local processed_class="${processed_dir}/transcript_class.txt"
+	local raw_class="${raw_dir}/transcript_class.txt"
+
+	if [[ -f "${processed_class}" ]]; then
+		echo "${processed_class}"
+		return 0
+	fi
+	if [[ -f "${raw_class}" ]]; then
+		echo "${raw_class}"
+		return 0
+	fi
+	return 1
+}
+
 set_defaults_for_species() {
 	local sp="$1"
 	case "${sp}" in
@@ -265,13 +282,14 @@ set_defaults_for_species() {
 
 for species in "${TARGET_SPECIES[@]}"; do
 	RAW_DIR="${DATA_ROOT}/${species}/raw"
+	PROCESSED_DIR="${DATA_ROOT}/${species}/processed"
 	TRANS_SCORE_DIR="${DATA_ROOT}/${species}/trans_score"
 	EVAL_SCORE_DIR="${DATA_ROOT}/${species}/eval_score"
 
 	CLASS_FILE="${CLASS_FILE_OVERRIDE}"
 	REF_GFF="${REF_GFF_OVERRIDE}"
 	if [[ -z "${CLASS_FILE}" ]]; then
-		CLASS_FILE="${RAW_DIR}/transcript_class.txt"
+		CLASS_FILE="$(resolve_class_file "${PROCESSED_DIR}" "${RAW_DIR}" || true)"
 	fi
 	if [[ -z "${REF_GFF}" ]]; then
 		REF_GFF="$(resolve_ref_gff "${RAW_DIR}" || true)"
@@ -342,6 +360,7 @@ for species in "${TARGET_SPECIES[@]}"; do
 		fi
 
 		echo "[eval_trans_score] species=${species} file=${score_file}"
+		echo "[eval_trans_score] class_file=${CLASS_FILE}"
 		echo "[eval_trans_score] ref_gff=${REF_GFF}"
 		python3 "${PROJECT_ROOT}/src/evaluate_scores.py" "${RUN_ARGS[@]}"
 		echo "[eval_trans_score] wrote ${output_file}"

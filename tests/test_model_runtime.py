@@ -247,7 +247,7 @@ def test_compile_model_with_fallback_quick_alias_uses_default_strategy(
     assert mode_calls == [("default", False)]
 
 
-def test_compile_model_with_fallback_full_alias_prefers_max_autotune(
+def test_compile_model_with_fallback_full_alias_uses_default_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mode_calls: list[tuple[str | None, bool | None]] = []
@@ -262,20 +262,15 @@ def test_compile_model_with_fallback_full_alias_prefers_max_autotune(
         return module
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
-    monkeypatch.setattr(
-        model_runtime,
-        "_can_use_max_autotune_mode",
-        lambda: True,
-    )
     compiled, enabled, selected_mode, setup_error = compile_model_with_fallback(
         model,
         compile_mode="full",
     )
     assert compiled is model
     assert enabled is True
-    assert selected_mode == "max-autotune"
+    assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("max-autotune-no-cudagraphs", False)]
+    assert mode_calls == [("default", False)]
 
 
 def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> None:

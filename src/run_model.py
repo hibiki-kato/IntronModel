@@ -1033,7 +1033,19 @@ def _resolve_pipeline_paths(
         test_tsv = str(args.test_tsv) if args.test_tsv is not None else ""
     else:
         test_tsv = resolve_test_tsv(args.species, args.test_tsv)
-    class_file = args.class_file or os.path.join(dirs["raw"], "transcript_class.txt")
+    if args.class_file is not None:
+        class_file = str(args.class_file)
+    else:
+        processed_class_file = os.path.join(
+            dirs["processed"],
+            "transcript_class.txt",
+        )
+        raw_class_file = os.path.join(dirs["raw"], "transcript_class.txt")
+        class_file = (
+            processed_class_file
+            if os.path.isfile(processed_class_file)
+            else raw_class_file
+        )
     site_output_tsv = args.site_output_tsv or default_site_output_path(
         species=args.species,
         model_name=args.model,

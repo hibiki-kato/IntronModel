@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="660"
+TIME_BUDGET_MINUTES="300"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -30,15 +30,15 @@ BASE_SEED="0"
 SEED_LIST=""
 PROCESS_TITLE="ETA"
 
-QUICK_TRIALS="16"
+QUICK_TRIALS="8"
 QUICK_EPOCHS="2"
-TOP_K="4"
-FULL_EPOCHS="10"
+TOP_K="2"
+FULL_EPOCHS="5"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="errors"
 
-GPU_IDS="4,5,6,7"
+GPU_IDS="auto"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 
