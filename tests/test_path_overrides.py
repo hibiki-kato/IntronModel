@@ -17,6 +17,7 @@ def test_species_data_dirs_respects_data_root_override(
 
     assert dirs["base"] == "/tmp/intron-data/Dmel"
     assert dirs["raw"] == "/tmp/intron-data/Dmel/raw"
+    assert dirs["processed"] == "/tmp/intron-data/Dmel/processed"
     assert dirs["train"] == "/tmp/intron-data/Dmel/train"
     assert dirs["learning_metric"] == "/tmp/intron-data/Dmel/learning_metric"
 
@@ -29,10 +30,7 @@ def test_checkpoint_paths_respect_model_root_override(
     paths = run_model._build_checkpoint_paths("Dmel", "cnn_dlen100_alen100")
 
     assert paths["donor"] == "/tmp/intron-model/Dmel/donor/cnn_dlen100_alen100.pt"
-    assert (
-        paths["acceptor"]
-        == "/tmp/intron-model/Dmel/acceptor/cnn_dlen100_alen100.pt"
-    )
+    assert paths["acceptor"] == "/tmp/intron-model/Dmel/acceptor/cnn_dlen100_alen100.pt"
 
 
 def test_data_root_relative_override_is_resolved_from_project_root(

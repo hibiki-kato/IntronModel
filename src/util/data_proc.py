@@ -216,13 +216,14 @@ def species_data_dirs(species: str) -> Dict[str, str]:
     Returns
     -------
     dict[str, str]
-        Paths for base/raw/train/site_score/intron_score/trans_score/
+        Paths for base/raw/processed/train/site_score/intron_score/trans_score/
         learning_metric/eval_score directories.
     """
     base = os.path.join(data_root(), species)
     return {
         "base": base,
         "raw": os.path.join(base, "raw"),
+        "processed": os.path.join(base, "processed"),
         "train": os.path.join(base, "train"),
         "trans_score": os.path.join(base, "trans_score"),
         "site_score": os.path.join(base, "site_score"),
@@ -254,9 +255,7 @@ def parse_name_fields(name_fields: Optional[str]) -> List[str]:
     if name_fields in (None, ""):
         return []
     raw_fields = [
-        field.strip()
-        for field in str(name_fields).split(",")
-        if field.strip()
+        field.strip() for field in str(name_fields).split(",") if field.strip()
     ]
     if not raw_fields:
         return []
@@ -652,9 +651,7 @@ def resolve_test_tsv(species: str, test_tsv: Optional[str]) -> str:
     if test_tsv:
         return test_tsv
     dirs = species_data_dirs(species)
-    processed_path = os.path.join(
-        dirs["base"], "processed", "transcripts.unique.tsv"
-    )
+    processed_path = os.path.join(dirs["base"], "processed", "transcripts.unique.tsv")
     if os.path.isfile(processed_path):
         return processed_path
     raise FileNotFoundError(
@@ -1140,8 +1137,7 @@ def read_examples_pair_task_with_metadata(
         neg_path=neg_signature[0],
     )
     extra_negative_signatures = tuple(
-        _resolve_training_file_signature(path)
-        for path in extra_negative_paths
+        _resolve_training_file_signature(path) for path in extra_negative_paths
     )
     cached_examples = _read_examples_pair_task_with_metadata_cached(
         pos_signature,
@@ -1175,8 +1171,10 @@ def _read_examples_pair_task_with_metadata_uncached(
                 parsed = parse_debug_training_record(line)
                 if parsed is None or parsed.record_type != "pair":
                     continue
-                if label == 0 and negative_pair_only and not line.startswith(
-                    "DEBUG pair "
+                if (
+                    label == 0
+                    and negative_pair_only
+                    and not line.startswith("DEBUG pair ")
                 ):
                     continue
                 if parsed.donor_seq is None or parsed.acceptor_seq is None:
@@ -1294,9 +1292,7 @@ def _discover_default_pair_extra_negative_paths(
     for processed_dir in sorted(processed_dirs):
         try:
             entries = sorted(
-                entry.name
-                for entry in os.scandir(processed_dir)
-                if entry.is_file()
+                entry.name for entry in os.scandir(processed_dir) if entry.is_file()
             )
         except OSError:
             continue
@@ -1446,8 +1442,7 @@ def read_test_site_rows(
                     intron_half_length = _parse_required_int(raw_value)
                     if intron_half_length is None:
                         raise ValueError(
-                            "Invalid intron_half_length value in test TSV: "
-                            f"{raw_value}"
+                            f"Invalid intron_half_length value in test TSV: {raw_value}"
                         )
             if intron_half_length is None:
                 intron_half_length = half_length_map.get(
@@ -1537,8 +1532,7 @@ def read_test_pair_rows(
                     parsed_half = _parse_required_int(raw_value)
                     if parsed_half is None:
                         raise ValueError(
-                            "Invalid intron_half_length value in test TSV: "
-                            f"{raw_value}"
+                            f"Invalid intron_half_length value in test TSV: {raw_value}"
                         )
                     existing = bucket.get("intron_half_length")
                     if (
