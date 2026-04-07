@@ -894,8 +894,13 @@ PARALLEL_SLOT_COUNT="$(
 		"${MAX_PARALLEL_TRIALS}" \
 		"${#GPU_ID_LIST[@]}"
 )"
-mkdir -p "${PROJECT_ROOT}/temp"
-scheduler_root="$(mktemp -d "${PROJECT_ROOT}/temp/${TUNING_MODEL_NAME}_scheduler_XXXXXX")"
+scheduler_root="$(mktemp -d "${TMPDIR:-/tmp}/${TUNING_MODEL_NAME}_scheduler_XXXXXX")"
+cleanup_scheduler_root() {
+	if [[ -n "${scheduler_root:-}" && -d "${scheduler_root}" ]]; then
+		rm -rf "${scheduler_root}"
+	fi
+}
+trap cleanup_scheduler_root EXIT INT TERM HUP
 jobs_file="${scheduler_root}/jobs.jsonl"
 : > "${jobs_file}"
 selected_gpu_ids=("${GPU_ID_LIST[@]:0:${PARALLEL_SLOT_COUNT}}")
