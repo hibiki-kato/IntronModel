@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="300"
+TIME_BUDGET_MINUTES="700"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -38,7 +38,7 @@ QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="errors"
 
-GPU_IDS="0,1,2,3"
+GPU_IDS="4,5,6,7"
 # Keep default conservative for single-GPU runs.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -80,7 +80,7 @@ JOB_ORDER=(
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "acceptor_len": {"type": "int", "min": 60, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
 	"batch_size": {
 		"type": "categorical",
