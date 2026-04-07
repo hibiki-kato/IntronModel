@@ -198,6 +198,8 @@ run_species_once() {
 	append_arg_if_set "test_tsv" "${TEST_TSV_PATH}"
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
+	append_arg_if_set "epochs" "${EPOCHS}"
+	append_arg_if_set "max_epochs" "${MAX_EPOCHS}"
 	append_arg_if_set "early_stop_patience" "${EARLY_STOP_PATIENCE}"
 	append_arg_if_set "early_stop_min_delta" "${EARLY_STOP_MIN_DELTA}"
 	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
@@ -277,8 +279,6 @@ run_species_once() {
 			--acceptor_len "${ACCEPTOR_LEN}"
 			--seed "${SEED}"
 			--val_frac "${VAL_FRAC}"
-			--epochs "${EPOCHS}"
-			--max_epochs "${MAX_EPOCHS}"
 			--batch_size "${BATCH_SIZE}"
 			--lr "${LR}"
 			--loss "${LOSS}"

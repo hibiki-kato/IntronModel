@@ -1155,6 +1155,7 @@ def train(
         patience_arg=model_args.early_stop_patience,
         min_delta_arg=model_args.early_stop_min_delta,
     )
+    # Enable early stopping only for auto epoch budget mode.
     effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
     tasks_to_train = resolve_tasks_to_train(train_target)
