@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="300"
+TIME_BUDGET_MINUTES="30"
 TIMEOUT_GRACE_SECONDS="30"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -36,7 +36,7 @@ FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="errors"
 ENABLE_PHASE_OVERLAP="1"
 
-GPU_IDS="0,1,2,3"
+GPU_IDS="auto"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -68,9 +68,9 @@ HEAD_TYPE="gap"
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
+	"Mmus"
 	"Hsap"
 	"Dmel"
-	"Mmus"
 	"Athal"
 )
 

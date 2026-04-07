@@ -205,10 +205,10 @@ def test_intron_score_snpr_draws_train_positive_hline_only_when_included(
     (intron_dir / "model.tsv").write_text(
         "\n".join(
             [
-                "transcript_id\tintron_index\tscore\tlabel",
-                "tx1\t1\t0.9\t1",
-                "tx2\t1\t0.1\t0",
-                "tx3\t1\t0.8\t1",
+                "intron_id\tscore\tlabel",
+                "tx1\t0.9\t1",
+                "tx2\t0.1\t0",
+                "tx3\t0.8\t1",
             ]
         )
         + "\n",
@@ -283,10 +283,10 @@ def test_intron_score_agreement_at_sensitivity(tmp_path: Path) -> None:
     (intron_dir / "model_a.tsv").write_text(
         "\n".join(
             [
-                "transcript_id\tintron_index\tscore\tlabel",
-                "tx1\t1\t0.90\t1",
-                "tx2\t1\t0.10\t0",
-                "tx3\t1\t0.80\t1",
+                "intron_id\tscore\tlabel",
+                "tx1\t0.90\t1",
+                "tx2\t0.10\t0",
+                "tx3\t0.80\t1",
             ]
         )
         + "\n",
@@ -295,10 +295,10 @@ def test_intron_score_agreement_at_sensitivity(tmp_path: Path) -> None:
     (intron_dir / "model_b.tsv").write_text(
         "\n".join(
             [
-                "transcript_id\tintron_index\tscore\tlabel",
-                "tx1\t1\t0.95\t1",
-                "tx2\t1\t0.70\t0",
-                "tx3\t1\t0.60\t1",
+                "intron_id\tscore\tlabel",
+                "tx1\t0.95\t1",
+                "tx2\t0.70\t0",
+                "tx3\t0.60\t1",
             ]
         )
         + "\n",

@@ -8,6 +8,7 @@ import pytest
 from util.versioned_artifacts import ensure_publication_seed
 from util.versioned_artifacts import publish_latest_best_version
 from util.versioned_artifacts import read_version_history
+from util.versioned_artifacts import refresh_published_version_if_improved
 from util.versioned_artifacts import resolve_latest_published_run_assets
 from util.versioned_artifacts import write_version_history
 from util.versioned_artifacts import VersionHistoryEntry
@@ -671,3 +672,238 @@ def test_resolve_latest_published_run_assets_handles_pair_version(
     assert assets["published_name"] == "cnn_pair_v3.02"
     assert assets["pair_checkpoint_path"] == str(pair_checkpoint.resolve())
     assert assets["transcript_output_tsv"].endswith("cnn_pair_v3.02.tsv")
+
+
+def test_ensure_publication_seed_supports_generic_site_model(
+    tmp_path: Path,
+) -> None:
+    donor_checkpoint = tmp_path / "model" / "SpX" / "donor" / "donor_raw.pt"
+    acceptor_checkpoint = tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw.pt"
+    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    donor_checkpoint.write_bytes(b"donor-generic")
+    acceptor_checkpoint.write_bytes(b"acceptor-generic")
+    donor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_resdil"
+        / "donor"
+        / "best_config.json"
+    )
+    acceptor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_resdil"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_checkpoint,
+            objective_metric="donor_pr_auc",
+            objective_score=0.84,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_checkpoint,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.83,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_resdil")
+
+    published_name = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_resdil",
+    )
+
+    assert published_name == "cnn_resdil.01"
+    assert (
+        tmp_path / "model" / "SpX" / "donor" / "cnn_resdil.01.pt"
+    ).read_bytes() == b"donor-generic"
+    assert (
+        tmp_path / "model" / "SpX" / "acceptor" / "cnn_resdil.01.pt"
+    ).read_bytes() == b"acceptor-generic"
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_resdil")
+    assert [row.published_name for row in history] == ["cnn_resdil.01"]
+
+
+def test_ensure_publication_seed_supports_generic_pair_model(
+    tmp_path: Path,
+) -> None:
+    pair_checkpoint = tmp_path / "model" / "SpX" / "pair" / "pair_raw.pt"
+    pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    pair_checkpoint.write_bytes(b"pair-generic")
+    pair_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "bilstm_pair"
+        / "pair"
+        / "best_config.json"
+    )
+    _write_json(
+        pair_best,
+        _best_payload(
+            checkpoint_path=pair_checkpoint,
+            objective_metric="pair_pr_auc",
+            objective_score=0.77,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "bilstm_pair")
+
+    published_name = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="bilstm_pair",
+    )
+
+    assert published_name == "bilstm_pair.01"
+    assert (
+        tmp_path / "model" / "SpX" / "pair" / "bilstm_pair.01.pt"
+    ).read_bytes() == b"pair-generic"
+    history = read_version_history(tmp_path / "data", "SpX", "bilstm_pair")
+    assert [row.published_name for row in history] == ["bilstm_pair.01"]
+
+
+def test_refresh_published_version_if_improved_updates_same_site_version(
+    tmp_path: Path,
+) -> None:
+    donor_raw = tmp_path / "model" / "SpX" / "donor" / "donor_raw.pt"
+    acceptor_raw = tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw.pt"
+    donor_raw.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_raw.parent.mkdir(parents=True, exist_ok=True)
+    donor_raw.write_bytes(b"donor-seed")
+    acceptor_raw.write_bytes(b"acceptor-seed")
+    donor_best = (
+        tmp_path / "data" / "SpX" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    )
+    acceptor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_v2"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw,
+            objective_metric="pr_auc",
+            objective_score=0.81,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_raw,
+            objective_metric="pr_auc",
+            objective_score=0.79,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_v2")
+    _ = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+    )
+
+    donor_full = tmp_path / "model" / "SpX" / "donor" / "donor_full.pt"
+    donor_full.write_bytes(b"donor-full")
+    refreshed = refresh_published_version_if_improved(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+        published_name="cnn_v2.01",
+        task_payloads={
+            "donor": {
+                "donor_checkpoint_path": str(donor_full),
+                "objective_metric": "pr_auc",
+                "objective_score": 0.93,
+            }
+        },
+        metrics_json="data/SpX/learning_metric/cnn_v2_full.train.json",
+    )
+
+    assert refreshed is not None
+    assert refreshed.published_name == "cnn_v2.01"
+    assert (tmp_path / "model" / "SpX" / "donor" / "cnn_v2.01.pt").read_bytes() == (
+        b"donor-full"
+    )
+    assert (
+        tmp_path / "model" / "SpX" / "acceptor" / "cnn_v2.01.pt"
+    ).read_bytes() == b"acceptor-seed"
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_v2")
+    assert [row.published_name for row in history] == ["cnn_v2.01"]
+    donor_payload = json.loads(donor_best.read_text(encoding="utf-8"))
+    assert float(donor_payload["objective_score"]) == pytest.approx(0.93)
+    assert donor_payload["published_name"] == "cnn_v2.01"
+
+
+def test_refresh_published_version_if_improved_noops_without_improvement(
+    tmp_path: Path,
+) -> None:
+    pair_raw = tmp_path / "model" / "SpX" / "pair" / "pair_raw.pt"
+    pair_raw.parent.mkdir(parents=True, exist_ok=True)
+    pair_raw.write_bytes(b"pair-seed")
+    pair_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_pair_v3"
+        / "pair"
+        / "best_config.json"
+    )
+    _write_json(
+        pair_best,
+        _best_payload(
+            checkpoint_path=pair_raw,
+            objective_metric="pr_auc",
+            objective_score=0.88,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_pair_v3")
+    _ = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v3",
+    )
+
+    pair_full = tmp_path / "model" / "SpX" / "pair" / "pair_full.pt"
+    pair_full.write_bytes(b"pair-full")
+    refreshed = refresh_published_version_if_improved(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v3",
+        published_name="cnn_pair_v3.01",
+        task_payloads={
+            "pair": {
+                "pair_checkpoint_path": str(pair_full),
+                "objective_metric": "pr_auc",
+                "objective_score": 0.88,
+            }
+        },
+    )
+
+    assert refreshed is None
+    assert (
+        tmp_path / "model" / "SpX" / "pair" / "cnn_pair_v3.01.pt"
+    ).read_bytes() == b"pair-seed"
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_pair_v3")
+    assert [row.published_name for row in history] == ["cnn_pair_v3.01"]

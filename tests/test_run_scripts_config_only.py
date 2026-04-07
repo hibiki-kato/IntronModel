@@ -142,6 +142,8 @@ def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     assert "--validation_metric" in content
     assert "--seed" in content
     assert "--checkpoint_top_k" in content
+    assert 'append_arg_if_set "donor_tuned_config_path" "${donor_tuned_config_path}"' in content
+    assert 'append_arg_if_set "acceptor_tuned_config_path" "${acceptor_tuned_config_path}"' in content
     assert 'for task_name in donor acceptor; do' not in content
 
 
@@ -216,10 +218,31 @@ def test_run_cnn_pair_v2_sh_omits_empty_optional_loss_alpha_args() -> None:
     assert 'if [[ "${use_wrapper_hparams}" == "1" ]]; then' in content
     assert 'FOCAL_ALPHA_POS=""' in content
     assert 'ASYM_ALPHA_POS=""' in content
-    assert '--focal_alpha_pos "${FOCAL_ALPHA_POS}"' not in content
-    assert '--asym_alpha_pos "${ASYM_ALPHA_POS}"' not in content
-    assert 'append_arg_if_set "focal_alpha_pos" "${FOCAL_ALPHA_POS}"' in content
-    assert 'append_arg_if_set "asym_alpha_pos" "${ASYM_ALPHA_POS}"' in content
+
+
+def test_eval_intron_pr_auc_sh_supports_latest_published_site_score_names() -> None:
+    content = (_project_root() / "run" / "eval_intron_pr_auc.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "resolve_site_score_input()" in content
+    assert "intronmodel_resolve_latest_published_data_path" in content
+    assert 'cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3' not in content
+
+
+def test_eval_trans_score_sh_supports_latest_published_score_names_generically() -> None:
+    content = (_project_root() / "run" / "eval_trans_score.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "intronmodel_resolve_latest_published_data_path" in content
+    assert 'cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3' not in content
+
+
+def test_rerun_active_best_scores_and_evals_uses_model_alias_for_intron_eval() -> None:
+    content = (
+        _project_root() / "run" / "rerun_active_best_scores_and_evals.sh"
+    ).read_text(encoding="utf-8")
+    assert '--site-score-tsv "cnn_v2"' in content
+    assert 'site_score/cnn_v2.tsv' not in content
 
 
 def test_run_cnn_pair_v2_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
@@ -249,7 +272,8 @@ def test_run_cnn_pair_v2_sh_uses_single_pair_tuning_namespace() -> None:
     assert "intronmodel_resolve_pair_best_config_filename" in content
     assert 'best_config_filename="$(' in content
     assert "intronmodel_resolve_tuned_config_path" in content
-    assert "append_versioned_output_args" in content
+    assert 'append_arg_if_set "pair_tuned_config_path" "${tuned_path}"' in content
+    assert "intronmodel_append_versioned_output_args" in content
     assert "SYNTHESIZE_MODE" not in content
     assert "cnn_pair_v2_synth" not in content
 
@@ -289,7 +313,8 @@ def test_run_cnn_pair_v3_sh_uses_single_pair_tuning_namespace() -> None:
     assert 'intronmodel_resolve_pair_tuning_model_name "${MODEL}"' in content
     assert "intronmodel_resolve_pair_best_config_filename" in content
     assert "intronmodel_resolve_tuned_config_path" in content
-    assert 'append_versioned_output_args "cnn_pair_v3.sh" "${species}" "${MODEL}"' in content
+    assert 'append_arg_if_set "pair_tuned_config_path" "${tuned_path}"' in content
+    assert "intronmodel_append_versioned_output_args" in content
 
 
 def test_run_cnn_pair_v3_sh_exposes_resdil_wrapper_knobs() -> None:

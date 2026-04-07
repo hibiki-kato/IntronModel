@@ -1,5 +1,36 @@
 #!/usr/bin/env bash
 
+if ! declare -F intronmodel_is_active_public_model >/dev/null 2>&1; then
+	intronmodel_is_active_public_model() {
+		local script_tag="$1"
+		local model_name="$2"
+		local python_bin="python3"
+		local resolved_project_root="${PROJECT_ROOT:-$(pwd)}"
+
+		if ! command -v "${python_bin}" >/dev/null 2>&1; then
+			python_bin="python"
+		fi
+		if ! command -v "${python_bin}" >/dev/null 2>&1; then
+			echo "[${script_tag}] python interpreter not found (python3/python)." >&2
+			return 1
+		fi
+		(
+			export PYTHONPATH="${resolved_project_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
+			"${python_bin}" - "${model_name}" <<'PY'
+from __future__ import annotations
+
+import sys
+
+from util.versioned_artifacts import is_active_public_model
+
+
+model_name = sys.argv[1]
+print("1" if is_active_public_model(model_name) else "0")
+PY
+		)
+	}
+fi
+
 intronmodel_normalize_use_tuned_mode() {
 	local raw_mode="$1"
 	local script_name="$2"
@@ -51,11 +82,13 @@ intronmodel_resolve_tuned_config_path() {
 	fi
 
 	local use_task_only_configs="0"
-	case "${tuned_model_name}" in
-		cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3)
-			use_task_only_configs="1"
-			;;
-	esac
+	if [[ -n "${tuned_model_name}" ]]; then
+		use_task_only_configs="$(
+			intronmodel_is_active_public_model \
+				"tuned_config.sh" \
+				"${tuned_model_name}"
+		)"
+	fi
 
 	if [[ "${use_task_only_configs}" != "1" && -n "${shared_path}" ]]; then
 		local shared_candidate="${shared_path}"
@@ -132,9 +165,19 @@ if isinstance(fixed_run_args, dict):
     pair_mode_value = fixed_run_args.get("pair_mode")
 if pair_mode_value is None and isinstance(sampled_params, dict):
     pair_mode_value = sampled_params.get("pair_mode")
+train_target_value = None
+if isinstance(fixed_run_args, dict):
+    train_target_value = fixed_run_args.get("train_target")
+if train_target_value is None and isinstance(sampled_params, dict):
+    train_target_value = sampled_params.get("train_target")
 independent_mode = (
     isinstance(pair_mode_value, str)
     and pair_mode_value.strip().lower() == "independent"
+)
+train_target = (
+    train_target_value.strip().lower()
+    if isinstance(train_target_value, str)
+    else ""
 )
 if isinstance(fixed_run_args, dict):
     for key in sorted(fixed_run_args):
@@ -149,6 +192,10 @@ if isinstance(fixed_run_args, dict):
 sequence_transform_value = sampled_params.pop("sequence_transform", None)
 mask_value = sampled_params.pop("mask", None)
 if independent_mode:
+    if train_target == "donor":
+        sampled_params.pop("acceptor_len", None)
+    elif train_target == "acceptor":
+        sampled_params.pop("donor_len", None)
     print("sequence_transform\tnone")
 elif mask_value is not None:
     print(f"sequence_transform\t{_mask_to_sequence_transform(mask_value)}")

@@ -1,0 +1,10 @@
+# gffcompare v0.12.10 | Command line was:
+#gffcompare -r viterbi_ref.gff viterbi.gff
+#
+
+#= Summary for dataset: viterbi.gff 
+#     Query mRNAs :       0 in       0 loci  (0 multi-exon transcripts)
+#            (0 multi-transcript loci, ~-nan transcripts per locus)
+
+ Total union super-loci across all input datasets: 0 
+0 out of 0 consensus transcripts written in gffcmp.combined.gtf (0 discarded as redundant)

@@ -41,6 +41,7 @@ _COMPILE_STRATEGY_ENV: str = "INTRONMODEL_TORCH_COMPILE_STRATEGY"
 _COMPILE_STICKY_MODE_ENV: str = "INTRONMODEL_TORCH_COMPILE_STICKY_MODE"
 _COMPILE_DISABLED_MODES_ENV: str = "INTRONMODEL_TORCH_COMPILE_DISABLED_MODES"
 _TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV: str = "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"
+_TORCHINDUCTOR_MAX_AUTOTUNE_ENV: str = "TORCHINDUCTOR_MAX_AUTOTUNE"
 
 _MAX_AUTOTUNE_MIN_SM_COUNT_CUDA: int = 68
 
@@ -279,20 +280,14 @@ def resolve_compile_enabled(
     del epochs
     if device != "cuda":
         return False
+    mode = normalize_high_level_compile_mode(compile_mode)
     if compile_flag:
         return True
-    mode = normalize_high_level_compile_mode(compile_mode)
-    if mode in {"on", "quick", "full"}:
+    if mode in {"on", "auto", "quick", "full"}:
         return True
-    if mode == "off":
-        return False
     if quick_phase:
         return False
-    ptxas_env = os.environ.get("TRITON_PTXAS_PATH")
-    ptxas_blackwell_env = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
-    if ptxas_env or ptxas_blackwell_env:
-        return True
-    return shutil.which("ptxas") is not None
+    return False
 
 
 def normalize_high_level_compile_mode(compile_mode: str) -> str:
@@ -331,8 +326,7 @@ def normalize_high_level_compile_mode(compile_mode: str) -> str:
     if resolved is not None:
         return resolved
 
-    choices = ", ".join(HIGH_LEVEL_COMPILE_MODE_CHOICES)
-    raise ValueError(f"--compile_mode must be one of: {choices}.")
+    raise ValueError("--compile_mode must be one of: off, on, auto, quick, full.")
 
 
 def _normalize_compile_mode_token(raw: str) -> str | None:
@@ -452,7 +446,9 @@ def _can_use_max_autotune_mode() -> bool:
 def _temporary_max_autotune_setting(enabled: bool) -> Iterator[None]:
     """Temporarily align env/config max-autotune flags with one compile mode."""
     key = _TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV
+    key_max = _TORCHINDUCTOR_MAX_AUTOTUNE_ENV
     previous = os.environ.get(key)
+    previous_max = os.environ.get(key_max)
     inductor_module = getattr(torch, "_inductor", None)
     config_obj = getattr(inductor_module, "config", None) if inductor_module else None
     max_autotune_prev = None
@@ -467,6 +463,7 @@ def _temporary_max_autotune_setting(enabled: bool) -> Iterator[None]:
             max_autotune_gemm_prev = value_obj
             setattr(config_obj, "max_autotune_gemm", enabled)
     os.environ[key] = "1" if enabled else "0"
+    os.environ[key_max] = "1" if enabled else "0"
     try:
         yield
     finally:
@@ -479,6 +476,10 @@ def _temporary_max_autotune_setting(enabled: bool) -> Iterator[None]:
             os.environ.pop(key, None)
         else:
             os.environ[key] = previous
+        if previous_max is None:
+            os.environ.pop(key_max, None)
+        else:
+            os.environ[key_max] = previous_max
 
 
 def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
@@ -566,31 +567,34 @@ def compile_model_with_fallback(
 
     _load_compile_runtime_cache_from_env()
     normalized_compile_mode = normalize_high_level_compile_mode(compile_mode)
-    if normalized_compile_mode in {"auto", "on", "quick"}:
-        strategy = "default-then-off"
-    elif normalized_compile_mode == "full":
-        strategy = "max-then-default-then-off"
-    else:
-        strategy_raw = os.environ.get(_COMPILE_STRATEGY_ENV, "default-then-off")
-        strategy = _normalize_compile_strategy(strategy_raw)
-    if strategy == "off":
+    if normalized_compile_mode == "off":
         _set_compile_sticky_mode(_COMPILE_MODE_OFF)
         return model, False, None, None
 
     if _COMPILE_STICKY_MODE_CACHE == _COMPILE_MODE_OFF:
         return model, False, None, None
 
-    if _COMPILE_STICKY_MODE_CACHE in _COMPILE_MODE_CHOICES:
-        candidate_modes = [_COMPILE_STICKY_MODE_CACHE]
-    else:
-        candidate_modes = list(_compile_modes_for_strategy(strategy))
+    preferred_modes: list[str] = [_COMPILE_MODE_REDUCE_OVERHEAD]
+    if normalized_compile_mode == "full" and _can_use_max_autotune_mode():
+        preferred_modes = [
+            _COMPILE_MODE_MAX_AUTOTUNE,
+            _COMPILE_MODE_REDUCE_OVERHEAD,
+        ]
+
+    candidate_modes: list[str] = []
+    sticky_mode = _COMPILE_STICKY_MODE_CACHE
+    if sticky_mode in preferred_modes:
+        candidate_modes.append(sticky_mode)
+    elif sticky_mode == _COMPILE_MODE_MAX_AUTOTUNE:
+        # Keep default policy stable: max-autotune is opt-in via full mode.
+        _set_compile_sticky_mode(None)
+    for mode in preferred_modes:
+        if mode not in candidate_modes:
+            candidate_modes.append(mode)
 
     last_error: Exception | None = None
     for mode in candidate_modes:
         if mode in _COMPILE_DISABLED_MODES_CACHE:
-            continue
-        if mode == _COMPILE_MODE_MAX_AUTOTUNE and not _can_use_max_autotune_mode():
-            _disable_compile_mode(mode)
             continue
         try:
             compiled_model = _compile_model_once_with_mode(model, mode)
@@ -814,6 +818,8 @@ def configure_torch_compile_runtime() -> None:
     max_autotune_gemm = getattr(inductor_config_obj, "max_autotune_gemm", None)
     if isinstance(max_autotune_gemm, bool) and max_autotune_gemm:
         setattr(inductor_config_obj, "max_autotune_gemm", False)
+    os.environ[_TORCHINDUCTOR_MAX_AUTOTUNE_ENV] = "0"
+    os.environ[_TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV] = "0"
     triton_config_obj = getattr(inductor_config_obj, "triton", None)
     if triton_config_obj is None:
         return

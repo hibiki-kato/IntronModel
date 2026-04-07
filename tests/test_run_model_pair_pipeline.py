@@ -181,6 +181,41 @@ class _DummyPublishedPairModelModule(_DummyPairModelModule):
         return super().infer_site(common_args=common_args, model_args=argparse.Namespace())
 
 
+def _write_cnn_v2_best_config(
+    path: Path,
+    *,
+    task: str,
+    published_name: str | None,
+    checkpoint_path: Path,
+    batch_size: int,
+    sampled_params: dict[str, object],
+) -> None:
+    """Write one cnn_v2 tuned best-config fixture."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": "ok",
+        "objective_metric": "pr_auc",
+        "objective_score": 0.8,
+        "metrics_json": "",
+        "sampled_params": {
+            "batch_size": batch_size,
+            **sampled_params,
+        },
+        "hparam_context": {
+            "fixed_run_args": {
+                "model": "cnn_v2",
+                "species": "Dmel",
+                "val_frac": 0.2,
+            }
+        },
+        f"{task}_checkpoint_path": str(checkpoint_path),
+    }
+    if published_name is not None:
+        payload["published_name"] = published_name
+        payload["published_at"] = "2026-04-06T00:00:00Z"
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def test_expand_unique_site_rows_maps_back_members() -> None:
     """Expand one unique site row into multiple original transcript introns."""
     unique_rows: list[dict[str, object]] = [
@@ -908,6 +943,485 @@ def test_run_pipeline_skip_train_uses_published_version_outputs(
     assert (data_root / "Dmel" / "intron_score" / "cnn_pair_v3.02.tsv").exists()
     assert (data_root / "Dmel" / "trans_score" / "cnn_pair_v3.02.tsv").exists()
     assert (data_root / "Dmel" / "eval_score" / "cnn_pair_v3.02.txt").exists()
+
+
+def test_run_pipeline_tuned_pair_run_uses_versioned_output_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    pair_checkpoint = model_root / "Dmel" / "pair" / "cnn_pair_v3.02.pt"
+    pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    pair_checkpoint.write_bytes(b"pair-v3")
+    pair_best = (
+        data_root
+        / "Dmel"
+        / "tuning"
+        / "cnn_pair_v3"
+        / "pair"
+        / "best_config.json"
+    )
+    pair_best.parent.mkdir(parents=True, exist_ok=True)
+    pair_best.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "objective_metric": "pr_auc",
+                "objective_score": 0.81,
+                "published_name": "cnn_pair_v3.02",
+                "published_at": "2026-03-29T01:00:00Z",
+                "metrics_json": "data/Dmel/learning_metric/cnn_pair_v3.02.train.json",
+                "sampled_params": {"batch_size": 512},
+                "hparam_context": {
+                    "fixed_run_args": {
+                        "model": "cnn_pair_v3",
+                        "species": "Dmel",
+                        "train_target": "pair",
+                        "val_frac": 0.25,
+                    }
+                },
+                "pair_checkpoint_path": str(pair_checkpoint),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    write_version_history(
+        data_root,
+        "Dmel",
+        "cnn_pair_v3",
+        [
+            VersionHistoryEntry(
+                version=2,
+                published_name="cnn_pair_v3.02",
+                published_at="2026-03-29T01:00:00Z",
+                source_best_config="data/Dmel/tuning/cnn_pair_v3/pair/best_config.json",
+                objective_metric="pr_auc",
+                objective_score="0.81",
+                updated_side="pair",
+                carry_forward_side="",
+                donor_checkpoint_path="",
+                acceptor_checkpoint_path="",
+                pair_checkpoint_path="model/Dmel/pair/cnn_pair_v3.02.pt",
+                metrics_json="data/Dmel/learning_metric/cnn_pair_v3.02.train.json",
+                archive_status="live",
+            )
+        ],
+    )
+
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("tx1\t1\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+
+    parser = run_model._build_parser(
+        selected_model="cnn_pair_v3",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_pair_v3",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--train_target",
+            "pair",
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--ref_gff",
+            str(ref_gff),
+            "--pair_tuned_config_path",
+            str(pair_best),
+        ]
+    )
+    args.batch_size = 512
+    args.val_frac = 0.25
+
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: _DummyPairModelModule(),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("tx1", 2): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 0, ("tx1", 2): 1},
+    )
+
+    run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+
+    assert "Versioned output targets: cnn_pair_v3.02" in captured.out
+    assert (data_root / "Dmel" / "site_score" / "cnn_pair_v3.02.tsv").exists()
+    assert (data_root / "Dmel" / "intron_score" / "cnn_pair_v3.02.tsv").exists()
+    assert (data_root / "Dmel" / "trans_score" / "cnn_pair_v3.02.tsv").exists()
+    assert (data_root / "Dmel" / "eval_score" / "cnn_pair_v3.02.txt").exists()
+    assert (
+        data_root / "Dmel" / "learning_metric" / "cnn_pair_v3.02.train.json"
+    ).exists()
+
+
+def test_run_pipeline_tuned_cnn_v2_run_uses_versioned_output_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    donor_checkpoint = model_root / "Dmel" / "donor" / "cnn_v2.01.pt"
+    acceptor_checkpoint = model_root / "Dmel" / "acceptor" / "cnn_v2.01.pt"
+    donor_best = data_root / "Dmel" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    acceptor_best = (
+        data_root / "Dmel" / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
+    )
+    _write_cnn_v2_best_config(
+        donor_best,
+        task="donor",
+        published_name="cnn_v2.01",
+        checkpoint_path=donor_checkpoint,
+        batch_size=512,
+        sampled_params={
+            "donor_len": 50,
+            "acceptor_len": 70,
+            "input_mode": "kmer3",
+        },
+    )
+    _write_cnn_v2_best_config(
+        acceptor_best,
+        task="acceptor",
+        published_name="cnn_v2.01",
+        checkpoint_path=acceptor_checkpoint,
+        batch_size=256,
+        sampled_params={
+            "donor_len": 90,
+            "acceptor_len": 100,
+            "input_mode": "onehot",
+        },
+    )
+    write_version_history(
+        data_root,
+        "Dmel",
+        "cnn_v2",
+        [
+            VersionHistoryEntry(
+                version=1,
+                published_name="cnn_v2.01",
+                published_at="2026-04-06T00:00:00Z",
+                source_best_config="data/Dmel/tuning/cnn_v2/donor/best_config.json",
+                objective_metric="pr_auc",
+                objective_score="0.81",
+                updated_side="donor",
+                carry_forward_side="acceptor",
+                donor_checkpoint_path="model/Dmel/donor/cnn_v2.01.pt",
+                acceptor_checkpoint_path="model/Dmel/acceptor/cnn_v2.01.pt",
+                pair_checkpoint_path="",
+                metrics_json="data/Dmel/learning_metric/cnn_v2.01.train.json",
+                archive_status="live",
+            )
+        ],
+    )
+
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("tx1\t1\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: _DummyCnnV2PairRowsModule(),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("tx1", 2): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 1, ("tx1", 2): 0},
+    )
+
+    parser = run_model._build_parser(
+        selected_model="cnn_v2",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_v2",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--ref_gff",
+            str(ref_gff),
+            "--donor_tuned_config_path",
+            str(donor_best),
+            "--acceptor_tuned_config_path",
+            str(acceptor_best),
+        ]
+    )
+    args.batch_size = 64
+    args.donor_batch_size = 512
+    args.acceptor_batch_size = 256
+    args.val_frac = 0.2
+
+    run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+
+    assert "Versioned output targets: cnn_v2.01" in captured.out
+    assert (data_root / "Dmel" / "site_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "intron_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "trans_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "eval_score" / "cnn_v2.01.txt").exists()
+    assert (data_root / "Dmel" / "learning_metric" / "cnn_v2.01.train.json").exists()
+
+
+def test_run_pipeline_tuned_cnn_v2_run_uses_version_history_when_best_config_lacks_published_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    donor_checkpoint = model_root / "Dmel" / "donor" / "cnn_v2.01.pt"
+    acceptor_checkpoint = model_root / "Dmel" / "acceptor" / "cnn_v2.01.pt"
+    donor_best = data_root / "Dmel" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    acceptor_best = (
+        data_root / "Dmel" / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
+    )
+    _write_cnn_v2_best_config(
+        donor_best,
+        task="donor",
+        published_name=None,
+        checkpoint_path=donor_checkpoint,
+        batch_size=512,
+        sampled_params={
+            "donor_len": 50,
+            "acceptor_len": 70,
+            "input_mode": "kmer3",
+        },
+    )
+    _write_cnn_v2_best_config(
+        acceptor_best,
+        task="acceptor",
+        published_name=None,
+        checkpoint_path=acceptor_checkpoint,
+        batch_size=256,
+        sampled_params={
+            "donor_len": 90,
+            "acceptor_len": 100,
+            "input_mode": "onehot",
+        },
+    )
+    write_version_history(
+        data_root,
+        "Dmel",
+        "cnn_v2",
+        [
+            VersionHistoryEntry(
+                version=1,
+                published_name="cnn_v2.01",
+                published_at="2026-04-06T00:00:00Z",
+                source_best_config="data/Dmel/tuning/cnn_v2/donor/best_config.json",
+                objective_metric="pr_auc",
+                objective_score="0.81",
+                updated_side="donor",
+                carry_forward_side="acceptor",
+                donor_checkpoint_path="model/Dmel/donor/cnn_v2.01.pt",
+                acceptor_checkpoint_path="model/Dmel/acceptor/cnn_v2.01.pt",
+                pair_checkpoint_path="",
+                metrics_json="data/Dmel/learning_metric/cnn_v2.01.train.json",
+                archive_status="live",
+            )
+        ],
+    )
+
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("tx1\t1\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: _DummyCnnV2PairRowsModule(),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("tx1", 2): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 1, ("tx1", 2): 0},
+    )
+
+    parser = run_model._build_parser(
+        selected_model="cnn_v2",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_v2",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--ref_gff",
+            str(ref_gff),
+            "--donor_tuned_config_path",
+            str(donor_best),
+            "--acceptor_tuned_config_path",
+            str(acceptor_best),
+        ]
+    )
+    args.batch_size = 64
+    args.donor_batch_size = 512
+    args.acceptor_batch_size = 256
+    args.val_frac = 0.2
+
+    run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+
+    assert "Versioned output targets: cnn_v2.01" in captured.out
+    assert (data_root / "Dmel" / "site_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "intron_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "trans_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "eval_score" / "cnn_v2.01.txt").exists()
+    assert (data_root / "Dmel" / "learning_metric" / "cnn_v2.01.train.json").exists()
 
 
 def test_run_pipeline_pair_model_uses_unique_intron_scores_and_maps_back(

@@ -352,14 +352,11 @@ if [[ "${RUN_INTRON_EVAL}" == "1" ]]; then
 		if [[ -z "${species}" ]]; then
 			continue
 		fi
-		cnn_v2_site_score="${PROJECT_ROOT}/data/${species}/site_score/cnn_v2.tsv"
-		if [[ -f "${cnn_v2_site_score}" ]]; then
-			bash "${PROJECT_ROOT}/run/eval_intron_pr_auc.sh" \
-				--species "${species}" \
-				--site-score-tsv "${cnn_v2_site_score}" \
-				--score-source auto \
-				--intron-score-op "*"
-		fi
+		bash "${PROJECT_ROOT}/run/eval_intron_pr_auc.sh" \
+			--species "${species}" \
+			--site-score-tsv "cnn_v2" \
+			--score-source auto \
+			--intron-score-op "*"
 	done
 fi
 

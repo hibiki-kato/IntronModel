@@ -361,6 +361,18 @@ def test_common_resolve_latest_published_name_uses_data_root_override(
     assert run.stdout.strip() == "cnn_pair_v3.02"
 
 
+def test_common_is_active_public_model_supports_generic_models() -> None:
+    run = _run_common_shell(
+        'printf "%s\\n%s\\n%s\\n" '
+        '"$(intronmodel_is_active_public_model test_common.sh cnn_resdil)" '
+        '"$(intronmodel_is_active_public_model test_common.sh bilstm_pair)" '
+        '"$(intronmodel_is_active_public_model test_common.sh nonexistent_model)"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip().splitlines() == ["1", "1", "0"]
+
+
 def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:
     run = _run_common_shell(
         'printf "%s\\n%s\\n" '

@@ -124,6 +124,43 @@ fi
 
 python_bin="$(intronmodel_resolve_python_bin "eval_intron_pr_auc.sh")"
 
+resolve_site_score_input() {
+	local input_value="$1"
+	local site_score_dir="$2"
+	local species="$3"
+	local published_candidate=""
+
+	if [[ -f "${input_value}" ]]; then
+		echo "${input_value}"
+		return 0
+	fi
+
+	local candidate="${site_score_dir}/${input_value}"
+	if [[ -f "${candidate}" ]]; then
+		echo "${candidate}"
+		return 0
+	fi
+	if [[ "${input_value}" != *.tsv && -f "${candidate}.tsv" ]]; then
+		echo "${candidate}.tsv"
+		return 0
+	fi
+
+	published_candidate="$(
+		intronmodel_resolve_latest_published_data_path \
+			"eval_intron_pr_auc.sh" \
+			"${species}" \
+			"${input_value}" \
+			"${site_score_dir}" \
+			".tsv" || true
+	)"
+	if [[ -n "${published_candidate}" ]]; then
+		echo "${published_candidate}"
+		return 0
+	fi
+
+	return 1
+}
+
 IFS=',' read -r -a species_tokens <<< "${SPECIES}"
 for raw_species in "${species_tokens[@]}"; do
 	token="$(printf '%s' "${raw_species}" | tr -d '[:space:]')"
@@ -174,11 +211,14 @@ for raw_species in "${species_tokens[@]}"; do
 
 	site_files=()
 	if [[ -n "${SITE_SCORE_TSV}" ]]; then
-		if [[ ! -f "${SITE_SCORE_TSV}" ]]; then
+		resolved_site_score_tsv="$(
+			resolve_site_score_input "${SITE_SCORE_TSV}" "${site_score_dir}" "${species}" || true
+		)"
+		if [[ -z "${resolved_site_score_tsv}" || ! -f "${resolved_site_score_tsv}" ]]; then
 			echo "site_score TSV not found: ${SITE_SCORE_TSV}" >&2
 			exit 4
 		fi
-		site_files=("${SITE_SCORE_TSV}")
+		site_files=("${resolved_site_score_tsv}")
 	else
 		shopt -s nullglob
 		site_files=("${site_score_dir}"/${SITE_SCORE_PATTERN})

@@ -2438,6 +2438,27 @@ def test_maybe_update_global_best_skips_publish_on_missing_checkpoint(
     assert "Checkpoint not found: missing.pt" in captured.out
 
 
+def test_extract_model_name_from_best_update_supports_generic_site_model(
+    tmp_path: Path,
+) -> None:
+    best_path = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_resdil"
+        / "donor"
+        / "best_config.json"
+    )
+
+    resolved = hparam_search._extract_model_name_from_best_update(
+        best_path,
+        hparam_context=None,
+    )
+
+    assert resolved == "cnn_resdil"
+
+
 def test_print_trial_result_includes_failure_reason(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

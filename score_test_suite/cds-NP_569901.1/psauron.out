@@ -1,0 +1,41 @@
+PSAURON version 1.0.4
+System info
+3.8.8 (default, May  6 2021, 21:17:49) 
+[GCC 10.3.0] 
+
+                                             _______________________
+   _______________________-------------------                       `\\
+ /:--__                                                              |
+||< > |                                   ___________________________/
+| \__/_________________-------------------                          |
+ |                                                                  |
+  |                                                                  |
+  |       One Model to rule them all, One Model to find them,        |
+  |      One Model to score them all and in the Paper cite them.     |
+   |                                                                  |
+   |                                              ____________________|_
+  |  ___________________-------------------------                      `\\
+  |/`--_                                                                 |
+  ||[ ]||                                            ___________________/
+   \===/___________________--------------------------
+
+
+Loading TCN model...
+Loaded...
+Loading CDS FASTA...
+Loading transcripts at cds-NP_569901.1.fa
+Loaded...
+
+Loaded 1 CDS sequences...
+Translating CDS sequences in all reading frames...
+Excluding 0 proteins with length below m amino acids from analysis, m = 5 
+
+No GPU detected, running TCN model on CPU...
+Scoring in-frame sequence...
+Scoring out-of-frame sequence...
+
+psauron score: 100.0
+
+Writing detailed output file to ./psauron_score.csv
+NOTE: all_prob cells in .csv output may exceed Microsoft Excel max cell size limit
+Done

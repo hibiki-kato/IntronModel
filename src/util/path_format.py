@@ -49,7 +49,11 @@ def relativize_path_string(
     if str(path).strip() == "":
         return ""
     if not path.is_absolute():
-        return os.path.normpath(str(path))
+        trimmed = _trim_embedded_repository_prefix(
+            os.path.normpath(str(path)),
+            project_root=project_root,
+        )
+        return trimmed
     root = repository_root() if project_root is None else project_root.resolve()
     absolute = path.resolve(strict=False)
     return os.path.relpath(absolute, root)
@@ -203,3 +207,37 @@ def _looks_like_filesystem_path(raw_value: str) -> bool:
     if os.path.altsep is not None and os.path.altsep in raw_value:
         return True
     return Path(raw_value).is_absolute()
+
+
+def _trim_embedded_repository_prefix(
+    raw_path: str,
+    *,
+    project_root: Path | None = None,
+) -> str:
+    """Trim one serialized path down to the repository-relative suffix.
+
+    This handles legacy metadata strings such as
+    ``../../../../export/<user>/intronmodel/data/...`` which are technically
+    relative paths but clearly embed an old absolute repository root.
+    """
+    normalized = os.path.normpath(raw_path)
+    path = Path(normalized)
+    parts = path.parts
+    if not parts:
+        return normalized
+
+    root = repository_root() if project_root is None else project_root.resolve()
+    repo_markers = {root.name.lower(), "intronmodel"}
+    lowered_parts = [part.lower() for part in parts]
+    for index, part in enumerate(lowered_parts):
+        if part not in repo_markers:
+            continue
+        suffix_parts = parts[index + 1 :]
+        if suffix_parts:
+            return os.path.normpath(str(Path(*suffix_parts)))
+
+    for index, part in enumerate(parts):
+        if part in _REPOSITORY_ROOT_HINTS and part not in {".", ".."}:
+            suffix_parts = parts[index:]
+            return os.path.normpath(str(Path(*suffix_parts)))
+    return normalized

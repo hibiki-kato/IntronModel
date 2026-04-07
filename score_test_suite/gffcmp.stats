@@ -1,0 +1,30 @@
+# gffcompare v0.12.10 | Command line was:
+#gffcompare -r viterbi_ref.gff viterbi.gff
+#
+
+#= Summary for dataset: viterbi.gff 
+#     Query mRNAs :      10 in       1 loci  (9 multi-exon transcripts)
+#            (1 multi-transcript loci, ~10.0 transcripts per locus)
+# Reference mRNAs :       6 in       1 loci  (6 multi-exon)
+# Super-loci w/ reference transcripts:        1
+#-----------------| Sensitivity | Precision  |
+        Base level:    99.2     |   100.0    |
+        Exon level:    92.1     |    77.8    |
+      Intron level:    93.8     |    85.7    |
+Intron chain level:    66.7     |    44.4    |
+  Transcript level:    66.7     |    40.0    |
+       Locus level:   100.0     |   100.0    |
+
+     Matching intron chains:       4
+       Matching transcripts:       4
+              Matching loci:       1
+
+          Missed exons:       0/38	(  0.0%)
+           Novel exons:       0/45	(  0.0%)
+        Missed introns:       0/32	(  0.0%)
+         Novel introns:       0/35	(  0.0%)
+           Missed loci:       0/1	(  0.0%)
+            Novel loci:       0/1	(  0.0%)
+
+ Total union super-loci across all input datasets: 1 
+10 out of 10 consensus transcripts written in gffcmp.annotated.gtf (0 discarded as redundant)

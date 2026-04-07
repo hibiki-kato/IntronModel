@@ -560,6 +560,7 @@ def train_task_model(
     pos_path: str,
     neg_path: str,
     checkpoint_path: str,
+    init_checkpoint_path: Optional[str],
     window_len: int,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
@@ -621,6 +622,8 @@ def train_task_model(
         Negative training examples path.
     checkpoint_path : str
         Output checkpoint path.
+    init_checkpoint_path : str | None
+        Optional warm-start checkpoint path used to initialize model weights.
     window_len : int
         Sequence window length.
     donor_len : int | None
@@ -790,6 +793,8 @@ def train_task_model(
     checkpoint_dir = os.path.dirname(checkpoint_path)
     if checkpoint_dir:
         os.makedirs(checkpoint_dir, exist_ok=True)
+    if init_checkpoint_path is not None and init_checkpoint_path.strip() == "":
+        init_checkpoint_path = None
 
     examples = _load_task_examples_with_transform(
         pos_path=pos_path,
@@ -962,6 +967,33 @@ def train_task_model(
                 dropout=dropout,
                 fc_hidden=fc_hidden,
             ).to(device)
+
+            if init_checkpoint_path is not None:
+                ckpt = torch.load(
+                    init_checkpoint_path,
+                    map_location=device,
+                    weights_only=False,
+                )
+                if not isinstance(ckpt, dict):
+                    raise ValueError(
+                        f"Invalid init checkpoint payload: {init_checkpoint_path}"
+                    )
+                state_dict_obj = ckpt.get("model_state", ckpt)
+                if not isinstance(state_dict_obj, dict):
+                    raise ValueError(
+                        f"Init checkpoint missing model_state: {init_checkpoint_path}"
+                    )
+                state_dict = {
+                    str(k): v
+                    for k, v in state_dict_obj.items()
+                    if isinstance(v, torch.Tensor)
+                }
+                if not state_dict:
+                    raise ValueError(
+                        f"Init checkpoint has no tensor weights: {init_checkpoint_path}"
+                    )
+                model.load_state_dict(state_dict)
+                print(f"[{task}] initialized from checkpoint: {init_checkpoint_path}")
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
@@ -1371,8 +1403,9 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
         head_type=head_type,
         dropout=dropout,
         fc_hidden=fc_hidden,
-    ).to(device)
+    )
     model.load_state_dict(state_dict)
+    model = model.to(device)
     model.eval()
     return model, ckpt
 
@@ -1488,9 +1521,7 @@ def infer_site_scores(
     if len(donor_scores) != len(donor_seqs):
         raise ValueError("Donor score count does not match donor sequence count.")
     if len(acceptor_scores) != len(acceptor_seqs):
-        raise ValueError(
-            "Acceptor score count does not match acceptor sequence count."
-        )
+        raise ValueError("Acceptor score count does not match acceptor sequence count.")
 
     out_rows: List[Dict[str, object]] = []
     donor_idx = 0
@@ -2208,6 +2239,9 @@ def train(
             pos_path=train_pos_path,
             neg_path=train_neg_path,
             checkpoint_path=task_checkpoint_paths[task],
+            init_checkpoint_path=(
+                str(getattr(common_args, f"{task}_init_checkpoint_path", "")) or None
+            ),
             window_len=task_window_len[task],
             donor_len=donor_len,
             acceptor_len=acceptor_len,
@@ -2315,9 +2349,7 @@ def train(
         "max_epochs": model_args.max_epochs,
         "early_stop_patience": early_stop_patience,
         "early_stop_min_delta": early_stop_min_delta,
-        "validation_metric": resolve_validation_metric(
-            model_args.validation_metric
-        ),
+        "validation_metric": resolve_validation_metric(model_args.validation_metric),
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,

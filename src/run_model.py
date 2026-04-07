@@ -20,6 +20,7 @@ from typing import Mapping, Optional, Sequence
 
 from models.registry import available_models, load_model_module
 from util.checkpoint_prune import prune_species_model_checkpoints
+from util.checkpoint_io import read_json_object
 from util.data_proc import (
     NAME_FIELD_CHOICES,
     NAME_FIELD_LABELS,
@@ -39,6 +40,7 @@ from util.model_task_paths import checkpoint_tasks_for_model
 from util.model_runtime import (
     HIGH_LEVEL_COMPILE_MODE_CHOICES,
     is_compile_runtime_error as _is_compile_runtime_error,
+    normalize_high_level_compile_mode as _normalize_high_level_compile_mode,
     record_compile_runtime_failure as _record_compile_runtime_failure,
 )
 from util.process_title import (
@@ -70,7 +72,11 @@ from util.unique_intron import (
     load_unique_map,
 )
 from util.versioned_artifacts import (
+    refresh_published_version_if_improved,
     is_active_public_model,
+    normalize_published_run_checkpoints,
+    resolve_latest_published_name,
+    resolve_published_run_assets,
     resolve_latest_published_run_assets,
 )
 
@@ -152,6 +158,26 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
 MAX_CHECKPOINT_STEM_LENGTH: int = 200
 CHECKPOINT_STEM_HASH_CHARS: int = 12
 DEFAULT_SITE_COLLAPSE_SCORE_TOLERANCE: float = 1e-6
+TUNED_IDENTITY_IGNORED_FIXED_RUN_ARGS: frozenset[str] = frozenset(
+    {"seed", "script_name", "train_target"}
+)
+TUNED_IDENTITY_IGNORED_SAMPLED_PARAMS: frozenset[str] = frozenset(
+    {
+        "model",
+        "species",
+        "seed",
+        "train_target",
+        "donor_len",
+        "acceptor_len",
+        "input_mode",
+        "pair_mode",
+        "sequence_transform",
+        "embedding_dim",
+        "bpe_pretrained_model_name",
+        "bpe_pretrained_revision",
+        "bpe_trust_remote_code",
+    }
+)
 
 
 def _set_csv_field_limit_max() -> None:
@@ -211,6 +237,9 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--intron_output_tsv", default=None)
     parser.add_argument("--transcript_output_tsv", default=None)
     parser.add_argument("--metrics_json", default=None)
+    parser.add_argument("--donor_tuned_config_path", default=None)
+    parser.add_argument("--acceptor_tuned_config_path", default=None)
+    parser.add_argument("--pair_tuned_config_path", default=None)
     parser.add_argument("--class_file", default=None)
     parser.add_argument(
         "--ref_gff",
@@ -1093,10 +1122,7 @@ def _apply_skip_train_published_version(
         setattr(args, asset_key, raw_path)
 
     published_name = str(published_assets["published_name"])
-    print(
-        "[pipeline] Skip training uses published version: "
-        f"{published_name}"
-    )
+    print(f"[pipeline] Skip training uses published version: {published_name}")
     return resolved_paths
 
 
@@ -1385,6 +1411,404 @@ def _safe_float(value: object, default: float = float("-inf")) -> float:
     return default
 
 
+def _normalize_hparam_value(value: object) -> str:
+    """Normalize one CLI or JSON hyperparameter value for equality checks."""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return format(value, ".15g")
+    if isinstance(value, (list, tuple)):
+        return ",".join(_normalize_hparam_value(item) for item in value)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_tuned_config_paths(
+    *,
+    args: argparse.Namespace,
+    model_tasks: Sequence[str],
+) -> dict[str, Path]:
+    """Collect explicitly provided tuned-config paths for active tasks."""
+    resolved: dict[str, Path] = {}
+    for task in model_tasks:
+        raw_path = getattr(args, f"{task}_tuned_config_path", None)
+        if not isinstance(raw_path, str) or raw_path.strip() == "":
+            continue
+        resolved[task] = Path(raw_path).resolve()
+    return resolved
+
+
+def _load_tuned_payloads(
+    *,
+    args: argparse.Namespace,
+    model_tasks: Sequence[str],
+) -> dict[str, dict[str, object]]:
+    """Load tuned best-config payloads keyed by task."""
+    payloads: dict[str, dict[str, object]] = {}
+    for task, path in _resolve_tuned_config_paths(
+        args=args, model_tasks=model_tasks
+    ).items():
+        payload = read_json_object(path)
+        if payload is None or payload.get("status") != "ok":
+            continue
+        payloads[task] = dict(payload)
+    return payloads
+
+
+def _resolve_tuned_runtime_value(
+    *,
+    args: argparse.Namespace,
+    task: str,
+    tuned_key: str,
+) -> object:
+    """Resolve one runtime value corresponding to a tuned key."""
+    prefixed_name = f"{task}_{tuned_key}"
+    if hasattr(args, prefixed_name):
+        prefixed_value = getattr(args, prefixed_name)
+        if prefixed_value is not None:
+            return prefixed_value
+    return getattr(args, tuned_key, None)
+
+
+def _tuned_identity_matches_args(
+    *,
+    args: argparse.Namespace,
+    model_tasks: Sequence[str],
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """Return whether current runtime args match tuned hparam identity."""
+    if not tuned_payloads:
+        return False
+
+    for task in model_tasks:
+        payload = tuned_payloads.get(task)
+        if payload is None:
+            continue
+        sampled_params = payload.get("sampled_params")
+        if isinstance(sampled_params, Mapping):
+            for tuned_key, tuned_value in sampled_params.items():
+                key_name = str(tuned_key).strip()
+                if (
+                    key_name == ""
+                    or key_name == "train_target"
+                    or key_name in TUNED_IDENTITY_IGNORED_SAMPLED_PARAMS
+                ):
+                    continue
+                runtime_value = _resolve_tuned_runtime_value(
+                    args=args,
+                    task=task,
+                    tuned_key=key_name,
+                )
+                if _normalize_hparam_value(runtime_value) != _normalize_hparam_value(
+                    tuned_value
+                ):
+                    return False
+
+        hparam_context = payload.get("hparam_context")
+        if not isinstance(hparam_context, Mapping):
+            continue
+        fixed_run_args = hparam_context.get("fixed_run_args")
+        if not isinstance(fixed_run_args, Mapping):
+            continue
+        for key, tuned_value in fixed_run_args.items():
+            key_name = str(key).strip()
+            if (
+                key_name == ""
+                or key_name in TUNED_IDENTITY_IGNORED_FIXED_RUN_ARGS
+                or not hasattr(args, key_name)
+            ):
+                continue
+            runtime_value = getattr(args, key_name)
+            if _normalize_hparam_value(runtime_value) != _normalize_hparam_value(
+                tuned_value
+            ):
+                return False
+    return True
+
+
+def _resolve_published_name_from_tuned_payloads(
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+) -> str | None:
+    """Resolve one shared published version name from tuned payloads."""
+    published_names = {
+        str(payload.get("published_name", "")).strip()
+        for payload in tuned_payloads.values()
+        if str(payload.get("published_name", "")).strip() != ""
+    }
+    if not published_names:
+        return None
+    if len(published_names) != 1:
+        raise ValueError(
+            "Tuned configs disagree on published_name; cannot warm-start safely."
+        )
+    return next(iter(published_names))
+
+
+def _resolve_effective_published_name_for_tuned_run(
+    *,
+    args: argparse.Namespace,
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+    model_tasks: Sequence[str],
+) -> str | None:
+    """Resolve one published name for tuned runs.
+
+    Prefer the explicit ``published_name`` stored in tuned payloads. When that
+    annotation is missing, fall back to the latest live published version from
+    version history, but only for runs whose effective tuned identity matches
+    the current CLI arguments.
+    """
+    published_name = _resolve_published_name_from_tuned_payloads(tuned_payloads)
+    if published_name is not None:
+        return published_name
+    if not is_active_public_model(str(args.model)):
+        return None
+    if not _tuned_identity_matches_args(
+        args=args,
+        model_tasks=model_tasks,
+        tuned_payloads=tuned_payloads,
+    ):
+        return None
+    data_root = Path(species_data_dirs(str(args.species))["base"]).parent
+    return resolve_latest_published_name(
+        data_root=data_root,
+        species=str(args.species),
+        model_name=str(args.model),
+    )
+
+
+def _resolve_required_published_name_for_tuned_continue(
+    *,
+    args: argparse.Namespace,
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+) -> str:
+    """Resolve the published version name required for tuned continue runs.
+
+    For ``--continue_train`` with tuned configs, warm-start must use the
+    versioned checkpoint that corresponds to the tuned configuration identity.
+    Therefore this resolver requires an explicit ``published_name`` annotation
+    in tuned payloads and does not fall back to "latest" publication.
+
+    Raises
+    ------
+    ValueError
+        If published_name is missing or inconsistent across tuned payloads.
+    """
+    published_name = _resolve_published_name_from_tuned_payloads(tuned_payloads)
+    if published_name is not None:
+        return published_name
+    data_root = Path(species_data_dirs(str(args.species))["base"]).parent
+    latest = resolve_latest_published_name(
+        data_root=data_root,
+        species=str(args.species),
+        model_name=str(args.model),
+    )
+    if latest is None:
+        raise ValueError(
+            "Tuned continue-train requires published_name in best_config.json, "
+            "but none was found and no published version history exists for "
+            f"species={args.species}, model={args.model}. "
+            "Seed one published version first (versioning rollout), or add "
+            "published_name to tuned best_config files."
+        )
+    raise ValueError(
+        "Tuned continue-train requires published_name in best_config.json "
+        f"for each active task, but no published_name was found "
+        f"(species={args.species}, model={args.model}, latest={latest})."
+    )
+
+
+def _resolve_tuned_published_assets(
+    *,
+    args: argparse.Namespace,
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+    model_tasks: Sequence[str],
+    allow_missing_checkpoints: bool,
+) -> tuple[str, dict[str, str]] | None:
+    """Resolve published assets for one tuned run when identity matches."""
+    published_name = _resolve_effective_published_name_for_tuned_run(
+        args=args,
+        tuned_payloads=tuned_payloads,
+        model_tasks=model_tasks,
+    )
+    if published_name is None:
+        return None
+
+    published_assets = resolve_published_run_assets(
+        project_root=Path(project_root()),
+        species=str(args.species),
+        model_name=str(args.model),
+        published_name=published_name,
+        allow_missing_checkpoints=allow_missing_checkpoints,
+    )
+    if published_assets is None:
+        return None
+    return published_name, published_assets
+
+
+def _apply_published_output_targets(
+    *,
+    args: argparse.Namespace,
+    published_assets: Mapping[str, str],
+) -> None:
+    """Fill unset output paths from one published-asset payload."""
+    if not args.site_output_tsv:
+        args.site_output_tsv = published_assets["site_output_tsv"]
+    if not args.intron_output_tsv:
+        args.intron_output_tsv = published_assets["intron_output_tsv"]
+    if not args.transcript_output_tsv:
+        args.transcript_output_tsv = published_assets["transcript_output_tsv"]
+    if not args.eval_output_txt:
+        args.eval_output_txt = published_assets["eval_output_txt"]
+    if getattr(args, "metrics_json", None) in {None, ""}:
+        args.metrics_json = published_assets["metrics_json"]
+
+
+def _apply_tuned_continue_warm_start(
+    *,
+    args: argparse.Namespace,
+    checkpoint_paths: dict[str, str],
+    model_tasks: Sequence[str],
+    tasks_to_train: Sequence[str],
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """Inject published checkpoints as init weights for tuned continue runs."""
+    if not tuned_payloads:
+        return False
+
+    published_name = _resolve_required_published_name_for_tuned_continue(
+        args=args,
+        tuned_payloads=tuned_payloads,
+    )
+    normalized = normalize_published_run_checkpoints(
+        project_root=Path(project_root()),
+        species=str(args.species),
+        model_name=str(args.model),
+        published_name=published_name,
+    )
+    if normalized:
+        for task_name, source_path in normalized.items():
+            print(
+                "[pipeline] Normalized published checkpoint: "
+                f"task={task_name} source={source_path} "
+                f"target={published_name}.pt"
+            )
+    published_assets = resolve_published_run_assets(
+        project_root=Path(project_root()),
+        species=str(args.species),
+        model_name=str(args.model),
+        published_name=published_name,
+        allow_missing_checkpoints=False,
+    )
+    if published_assets is None:
+        raise ValueError(
+            "Published assets were not found for tuned continue-train "
+            f"(species={args.species}, model={args.model}, "
+            f"published_name={published_name})."
+        )
+
+    for task in tasks_to_train:
+        asset_key = f"{task}_checkpoint_path"
+        checkpoint_path = published_assets.get(asset_key)
+        if not isinstance(checkpoint_path, str) or checkpoint_path.strip() == "":
+            return False
+
+    for task in tasks_to_train:
+        checkpoint_path = str(published_assets[f"{task}_checkpoint_path"])
+        setattr(args, f"{task}_init_checkpoint_path", checkpoint_path)
+        setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
+        print(
+            "[pipeline] Continue warm-start source: "
+            f"task={task} checkpoint={checkpoint_path}"
+        )
+
+    print(
+        "[pipeline] Continue training (--continue_train): "
+        f"use published checkpoints from {published_name} as initialization."
+    )
+    return True
+
+
+def _resolve_tuned_published_checkpoint_targets(
+    *,
+    args: argparse.Namespace,
+    model_tasks: Sequence[str],
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+) -> dict[str, str] | None:
+    """Resolve published checkpoint paths as canonical save targets.
+
+    When one run exactly matches the tuned hparam identity, the checkpoint
+    destination should be the published version path itself rather than one
+    transient stem-specific raw filename.
+    """
+    resolved = _resolve_tuned_published_assets(
+        args=args,
+        tuned_payloads=tuned_payloads,
+        model_tasks=model_tasks,
+        allow_missing_checkpoints=True,
+    )
+    if resolved is None:
+        return None
+    _published_name, published_assets = resolved
+
+    resolved_paths: dict[str, str] = {}
+    for task in model_tasks:
+        asset_key = f"{task}_checkpoint_path"
+        checkpoint_path = published_assets.get(asset_key)
+        if not isinstance(checkpoint_path, str) or checkpoint_path.strip() == "":
+            return None
+        resolved_paths[task] = checkpoint_path
+    return resolved_paths
+
+
+def _apply_tuned_published_output_targets(
+    *,
+    args: argparse.Namespace,
+    tuned_payloads: Mapping[str, Mapping[str, object]],
+    model_tasks: Sequence[str],
+) -> str | None:
+    """Point pipeline outputs at the published version when identity matches."""
+    resolved = _resolve_tuned_published_assets(
+        args=args,
+        tuned_payloads=tuned_payloads,
+        model_tasks=model_tasks,
+        allow_missing_checkpoints=True,
+    )
+    if resolved is None:
+        return None
+    published_name, published_assets = resolved
+    _apply_published_output_targets(args=args, published_assets=published_assets)
+    return published_name
+
+
+def _build_refresh_task_payloads(
+    *,
+    summary: Mapping[str, object],
+    tasks_to_train: Sequence[str],
+    metrics_json: str,
+) -> dict[str, dict[str, object]]:
+    """Build version-refresh payloads from one completed training summary."""
+    payloads: dict[str, dict[str, object]] = {}
+    for task in tasks_to_train:
+        task_summary = summary.get(task)
+        if not isinstance(task_summary, Mapping):
+            continue
+        checkpoint = str(task_summary.get("checkpoint", "")).strip()
+        metric = str(task_summary.get("best_metric", "")).strip()
+        score = task_summary.get("best_score")
+        if checkpoint == "" or metric == "" or score is None:
+            continue
+        payloads[task] = {
+            f"{task}_checkpoint_path": checkpoint,
+            "objective_metric": metric,
+            "objective_score": score,
+            "metrics_json": metrics_json,
+        }
+    return payloads
+
+
 def _attach_validation_metadata(
     *,
     summary: dict[str, object],
@@ -1465,7 +1889,9 @@ def _bool_from_cli_flag(value: object) -> bool:
 def _infer_compile_requested(args: argparse.Namespace) -> bool:
     """Return whether inference may attempt ``torch.compile`` for this run."""
     compile_flag = _bool_from_cli_flag(getattr(args, "compile", False))
-    compile_mode = str(getattr(args, "compile_mode", "off")).strip().lower()
+    compile_mode = _normalize_high_level_compile_mode(
+        str(getattr(args, "compile_mode", "off"))
+    )
 
     infer_compile_raw = getattr(args, "infer_compile", None)
     infer_mode_raw = getattr(args, "infer_compile_mode", None)
@@ -1475,9 +1901,11 @@ def _infer_compile_requested(args: argparse.Namespace) -> bool:
         else _bool_from_cli_flag(infer_compile_raw)
     )
     infer_mode = (
-        compile_mode if infer_mode_raw is None else str(infer_mode_raw).strip().lower()
+        compile_mode
+        if infer_mode_raw is None
+        else _normalize_high_level_compile_mode(str(infer_mode_raw))
     )
-    return infer_compile_flag or infer_mode in {"on", "auto"}
+    return infer_compile_flag and infer_mode == "on"
 
 
 def _disable_infer_compile_flags(args: argparse.Namespace) -> None:
@@ -1516,9 +1944,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             train_target = "pair"
             args.train_target = "pair"
     allowed_targets = (
-        ("both", *model_tasks)
-        if len(model_tasks) > 1
-        else tuple(model_tasks)
+        ("both", *model_tasks) if len(model_tasks) > 1 else tuple(model_tasks)
     )
     if train_target not in allowed_targets:
         allowed_text = ", ".join(allowed_targets)
@@ -1543,6 +1969,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
             f"--train_target must be '{model_tasks[0]}' for model {args.model}."
         )
     tasks_to_train = model_tasks if train_target == "both" else (train_target,)
+    tuned_payloads = _load_tuned_payloads(args=args, model_tasks=model_tasks)
+    published_output_name = _apply_tuned_published_output_targets(
+        args=args,
+        tuned_payloads=tuned_payloads,
+        model_tasks=model_tasks,
+    )
     donor_len, acceptor_len, inferred_train_len = _infer_window_defaults(
         species=args.species,
         donor_len=args.donor_len,
@@ -1561,6 +1993,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         checkpoint_stem,
         tasks=model_tasks,
     )
+    published_checkpoint_targets = _resolve_tuned_published_checkpoint_targets(
+        args=args,
+        model_tasks=model_tasks,
+        tuned_payloads=tuned_payloads,
+    )
+    if published_checkpoint_targets is not None:
+        checkpoint_paths = published_checkpoint_targets
     for task in model_tasks:
         setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
         setattr(args, f"{task}_init_checkpoint_path", "")
@@ -1583,6 +2022,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         acceptor_len=acceptor_len,
         inferred_train_len=inferred_train_len,
     )
+    if published_output_name is not None:
+        print(f"[pipeline] Versioned output targets: {published_output_name}")
 
     if args.skip_train and args.continue_train:
         raise ValueError("--continue_train cannot be combined with --skip_train.")
@@ -1592,16 +2033,26 @@ def run_pipeline(args: argparse.Namespace) -> None:
     else:
         _ = apply_eta_process_title_placeholder()
         if args.continue_train:
-            _assert_checkpoint_paths_exist(
-                checkpoint_paths,
-                required_tasks=tasks_to_train,
+            used_published_warm_start = _apply_tuned_continue_warm_start(
+                args=args,
+                checkpoint_paths=checkpoint_paths,
+                model_tasks=model_tasks,
+                tasks_to_train=tasks_to_train,
+                tuned_payloads=tuned_payloads,
             )
-            for task in tasks_to_train:
-                setattr(args, f"{task}_init_checkpoint_path", checkpoint_paths[task])
-            print(
-                "[pipeline] Continue training (--continue_train): "
-                "use existing checkpoints as initialization."
-            )
+            if not used_published_warm_start:
+                _assert_checkpoint_paths_exist(
+                    checkpoint_paths,
+                    required_tasks=tasks_to_train,
+                )
+                for task in tasks_to_train:
+                    setattr(
+                        args, f"{task}_init_checkpoint_path", checkpoint_paths[task]
+                    )
+                print(
+                    "[pipeline] Continue training (--continue_train): "
+                    "use existing checkpoints as initialization."
+                )
         summary = model_module.train(common_args=args, model_args=args)
         _attach_validation_metadata(summary=summary, args=args)
         metrics_json = args.metrics_json
@@ -1620,6 +2071,31 @@ def run_pipeline(args: argparse.Namespace) -> None:
         with open(metrics_json, "w", encoding="utf-8") as f:
             json.dump(serializable_summary, f, indent=2)
         print(f"Saved training summary: {metrics_json}")
+        published_name = _resolve_effective_published_name_for_tuned_run(
+            args=args,
+            tuned_payloads=tuned_payloads,
+            model_tasks=model_tasks,
+        )
+        if published_name is not None:
+            refresh_payloads = _build_refresh_task_payloads(
+                summary=summary,
+                tasks_to_train=tasks_to_train,
+                metrics_json=str(metrics_json),
+            )
+            refreshed_entry = refresh_published_version_if_improved(
+                project_root=Path(project_root()),
+                species=str(args.species),
+                model_name=str(args.model),
+                published_name=published_name,
+                task_payloads=refresh_payloads,
+                metrics_json=str(metrics_json),
+            )
+            if refreshed_entry is not None:
+                print(
+                    "[pipeline] Refreshed published version in place: "
+                    f"{refreshed_entry.published_name} "
+                    f"updated_side={refreshed_entry.updated_side}"
+                )
         for task in model_tasks:
             task_summary = summary.get(task)
             if isinstance(task_summary, dict) and "checkpoint" in task_summary:
@@ -1681,8 +2157,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             site_rows = model_module.infer_site(common_args=args, model_args=args)
         except Exception as exc:
             should_retry_without_compile = _infer_compile_requested(args) and (
-                isinstance(exc, NotImplementedError)
-                or _is_compile_runtime_error(exc)
+                isinstance(exc, NotImplementedError) or _is_compile_runtime_error(exc)
             )
             if not should_retry_without_compile:
                 raise

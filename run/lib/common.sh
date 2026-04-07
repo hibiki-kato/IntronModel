@@ -177,15 +177,13 @@ PY
 
 
 intronmodel_configure_compile_defaults() {
-	if [[ -z "${INTRONMODEL_TORCH_COMPILE_STRATEGY:-}" ]]; then
-		export INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"
-	fi
-	if [[ -z "${INTRONMODEL_TORCH_COMPILE_STICKY_MODE:-}" ]]; then
-		export INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
-	fi
-	if [[ -z "${INTRONMODEL_TORCH_COMPILE_DISABLED_MODES:-}" ]]; then
-		export INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
-	fi
+	# Effective compile policy is now on|off in model_runtime.
+	# Keep one explicit guard to prevent Inductor GEMM autotune attempts.
+	export TORCHINDUCTOR_MAX_AUTOTUNE="0"
+	export TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
+	unset INTRONMODEL_TORCH_COMPILE_STRATEGY || true
+	unset INTRONMODEL_TORCH_COMPILE_STICKY_MODE || true
+	unset INTRONMODEL_TORCH_COMPILE_DISABLED_MODES || true
 }
 
 
@@ -483,7 +481,7 @@ intronmodel_resolve_latest_published_name() {
 		resolved_data_root="${resolved_project_root}/data"
 	fi
 	(
-		export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+		export PYTHONPATH="${resolved_project_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
 		"${python_bin}" - \
 			"${resolved_project_root}" \
 			"${resolved_data_root}" \
@@ -506,6 +504,95 @@ if published_name is None:
     published_name = model_name
 print(published_name)
 PY
+	)
+}
+
+
+intronmodel_is_active_public_model() {
+	local script_tag="$1"
+	local model_name="$2"
+	local python_bin
+	local resolved_project_root="${PROJECT_ROOT:-$(pwd)}"
+
+	python_bin="$(intronmodel_resolve_python_bin "${script_tag}")" || return 1
+	(
+		export PYTHONPATH="${resolved_project_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
+		"${python_bin}" - \
+			"${model_name}" <<'PY'
+from __future__ import annotations
+
+import sys
+
+from util.versioned_artifacts import is_active_public_model
+
+
+model_name = sys.argv[1]
+print("1" if is_active_public_model(model_name) else "0")
+PY
+	)
+}
+
+
+intronmodel_resolve_latest_published_data_path() {
+	local script_tag="$1"
+	local species="$2"
+	local model_name="$3"
+	local data_dir="$4"
+	local suffix="$5"
+	local latest_published=""
+	local is_public_model="0"
+
+	is_public_model="$(
+		intronmodel_is_active_public_model \
+			"${script_tag}" \
+			"${model_name}"
+	)"
+	if [[ "${is_public_model}" != "1" ]]; then
+		return 1
+	fi
+
+	latest_published="$(
+		intronmodel_resolve_latest_published_name \
+			"${script_tag}" \
+			"${species}" \
+			"${model_name}"
+	)"
+	if [[ -z "${latest_published}" ]]; then
+		return 1
+	fi
+
+	local candidate="${data_dir}/${latest_published}${suffix}"
+	if [[ ! -f "${candidate}" ]]; then
+		return 1
+	fi
+	printf '%s\n' "${candidate}"
+}
+
+
+intronmodel_append_versioned_output_args() {
+	local script_tag="$1"
+	local species="$2"
+	local model_name="$3"
+	local args_name="${4:-args}"
+	local published_name=""
+	local -n target_args="${args_name}"
+
+	published_name="$(
+		intronmodel_resolve_latest_published_name \
+			"${script_tag}" \
+			"${species}" \
+			"${model_name}"
+	)"
+	if [[ -z "${published_name}" ]]; then
+		return 0
+	fi
+
+	target_args+=(
+		--site_output_tsv "${DATA_ROOT}/${species}/site_score/${published_name}.tsv"
+		--intron_output_tsv "${DATA_ROOT}/${species}/intron_score/${published_name}.tsv"
+		--transcript_output_tsv "${DATA_ROOT}/${species}/trans_score/${published_name}.tsv"
+		--eval_output_txt "${DATA_ROOT}/${species}/eval_score/${published_name}.txt"
+		--metrics_json "${DATA_ROOT}/${species}/learning_metric/${published_name}.train.json"
 	)
 }
 

@@ -1,15 +1,11 @@
-"""Utilities for publishing versioned best artifacts for active models.
+"""Utilities for publishing versioned best artifacts for tuned models.
 
-This module manages a small public-artifact layer for the active wrappers:
-
-- ``cnn_v2`` (shared donor/acceptor publication)
-- ``cnn_v3`` (shared donor/acceptor publication)
-- ``cnn_pair_v2`` (public pair publication)
-- ``cnn_pair_v3`` (public pair publication)
-
-Publication happens when a canonical ``best_config.json`` improves. The latest
-and previous versions remain live under ``data/`` and ``model/`` while older
-versions move under ``archive/versioned_artifacts/``.
+Publication happens when a canonical ``best_config.json`` improves. Site models
+publish synchronized donor/acceptor checkpoint versions, so a donor-only update
+still bumps the acceptor side to the same version number via carry-forward.
+Pair models publish a single versioned pair checkpoint. The latest and previous
+versions remain live under ``data/`` and ``model/`` while older versions move
+under ``archive/versioned_artifacts/``.
 """
 
 from __future__ import annotations
@@ -23,23 +19,23 @@ from pathlib import Path
 import shutil
 from typing import Iterable, Mapping
 
+import torch
+
 from util.checkpoint_io import (
     extract_task_checkpoint_path,
     read_json_object,
     resolve_existing_checkpoint_path,
 )
+from models.registry import available_models
+from util.model_task_paths import checkpoint_tasks_for_model
 from util.path_format import relativize_path_fields, relativize_path_string
 
-INDEPENDENT_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset({"cnn_v2", "cnn_v3"})
-PAIR_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
-    {"cnn_pair_v2", "cnn_pair_v3"}
-)
-ACTIVE_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
-    {*INDEPENDENT_PUBLIC_MODEL_NAMES, *PAIR_PUBLIC_MODEL_NAMES}
-)
+SITE_PUBLICATION_TASKS: tuple[str, ...] = ("donor", "acceptor")
+PAIR_PUBLICATION_TASKS: tuple[str, ...] = ("pair",)
 LEGACY_PUBLIC_OUTPUT_STEMS: dict[str, tuple[str, ...]] = {
     "cnn_pair_v2": ("cnn_v2_pair",),
 }
+KNOWN_MODEL_NAMES: frozenset[str] = frozenset(available_models())
 VERSION_HISTORY_COLUMNS: tuple[str, ...] = (
     "version",
     "published_name",
@@ -101,9 +97,29 @@ def normalize_public_model_name(model_name: str) -> str:
     return model_name.strip()
 
 
+def publication_tasks_for_model(model_name: str) -> tuple[str, ...] | None:
+    """Return the checkpoint-task signature supported by version publication."""
+    public_model_name = normalize_public_model_name(model_name)
+    if public_model_name == "":
+        return None
+    if public_model_name not in KNOWN_MODEL_NAMES:
+        return None
+    tasks = checkpoint_tasks_for_model(public_model_name)
+    if tasks == SITE_PUBLICATION_TASKS:
+        return SITE_PUBLICATION_TASKS
+    if tasks == PAIR_PUBLICATION_TASKS:
+        return PAIR_PUBLICATION_TASKS
+    return None
+
+
 def is_active_public_model(model_name: str) -> bool:
     """Return whether one model participates in version publication."""
-    return normalize_public_model_name(model_name) in ACTIVE_PUBLIC_MODEL_NAMES
+    return publication_tasks_for_model(model_name) is not None
+
+
+def is_independent_public_model(model_name: str) -> bool:
+    """Return whether one model publishes synchronized donor/acceptor assets."""
+    return publication_tasks_for_model(model_name) == SITE_PUBLICATION_TASKS
 
 
 def format_published_name(public_model_name: str, version: int) -> str:
@@ -171,9 +187,7 @@ def read_version_history(
                 objective_score=str(row.get("objective_score", "")).strip(),
                 updated_side=str(row.get("updated_side", "")).strip(),
                 carry_forward_side=str(row.get("carry_forward_side", "")).strip(),
-                donor_checkpoint_path=str(
-                    row.get("donor_checkpoint_path", "")
-                ).strip(),
+                donor_checkpoint_path=str(row.get("donor_checkpoint_path", "")).strip(),
                 acceptor_checkpoint_path=str(
                     row.get("acceptor_checkpoint_path", "")
                 ).strip(),
@@ -250,16 +264,65 @@ def resolve_latest_published_run_assets(
     model_name: str,
 ) -> dict[str, str] | None:
     """Resolve latest published checkpoints and output paths for one run."""
+    return resolve_published_run_assets(
+        project_root=project_root,
+        species=species,
+        model_name=model_name,
+        published_name=None,
+    )
+
+
+def resolve_published_history_entry(
+    *,
+    data_root: Path,
+    species: str,
+    model_name: str,
+    published_name: str | None,
+) -> VersionHistoryEntry | None:
+    """Resolve one published history entry by name or latest live version."""
     public_model_name = normalize_public_model_name(model_name)
-    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
+    if publication_tasks_for_model(public_model_name) is None:
+        return None
+
+    if published_name is None or published_name.strip() == "":
+        return resolve_latest_live_history_entry(
+            data_root=data_root,
+            species=species,
+            model_name=public_model_name,
+        )
+
+    target_name = published_name.strip()
+    history = read_version_history(data_root, species, public_model_name)
+    for entry in reversed(history):
+        if entry.published_name == target_name and entry.archive_status == "live":
+            return entry
+    for entry in reversed(history):
+        if entry.published_name == target_name:
+            return entry
+    return None
+
+
+def resolve_published_run_assets(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+    published_name: str | None,
+    allow_missing_checkpoints: bool = False,
+) -> dict[str, str] | None:
+    """Resolve checkpoints and output paths for one published run identity."""
+    public_model_name = normalize_public_model_name(model_name)
+    publication_tasks = publication_tasks_for_model(public_model_name)
+    if publication_tasks is None:
         return None
 
     data_root = _resolve_data_root(project_root)
     model_root = _resolve_model_root(project_root)
-    latest_entry = resolve_latest_live_history_entry(
+    latest_entry = resolve_published_history_entry(
         data_root=data_root,
         species=species,
         model_name=public_model_name,
+        published_name=published_name,
     )
     if latest_entry is None:
         return None
@@ -286,14 +349,16 @@ def resolve_latest_published_run_assets(
         ),
     }
 
-    if public_model_name in INDEPENDENT_PUBLIC_MODEL_NAMES:
+    if publication_tasks == SITE_PUBLICATION_TASKS:
         donor_path = _resolve_version_history_checkpoint_path(
             raw_path=latest_entry.donor_checkpoint_path,
             model_root=model_root,
+            allow_missing=allow_missing_checkpoints,
         )
         acceptor_path = _resolve_version_history_checkpoint_path(
             raw_path=latest_entry.acceptor_checkpoint_path,
             model_root=model_root,
+            allow_missing=allow_missing_checkpoints,
         )
         assets["donor_checkpoint_path"] = str(donor_path)
         assets["acceptor_checkpoint_path"] = str(acceptor_path)
@@ -301,9 +366,394 @@ def resolve_latest_published_run_assets(
         pair_path = _resolve_version_history_checkpoint_path(
             raw_path=latest_entry.pair_checkpoint_path,
             model_root=model_root,
+            allow_missing=allow_missing_checkpoints,
         )
         assets["pair_checkpoint_path"] = str(pair_path)
     return assets
+
+
+def _is_loadable_torch_checkpoint(path: Path) -> bool:
+    """Return whether a path can be loaded as a Torch checkpoint payload."""
+    if not path.is_file():
+        return False
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return False
+    if isinstance(payload, dict):
+        return True
+    return isinstance(payload, torch.Tensor)
+
+
+def _find_latest_valid_checkpoint_candidate(
+    *,
+    model_root: Path,
+    species: str,
+    task: str,
+    exclude_name: str,
+) -> Path | None:
+    """Find the newest valid checkpoint candidate for one task directory."""
+    task_dir = model_root / species / task
+    if not task_dir.is_dir():
+        return None
+    candidates = sorted(
+        (
+            path
+            for path in task_dir.glob("*.pt")
+            if path.name != exclude_name and path.is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if _is_loadable_torch_checkpoint(candidate):
+            return candidate.resolve()
+    return None
+
+
+def normalize_published_run_checkpoints(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+    published_name: str,
+) -> dict[str, str]:
+    """Normalize corrupted published checkpoints in-place for one run identity.
+
+    This function validates published checkpoint files referenced by version
+    history. If one file is missing or not loadable by ``torch.load``, it is
+    replaced by the newest valid ``.pt`` candidate under the same
+    ``model/<species>/<task>/`` directory, and metadata pointers are rewritten
+    to the canonical published paths.
+
+    Raises
+    ------
+    ValueError
+        If no valid replacement checkpoint can be found for a broken task.
+    """
+    public_model_name = normalize_public_model_name(model_name)
+    publication_tasks = publication_tasks_for_model(public_model_name)
+    if publication_tasks is None:
+        return {}
+
+    data_root = _resolve_data_root(project_root)
+    model_root = _resolve_model_root(project_root)
+    history = read_version_history(data_root, species, public_model_name)
+    target_entry: VersionHistoryEntry | None = None
+    target_index = -1
+    for index, entry in enumerate(history):
+        if entry.published_name == published_name:
+            target_entry = entry
+            target_index = index
+    if target_entry is None:
+        raise ValueError(
+            "Published entry not found for normalization: "
+            f"species={species}, model={public_model_name}, "
+            f"published_name={published_name}."
+        )
+
+    replacements: dict[str, str] = {}
+    for task in publication_tasks:
+        published_path = model_root / species / task / f"{published_name}.pt"
+        if _is_loadable_torch_checkpoint(published_path):
+            continue
+        replacement = _find_latest_valid_checkpoint_candidate(
+            model_root=model_root,
+            species=species,
+            task=task,
+            exclude_name=f"{published_name}.pt",
+        )
+        if replacement is None:
+            raise ValueError(
+                "No valid checkpoint candidate found while normalizing "
+                f"published checkpoint: {published_path}"
+            )
+        published_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(replacement, published_path)
+        replacements[task] = str(replacement)
+
+    donor_path = str(
+        (model_root / species / "donor" / f"{published_name}.pt").resolve()
+    )
+    acceptor_path = str(
+        (model_root / species / "acceptor" / f"{published_name}.pt").resolve()
+    )
+    pair_path = str((model_root / species / "pair" / f"{published_name}.pt").resolve())
+    rewritten_entry = VersionHistoryEntry(
+        version=target_entry.version,
+        published_name=target_entry.published_name,
+        published_at=target_entry.published_at,
+        source_best_config=target_entry.source_best_config,
+        objective_metric=target_entry.objective_metric,
+        objective_score=target_entry.objective_score,
+        updated_side=target_entry.updated_side,
+        carry_forward_side=target_entry.carry_forward_side,
+        donor_checkpoint_path=(
+            relativize_path_string(donor_path)
+            if publication_tasks == SITE_PUBLICATION_TASKS
+            else target_entry.donor_checkpoint_path
+        ),
+        acceptor_checkpoint_path=(
+            relativize_path_string(acceptor_path)
+            if publication_tasks == SITE_PUBLICATION_TASKS
+            else target_entry.acceptor_checkpoint_path
+        ),
+        pair_checkpoint_path=(
+            relativize_path_string(pair_path)
+            if publication_tasks == PAIR_PUBLICATION_TASKS
+            else target_entry.pair_checkpoint_path
+        ),
+        metrics_json=target_entry.metrics_json,
+        archive_status=target_entry.archive_status,
+    )
+    history[target_index] = rewritten_entry
+    write_version_history(data_root, species, public_model_name, history)
+
+    best_config_paths = _resolve_best_config_paths(
+        data_root=data_root,
+        species=species,
+        public_model_name=public_model_name,
+        publication_tasks=publication_tasks,
+    )
+    for config_path in best_config_paths.values():
+        payload = read_json_object(config_path)
+        if payload is None:
+            continue
+        payload["published_name"] = published_name
+        if publication_tasks == SITE_PUBLICATION_TASKS:
+            payload["donor_checkpoint_path"] = donor_path
+            payload["acceptor_checkpoint_path"] = acceptor_path
+        else:
+            payload["pair_checkpoint_path"] = pair_path
+        _write_json_object(config_path, payload)
+
+    return replacements
+
+
+def refresh_published_version_if_improved(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+    published_name: str,
+    task_payloads: Mapping[str, Mapping[str, object]],
+    metrics_json: str | None = None,
+) -> VersionHistoryEntry | None:
+    """Refresh one published version in-place when a full run improves it.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+    species : str
+        Species key under ``data`` and ``model``.
+    model_name : str
+        Public model name such as ``cnn_v2`` or ``cnn_pair_v3``.
+    published_name : str
+        Existing published version stem to refresh.
+    task_payloads : Mapping[str, Mapping[str, object]]
+        Candidate per-task payloads containing checkpoint path and objective
+        fields from the current full run.
+    metrics_json : str | None, default=None
+        Training summary path for the current run.
+
+    Returns
+    -------
+    VersionHistoryEntry | None
+        Updated history entry when at least one task improved, otherwise
+        ``None``.
+    """
+    public_model_name = normalize_public_model_name(model_name)
+    publication_tasks = publication_tasks_for_model(public_model_name)
+    if publication_tasks is None:
+        return None
+    target_published_name = published_name.strip()
+    if target_published_name == "":
+        raise ValueError("published_name must not be empty.")
+
+    data_root = _resolve_data_root(project_root)
+    model_root = _resolve_model_root(project_root)
+    history = read_version_history(data_root, species, public_model_name)
+    entry = resolve_published_history_entry(
+        data_root=data_root,
+        species=species,
+        model_name=public_model_name,
+        published_name=target_published_name,
+    )
+    if entry is None or entry.archive_status != "live":
+        return None
+
+    best_config_paths = _resolve_best_config_paths(
+        data_root=data_root,
+        species=species,
+        public_model_name=public_model_name,
+        publication_tasks=publication_tasks,
+    )
+    best_payloads: dict[str, dict[str, object]] = {}
+    improved_tasks: list[str] = []
+    published_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    metrics_json_value = metrics_json.strip() if metrics_json is not None else ""
+
+    for task in publication_tasks:
+        best_path = best_config_paths[task]
+        payload = read_json_object(best_path)
+        if payload is None or payload.get("status") != "ok":
+            return None
+        mutable_payload = dict(payload)
+        best_payloads[task] = mutable_payload
+        candidate_payload = task_payloads.get(task)
+        if candidate_payload is None:
+            continue
+        candidate_metric = str(candidate_payload.get("objective_metric", "")).strip()
+        current_metric = str(mutable_payload.get("objective_metric", "")).strip()
+        if (
+            candidate_metric != ""
+            and current_metric != ""
+            and candidate_metric != current_metric
+        ):
+            continue
+        candidate_score = _coerce_score(candidate_payload.get("objective_score"))
+        current_score = _coerce_score(mutable_payload.get("objective_score"))
+        if candidate_score <= current_score:
+            continue
+
+        checkpoint_source = _resolve_task_checkpoint_from_payload(
+            payload=candidate_payload,
+            task=task,
+            base_dir=project_root,
+            model_root=model_root,
+        )
+        if checkpoint_source is None:
+            continue
+        destination = model_root / species / task / f"{target_published_name}.pt"
+        _copy_checkpoint_file(checkpoint_source, destination)
+        mutable_payload[f"{task}_checkpoint_path"] = str(destination.resolve())
+        mutable_payload["published_name"] = target_published_name
+        mutable_payload["published_at"] = published_at
+        if candidate_metric != "":
+            mutable_payload["objective_metric"] = candidate_metric
+        mutable_payload["objective_score"] = candidate_score
+        if metrics_json_value != "":
+            mutable_payload["metrics_json"] = metrics_json_value
+        improved_tasks.append(task)
+
+    if not improved_tasks:
+        return None
+
+    if publication_tasks == SITE_PUBLICATION_TASKS:
+        donor_destination = (
+            model_root / species / "donor" / f"{target_published_name}.pt"
+        )
+        acceptor_destination = (
+            model_root / species / "acceptor" / f"{target_published_name}.pt"
+        )
+        for task in SITE_PUBLICATION_TASKS:
+            best_payloads[task]["donor_checkpoint_path"] = str(
+                donor_destination.resolve()
+            )
+            best_payloads[task]["acceptor_checkpoint_path"] = str(
+                acceptor_destination.resolve()
+            )
+            best_payloads[task]["published_name"] = target_published_name
+            best_payloads[task]["published_at"] = published_at
+            if metrics_json_value != "":
+                best_payloads[task]["metrics_json"] = metrics_json_value
+    else:
+        pair_destination = model_root / species / "pair" / f"{target_published_name}.pt"
+        best_payloads["pair"]["pair_checkpoint_path"] = str(pair_destination.resolve())
+        best_payloads["pair"]["published_name"] = target_published_name
+        best_payloads["pair"]["published_at"] = published_at
+        if metrics_json_value != "":
+            best_payloads["pair"]["metrics_json"] = metrics_json_value
+
+    for task, best_path in best_config_paths.items():
+        _write_json_object(best_path, best_payloads[task])
+
+    improved_side = ",".join(improved_tasks)
+    carry_forward_side = ",".join(
+        task for task in publication_tasks if task not in improved_tasks
+    )
+    snapshot_payload = _build_snapshot_payload(
+        public_model_name=public_model_name,
+        published_name=target_published_name,
+        published_at=published_at,
+        updated_side=improved_side,
+        carry_forward_side=carry_forward_side,
+        best_payloads=best_payloads,
+        publication_tasks=publication_tasks,
+    )
+    _write_snapshot(
+        data_root=data_root,
+        species=species,
+        public_model_name=public_model_name,
+        published_name=target_published_name,
+        payload=snapshot_payload,
+    )
+
+    primary_task = improved_tasks[0]
+    primary_payload = best_payloads[primary_task]
+    source_best_config = str(best_config_paths[primary_task].resolve())
+    metrics_value = (
+        metrics_json_value
+        if metrics_json_value != ""
+        else str(primary_payload.get("metrics_json", "")).strip()
+    )
+    updated_entry = VersionHistoryEntry(
+        version=_parse_version_number(target_published_name, public_model_name),
+        published_name=target_published_name,
+        published_at=published_at,
+        source_best_config=relativize_path_string(source_best_config),
+        objective_metric=str(primary_payload.get("objective_metric", "")).strip(),
+        objective_score=_stringify_scalar(primary_payload.get("objective_score")),
+        updated_side=improved_side,
+        carry_forward_side=carry_forward_side,
+        donor_checkpoint_path=(
+            relativize_path_string(
+                str(
+                    (
+                        model_root / species / "donor" / f"{target_published_name}.pt"
+                    ).resolve()
+                )
+            )
+            if publication_tasks == SITE_PUBLICATION_TASKS
+            else ""
+        ),
+        acceptor_checkpoint_path=(
+            relativize_path_string(
+                str(
+                    (
+                        model_root
+                        / species
+                        / "acceptor"
+                        / f"{target_published_name}.pt"
+                    ).resolve()
+                )
+            )
+            if publication_tasks == SITE_PUBLICATION_TASKS
+            else ""
+        ),
+        pair_checkpoint_path=(
+            relativize_path_string(
+                str(
+                    (
+                        model_root / species / "pair" / f"{target_published_name}.pt"
+                    ).resolve()
+                )
+            )
+            if publication_tasks == PAIR_PUBLICATION_TASKS
+            else ""
+        ),
+        metrics_json=relativize_path_string(metrics_value) if metrics_value else "",
+        archive_status="live",
+    )
+    rewritten_history: list[VersionHistoryEntry] = []
+    for row in history:
+        if row.published_name == target_published_name:
+            rewritten_history.append(updated_entry)
+        else:
+            rewritten_history.append(row)
+    write_version_history(data_root, species, public_model_name, rewritten_history)
+    return updated_entry
 
 
 def ensure_publication_seed(
@@ -314,7 +764,7 @@ def ensure_publication_seed(
 ) -> str | None:
     """Seed the initial ``.01`` publication when history does not exist yet."""
     public_model_name = normalize_public_model_name(model_name)
-    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
+    if publication_tasks_for_model(public_model_name) is None:
         return None
 
     data_root = _resolve_data_root(project_root)
@@ -339,19 +789,18 @@ def publish_latest_best_version(
 ) -> VersionHistoryEntry | None:
     """Publish the current canonical best state as the next public version."""
     public_model_name = normalize_public_model_name(model_name)
-    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
+    publication_tasks = publication_tasks_for_model(public_model_name)
+    if publication_tasks is None:
         return None
 
     data_root = _resolve_data_root(project_root)
     model_root = _resolve_model_root(project_root)
     history = read_version_history(data_root, species, public_model_name)
-    next_version = (
-        INITIAL_VERSION_NUMBER if not history else history[-1].version + 1
-    )
+    next_version = INITIAL_VERSION_NUMBER if not history else history[-1].version + 1
     published_name = format_published_name(public_model_name, next_version)
     published_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    if public_model_name in INDEPENDENT_PUBLIC_MODEL_NAMES:
+    if publication_tasks == SITE_PUBLICATION_TASKS:
         entry = _publish_independent_public_version(
             project_root=project_root,
             data_root=data_root,
@@ -403,10 +852,20 @@ def _publish_independent_public_version(
     updated_side: str,
 ) -> VersionHistoryEntry | None:
     donor_path = (
-        data_root / species / "tuning" / public_model_name / "donor" / "best_config.json"
+        data_root
+        / species
+        / "tuning"
+        / public_model_name
+        / "donor"
+        / "best_config.json"
     )
     acceptor_path = (
-        data_root / species / "tuning" / public_model_name / "acceptor" / "best_config.json"
+        data_root
+        / species
+        / "tuning"
+        / public_model_name
+        / "acceptor"
+        / "best_config.json"
     )
     donor_payload = read_json_object(donor_path)
     acceptor_payload = read_json_object(acceptor_path)
@@ -591,12 +1050,7 @@ def _publish_pair_public_version(
     pair_payload["published_name"] = published_name
     pair_payload["published_at"] = published_at
     public_pair_path = (
-        data_root
-        / species
-        / "tuning"
-        / public_model_name
-        / "pair"
-        / "best_config.json"
+        data_root / species / "tuning" / public_model_name / "pair" / "best_config.json"
     )
     _write_json_object(public_pair_path, pair_payload)
     if pair_path != public_pair_path:
@@ -660,11 +1114,7 @@ def _archive_old_versions(
     live_entries = history_entries[-LIVE_VERSION_KEEP_COUNT:]
     live_names = {entry.published_name for entry in live_entries}
     archive_root = (
-        project_root
-        / "archive"
-        / "versioned_artifacts"
-        / species
-        / public_model_name
+        project_root / "archive" / "versioned_artifacts" / species / public_model_name
     )
     updated_entries: list[VersionHistoryEntry] = []
     for entry in history_entries:
@@ -741,6 +1191,39 @@ def _seed_unversioned_outputs_if_needed(
             shutil.move(str(src_path), str(dst_path))
 
 
+def _build_snapshot_payload(
+    *,
+    public_model_name: str,
+    published_name: str,
+    published_at: str,
+    updated_side: str,
+    carry_forward_side: str,
+    best_payloads: Mapping[str, Mapping[str, object]],
+    publication_tasks: tuple[str, ...],
+) -> dict[str, object]:
+    """Build one snapshot payload for a published version."""
+    if publication_tasks == SITE_PUBLICATION_TASKS:
+        return {
+            "public_model": public_model_name,
+            "published_name": published_name,
+            "published_at": published_at,
+            "updated_side": updated_side,
+            "carry_forward_side": carry_forward_side,
+            "best_configs": {
+                "donor": best_payloads["donor"],
+                "acceptor": best_payloads["acceptor"],
+            },
+        }
+    return {
+        "public_model": public_model_name,
+        "published_name": published_name,
+        "published_at": published_at,
+        "updated_side": updated_side,
+        "carry_forward_side": carry_forward_side,
+        "best_config": best_payloads["pair"],
+    }
+
+
 def _iter_public_output_stem_candidates(public_model_name: str) -> tuple[str, ...]:
     legacy_stems = LEGACY_PUBLIC_OUTPUT_STEMS.get(public_model_name, ())
     return (public_model_name, *legacy_stems)
@@ -810,6 +1293,29 @@ def _resolve_pair_best_config_path(
         / "pair"
         / "best_config.json"
     )
+
+
+def _resolve_best_config_paths(
+    *,
+    data_root: Path,
+    species: str,
+    public_model_name: str,
+    publication_tasks: tuple[str, ...],
+) -> dict[str, Path]:
+    """Resolve canonical best-config paths for one published model."""
+    if publication_tasks == SITE_PUBLICATION_TASKS:
+        base_dir = data_root / species / "tuning" / public_model_name
+        return {
+            "donor": base_dir / "donor" / "best_config.json",
+            "acceptor": base_dir / "acceptor" / "best_config.json",
+        }
+    return {
+        "pair": _resolve_pair_best_config_path(
+            data_root=data_root,
+            species=species,
+            public_model_name=public_model_name,
+        )
+    }
 
 
 def _resolve_task_checkpoint_from_payload(
@@ -972,7 +1478,7 @@ def _iter_public_artifact_paths(
     public_model_name: str,
     published_name: str,
 ) -> Iterable[tuple[Path, Path]]:
-    if public_model_name in INDEPENDENT_PUBLIC_MODEL_NAMES:
+    if is_independent_public_model(public_model_name):
         yield (
             model_root / species / "donor" / f"{published_name}.pt",
             Path("model") / "donor" / f"{published_name}.pt",
@@ -1019,12 +1525,57 @@ def _resolve_version_history_checkpoint_path(
     *,
     raw_path: str,
     model_root: Path,
+    allow_missing: bool = False,
 ) -> Path:
     """Resolve one checkpoint path stored in version history."""
     stripped = raw_path.strip()
     if stripped == "":
         raise FileNotFoundError("Version history is missing a checkpoint path.")
-    return resolve_existing_checkpoint_path(Path(stripped), model_root_dir=model_root)
+    raw_checkpoint_path = Path(stripped)
+    if not allow_missing:
+        return resolve_existing_checkpoint_path(
+            raw_checkpoint_path,
+            model_root_dir=model_root,
+        )
+
+    try:
+        return resolve_existing_checkpoint_path(
+            raw_checkpoint_path,
+            model_root_dir=model_root,
+        )
+    except FileNotFoundError:
+        return _resolve_checkpoint_reference_path(
+            checkpoint_path=raw_checkpoint_path,
+            model_root=model_root,
+        )
+
+
+def _resolve_checkpoint_reference_path(
+    *,
+    checkpoint_path: Path,
+    model_root: Path,
+) -> Path:
+    """Resolve one checkpoint path reference without requiring file existence."""
+    if checkpoint_path.is_absolute():
+        path_parts = checkpoint_path.parts
+        if "model" in path_parts:
+            model_index = path_parts.index("model")
+            relative_parts = path_parts[model_index + 1 :]
+            if relative_parts:
+                return model_root.joinpath(*relative_parts)
+        return checkpoint_path
+
+    relative_parts = checkpoint_path.parts
+    if "model" in relative_parts:
+        model_index = relative_parts.index("model")
+        model_relative = relative_parts[model_index + 1 :]
+        if model_relative:
+            return model_root.joinpath(*model_relative)
+
+    resolved_path = checkpoint_path
+    if not resolved_path.is_absolute():
+        resolved_path = (model_root / checkpoint_path.name).resolve(strict=False)
+    return resolved_path
 
 
 def _parse_version_number(published_name: str, public_model_name: str) -> int:
@@ -1041,6 +1592,18 @@ def _stringify_scalar(value: object) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _coerce_score(value: object) -> float:
+    """Coerce one objective score to float for direct comparison."""
+    if isinstance(value, bool):
+        return float("-inf")
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return float("-inf")
 
 
 def _resolve_data_root(project_root: Path) -> Path:

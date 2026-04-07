@@ -55,6 +55,7 @@ from util.path_format import (
     relativize_path_string,
     resolve_path_string,
 )
+from util.model_task_paths import checkpoint_tasks_for_model
 from util.process_title import apply_process_title_from_env
 from util.versioned_artifacts import (
     is_active_public_model,
@@ -901,7 +902,7 @@ def _extract_sampled_params_from_best_config(
                 continue
     model_name = fixed_run_args.get("model", base_args.get("model"))
     pair_mode = fixed_run_args.get("pair_mode", base_args.get("pair_mode"))
-    if _is_cnn_v2_independent_mode(
+    if _is_independent_site_mode(
         model_name=model_name,
         pair_mode=pair_mode,
     ):
@@ -1619,34 +1620,44 @@ def _materialize_mask_sequence_transform_args(
     return materialized
 
 
-def _is_cnn_v2_independent_mode(
+def _is_independent_site_mode(
     *,
     model_name: object,
     pair_mode: object,
 ) -> bool:
-    """Return whether the current config targets ``cnn_v2`` independent mode."""
+    """Return whether the current config targets independent site scoring."""
     if not isinstance(model_name, str):
         return False
-    if model_name.strip().lower() != "cnn_v2":
+    if model_name.strip().lower() not in {"cnn_v2", "cnn_v3"}:
         return False
     if not isinstance(pair_mode, str):
         return False
     return pair_mode.strip().lower() == "independent"
 
 
-def _normalize_cnn_v2_independent_sampled_params(
+def _normalize_independent_site_sampled_params(
     sampled_params: dict[str, Scalar],
     *,
     model_name: object,
     pair_mode: object,
 ) -> dict[str, Scalar]:
-    """Drop legacy mask fields from sampled params for independent ``cnn_v2``."""
+    """Drop irrelevant keys from sampled params for independent site models."""
     normalized = dict(sampled_params)
-    if not _is_cnn_v2_independent_mode(
+    if not _is_independent_site_mode(
         model_name=model_name,
         pair_mode=pair_mode,
     ):
         return normalized
+    train_target_raw = normalized.get("train_target")
+    train_target = (
+        str(train_target_raw).strip().lower()
+        if isinstance(train_target_raw, str)
+        else ""
+    )
+    if train_target == "donor":
+        normalized.pop("acceptor_len", None)
+    elif train_target == "acceptor":
+        normalized.pop("donor_len", None)
     normalized.pop("mask", None)
     normalized.pop("sequence_transform", None)
     return normalized
@@ -1657,7 +1668,7 @@ def _normalize_cnn_v2_independent_runtime_args(
 ) -> dict[str, ArgValue]:
     """Force runtime args for independent ``cnn_v2`` to use no mask."""
     normalized = dict(args)
-    if not _is_cnn_v2_independent_mode(
+    if not _is_independent_site_mode(
         model_name=normalized.get("model"),
         pair_mode=normalized.get("pair_mode"),
     ):
@@ -2999,7 +3010,7 @@ def _run_trial_with_command_runner(
         sampled_params=sampled_params,
         base_args=config.base_args,
     )
-    sampled_params = _normalize_cnn_v2_independent_sampled_params(
+    sampled_params = _normalize_independent_site_sampled_params(
         sampled_params,
         model_name=base_model_name,
         pair_mode=base_pair_mode_obj,
@@ -6948,7 +6959,8 @@ def _extract_model_name_from_best_update(
             if isinstance(raw_model, str) and raw_model.strip():
                 return raw_model.strip()
     tuning_model_name = global_best_path.parent.parent.name
-    if tuning_model_name in {"cnn_v2", "cnn_pair_v2", "cnn_v3", "cnn_pair_v3"}:
+    task_signature = checkpoint_tasks_for_model(tuning_model_name)
+    if task_signature in {("donor", "acceptor"), ("pair",)}:
         return tuning_model_name
     return None
 

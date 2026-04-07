@@ -55,15 +55,11 @@ MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
 USE_AMP="1"
 AMP_DTYPE="auto"
 COMPILE_MODE="off"
-INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"  # reduce-overhead only
-INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
-INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
-TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
 INFER_BATCH_SIZE="2048"
 INFER_USE_AMP="1"
 INFER_AMP_DTYPE="auto"
 INFER_COMPILE="0"
-INFER_COMPILE_MODE="auto"
+INFER_COMPILE_MODE="off"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -131,31 +127,6 @@ append_flag_if_truthy() {
 	esac
 }
 
-
-append_versioned_output_args() {
-	local script_tag="$1"
-	local species="$2"
-	local model_name="$3"
-	local published_name=""
-
-	published_name="$(
-		intronmodel_resolve_latest_published_name \
-			"${script_tag}" \
-			"${species}" \
-			"${model_name}"
-	)"
-	if [[ -z "${published_name}" ]]; then
-		return 0
-	fi
-
-	args+=(
-		--site_output_tsv "${DATA_ROOT}/${species}/site_score/${published_name}.tsv"
-		--intron_output_tsv "${DATA_ROOT}/${species}/intron_score/${published_name}.tsv"
-		--transcript_output_tsv "${DATA_ROOT}/${species}/trans_score/${published_name}.tsv"
-		--eval_output_txt "${DATA_ROOT}/${species}/eval_score/${published_name}.txt"
-		--metrics_json "${DATA_ROOT}/${species}/learning_metric/${published_name}.train.json"
-	)
-}
 
 run_species_once() {
 	local species="$1"
@@ -228,7 +199,8 @@ run_species_once() {
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
 	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
-		append_versioned_output_args "cnn_pair_v3.sh" "${species}" "${MODEL}"
+		intronmodel_append_versioned_output_args \
+			"cnn_pair_v3.sh" "${species}" "${MODEL}" args
 	fi
 
 	tuned_path=""
@@ -295,6 +267,7 @@ run_species_once() {
 				"(species=${species}, count=${loaded_count})"
 		fi
 	fi
+	append_arg_if_set "pair_tuned_config_path" "${tuned_path}"
 
 	if [[ "${use_wrapper_hparams}" == "1" ]]; then
 		args+=(

@@ -148,7 +148,7 @@ fi
 resolve_score_file() {
 	local input_value="$1"
 	local trans_score_dir="$2"
-	local latest_published=""
+	local published_candidate=""
 
 	if [[ -f "${input_value}" ]]; then
 		echo "${input_value}"
@@ -169,20 +169,18 @@ resolve_score_file() {
 		return 0
 	fi
 
-	case "${input_value}" in
-		cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3)
-			latest_published="$(
-				intronmodel_resolve_latest_published_name \
-					"eval_trans_score.sh" \
-					"${species}" \
-					"${input_value}"
-			)"
-			if [[ -n "${latest_published}" && -f "${trans_score_dir}/${latest_published}.tsv" ]]; then
-				echo "${trans_score_dir}/${latest_published}.tsv"
-				return 0
-			fi
-			;;
-	esac
+	published_candidate="$(
+		intronmodel_resolve_latest_published_data_path \
+			"eval_trans_score.sh" \
+			"${species}" \
+			"${input_value}" \
+			"${trans_score_dir}" \
+			".tsv" || true
+	)"
+	if [[ -n "${published_candidate}" ]]; then
+		echo "${published_candidate}"
+		return 0
+	fi
 
 	return 1
 }

@@ -1,0 +1,11 @@
+NC_004354.4	RefSeq	transcript	1	2928	.	+	.	transcript_id "rna-NM_130502.3"; gene_id "rna-NM_130502.3"; gene_name "tw"
+NC_004354.4	RefSeq	CDS	1	110	.	+	0	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	186	269	.	+	1	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	330	414	.	+	1	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	484	588	.	+	0	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	643	751	.	+	0	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	813	1594	.	+	2	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	1665	1905	.	+	0	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	1970	2118	.	+	2	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	2182	2620	.	+	0	transcript_id "rna-NM_130502.3"; gene_name "tw";
+NC_004354.4	RefSeq	CDS	2735	2928	.	+	2	transcript_id "rna-NM_130502.3"; gene_name "tw";

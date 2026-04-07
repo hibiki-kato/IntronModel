@@ -723,7 +723,11 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
     return base
 
 
-def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
+def _build_run_args(
+    spec: WrapperSpec,
+    env: Mapping[str, str],
+    tuned_config_paths: Mapping[TaskName, Path],
+) -> list[str]:
     """Construct CLI args for src/run_model.py."""
 
     args: list[str] = []
@@ -777,6 +781,9 @@ def _build_run_args(spec: WrapperSpec, env: Mapping[str, str]) -> list[str]:
             value = env.get(env_key, "")
             if value != "":
                 args.extend([f"--{prefix.lower()}_{key.lower()}", value])
+
+    for task, tuned_config_path in tuned_config_paths.items():
+        args.extend([f"--{task}_tuned_config_path", str(tuned_config_path)])
 
     if env.get("SKIP_TRAINING", "0") == "1":
         args.append("--skip_train")
@@ -1470,8 +1477,8 @@ def _run_single_species(
             print(f"[{spec.script_name}] eval_score={output_eval_score_txt}")
             return 0
 
-    run_args = _build_run_args(spec, env)
-    if env.get("SKIP_TRAINING", "0") == "1" or env.get("CONTINUE_TRAINING", "0") == "1":
+    run_args = _build_run_args(spec, env, tuned_config_paths)
+    if env.get("SKIP_TRAINING", "0") == "1":
         _ensure_tuned_checkpoint_aliases(
             spec=spec,
             run_args=run_args,

@@ -24,10 +24,10 @@ TRAIN_NEG_PATH=""
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
 REF_GFF_PATH=""
-EPOCHS="20"
+EPOCHS="auto"
 MAX_EPOCHS="100"
-EARLY_STOP_PATIENCE="5"
-EARLY_STOP_MIN_DELTA="0.01"
+EARLY_STOP_PATIENCE="3"
+EARLY_STOP_MIN_DELTA="0.001"
 BATCH_SIZE="512"
 LR="5e-4"
 LOSS="focal"
@@ -69,15 +69,11 @@ CHECKPOINT_PRUNE_DRY_RUN="0"
 USE_AMP="1"
 AMP_DTYPE="auto"
 COMPILE_MODE="on"
-INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"  # reduce-overhead only
-INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
-INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
-TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
 INFER_BATCH_SIZE="2048"
 INFER_USE_AMP="1"
 INFER_AMP_DTYPE="auto"
 INFER_COMPILE="0"
-INFER_COMPILE_MODE="auto"
+INFER_COMPILE_MODE="off"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -130,31 +126,6 @@ append_flag_if_truthy() {
 }
 
 
-append_versioned_output_args() {
-	local script_tag="$1"
-	local species="$2"
-	local model_name="$3"
-	local published_name=""
-
-	published_name="$(
-		intronmodel_resolve_latest_published_name \
-			"${script_tag}" \
-			"${species}" \
-			"${model_name}"
-	)"
-	if [[ -z "${published_name}" ]]; then
-		return 0
-	fi
-
-	args+=(
-		--site_output_tsv "${DATA_ROOT}/${species}/site_score/${published_name}.tsv"
-		--intron_output_tsv "${DATA_ROOT}/${species}/intron_score/${published_name}.tsv"
-		--transcript_output_tsv "${DATA_ROOT}/${species}/trans_score/${published_name}.tsv"
-		--eval_output_txt "${DATA_ROOT}/${species}/eval_score/${published_name}.txt"
-		--metrics_json "${DATA_ROOT}/${species}/learning_metric/${published_name}.train.json"
-	)
-}
-
 resolve_task_tuned_config_path() {
 	local species="$1"
 	local task_name="$2"
@@ -179,11 +150,14 @@ tuned_key_scope() {
 			;;
 		# run_model.py keeps cnn_v3 in independent donor/acceptor mode. Pair-only
 		# keys should not participate in the effective runtime for this script.
-		model | species | seed | train_target | donor_len | acceptor_len \
+		model | species | seed | train_target \
 		|input_mode | pair_mode | sequence_transform | embedding_dim \
 		|bpe_pretrained_model_name | bpe_pretrained_revision \
 		|bpe_trust_remote_code)
 			printf '%s\n' "ignore"
+			;;
+		donor_len | acceptor_len)
+			printf '%s\n' "shared"
 			;;
 		*)
 			printf '%s\n' "ignore"
@@ -198,6 +172,7 @@ append_tuned_args_for_task() {
 	local -n task_arg_ref="$4"
 	local -n shared_value_ref="$5"
 	local -n shared_order_ref="$6"
+	local -n resolved_config_path_ref="$7"
 	local config_path
 	config_path="$(
 		resolve_task_tuned_config_path \
@@ -216,6 +191,7 @@ append_tuned_args_for_task() {
 		return
 	fi
 
+	resolved_config_path_ref="${config_path}"
 	local tuned_output
 	if ! tuned_output="$(intronmodel_load_tuned_overrides "${config_path}" 2>&1)"; then
 		if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
@@ -280,6 +256,8 @@ run_species_once() {
 	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 	local donor_tuned_args=()
 	local acceptor_tuned_args=()
+	local donor_tuned_config_path=""
+	local acceptor_tuned_config_path=""
 	local shared_tuned_args=()
 	local shared_key
 	declare -A shared_tuned_values=()
@@ -290,14 +268,16 @@ run_species_once() {
 		"${DONOR_TUNED_CONFIG_PATH}" \
 		donor_tuned_args \
 		shared_tuned_values \
-		shared_tuned_order
+		shared_tuned_order \
+		donor_tuned_config_path
 	append_tuned_args_for_task \
 		"${species}" \
 		"acceptor" \
 		"${ACCEPTOR_TUNED_CONFIG_PATH}" \
 		acceptor_tuned_args \
 		shared_tuned_values \
-		shared_tuned_order
+		shared_tuned_order \
+		acceptor_tuned_config_path
 	for shared_key in "${shared_tuned_order[@]}"; do
 		shared_tuned_args+=(--"${shared_key}" "${shared_tuned_values[${shared_key}]}")
 	done
@@ -357,8 +337,11 @@ run_species_once() {
 	append_arg_if_set "test_tsv" "${TEST_TSV_PATH}"
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
+	append_arg_if_set "donor_tuned_config_path" "${donor_tuned_config_path}"
+	append_arg_if_set "acceptor_tuned_config_path" "${acceptor_tuned_config_path}"
 	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
-		append_versioned_output_args "cnn_v3.sh" "${species}" "${MODEL}"
+		intronmodel_append_versioned_output_args \
+			"cnn_v3.sh" "${species}" "${MODEL}" args
 	fi
 
 	if [[ ${#shared_tuned_args[@]} -gt 0 ]]; then

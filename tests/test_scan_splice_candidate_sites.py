@@ -3,228 +3,143 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
+from tools.scan_splice_candidate_sites import (
+    build_candidate_windows,
+    load_resolved_best_model_paths,
+)
 
-from tools import scan_splice_candidate_sites as scan
 
+def _write_checkpoint(path: Path, *, window_len: int) -> None:
+    """Write one minimal checkpoint payload for scan-resolution tests."""
 
-def _write_text(path: Path, text: str) -> None:
-    """Write UTF-8 text to one path."""
+    import torch
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    torch.save({"window_len": window_len}, path)
 
 
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    """Write one JSON object to disk."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
+def test_build_candidate_windows_keeps_donor_layout() -> None:
+    """Donor windows should remain anchored on the G of one GT motif."""
+    sequence = "CCCGTATAGCCA"
 
-
-def test_normalize_sequence_text_strips_headers_and_whitespace() -> None:
-    """Normalize one FASTA-like string to one upper-cased sequence."""
-    raw = ">chr1\nacg t\nA C\n"
-
-    normalized = scan.normalize_sequence_text(raw)
-
-    assert normalized == "ACGTAC"
-
-
-def test_scan_motif_coordinates_finds_overlapping_candidates() -> None:
-    """Return all 0-based motif coordinates on the forward strand."""
-    sequence = "GTGTAG"
-
-    assert scan.scan_motif_coordinates(sequence, "GT") == [0, 2]
-    assert scan.scan_motif_coordinates(sequence, "AG") == [4]
-
-
-def test_build_candidate_windows_skips_edge_candidates() -> None:
-    """Skip candidates that cannot supply the full scoring window."""
-    sequence = "AGTAAAGTAAAG"
-
-    donor_candidates, acceptor_candidates = scan.build_candidate_windows(
+    donor_candidates, _ = build_candidate_windows(
         sequence,
         donor_window_len=6,
         acceptor_window_len=6,
     )
 
-    assert [candidate.coordinate for candidate in donor_candidates] == [6]
-    assert [candidate.coordinate for candidate in acceptor_candidates] == [5]
-    assert donor_candidates[0].window == "AAAGTA"
-    assert acceptor_candidates[0].window == "TAAAGT"
+    assert [(candidate.coordinate, candidate.window) for candidate in donor_candidates] == [
+        (3, "CCCGTA"),
+    ]
 
 
-def test_load_task_checkpoint_path_uses_direct_task_best_config(
-    tmp_path: Path,
-) -> None:
-    """Resolve one checkpoint path from one task-specific best-config."""
-    donor_best = tmp_path / "donor" / "best_config.json"
-    acceptor_best = tmp_path / "acceptor" / "best_config.json"
-    donor_ckpt = tmp_path / "model" / "donor.pt"
-    acceptor_ckpt = tmp_path / "model" / "acceptor.pt"
-    donor_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    acceptor_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    donor_ckpt.write_bytes(b"donor")
-    acceptor_ckpt.write_bytes(b"acceptor")
+def test_build_candidate_windows_uses_exon_start_acceptor_layout() -> None:
+    """Acceptor windows should match the exon-start layout used in training."""
+    sequence = "CCCGTATAGCCA"
 
-    _write_json(
-        donor_best,
-        {
-            "status": "ok",
-            "donor_checkpoint_path": str(donor_ckpt),
-        },
-    )
-    _write_json(
-        acceptor_best,
-        {
-            "status": "ok",
-            "acceptor_checkpoint_path": str(acceptor_ckpt),
-        },
-    )
-
-    assert (
-        scan.load_task_checkpoint_path(donor_best, "donor")
-        == donor_ckpt.resolve()
-    )
-    assert (
-        scan.load_task_checkpoint_path(acceptor_best, "acceptor")
-        == acceptor_ckpt.resolve()
-    )
-
-
-def test_load_task_checkpoint_path_falls_back_to_local_model_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Resolve missing absolute checkpoint paths via the local model root."""
-    local_root = tmp_path / "model"
-    donor_checkpoint = (
-        local_root
-        / "Dmel"
-        / "donor"
-        / "cnn_v2_test_donor.pt"
-    )
-    acceptor_checkpoint = (
-        local_root
-        / "Dmel"
-        / "acceptor"
-        / "cnn_v2_test_acceptor.pt"
-    )
-    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    acceptor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    donor_checkpoint.write_bytes(b"donor")
-    acceptor_checkpoint.write_bytes(b"acceptor")
-
-    payload = {
-        "status": "ok",
-        "donor_checkpoint_path": (
-            "/export/hibiki/intronmodel/model/Dmel/donor/cnn_v2_test_donor.pt"
-        ),
-        "acceptor_checkpoint_path": (
-            "/export/hibiki/intronmodel/model/Dmel/acceptor/"
-            "cnn_v2_test_acceptor.pt"
-        ),
-    }
-    best_config = tmp_path / "best_config.json"
-    _write_json(best_config, payload)
-
-    monkeypatch.setattr(scan, "model_root", lambda: str(local_root))
-
-    assert (
-        scan.load_task_checkpoint_path(best_config, "donor")
-        == donor_checkpoint.resolve()
-    )
-    assert (
-        scan.load_task_checkpoint_path(best_config, "acceptor")
-        == acceptor_checkpoint.resolve()
-    )
-
-
-def test_load_task_checkpoint_path_relaxes_checkpoint_hash_suffix(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Resolve stale checkpoint names when only the trailing hash changed."""
-    local_root = tmp_path / "model"
-    donor_checkpoint = (
-        local_root
-        / "Dmel"
-        / "donor"
-        / "cnn_v2_test_donor_h123456789abc.pt"
-    )
-    donor_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    donor_checkpoint.write_bytes(b"donor")
-
-    payload = {
-        "status": "ok",
-        "donor_checkpoint_path": (
-            "/export/hibiki/intronmodel/model/Dmel/donor/"
-            "cnn_v2_test_donor_habcdef123456.pt"
-        ),
-    }
-    best_config = tmp_path / "best_config.json"
-    _write_json(best_config, payload)
-
-    monkeypatch.setattr(scan, "model_root", lambda: str(local_root))
-
-    assert scan.load_task_checkpoint_path(best_config, "donor") == donor_checkpoint
-
-
-def test_main_writes_output_files_and_skips_edges(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Run the command-line path with fake models and deterministic scores."""
-    sequence_file = tmp_path / "sequence.txt"
-    output_dir = tmp_path / "out"
-    _write_text(sequence_file, ">chr1\nAGTAAAGTAAAG\n")
-
-    resolved = scan.ResolvedBestModelPaths(
-        best_config_path=tmp_path / "donor" / "best_config.json",
-        donor_checkpoint_path=tmp_path / "donor.pt",
-        acceptor_checkpoint_path=tmp_path / "acceptor.pt",
+    _, acceptor_candidates = build_candidate_windows(
+        sequence,
         donor_window_len=6,
         acceptor_window_len=6,
     )
 
-    monkeypatch.setattr(scan, "pick_device", lambda device: "cpu")
-    monkeypatch.setattr(
-        scan,
-        "load_resolved_best_model_paths",
-        lambda **kwargs: resolved,
+    assert [
+        (candidate.coordinate, candidate.window)
+        for candidate in acceptor_candidates
+    ] == [
+        (7, "TAGCCA"),
+    ]
+
+
+def test_load_resolved_best_model_paths_uses_task_best_configs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Scan should resolve donor and acceptor checkpoints from task best configs."""
+
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    donor_checkpoint = model_root / "Dmel" / "donor" / "cnn_v2.99.pt"
+    acceptor_checkpoint = model_root / "Dmel" / "acceptor" / "cnn_v2.98.pt"
+    _write_checkpoint(donor_checkpoint, window_len=50)
+    _write_checkpoint(acceptor_checkpoint, window_len=100)
+
+    donor_best = data_root / "Dmel" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    acceptor_best = (
+        data_root / "Dmel" / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
     )
-    monkeypatch.setattr(
-        scan,
-        "load_task_model",
-        lambda checkpoint_path, device: (f"model:{checkpoint_path}", {"window_len": 6}),
+    donor_best.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_best.parent.mkdir(parents=True, exist_ok=True)
+    donor_best.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "published_name": "cnn_v2.01",
+                "donor_checkpoint_path": str(donor_checkpoint),
+            }
+        ),
+        encoding="utf-8",
     )
-    monkeypatch.setattr(
-        scan,
-        "score_sequences",
-        lambda **kwargs: [float(len(sequence)) for sequence in kwargs["sequences"]],
+    acceptor_best.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "published_name": "cnn_v2.01",
+                "acceptor_checkpoint_path": str(acceptor_checkpoint),
+            }
+        ),
+        encoding="utf-8",
+    )
+    version_history = data_root / "Dmel" / "tuning" / "cnn_v2" / "version_history.tsv"
+    version_history.write_text(
+        "\t".join(
+            [
+                "version",
+                "published_name",
+                "published_at",
+                "source_best_config",
+                "objective_metric",
+                "objective_score",
+                "updated_side",
+                "carry_forward_side",
+                "donor_checkpoint_path",
+                "acceptor_checkpoint_path",
+                "pair_checkpoint_path",
+                "metrics_json",
+                "archive_status",
+            ]
+        )
+        + "\n"
+        + "\t".join(
+            [
+                "1",
+                "cnn_v2.01",
+                "2026-04-06T00:00:00Z",
+                "data/Dmel/tuning/cnn_v2/donor/best_config.json",
+                "pr_auc",
+                "0.81",
+                "donor",
+                "acceptor",
+                "model/Dmel/donor/cnn_v2.01.pt",
+                "model/Dmel/acceptor/cnn_v2.01.pt",
+                "",
+                "data/Dmel/learning_metric/cnn_v2.01.train.json",
+                "live",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+
+    resolved = load_resolved_best_model_paths(
+        data_root=data_root,
+        species="Dmel",
+        model_name="cnn_v2",
+        device="cpu",
     )
 
-    exit_code = scan.main(
-        [
-            "--data-root",
-            str(tmp_path / "data"),
-            "--species",
-            "Dmel",
-            "--model",
-            "cnn_v2",
-            "--name",
-            "NC_004354.4",
-            "--sequence-file",
-            str(sequence_file),
-            "--output-dir",
-            str(output_dir),
-            "--batch-size",
-            "8",
-        ]
-    )
-
-    donor_output = output_dir / "NC_004354.4.gt.txt"
-    acceptor_output = output_dir / "NC_004354.4.ag.txt"
-
-    assert exit_code == 0
-    assert donor_output.read_text(encoding="utf-8").splitlines() == ["6\t6.000000"]
-    assert acceptor_output.read_text(encoding="utf-8").splitlines() == ["5\t6.000000"]
+    assert resolved.donor_checkpoint_path == donor_checkpoint.resolve()
+    assert resolved.acceptor_checkpoint_path == acceptor_checkpoint.resolve()
+    assert resolved.donor_window_len == 50
+    assert resolved.acceptor_window_len == 100

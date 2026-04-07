@@ -8,13 +8,20 @@ from typing import Sequence
 DEFAULT_TASKS: tuple[str, ...] = ("donor", "acceptor")
 _MODEL_TASK_OVERRIDES: dict[str, tuple[str, ...]] = {
     "cnn_pair": ("pair",),
+    "cnn_pair_cheat": ("pair",),
+    "cnn_pair_mask": ("pair",),
+    "cnn_pair_mask_cheat": ("pair",),
     "cnn_pair_v2": ("pair",),
     "cnn_pair_v3": ("pair",),
+    "cnn_v2_pair": ("pair",),
     "cnn_v3_meta": ("pair",),
     "bilstm_pair": ("pair",),
+    "bilstm_pair_mask": ("pair",),
     "markov_xgboost": ("pair",),
     "dnabert_pair": ("pair",),
     "dnabert2_pair": ("pair",),
+    "dnabert2_pair_trunc": ("pair",),
+    "dnabert2_pair_trunc_cheat": ("pair",),
     "dnabert6_pair": ("pair",),
     "dnaberts_pair": ("pair",),
 }

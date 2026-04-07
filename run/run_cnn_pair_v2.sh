@@ -12,7 +12,7 @@ fi
 # --------------------------
 set -a
 MODEL="cnn_pair_v2"
-SPECIES="${SPECIES:-Mmus,Athal,Dmel,Hsap}"
+SPECIES="${SPECIES:-Dmel,Hsap,Mmus,Athal}"
 INTRONMODEL_AUTO_TMUX="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -21,8 +21,8 @@ TRAIN_NEG_PATH=""
 TEST_TSV_PATH=""
 CLASS_FILE_PATH=""
 REF_GFF_PATH=""
-EPOCHS="20"
-MAX_EPOCHS="200"
+EPOCHS="auto"
+MAX_EPOCHS="100"
 EARLY_STOP_PATIENCE="12"
 EARLY_STOP_MIN_DELTA="0.0"
 BATCH_SIZE="512"
@@ -51,16 +51,12 @@ GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
 USE_AMP="1"
 AMP_DTYPE="auto"
-COMPILE_MODE="off"
-INTRONMODEL_TORCH_COMPILE_STRATEGY="default-then-off"  # reduce-overhead only
-INTRONMODEL_TORCH_COMPILE_STICKY_MODE="reduce-overhead"
-INTRONMODEL_TORCH_COMPILE_DISABLED_MODES="max-autotune"
-TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
+COMPILE_MODE="on"
 INFER_BATCH_SIZE="2048"
 INFER_USE_AMP="1"
 INFER_AMP_DTYPE="auto"
 INFER_COMPILE="0"
-INFER_COMPILE_MODE="auto"
+INFER_COMPILE_MODE="off"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -83,7 +79,7 @@ SEED="1337"
 TAG=""
 VISUALIZE="true"
 SKIP_TRAINING="0"
-CONTINUE_TRAINING="0"
+CONTINUE_TRAINING="1"
 TRAIN_ONLY="0"
 CHECKPOINT_TOP_K="3"
 CHECKPOINT_PRUNE_DRY_RUN="0"
@@ -128,31 +124,6 @@ append_flag_if_truthy() {
 	esac
 }
 
-
-append_versioned_output_args() {
-	local script_tag="$1"
-	local species="$2"
-	local model_name="$3"
-	local published_name=""
-
-	published_name="$(
-		intronmodel_resolve_latest_published_name \
-			"${script_tag}" \
-			"${species}" \
-			"${model_name}"
-	)"
-	if [[ -z "${published_name}" ]]; then
-		return 0
-	fi
-
-	args+=(
-		--site_output_tsv "${DATA_ROOT}/${species}/site_score/${published_name}.tsv"
-		--intron_output_tsv "${DATA_ROOT}/${species}/intron_score/${published_name}.tsv"
-		--transcript_output_tsv "${DATA_ROOT}/${species}/trans_score/${published_name}.tsv"
-		--eval_output_txt "${DATA_ROOT}/${species}/eval_score/${published_name}.txt"
-		--metrics_json "${DATA_ROOT}/${species}/learning_metric/${published_name}.train.json"
-	)
-}
 
 run_species_once() {
 	local species="$1"
@@ -225,7 +196,8 @@ run_species_once() {
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
 	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
-		append_versioned_output_args "cnn_pair_v2.sh" "${species}" "${MODEL}"
+		intronmodel_append_versioned_output_args \
+			"cnn_pair_v2.sh" "${species}" "${MODEL}" args
 	fi
 
 	tuned_path=""
@@ -292,6 +264,7 @@ run_species_once() {
 				"(species=${species}, count=${loaded_count})"
 		fi
 	fi
+	append_arg_if_set "pair_tuned_config_path" "${tuned_path}"
 
 	if [[ "${use_wrapper_hparams}" == "1" ]]; then
 		args+=(
@@ -299,10 +272,6 @@ run_species_once() {
 			--acceptor_len "${ACCEPTOR_LEN}"
 			--seed "${SEED}"
 			--val_frac "${VAL_FRAC}"
-			--epochs "${EPOCHS}"
-			--max_epochs "${MAX_EPOCHS}"
-			--early_stop_patience "${EARLY_STOP_PATIENCE}"
-			--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
 			--batch_size "${BATCH_SIZE}"
 			--lr "${LR}"
 			--loss "${LOSS}"
@@ -328,6 +297,14 @@ run_species_once() {
 	if [[ ${#tuned_args[@]} -gt 0 ]]; then
 		args+=("${tuned_args[@]}")
 	fi
+
+	# Keep training-schedule controls wrapper-owned even with tuned hparams.
+	args+=(
+		--epochs "${EPOCHS}"
+		--max_epochs "${MAX_EPOCHS}"
+		--early_stop_patience "${EARLY_STOP_PATIENCE}"
+		--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
+	)
 
 	echo "[cnn_pair_v2.sh] species=${species}"
 	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"

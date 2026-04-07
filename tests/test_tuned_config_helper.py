@@ -135,6 +135,43 @@ def test_load_tuned_overrides_disables_mask_for_independent_cnn_v2(
     ]
 
 
+def test_load_tuned_overrides_drops_irrelevant_site_length_for_donor_task(
+    tmp_path: Path,
+) -> None:
+    """Independent donor configs should not emit acceptor_len overrides."""
+
+    config_path = tmp_path / "best_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "hparam_context": {
+                    "fixed_run_args": {
+                        "model": "cnn_v2",
+                        "pair_mode": "independent",
+                        "train_target": "donor",
+                    }
+                },
+                "sampled_params": {
+                    "donor_len": 50,
+                    "acceptor_len": 70,
+                    "batch_size": 256,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run_tuned_config_helper(config_path) == [
+        "model\tcnn_v2",
+        "pair_mode\tindependent",
+        "train_target\tdonor",
+        "sequence_transform\tnone",
+        "batch_size\t256",
+        "donor_len\t50",
+    ]
+
+
 def test_resolve_tuned_config_path_ignores_legacy_root_for_cnn_v2(
     tmp_path: Path,
 ) -> None:
@@ -175,6 +212,34 @@ def test_resolve_tuned_config_path_ignores_legacy_root_for_cnn_v3(
         f'source "{helper_path}" && '
         f'intronmodel_resolve_tuned_config_path '
         f'"{tmp_path}" "{species}" "cnn_v3" "pair" "" "{legacy_path}"'
+    )
+    run = subprocess.run(
+        ["bash", "-lc", command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == ""
+
+
+def test_resolve_tuned_config_path_ignores_legacy_root_for_generic_public_pair_model(
+    tmp_path: Path,
+) -> None:
+    """Public pair models should resolve only task-scoped tuned configs."""
+
+    helper_path = _project_root() / "run" / "lib" / "tuned_config.sh"
+    common_path = _project_root() / "run" / "lib" / "common.sh"
+    species = "Dmel"
+    legacy_path = tmp_path / species / "tuning" / "bilstm_pair" / "best_config.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("{}", encoding="utf-8")
+    command = (
+        f'source "{common_path}" && '
+        f'source "{helper_path}" && '
+        f'intronmodel_resolve_tuned_config_path '
+        f'"{tmp_path}" "{species}" "bilstm_pair" "pair" "" "{legacy_path}"'
     )
     run = subprocess.run(
         ["bash", "-lc", command],

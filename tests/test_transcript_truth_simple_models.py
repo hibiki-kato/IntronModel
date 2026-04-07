@@ -728,9 +728,9 @@ def test_build_species_feature_rows_fallbacks_without_unique_map(
     (species_dir / "intron_score" / "cnn.tsv").write_text(
         "\n".join(
             [
-                "transcript_id\tintron_index\tscore\tlabel",
-                "tx1\t1\t0.4\t1",
-                "tx2\t1\t0.3\t1",
+                "intron_id\tscore\tlabel",
+                "tx1\t0.4\t1",
+                "tx2\t0.3\t1",
             ]
         )
         + "\n",

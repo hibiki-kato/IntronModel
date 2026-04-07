@@ -16,15 +16,22 @@ from typing import Literal, Sequence
 
 import numpy as np
 import torch
+from torch import nn
 
-from models.cnn import load_task_model, score_sequences
-from util.data_proc import model_root
+from models import cnn_v3 as cnn_v3_model
+from models.cnn import load_task_model as load_cnn_v2_task_model
+from models.cnn import score_sequences as score_cnn_v2_sequences
+from util.data_proc import model_root, project_root
 from util.checkpoint_io import (
     extract_task_checkpoint_path,
     read_json_object,
     resolve_existing_checkpoint_path,
 )
 from util.model_runtime import pick_device
+from util.versioned_artifacts import (
+    is_active_public_model,
+    resolve_latest_published_name,
+)
 
 CandidateKind = Literal["gt", "ag"]
 
@@ -47,6 +54,73 @@ class ResolvedBestModelPaths:
     acceptor_checkpoint_path: Path
     donor_window_len: int
     acceptor_window_len: int
+    resolved_model_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ScoreTestSuiteCase:
+    """One discovered score-test-suite case FASTA."""
+
+    case_name: str
+    fasta_path: Path
+
+
+@dataclass(frozen=True)
+class ScoreTestSuiteSummary:
+    """Summary for one generated pair of score-test-suite outputs."""
+
+    case_name: str
+    donor_candidate_count: int
+    acceptor_candidate_count: int
+    donor_output_path: Path
+    acceptor_output_path: Path
+
+
+def _is_cnn_v3_model_name(model_name: str) -> bool:
+    """Return whether one model name should use the cnn_v3 loader."""
+    normalized = model_name.strip().lower()
+    return normalized.startswith("cnn_v3") or normalized.startswith("cnn_pair_v3")
+
+
+def load_site_model(
+    checkpoint_path: str,
+    device: str,
+    model_name: str,
+) -> tuple[nn.Module, dict[str, object]]:
+    """Load one site model checkpoint with the matching architecture."""
+    if _is_cnn_v3_model_name(model_name):
+        return cnn_v3_model.load_task_model(checkpoint_path, device)
+    return load_cnn_v2_task_model(checkpoint_path, device)
+
+
+def score_site_sequences(
+    model: nn.Module,
+    sequences: Sequence[str],
+    window_len: int,
+    device: str,
+    batch_size: int,
+    model_name: str,
+) -> np.ndarray:
+    """Score site sequences with the matching CNN implementation."""
+    if _is_cnn_v3_model_name(model_name):
+        return cnn_v3_model.score_sequences(
+            model=model,
+            sequences=sequences,
+            window_len=window_len,
+            device=device,
+            batch_size=batch_size,
+            use_amp=False,
+            amp_dtype=None,
+        )
+    return score_cnn_v2_sequences(
+        model=model,
+        sequences=sequences,
+        window_len=window_len,
+        device=device,
+        batch_size=batch_size,
+        use_amp=False,
+        amp_dtype=None,
+    )
 
 
 def normalize_sequence_text(raw_sequence: str) -> str:
@@ -197,7 +271,12 @@ def build_candidate_windows(
             ScoredCandidate(kind="gt", coordinate=coordinate, window=window)
         )
 
-    acceptor_left_offset = acceptor_window_len - 3
+    # Training-time acceptor windows are anchored on the first exonic base of the
+    # downstream exon, with the last two intronic bases forming the terminal AG.
+    # The stored sparse score coordinate remains the 0-based A position, so the
+    # extracted window must start two bases to the right of the old AG-anchored
+    # convention.
+    acceptor_left_offset = acceptor_window_len - 5
     acceptor_candidates: list[ScoredCandidate] = []
     for coordinate in scan_motif_coordinates(sequence, "AG"):
         window = extract_candidate_window(
@@ -263,6 +342,7 @@ def _resolve_json_path(raw_path: str, base_dir: Path) -> Path:
     if path.is_absolute():
         return path.resolve()
     return (base_dir / path).resolve()
+
 
 def load_task_checkpoint_path(best_config_path: Path, task: str) -> Path:
     """Load one task checkpoint path from a best-config payload.
@@ -356,6 +436,16 @@ def load_resolved_best_model_paths(
     device: str,
 ) -> ResolvedBestModelPaths:
     """Resolve best-config and best checkpoint metadata for one run."""
+    published_name: str | None = None
+    normalized_model_name = model_name.strip()
+
+    if is_active_public_model(normalized_model_name):
+        published_name = resolve_latest_published_name(
+            data_root,
+            species,
+            normalized_model_name,
+        )
+
     donor_best_config_path = resolve_task_best_config_path(
         data_root,
         species,
@@ -368,13 +458,22 @@ def load_resolved_best_model_paths(
         model_name,
         "acceptor",
     )
-    donor_checkpoint_path = load_task_checkpoint_path(
-        donor_best_config_path,
-        "donor",
+    model_candidates = [
+        candidate
+        for candidate in (published_name, normalized_model_name)
+        if candidate is not None and candidate.strip() != ""
+    ]
+    donor_checkpoint_path = _load_task_checkpoint_path_with_local_fallback(
+        best_config_path=donor_best_config_path,
+        task="donor",
+        species=species,
+        model_names=model_candidates,
     )
-    acceptor_checkpoint_path = load_task_checkpoint_path(
-        acceptor_best_config_path,
-        "acceptor",
+    acceptor_checkpoint_path = _load_task_checkpoint_path_with_local_fallback(
+        best_config_path=acceptor_best_config_path,
+        task="acceptor",
+        species=species,
+        model_names=model_candidates,
     )
 
     donor_window_len = _load_window_len_from_checkpoint(
@@ -391,7 +490,128 @@ def load_resolved_best_model_paths(
         acceptor_checkpoint_path=acceptor_checkpoint_path,
         donor_window_len=donor_window_len,
         acceptor_window_len=acceptor_window_len,
+        resolved_model_name=published_name or normalized_model_name,
     )
+
+
+def resolve_latest_local_task_checkpoint(
+    *,
+    species: str,
+    task: str,
+    model_names: Sequence[str],
+) -> Path | None:
+    """Return the best local checkpoint for one species/task/model list.
+
+    Parameters
+    ----------
+    species : str
+        Species identifier such as ``Dmel``.
+    task : str
+        Task name such as ``donor`` or ``acceptor``.
+    model_names : Sequence[str]
+        Ordered model-name candidates. Earlier names take precedence, so a
+        published version such as ``cnn_v2.01`` can win over a raw public model
+        stem such as ``cnn_v2``.
+
+    Returns
+    -------
+    Path | None
+        Newest matching local checkpoint, or ``None`` when no candidate exists.
+    """
+    task_dir = Path(model_root()).resolve() / species / task
+    if not task_dir.is_dir():
+        return None
+
+    candidates = [
+        candidate
+        for candidate in task_dir.iterdir()
+        if candidate.is_file() and candidate.suffix == ".pt"
+    ]
+    normalized_model_names = [
+        str(model_name).strip()
+        for model_name in model_names
+        if str(model_name).strip() != ""
+    ]
+    for model_name in normalized_model_names:
+        exact_matches = [
+            candidate
+            for candidate in candidates
+            if candidate.name == f"{model_name}.pt"
+        ]
+        if exact_matches:
+            exact_matches.sort(
+                key=lambda path: (path.stat().st_mtime_ns, path.name),
+                reverse=True,
+            )
+            return exact_matches[0].resolve()
+
+        prefix_matches = [
+            candidate
+            for candidate in candidates
+            if candidate.name.startswith(f"{model_name}_")
+            or candidate.name.startswith(f"{model_name}.")
+        ]
+        if prefix_matches:
+            prefix_matches.sort(
+                key=lambda path: (path.stat().st_mtime_ns, path.name),
+                reverse=True,
+            )
+            return prefix_matches[0].resolve()
+    return None
+
+
+def _load_task_checkpoint_path_with_local_fallback(
+    *,
+    best_config_path: Path,
+    task: str,
+    species: str,
+    model_names: Sequence[str],
+) -> Path:
+    """Load one task checkpoint path with local latest-checkpoint fallback.
+
+    Parameters
+    ----------
+    best_config_path : Path
+        Canonical best-config JSON path.
+    task : str
+        Task name, expected to be ``donor`` or ``acceptor``.
+    species : str
+        Species identifier.
+    model_names : Sequence[str]
+        Ordered model-name candidates used for local fallback discovery.
+
+    Returns
+    -------
+    Path
+        Resolved checkpoint path.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither the payload reference nor the local fallback can be
+        resolved.
+    """
+    try:
+        return load_task_checkpoint_path(best_config_path, task)
+    except FileNotFoundError as exc:
+        fallback = resolve_latest_local_task_checkpoint(
+            species=species,
+            task=task,
+            model_names=model_names,
+        )
+        if fallback is not None:
+            label = ", ".join(str(model_name) for model_name in model_names)
+            print(
+                "[scan_splice_candidate_sites] "
+                f"missing {task} checkpoint from {best_config_path}; "
+                f"using latest local checkpoint from [{label}]: {fallback}"
+            )
+            return fallback
+        raise FileNotFoundError(
+            f"{exc}. No local fallback checkpoint found for "
+            f"species={species} task={task} "
+            f"models={[str(model_name) for model_name in model_names]}."
+        ) from exc
 
 
 def score_candidate_windows(
@@ -401,6 +621,7 @@ def score_candidate_windows(
     window_len: int,
     device: str,
     batch_size: int,
+    model_name: str,
 ) -> list[float]:
     """Score one sequence candidate list with one loaded checkpoint.
 
@@ -425,16 +646,15 @@ def score_candidate_windows(
     if not candidates:
         return []
 
-    model, _ = load_task_model(str(checkpoint_path), device)
+    model, _ = load_site_model(str(checkpoint_path), device, model_name)
     windows = [candidate.window for candidate in candidates]
-    scores = score_sequences(
+    scores = score_site_sequences(
         model=model,
         sequences=windows,
         window_len=window_len,
         device=device,
         batch_size=batch_size,
-        use_amp=False,
-        amp_dtype=None,
+        model_name=model_name,
     )
     return [float(score) for score in np.asarray(scores, dtype=np.float64)]
 
@@ -454,6 +674,288 @@ def write_scores(
             handle.write(f"{candidate.coordinate}\t{score:.6f}\n")
 
 
+def discover_score_test_suite_cases(suite_root: Path) -> list[ScoreTestSuiteCase]:
+    """Discover score-test-suite FASTA cases under one suite root.
+
+    Parameters
+    ----------
+    suite_root : Path
+        Directory that contains case subdirectories such as ``cds-*`` or
+        ``rna-*``.
+
+    Returns
+    -------
+    list[ScoreTestSuiteCase]
+        Sorted discovered cases.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the suite root does not exist or one discovered case is missing its
+        expected FASTA file.
+    ValueError
+        If no score-test-suite cases are found.
+    """
+    if not suite_root.is_dir():
+        raise FileNotFoundError(f"score_test_suite directory not found: {suite_root}")
+
+    cases: list[ScoreTestSuiteCase] = []
+    for child in sorted(suite_root.iterdir(), key=lambda path: path.name):
+        if not child.is_dir():
+            continue
+        if not (child.name.startswith("cds-") or child.name.startswith("rna-")):
+            continue
+        fasta_path = child / f"{child.name}.fa"
+        if not fasta_path.is_file():
+            raise FileNotFoundError(
+                "Expected one matching FASTA file for score-test-suite case: "
+                f"{fasta_path}"
+            )
+        cases.append(
+            ScoreTestSuiteCase(
+                case_name=child.name,
+                fasta_path=fasta_path.resolve(),
+            )
+        )
+
+    if not cases:
+        raise ValueError(f"No score-test-suite cases found under {suite_root}")
+    return cases
+
+
+def build_score_test_suite_output_paths(
+    *,
+    students_dir: Path,
+    case_name: str,
+    tag: str,
+) -> tuple[Path, Path]:
+    """Build output paths for one score-test-suite case.
+
+    Parameters
+    ----------
+    students_dir : Path
+        Output directory for generated student-style score tables.
+    case_name : str
+        Case directory stem such as ``cds-NP_477286.2``.
+    tag : str
+        Variant suffix such as ``h``.
+
+    Returns
+    -------
+    tuple[Path, Path]
+        Donor and acceptor output paths.
+
+    Raises
+    ------
+    ValueError
+        If ``case_name`` or ``tag`` are empty.
+    """
+    if case_name.strip() == "":
+        raise ValueError("case_name must be non-empty.")
+    if tag.strip() == "":
+        raise ValueError("tag must be non-empty.")
+
+    donor_output_path = students_dir / f"out.gt.{case_name}.{tag}.txt"
+    acceptor_output_path = students_dir / f"out.ag.{case_name}.{tag}.txt"
+    return donor_output_path, acceptor_output_path
+
+
+def score_one_sequence(
+    *,
+    sequence: str,
+    resolved: ResolvedBestModelPaths,
+    device: str,
+    batch_size: int,
+) -> tuple[
+    list[ScoredCandidate],
+    list[float],
+    list[ScoredCandidate],
+    list[float],
+]:
+    """Build candidate windows and score one normalized DNA sequence.
+
+    Parameters
+    ----------
+    sequence : str
+        Upper-cased contiguous DNA sequence.
+    resolved : ResolvedBestModelPaths
+        Resolved checkpoint metadata for donor and acceptor models.
+    device : str
+        Torch device string.
+    batch_size : int
+        Inference batch size.
+
+    Returns
+    -------
+    tuple[list[ScoredCandidate], list[float], list[ScoredCandidate], list[float]]
+        Donor candidates, donor scores, acceptor candidates, and acceptor
+        scores in candidate order.
+    """
+    donor_candidates, acceptor_candidates = build_candidate_windows(
+        sequence,
+        donor_window_len=resolved.donor_window_len,
+        acceptor_window_len=resolved.acceptor_window_len,
+    )
+    donor_scores = score_candidate_windows(
+        candidates=donor_candidates,
+        checkpoint_path=resolved.donor_checkpoint_path,
+        window_len=resolved.donor_window_len,
+        device=device,
+        batch_size=batch_size,
+        model_name=resolved.resolved_model_name or "",
+    )
+    acceptor_scores = score_candidate_windows(
+        candidates=acceptor_candidates,
+        checkpoint_path=resolved.acceptor_checkpoint_path,
+        window_len=resolved.acceptor_window_len,
+        device=device,
+        batch_size=batch_size,
+        model_name=resolved.resolved_model_name or "",
+    )
+    return donor_candidates, donor_scores, acceptor_candidates, acceptor_scores
+
+
+def score_test_suite_cases(
+    *,
+    suite_root: Path,
+    students_dir: Path,
+    tag: str,
+    resolved: ResolvedBestModelPaths,
+    device: str,
+    batch_size: int,
+) -> list[ScoreTestSuiteSummary]:
+    """Score every discovered score-test-suite FASTA and write student outputs.
+
+    Parameters
+    ----------
+    suite_root : Path
+        Root directory that contains score-test-suite case subdirectories.
+    students_dir : Path
+        Output directory for generated student-style ``out.gt`` and
+        ``out.ag`` tables.
+    tag : str
+        Variant suffix such as ``h``.
+    resolved : ResolvedBestModelPaths
+        Resolved checkpoint metadata for donor and acceptor models.
+    device : str
+        Torch device string.
+    batch_size : int
+        Inference batch size.
+
+    Returns
+    -------
+    list[ScoreTestSuiteSummary]
+        One summary per scored case.
+    """
+    cases = discover_score_test_suite_cases(suite_root)
+    summaries: list[ScoreTestSuiteSummary] = []
+
+    for case in cases:
+        sequence = normalize_sequence_text(case.fasta_path.read_text(encoding="utf-8"))
+        donor_candidates, donor_scores, acceptor_candidates, acceptor_scores = (
+            score_one_sequence(
+                sequence=sequence,
+                resolved=resolved,
+                device=device,
+                batch_size=batch_size,
+            )
+        )
+        donor_output_path, acceptor_output_path = build_score_test_suite_output_paths(
+            students_dir=students_dir,
+            case_name=case.case_name,
+            tag=tag,
+        )
+        write_scores(donor_output_path, donor_candidates, donor_scores)
+        write_scores(acceptor_output_path, acceptor_candidates, acceptor_scores)
+        summaries.append(
+            ScoreTestSuiteSummary(
+                case_name=case.case_name,
+                donor_candidate_count=len(donor_candidates),
+                acceptor_candidate_count=len(acceptor_candidates),
+                donor_output_path=donor_output_path,
+                acceptor_output_path=acceptor_output_path,
+            )
+        )
+
+    return summaries
+
+
+def resolve_model_paths_from_args(
+    args: argparse.Namespace,
+    *,
+    device: str,
+) -> ResolvedBestModelPaths:
+    """Resolve donor and acceptor checkpoint metadata from CLI arguments.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments.
+    device : str
+        Torch device string.
+
+    Returns
+    -------
+    ResolvedBestModelPaths
+        Resolved best-config and checkpoint metadata for both site tasks.
+
+    Raises
+    ------
+    ValueError
+        If ``--best-config-path`` does not point at a donor or acceptor
+        best-config file.
+    """
+    if args.best_config_path is None:
+        return load_resolved_best_model_paths(
+            data_root=args.data_root.resolve(),
+            species=str(args.species),
+            model_name=str(args.model),
+            device=device,
+        )
+
+    best_config_path = args.best_config_path.resolve()
+    task_dir = best_config_path.parent.name
+    if task_dir not in {"donor", "acceptor"}:
+        raise ValueError(
+            "--best-config-path must point to a donor or acceptor "
+            "best_config.json file."
+        )
+    donor_best_config_path = (
+        best_config_path
+        if task_dir == "donor"
+        else best_config_path.parent.parent / "donor" / "best_config.json"
+    )
+    acceptor_best_config_path = (
+        best_config_path
+        if task_dir == "acceptor"
+        else best_config_path.parent.parent / "acceptor" / "best_config.json"
+    )
+    donor_checkpoint_path = load_task_checkpoint_path(
+        donor_best_config_path,
+        "donor",
+    )
+    acceptor_checkpoint_path = load_task_checkpoint_path(
+        acceptor_best_config_path,
+        "acceptor",
+    )
+    donor_window_len = _load_window_len_from_checkpoint(
+        donor_checkpoint_path,
+        device=device,
+    )
+    acceptor_window_len = _load_window_len_from_checkpoint(
+        acceptor_checkpoint_path,
+        device=device,
+    )
+    return ResolvedBestModelPaths(
+        best_config_path=best_config_path,
+        donor_checkpoint_path=donor_checkpoint_path,
+        acceptor_checkpoint_path=acceptor_checkpoint_path,
+        donor_window_len=donor_window_len,
+        acceptor_window_len=acceptor_window_len,
+        resolved_model_name=str(args.model).strip(),
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -465,10 +967,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--species", type=str, default="Dmel")
     parser.add_argument("--model", type=str, default="cnn_v2")
-    parser.add_argument("--name", type=str, required=True)
+    parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--output-dir", type=Path, default=Path("."))
     parser.add_argument("--sequence-file", type=Path, default=None)
     parser.add_argument("--sequence", type=str, default=None)
+    parser.add_argument("--suite-root", type=Path, default=None)
+    parser.add_argument("--students-dir", type=Path, default=None)
+    parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--best-config-path", type=Path, default=None)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--batch-size", type=int, default=512)
@@ -489,76 +994,51 @@ def _read_sequence(args: argparse.Namespace) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the splice-candidate scoring command-line utility."""
     args = build_arg_parser().parse_args(list(argv) if argv is not None else None)
-    sequence = _read_sequence(args)
     device = pick_device(str(args.device))
+    resolved = resolve_model_paths_from_args(args, device=device)
 
-    if args.best_config_path is None:
-        resolved = load_resolved_best_model_paths(
-            data_root=args.data_root.resolve(),
-            species=str(args.species),
-            model_name=str(args.model),
-            device=device,
-        )
-    else:
-        best_config_path = args.best_config_path.resolve()
-        task_dir = best_config_path.parent.name
-        if task_dir not in {"donor", "acceptor"}:
+    if args.suite_root is not None:
+        if args.sequence_file is not None or args.sequence is not None:
             raise ValueError(
-                "--best-config-path must point to a donor or acceptor "
-                "best_config.json file."
+                "--suite-root cannot be combined with --sequence-file or --sequence."
             )
-        donor_best_config_path = (
-            best_config_path
-            if task_dir == "donor"
-            else best_config_path.parent.parent / "donor" / "best_config.json"
-        )
-        acceptor_best_config_path = (
-            best_config_path
-            if task_dir == "acceptor"
-            else best_config_path.parent.parent / "acceptor" / "best_config.json"
-        )
-        donor_checkpoint_path = load_task_checkpoint_path(
-            donor_best_config_path,
-            "donor",
-        )
-        acceptor_checkpoint_path = load_task_checkpoint_path(
-            acceptor_best_config_path,
-            "acceptor",
-        )
-        donor_window_len = _load_window_len_from_checkpoint(
-            donor_checkpoint_path,
-            device=device,
-        )
-        acceptor_window_len = _load_window_len_from_checkpoint(
-            acceptor_checkpoint_path,
-            device=device,
-        )
-        resolved = ResolvedBestModelPaths(
-            best_config_path=best_config_path,
-            donor_checkpoint_path=donor_checkpoint_path,
-            acceptor_checkpoint_path=acceptor_checkpoint_path,
-            donor_window_len=donor_window_len,
-            acceptor_window_len=acceptor_window_len,
-        )
+        tag = "" if args.tag is None else str(args.tag).strip()
+        if tag == "":
+            raise ValueError("--tag is required when --suite-root is set.")
 
-    donor_candidates, acceptor_candidates = build_candidate_windows(
-        sequence,
-        donor_window_len=resolved.donor_window_len,
-        acceptor_window_len=resolved.acceptor_window_len,
-    )
-    donor_scores = score_candidate_windows(
-        candidates=donor_candidates,
-        checkpoint_path=resolved.donor_checkpoint_path,
-        window_len=resolved.donor_window_len,
-        device=device,
-        batch_size=int(args.batch_size),
-    )
-    acceptor_scores = score_candidate_windows(
-        candidates=acceptor_candidates,
-        checkpoint_path=resolved.acceptor_checkpoint_path,
-        window_len=resolved.acceptor_window_len,
-        device=device,
-        batch_size=int(args.batch_size),
+        suite_root = args.suite_root.resolve()
+        students_dir = (
+            args.students_dir.resolve()
+            if args.students_dir is not None
+            else (suite_root / "Students").resolve()
+        )
+        summaries = score_test_suite_cases(
+            suite_root=suite_root,
+            students_dir=students_dir,
+            tag=tag,
+            resolved=resolved,
+            device=device,
+            batch_size=int(args.batch_size),
+        )
+        print(
+            "[scan_splice_candidate_sites] "
+            f"model={resolved.resolved_model_name or str(args.model)} "
+            f"best_config={resolved.best_config_path} "
+            f"cases={len(summaries)} students_dir={students_dir}"
+        )
+        return 0
+
+    if args.name is None or str(args.name).strip() == "":
+        raise ValueError("--name is required when scoring one sequence.")
+
+    sequence = _read_sequence(args)
+    donor_candidates, donor_scores, acceptor_candidates, acceptor_scores = (
+        score_one_sequence(
+            sequence=sequence,
+            resolved=resolved,
+            device=device,
+            batch_size=int(args.batch_size),
+        )
     )
 
     output_dir = args.output_dir.resolve()
@@ -569,6 +1049,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(
         "[scan_splice_candidate_sites] "
+        f"model={resolved.resolved_model_name or str(args.model)} "
         f"best_config={resolved.best_config_path} "
         f"donor={len(donor_candidates)} acceptor={len(acceptor_candidates)} "
         f"output_dir={output_dir}"
