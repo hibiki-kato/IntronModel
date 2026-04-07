@@ -72,6 +72,7 @@ from util.unique_intron import (
     load_unique_map,
 )
 from util.versioned_artifacts import (
+    finalize_published_version_outputs,
     refresh_published_version_if_improved,
     is_active_public_model,
     normalize_published_run_checkpoints,
@@ -2264,6 +2265,19 @@ def run_pipeline(args: argparse.Namespace) -> None:
             f.write("\n".join(output_lines))
             f.write("\n")
     print(f"Evaluation scores saved to {eval_output_txt}")
+
+    if published_output_name is not None:
+        finalized_entry = finalize_published_version_outputs(
+            project_root=Path(project_root()),
+            species=str(args.species),
+            model_name=str(args.model),
+            published_name=published_output_name,
+        )
+        if finalized_entry is not None:
+            print(
+                "[pipeline] Archived stale published outputs: "
+                f"keep={finalized_entry.published_name}"
+            )
 
     if args.visualize != "none":
         print(

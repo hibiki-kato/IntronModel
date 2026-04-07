@@ -2,7 +2,7 @@
 # gffread v0.12.7
 # gffread -F
 NC_004354.4	HMM	transcript	1	1659	.	.	.	ID=cds-NP_525044.1.fa.0
-NC_004354.4	HMM	CDS	1	166	4143.51	.	0	Parent=cds-NP_525044.1.fa.0;state=E0
-NC_004354.4	HMM	CDS	221	674	4143.51	.	2	Parent=cds-NP_525044.1.fa.0;state=E0
-NC_004354.4	HMM	CDS	730	1268	4143.51	.	1	Parent=cds-NP_525044.1.fa.0;state=E1
-NC_004354.4	HMM	CDS	1324	1659	4143.51	.	2	Parent=cds-NP_525044.1.fa.0;state=E2
+NC_004354.4	HMM	CDS	1	166	3218.45	.	0	Parent=cds-NP_525044.1.fa.0;state=E0
+NC_004354.4	HMM	CDS	221	674	3218.45	.	2	Parent=cds-NP_525044.1.fa.0;state=E0
+NC_004354.4	HMM	CDS	730	1262	3218.45	.	1	Parent=cds-NP_525044.1.fa.0;state=E1
+NC_004354.4	HMM	CDS	1324	1659	3218.45	.	2	Parent=cds-NP_525044.1.fa.0;state=E2

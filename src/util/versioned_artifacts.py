@@ -3,9 +3,9 @@
 Publication happens when a canonical ``best_config.json`` improves. Site models
 publish synchronized donor/acceptor checkpoint versions, so a donor-only update
 still bumps the acceptor side to the same version number via carry-forward.
-Pair models publish a single versioned pair checkpoint. The latest and previous
-versions remain live under ``data/`` and ``model/`` while older versions move
-under ``archive/versioned_artifacts/``.
+Pair models publish a single versioned pair checkpoint. Older published
+versions move under ``archive/versioned_artifacts/`` only after the new
+version's score and eval outputs are finalized.
 """
 
 from __future__ import annotations
@@ -51,7 +51,6 @@ VERSION_HISTORY_COLUMNS: tuple[str, ...] = (
     "metrics_json",
     "archive_status",
 )
-LIVE_VERSION_KEEP_COUNT: int = 2
 INITIAL_VERSION_NUMBER: int = 1
 
 
@@ -828,15 +827,149 @@ def publish_latest_best_version(
         return None
 
     updated_history = [*history, entry]
-    _archive_old_versions(
-        project_root=project_root,
+    write_version_history(data_root, species, public_model_name, updated_history)
+    return updated_history[-1]
+
+
+def finalize_published_version_outputs(
+    *,
+    project_root: Path,
+    species: str,
+    model_name: str,
+    published_name: str,
+) -> VersionHistoryEntry | None:
+    """Archive stale live versions after one published output set is complete.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+    species : str
+        Species key under ``data`` and ``model``.
+    model_name : str
+        Public model name such as ``cnn_v2`` or ``cnn_pair_v3``.
+    published_name : str
+        Published version whose score/eval outputs have completed.
+
+    Returns
+    -------
+    VersionHistoryEntry | None
+        Finalized live entry when publication participates in versioning,
+        otherwise ``None``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the required score/eval outputs are missing.
+    ValueError
+        If ``published_name`` is empty.
+    """
+    public_model_name = normalize_public_model_name(model_name)
+    publication_tasks = publication_tasks_for_model(public_model_name)
+    if publication_tasks is None:
+        return None
+
+    target_published_name = published_name.strip()
+    if target_published_name == "":
+        raise ValueError("published_name must not be empty.")
+
+    data_root = _resolve_data_root(project_root)
+    model_root = _resolve_model_root(project_root)
+    history = read_version_history(data_root, species, public_model_name)
+    if not history:
+        return None
+
+    target_entry: VersionHistoryEntry | None = None
+    for entry in history:
+        if entry.published_name == target_published_name:
+            target_entry = entry
+    if target_entry is None:
+        return None
+
+    _validate_published_outputs_ready(
         data_root=data_root,
         model_root=model_root,
         species=species,
         public_model_name=public_model_name,
-        history_entries=updated_history,
+        published_name=target_published_name,
     )
-    return updated_history[-1]
+
+    archive_root = (
+        project_root / "archive" / "versioned_artifacts" / species / public_model_name
+    )
+    updated_entries: list[VersionHistoryEntry] = []
+    for entry in history:
+        archive_status = (
+            "live" if entry.published_name == target_published_name else "archived"
+        )
+        if archive_status == "archived" and entry.archive_status != "archived":
+            _archive_one_version(
+                archive_root=archive_root / entry.published_name,
+                data_root=data_root,
+                model_root=model_root,
+                species=species,
+                public_model_name=public_model_name,
+                published_name=entry.published_name,
+            )
+        updated_entry = VersionHistoryEntry(
+            version=entry.version,
+            published_name=entry.published_name,
+            published_at=entry.published_at,
+            source_best_config=entry.source_best_config,
+            objective_metric=entry.objective_metric,
+            objective_score=entry.objective_score,
+            updated_side=entry.updated_side,
+            carry_forward_side=entry.carry_forward_side,
+            donor_checkpoint_path=entry.donor_checkpoint_path,
+            acceptor_checkpoint_path=entry.acceptor_checkpoint_path,
+            pair_checkpoint_path=entry.pair_checkpoint_path,
+            metrics_json=entry.metrics_json,
+            archive_status=archive_status,
+        )
+        updated_entries.append(updated_entry)
+        if updated_entry.published_name == target_published_name:
+            target_entry = updated_entry
+
+    write_version_history(data_root, species, public_model_name, updated_entries)
+    return target_entry
+
+
+def finalize_ready_published_outputs_for_species(
+    *,
+    project_root: Path,
+    species: str,
+) -> list[VersionHistoryEntry]:
+    """Finalize every ready published model version for one species.
+
+    This helper is intended for maintenance entrypoints such as plotting where
+    one caller wants score/eval directories cleaned up before aggregating files.
+    Models whose latest live version does not yet have a complete published
+    score/eval set are skipped without error.
+    """
+    data_root = _resolve_data_root(project_root)
+    finalized_entries: list[VersionHistoryEntry] = []
+    for model_name in sorted(KNOWN_MODEL_NAMES):
+        if not is_active_public_model(model_name):
+            continue
+        latest_entry = resolve_latest_live_history_entry(
+            data_root=data_root,
+            species=species,
+            model_name=model_name,
+        )
+        if latest_entry is None:
+            continue
+        try:
+            finalized_entry = finalize_published_version_outputs(
+                project_root=project_root,
+                species=species,
+                model_name=model_name,
+                published_name=latest_entry.published_name,
+            )
+        except FileNotFoundError:
+            continue
+        if finalized_entry is not None:
+            finalized_entries.append(finalized_entry)
+    return finalized_entries
 
 
 def _publish_independent_public_version(
@@ -1098,56 +1231,6 @@ def _publish_pair_public_version(
     )
 
 
-def _archive_old_versions(
-    *,
-    project_root: Path,
-    data_root: Path,
-    model_root: Path,
-    species: str,
-    public_model_name: str,
-    history_entries: list[VersionHistoryEntry],
-) -> None:
-    if len(history_entries) <= LIVE_VERSION_KEEP_COUNT:
-        write_version_history(data_root, species, public_model_name, history_entries)
-        return
-
-    live_entries = history_entries[-LIVE_VERSION_KEEP_COUNT:]
-    live_names = {entry.published_name for entry in live_entries}
-    archive_root = (
-        project_root / "archive" / "versioned_artifacts" / species / public_model_name
-    )
-    updated_entries: list[VersionHistoryEntry] = []
-    for entry in history_entries:
-        archive_status = "live" if entry.published_name in live_names else "archived"
-        if archive_status == "archived":
-            _archive_one_version(
-                archive_root=archive_root / entry.published_name,
-                data_root=data_root,
-                model_root=model_root,
-                species=species,
-                public_model_name=public_model_name,
-                published_name=entry.published_name,
-            )
-        updated_entries.append(
-            VersionHistoryEntry(
-                version=entry.version,
-                published_name=entry.published_name,
-                published_at=entry.published_at,
-                source_best_config=entry.source_best_config,
-                objective_metric=entry.objective_metric,
-                objective_score=entry.objective_score,
-                updated_side=entry.updated_side,
-                carry_forward_side=entry.carry_forward_side,
-                donor_checkpoint_path=entry.donor_checkpoint_path,
-                acceptor_checkpoint_path=entry.acceptor_checkpoint_path,
-                pair_checkpoint_path=entry.pair_checkpoint_path,
-                metrics_json=entry.metrics_json,
-                archive_status=archive_status,
-            )
-        )
-    write_version_history(data_root, species, public_model_name, updated_entries)
-
-
 def _archive_one_version(
     *,
     archive_root: Path,
@@ -1169,6 +1252,48 @@ def _archive_one_version(
         destination = archive_root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(live_path), str(destination))
+
+
+def _validate_published_outputs_ready(
+    *,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+) -> None:
+    """Validate that one published version has its core outputs in place."""
+    required_paths = list(
+        _iter_required_live_artifact_paths(
+            data_root=data_root,
+            model_root=model_root,
+            species=species,
+            public_model_name=public_model_name,
+            published_name=published_name,
+        )
+    )
+    missing_paths = [path for path in required_paths if not path.is_file()]
+    if missing_paths:
+        missing_text = ", ".join(str(path) for path in missing_paths)
+        raise FileNotFoundError(
+            "Published outputs are incomplete; refusing to archive older "
+            f"versions: {missing_text}"
+        )
+
+
+def _iter_required_live_artifact_paths(
+    *,
+    data_root: Path,
+    model_root: Path,
+    species: str,
+    public_model_name: str,
+    published_name: str,
+) -> Iterable[Path]:
+    """Yield core artifacts that must exist before one version is finalized."""
+    yield data_root / species / "site_score" / f"{published_name}.tsv"
+    yield data_root / species / "intron_score" / f"{published_name}.tsv"
+    yield data_root / species / "trans_score" / f"{published_name}.tsv"
+    yield data_root / species / "eval_score" / f"{published_name}.txt"
 
 
 def _seed_unversioned_outputs_if_needed(

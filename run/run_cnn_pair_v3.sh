@@ -12,7 +12,7 @@ fi
 # --------------------------
 set -a
 MODEL="cnn_pair_v3"
-SPECIES="${SPECIES:-Mmus,Athal,Dmel,Hsap}"
+SPECIES="${SPECIES:-Dmel,Hsap}"
 INTRONMODEL_AUTO_TMUX="off"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
@@ -198,6 +198,8 @@ run_species_once() {
 	append_arg_if_set "test_tsv" "${TEST_TSV_PATH}"
 	append_arg_if_set "class_file" "${CLASS_FILE_PATH}"
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
+	append_arg_if_set "early_stop_patience" "${EARLY_STOP_PATIENCE}"
+	append_arg_if_set "early_stop_min_delta" "${EARLY_STOP_MIN_DELTA}"
 	if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
 		intronmodel_append_versioned_output_args \
 			"cnn_pair_v3.sh" "${species}" "${MODEL}" args
@@ -277,8 +279,6 @@ run_species_once() {
 			--val_frac "${VAL_FRAC}"
 			--epochs "${EPOCHS}"
 			--max_epochs "${MAX_EPOCHS}"
-			--early_stop_patience "${EARLY_STOP_PATIENCE}"
-			--early_stop_min_delta "${EARLY_STOP_MIN_DELTA}"
 			--batch_size "${BATCH_SIZE}"
 			--lr "${LR}"
 			--loss "${LOSS}"

@@ -992,8 +992,18 @@ def train_task_model(
                     raise ValueError(
                         f"Init checkpoint has no tensor weights: {init_checkpoint_path}"
                     )
-                model.load_state_dict(state_dict)
-                print(f"[{task}] initialized from checkpoint: {init_checkpoint_path}")
+                try:
+                    model.load_state_dict(state_dict)
+                    print(
+                        f"[{task}] initialized from checkpoint: {init_checkpoint_path}"
+                    )
+                except RuntimeError as exc:
+                    print(
+                        f"[{task}] warm-start checkpoint incompatible; "
+                        "continue from random initialization."
+                    )
+                    print(f"[{task}] warm-start checkpoint: {init_checkpoint_path}")
+                    print(f"[{task}] warm-start detail: {exc}")
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()

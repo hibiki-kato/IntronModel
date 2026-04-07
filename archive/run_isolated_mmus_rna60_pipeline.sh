@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOT'
-Usage: bash run/run_isolated_mmus_rna60_pipeline.sh [options]
+Usage: bash archive/run_isolated_mmus_rna60_pipeline.sh [options]
 
 Options:
   --query-gtf <path>         Query GTF-like input path
@@ -14,7 +14,7 @@ Options:
   --source-model-root <path> Source model root used for checkpoints
                              (default: <repo>/model)
   --work-root <path>         Isolated workspace root
-                             (default: <repo>/temp/isolated_<species>_rna60)
+                             (default: <repo>/archive/isolated_<species>_rna60)
   --device <name>            DEVICE for inference wrappers (default: auto)
   --gpu-ids <csv|auto>       GPU_IDS for inference wrappers (default: auto)
   --max-parallel <n|auto>    MAX_PARALLEL_TRIALS for inference wrappers
@@ -68,7 +68,7 @@ INFER_MODELS="cnn_v2,dnabert2_pair"
 # --------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/../run/lib/common.sh"
 intronmodel_activate_conda "${CONDA_ENV}"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
 
@@ -153,7 +153,7 @@ if [[ -z "${SOURCE_MODEL_ROOT}" ]]; then
 	SOURCE_MODEL_ROOT="${PROJECT_ROOT}/model"
 fi
 if [[ -z "${WORK_ROOT}" ]]; then
-	WORK_ROOT="${PROJECT_ROOT}/temp/isolated_${SPECIES}_rna60"
+	WORK_ROOT="${PROJECT_ROOT}/archive/isolated_${SPECIES}_rna60"
 fi
 
 resolve_existing_file() {

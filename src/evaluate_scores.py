@@ -16,6 +16,7 @@ from matplotlib.backend_bases import PickEvent
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.text import Text
+from util.versioned_artifacts import finalize_ready_published_outputs_for_species
 
 PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
     "Athal": (10.0, 52.0, 48.0, 75.0),
@@ -34,6 +35,12 @@ LEGEND_VISIBLE_ALPHA = 1.0
 LEGEND_LOCATION = "upper left"
 LEGEND_BBOX_ANCHOR: tuple[float, float] = (1.02, 1.0)
 NON_GUI_BACKENDS: set[str] = {"agg", "cairo", "pdf", "pgf", "ps", "svg", "template"}
+
+
+def resolve_project_root() -> Path:
+    """Resolve the repository root for maintenance helpers."""
+
+    return Path(__file__).resolve().parents[1]
 
 
 def load_class_dict(class_file: str | Path) -> dict[str, str]:
@@ -613,6 +620,16 @@ def run_eval_command(args: argparse.Namespace) -> None:
 
 def run_plot_command(args: argparse.Namespace) -> None:
     """Run `plot` subcommand."""
+
+    finalized_entries = finalize_ready_published_outputs_for_species(
+        project_root=resolve_project_root(),
+        species=args.species,
+    )
+    if finalized_entries:
+        kept = ", ".join(
+            sorted(entry.published_name for entry in finalized_entries)
+        )
+        print(f"[plot_eval] finalized published outputs: {kept}")
 
     plot_eval_scores(
         species=args.species,

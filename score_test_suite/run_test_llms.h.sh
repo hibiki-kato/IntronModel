@@ -9,6 +9,9 @@ cd "$script_dir"
 source "${project_root}/run/lib/common.sh"
 intronmodel_activate_conda "${CONDA_ENV:-intronmodel}"
 
+input_tag="${INPUT_TAG:-h}"
+score_mode="${SCORE_MODE:-h}"
+use_pair_filter="${USE_PAIR_FILTER:-0}"
 pair_model="${PAIR_MODEL:-cnn_pair_v2}"
 pair_device="${PAIR_DEVICE:-auto}"
 pair_batch_size="${PAIR_BATCH_SIZE:-512}"
@@ -24,6 +27,29 @@ pair_filter_mode="${PAIR_FILTER_MODE:-error}"
 min_intron_length="${MIN_INTRON_LENGTH:-30}"
 pair_best_config_path="${PAIR_BEST_CONFIG_PATH:-}"
 pair_checkpoint_path="${PAIR_CHECKPOINT_PATH:-}"
+
+case "${score_mode}" in
+  c)
+    donor_transform='perl -ane '\''{$score=log($F[1]*2)*500+50;$score=$score>-150?$score:-1000;print "$F[0]\t$score\n"}'\'''
+    acceptor_transform="${donor_transform}"
+    ;;
+  exp10_c)
+    donor_transform='perl -ane '\''{$p=10**$F[1];$score=log($p*2)*500+50;$score=$score>-150?$score:-1000;print "$F[0]\t$score\n"}'\'''
+    acceptor_transform="${donor_transform}"
+    ;;
+  h)
+    donor_transform='perl -ane '\''$score=$F[1]*1151.292546497023+396.5735902799727;$score=$score>-150?$score:-1000;print "$F[0]\t$score\n"'\'''
+    acceptor_transform="${donor_transform}"
+    ;;
+  none)
+    donor_transform='perl -ane '\''print "$F[0]\t$F[1]\n"'\'''
+    acceptor_transform="${donor_transform}"
+    ;;
+  *)
+    echo "[run_test_llms.h.sh] unsupported SCORE_MODE: ${score_mode}" >&2
+    exit 1
+    ;;
+esac
 
 rm -f {rna,cds}-*/*.fa.gff
 for d in {rna,cds}-*; do
@@ -55,11 +81,13 @@ for d in {rna,cds}-*; do
   if [[ -n "${pair_checkpoint_path}" ]]; then
     pair_args+=(--pair-checkpoint-path "${pair_checkpoint_path}")
   fi
-  perl -ane '$score=$F[1]*1151.292546497023+396.5735902799727;$score=$score>-150?$score:-1000;print "$F[0]\t$score\n"' Students/out.gt.$d.h.txt > $d/out.gt.txt && \
-  perl -ane '$score=$F[1]*1151.292546497023+396.5735902799727;$score=$score>-150?$score:-1000;print "$F[0]\t$score\n"' Students/out.ag.$d.h.txt > $d/out.ag.txt && \
-  PYTHONPATH="${project_root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 "${project_root}/src/tools/filter_score_test_suite_pairs.py" \
-      "${pair_args[@]}" && \
+  eval "${donor_transform}" "Students/out.gt.${d}.${input_tag}.txt" > "${d}/out.gt.txt" && \
+  eval "${acceptor_transform}" "Students/out.ag.${d}.${input_tag}.txt" > "${d}/out.ag.txt" && \
+  if [[ "${use_pair_filter}" == "1" ]]; then \
+    PYTHONPATH="${project_root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+      python3 "${project_root}/src/tools/filter_score_test_suite_pairs.py" \
+        "${pair_args[@]}" ; \
+  fi && \
   (cd $d && ../run_gene_finder_viterbi_nn.sh $d.fa)
 done
 gffread {rna,cds}-*/*.fa.gff > viterbi.gff

@@ -14,7 +14,7 @@ fi
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="660"
 TIMEOUT_GRACE_SECONDS="30"
-GPU_IDS="0,1,6,7"
+GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="auto"
 
 INTRONMODEL_AUTO_TMUX="on"
@@ -29,9 +29,9 @@ TRAIN_NEG_PATH=""
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 
-QUICK_TRIALS="16"
+QUICK_TRIALS="8"
 QUICK_EPOCHS="2"
-TOP_K="4"
+TOP_K="2"
 FULL_EPOCHS="15"
 QUICK_COMPILE_MODE="off"
 FULL_COMPILE_MODE="on"
@@ -83,7 +83,7 @@ TARGET_ORDER=(
 DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "acceptor_len": {"type": "int", "min": 60, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
 	"batch_size": {
 		"type": "categorical",

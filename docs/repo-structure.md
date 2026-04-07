@@ -23,7 +23,7 @@ Unified pipeline wrappers (config-only):
 
 - `run/run_cnn_v2.sh`
 - `run/run_cnn_pair_v2.sh`
-- `run/run_isolated_mmus_rna60_pipeline.sh`
+- `archive/run_isolated_mmus_rna60_pipeline.sh`
 
 Archived wrappers:
 

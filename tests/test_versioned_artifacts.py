@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from util.versioned_artifacts import ensure_publication_seed
+from util.versioned_artifacts import finalize_published_version_outputs
 from util.versioned_artifacts import publish_latest_best_version
 from util.versioned_artifacts import read_version_history
 from util.versioned_artifacts import refresh_published_version_if_improved
@@ -207,7 +208,120 @@ def test_publish_latest_best_version_carries_forward_other_site_checkpoint(
     assert acceptor_v2.read_bytes() == b"acceptor-1"
     history = read_version_history(tmp_path / "data", "SpX", "cnn_v2")
     assert [row.published_name for row in history] == ["cnn_v2.01", "cnn_v2.02"]
+    assert [row.archive_status for row in history] == ["live", "live"]
     assert history[-1].carry_forward_side == "acceptor"
+
+
+def test_finalize_published_version_outputs_archives_stale_site_outputs(
+    tmp_path: Path,
+) -> None:
+    donor_raw_1 = tmp_path / "model" / "SpX" / "donor" / "donor_raw_1.pt"
+    acceptor_raw_1 = (
+        tmp_path / "model" / "SpX" / "acceptor" / "acceptor_raw_1.pt"
+    )
+    donor_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    acceptor_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    donor_raw_1.write_bytes(b"donor-1")
+    acceptor_raw_1.write_bytes(b"acceptor-1")
+    donor_best = (
+        tmp_path / "data" / "SpX" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    )
+    acceptor_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_v2"
+        / "acceptor"
+        / "best_config.json"
+    )
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw_1,
+            objective_metric="donor_pr_auc",
+            objective_score=0.91,
+        ),
+    )
+    _write_json(
+        acceptor_best,
+        _site_best_payload(
+            task="acceptor",
+            checkpoint_path=acceptor_raw_1,
+            objective_metric="acceptor_pr_auc",
+            objective_score=0.87,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_v2")
+    _ = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+    )
+
+    donor_raw_2 = tmp_path / "model" / "SpX" / "donor" / "donor_raw_2.pt"
+    donor_raw_2.write_bytes(b"donor-2")
+    _write_json(
+        donor_best,
+        _site_best_payload(
+            task="donor",
+            checkpoint_path=donor_raw_2,
+            objective_metric="donor_pr_auc",
+            objective_score=0.95,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_v2.02")
+
+    published_entry = publish_latest_best_version(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+        updated_side="donor",
+    )
+
+    assert published_entry is not None
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_v2")
+    assert [row.archive_status for row in history] == ["live", "live"]
+
+    finalized_entry = finalize_published_version_outputs(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_v2",
+        published_name="cnn_v2.02",
+    )
+
+    assert finalized_entry is not None
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_v2")
+    assert [row.archive_status for row in history] == ["archived", "live"]
+    assert not (tmp_path / "data" / "SpX" / "eval_score" / "cnn_v2.01.txt").exists()
+    assert (tmp_path / "data" / "SpX" / "eval_score" / "cnn_v2.02.txt").exists()
+    assert not (tmp_path / "model" / "SpX" / "donor" / "cnn_v2.01.pt").exists()
+    assert (tmp_path / "model" / "SpX" / "donor" / "cnn_v2.02.pt").exists()
+    archived_eval = (
+        tmp_path
+        / "archive"
+        / "versioned_artifacts"
+        / "SpX"
+        / "cnn_v2"
+        / "cnn_v2.01"
+        / "data"
+        / "eval_score"
+        / "cnn_v2.01.txt"
+    )
+    archived_checkpoint = (
+        tmp_path
+        / "archive"
+        / "versioned_artifacts"
+        / "SpX"
+        / "cnn_v2"
+        / "cnn_v2.01"
+        / "model"
+        / "donor"
+        / "cnn_v2.01.pt"
+    )
+    assert archived_eval.is_file()
+    assert archived_checkpoint.is_file()
 
 
 def test_publish_latest_best_version_acceptor_update_ignores_stale_donor_payload(
@@ -548,6 +662,104 @@ def test_publish_latest_best_version_for_cnn_pair_v3_uses_its_own_namespace(
         "cnn_pair_v3.01",
         "cnn_pair_v3.02",
     ]
+    assert [row.archive_status for row in history] == ["live", "live"]
+
+
+def test_finalize_published_version_outputs_archives_stale_pair_outputs(
+    tmp_path: Path,
+) -> None:
+    pair_raw_1 = tmp_path / "model" / "SpX" / "pair" / "pair_raw_1.pt"
+    pair_raw_1.parent.mkdir(parents=True, exist_ok=True)
+    pair_raw_1.write_bytes(b"pair-v3-1")
+    pair_best = (
+        tmp_path
+        / "data"
+        / "SpX"
+        / "tuning"
+        / "cnn_pair_v3"
+        / "pair"
+        / "best_config.json"
+    )
+    _write_json(
+        pair_best,
+        _best_payload(
+            checkpoint_path=pair_raw_1,
+            objective_metric="pair_pr_auc",
+            objective_score=0.89,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_pair_v3")
+    _ = ensure_publication_seed(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v3",
+    )
+
+    pair_raw_2 = tmp_path / "model" / "SpX" / "pair" / "pair_raw_2.pt"
+    pair_raw_2.write_bytes(b"pair-v3-2")
+    _write_json(
+        pair_best,
+        _best_payload(
+            checkpoint_path=pair_raw_2,
+            objective_metric="pair_pr_auc",
+            objective_score=0.93,
+        ),
+    )
+    _touch_public_outputs(tmp_path / "data" / "SpX", "cnn_pair_v3.02")
+
+    published_entry = publish_latest_best_version(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v3",
+        updated_side="pair",
+    )
+
+    assert published_entry is not None
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_pair_v3")
+    assert [row.archive_status for row in history] == ["live", "live"]
+
+    finalized_entry = finalize_published_version_outputs(
+        project_root=tmp_path,
+        species="SpX",
+        model_name="cnn_pair_v3",
+        published_name="cnn_pair_v3.02",
+    )
+
+    assert finalized_entry is not None
+    history = read_version_history(tmp_path / "data", "SpX", "cnn_pair_v3")
+    assert [row.archive_status for row in history] == ["archived", "live"]
+    assert not (
+        tmp_path / "data" / "SpX" / "eval_score" / "cnn_pair_v3.01.txt"
+    ).exists()
+    assert (
+        tmp_path / "data" / "SpX" / "eval_score" / "cnn_pair_v3.02.txt"
+    ).exists()
+    assert not (tmp_path / "model" / "SpX" / "pair" / "cnn_pair_v3.01.pt").exists()
+    assert (tmp_path / "model" / "SpX" / "pair" / "cnn_pair_v3.02.pt").exists()
+    archived_eval = (
+        tmp_path
+        / "archive"
+        / "versioned_artifacts"
+        / "SpX"
+        / "cnn_pair_v3"
+        / "cnn_pair_v3.01"
+        / "data"
+        / "eval_score"
+        / "cnn_pair_v3.01.txt"
+    )
+    archived_checkpoint = (
+        tmp_path
+        / "archive"
+        / "versioned_artifacts"
+        / "SpX"
+        / "cnn_pair_v3"
+        / "cnn_pair_v3.01"
+        / "model"
+        / "pair"
+        / "cnn_pair_v3.01.pt"
+    )
+    assert archived_eval.is_file()
+    assert archived_checkpoint.is_file()
 
 
 def test_publish_latest_best_version_uses_root_overrides(

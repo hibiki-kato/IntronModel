@@ -3,28 +3,28 @@
 #
 
 #= Summary for dataset: viterbi.gff 
-#     Query mRNAs :      11 in       1 loci  (8 multi-exon transcripts)
-#            (1 multi-transcript loci, ~11.0 transcripts per locus)
+#     Query mRNAs :      10 in       1 loci  (9 multi-exon transcripts)
+#            (1 multi-transcript loci, ~10.0 transcripts per locus)
 # Reference mRNAs :       6 in       1 loci  (6 multi-exon)
 # Super-loci w/ reference transcripts:        1
 #-----------------| Sensitivity | Precision  |
         Base level:    99.2     |   100.0    |
-        Exon level:    76.3     |    65.9    |
-      Intron level:    75.0     |    72.7    |
-Intron chain level:    16.7     |    12.5    |
-  Transcript level:    16.7     |     9.1    |
+        Exon level:    92.1     |    77.8    |
+      Intron level:    93.8     |    85.7    |
+Intron chain level:    66.7     |    44.4    |
+  Transcript level:    66.7     |    40.0    |
        Locus level:   100.0     |   100.0    |
 
-     Matching intron chains:       1
-       Matching transcripts:       1
+     Matching intron chains:       4
+       Matching transcripts:       4
               Matching loci:       1
 
           Missed exons:       0/38	(  0.0%)
-           Novel exons:       0/44	(  0.0%)
+           Novel exons:       0/45	(  0.0%)
         Missed introns:       0/32	(  0.0%)
-         Novel introns:       0/33	(  0.0%)
+         Novel introns:       0/35	(  0.0%)
            Missed loci:       0/1	(  0.0%)
             Novel loci:       0/1	(  0.0%)
 
  Total union super-loci across all input datasets: 1 
-11 out of 11 consensus transcripts written in gffcmp.annotated.gtf (0 discarded as redundant)
+10 out of 10 consensus transcripts written in gffcmp.annotated.gtf (0 discarded as redundant)

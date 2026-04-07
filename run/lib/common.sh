@@ -178,10 +178,11 @@ PY
 
 intronmodel_configure_compile_defaults() {
 	# Effective compile policy is now on|off in model_runtime.
-	# Keep one explicit guard to prevent Inductor GEMM autotune attempts.
+	# For "on" and "quick" modes, enforce reduce-overhead only.
+	# Clear any lingering cache to prevent max-autotune attempts.
 	export TORCHINDUCTOR_MAX_AUTOTUNE="0"
 	export TORCHINDUCTOR_MAX_AUTOTUNE_GEMM="0"
-	unset INTRONMODEL_TORCH_COMPILE_STRATEGY || true
+	export INTRONMODEL_TORCH_COMPILE_STRATEGY="default-only"
 	unset INTRONMODEL_TORCH_COMPILE_STICKY_MODE || true
 	unset INTRONMODEL_TORCH_COMPILE_DISABLED_MODES || true
 }

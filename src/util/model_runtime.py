@@ -520,6 +520,16 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
         # the same public compile policy, but compile with the default
         # no-cudagraph Inductor mode under the hood.
         torch_mode = "default"
+        # Explicitly disable max_autotune_gemm for reduce-overhead mode to prevent
+        # Inductor from attempting GEMM autotuning which can be noisy.
+        inductor_module = getattr(torch, "_inductor", None)
+        inductor_config = (
+            getattr(inductor_module, "config", None) if inductor_module else None
+        )
+        if inductor_config is not None:
+            current_gemm = getattr(inductor_config, "max_autotune_gemm", None)
+            if isinstance(current_gemm, bool) and current_gemm:
+                setattr(inductor_config, "max_autotune_gemm", False)
     elif model.training and mode == _COMPILE_MODE_MAX_AUTOTUNE:
         # Keep autotuning for training, but skip cudagraph capture to avoid the
         # same graph partition issue as ``reduce-overhead``.
@@ -585,6 +595,11 @@ def compile_model_with_fallback(
             preferred_modes = [_COMPILE_MODE_REDUCE_OVERHEAD]
         elif not _can_use_max_autotune_mode():
             preferred_modes = [_COMPILE_MODE_REDUCE_OVERHEAD]
+    elif normalized_compile_mode in ("on", "quick"):
+        # For "on" and "quick" modes, enforce reduce-overhead only and clear
+        # any lingering sticky mode cache to prevent max-autotune attempts.
+        preferred_modes = [_COMPILE_MODE_REDUCE_OVERHEAD]
+        _set_compile_sticky_mode(None)
 
     candidate_modes: list[str] = []
     sticky_mode = _COMPILE_STICKY_MODE_CACHE
