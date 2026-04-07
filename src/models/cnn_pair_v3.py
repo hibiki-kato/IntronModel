@@ -481,7 +481,7 @@ class ResidualDilatedBranchEncoder(nn.Module):
                 strict=True,
             )
         ):
-            apply_pool = ((index + 1) % pool_every == 0)
+            apply_pool = (index + 1) % pool_every == 0
             self.blocks.append(
                 ResidualDilatedBlock(
                     in_channels=current_in_channels,
@@ -885,9 +885,7 @@ def train_pair_model(
             }
             if resolved_num_workers > 0:
                 train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-                train_eval_loader_kwargs["persistent_workers"] = (
-                    use_persistent_workers
-                )
+                train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
             train_eval_loader = DataLoader(**train_eval_loader_kwargs)
 
         print(
@@ -1273,9 +1271,7 @@ def train_pair_model(
                 "acceptor_kernel_sizes": list(arch_params.acceptor.kernel_sizes),
                 "donor_block_dilations": list(arch_params.donor.dilations),
                 "acceptor_block_dilations": list(arch_params.acceptor.dilations),
-                "donor_residual_channels": list(
-                    arch_params.donor.residual_channels
-                ),
+                "donor_residual_channels": list(arch_params.donor.residual_channels),
                 "acceptor_residual_channels": list(
                     arch_params.acceptor.residual_channels
                 ),
@@ -1587,7 +1583,9 @@ def infer_pair_site_scores(
 def add_train_args(parser: argparse.ArgumentParser) -> None:
     """Register ``cnn_pair_v3`` training arguments."""
     cnn_v2.add_train_args(parser)
-    parser.set_defaults(pair_mode="pair", train_target="pair", validation_metric="pr_auc")
+    parser.set_defaults(
+        pair_mode="pair", train_target="pair", validation_metric="pr_auc"
+    )
     parser.add_argument(
         "--block_dilations",
         type=str,
@@ -1751,9 +1749,7 @@ def train(
         "max_epochs": model_args.max_epochs,
         "early_stop_patience": early_stop_patience,
         "early_stop_min_delta": early_stop_min_delta,
-        "validation_metric": resolve_validation_metric(
-            model_args.validation_metric
-        ),
+        "validation_metric": resolve_validation_metric(model_args.validation_metric),
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": "pair",

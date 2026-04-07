@@ -493,9 +493,7 @@ def train_task_model(
             }
             if resolved_num_workers > 0:
                 train_eval_loader_kwargs["prefetch_factor"] = prefetch_factor
-                train_eval_loader_kwargs["persistent_workers"] = (
-                    use_persistent_workers
-                )
+                train_eval_loader_kwargs["persistent_workers"] = use_persistent_workers
             train_eval_loader = DataLoader(**train_eval_loader_kwargs)
 
         print(
@@ -516,9 +514,7 @@ def train_task_model(
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
                 ptxas_path = os.environ.get("TRITON_PTXAS_PATH")
-                ptxas_blackwell_path = os.environ.get(
-                    "TRITON_PTXAS_BLACKWELL_PATH"
-                )
+                ptxas_blackwell_path = os.environ.get("TRITON_PTXAS_BLACKWELL_PATH")
                 print(
                     f"[cnn_v3:{task}] torch.compile requested "
                     f"(ptxas={ptxas_path}, "
@@ -981,7 +977,9 @@ def infer_site_scores(
         next_row["seq"] = transformed_seq
         transformed_rows.append(next_row)
 
-    donor_seqs = [str(row["seq"]) for row in transformed_rows if row["site_type"] == "donor"]
+    donor_seqs = [
+        str(row["seq"]) for row in transformed_rows if row["site_type"] == "donor"
+    ]
     acceptor_seqs = [
         str(row["seq"]) for row in transformed_rows if row["site_type"] == "acceptor"
     ]
@@ -1007,9 +1005,7 @@ def infer_site_scores(
     if len(donor_scores) != len(donor_seqs):
         raise ValueError("Donor score count does not match donor sequence count.")
     if len(acceptor_scores) != len(acceptor_seqs):
-        raise ValueError(
-            "Acceptor score count does not match acceptor sequence count."
-        )
+        raise ValueError("Acceptor score count does not match acceptor sequence count.")
 
     out_rows: List[Dict[str, object]] = []
     donor_index = 0
@@ -1240,9 +1236,7 @@ def train(
         "max_epochs": model_args.max_epochs,
         "early_stop_patience": early_stop_patience,
         "early_stop_min_delta": early_stop_min_delta,
-        "validation_metric": resolve_validation_metric(
-            model_args.validation_metric
-        ),
+        "validation_metric": resolve_validation_metric(model_args.validation_metric),
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,
