@@ -518,9 +518,7 @@ def test_configure_triton_tool_paths_finds_ptxas_without_path_lookup(
     configure_triton_tool_paths()
 
     assert os.environ["TRITON_PTXAS_PATH"] == str(ptxas_path.resolve())
-    assert os.environ["TRITON_PTXAS_BLACKWELL_PATH"] == str(
-        ptxas_path.resolve()
-    )
+    assert os.environ["TRITON_PTXAS_BLACKWELL_PATH"] == str(ptxas_path.resolve())
     assert os.environ["CUDA_HOME"] == str(env_root.resolve())
     assert os.environ["CUDA_PATH"] == str(env_root.resolve())
     assert os.environ["CPATH"] == str(cuda_header.parent.resolve())

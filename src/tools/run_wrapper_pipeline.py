@@ -360,11 +360,7 @@ def _apply_tuned_overrides(
         and tuned_model_name not in task_only_models
     ):
         env["SHARED_TUNED_CONFIG_PATH"] = str(
-            data_root
-            / species
-            / "tuning"
-            / tuned_model_name
-            / best_config_filename
+            data_root / species / "tuning" / tuned_model_name / best_config_filename
         )
 
     model_tasks = checkpoint_tasks_for_model(model_name)
@@ -535,8 +531,9 @@ def _resolve_expected_checkpoint_paths_for_run(
         tasks=model_tasks,
     )
     default_train_target = (
-        model_tasks[0] if args.model == "cnn_v2" else
-        ("both" if len(model_tasks) > 1 else model_tasks[0])
+        model_tasks[0]
+        if args.model == "cnn_v2"
+        else ("both" if len(model_tasks) > 1 else model_tasks[0])
     )
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
@@ -827,9 +824,7 @@ def _validate_common(spec: WrapperSpec, env: Mapping[str, str]) -> None:
     allowed_targets = (
         model_tasks
         if model_name == "cnn_v2"
-        else (
-            ("both", *model_tasks) if len(model_tasks) > 1 else model_tasks
-        )
+        else (("both", *model_tasks) if len(model_tasks) > 1 else model_tasks)
     )
     _check_choice(train_target, tuple(allowed_targets), "TRAIN_TARGET")
 
@@ -920,8 +915,9 @@ def _check_dnabert_skip_training_preconditions(run_args: list[str]) -> None:
         tasks=model_tasks,
     )
     default_train_target = (
-        model_tasks[0] if args.model == "cnn_v2" else
-        ("both" if len(model_tasks) > 1 else model_tasks[0])
+        model_tasks[0]
+        if args.model == "cnn_v2"
+        else ("both" if len(model_tasks) > 1 else model_tasks[0])
     )
     train_target = (
         str(getattr(args, "train_target", default_train_target)).strip().lower()
@@ -1439,9 +1435,7 @@ def _run_single_species(
         )
         raw_class_file = data_root / species / "raw" / "transcript_class.txt"
         class_file = (
-            processed_class_file
-            if processed_class_file.is_file()
-            else raw_class_file
+            processed_class_file if processed_class_file.is_file() else raw_class_file
         )
     output_site_score_tsv = data_root / species / "site_score" / f"{output_stem}.tsv"
     output_intron_score_tsv = (
