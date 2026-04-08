@@ -712,9 +712,7 @@ def _canonicalize_hparam_context(context: dict[str, object]) -> dict[str, object
         if isinstance(train_source, dict):
             for key in ("train_neg_path", "train_pos_path"):
                 if key in train_source:
-                    train_source[key] = _normalize_context_path_alias(
-                        train_source[key]
-                    )
+                    train_source[key] = _normalize_context_path_alias(train_source[key])
 
         train_source_signature = validation_protocol.get("train_source_signature")
         if isinstance(train_source_signature, dict):
@@ -724,15 +722,11 @@ def _canonicalize_hparam_context(context: dict[str, object]) -> dict[str, object
                     source_entry["path"] = _normalize_context_path_alias(
                         source_entry["path"]
                     )
-            pair_extra_negatives = train_source_signature.get(
-                "pair_extra_negatives"
-            )
+            pair_extra_negatives = train_source_signature.get("pair_extra_negatives")
             if isinstance(pair_extra_negatives, list):
                 for entry in pair_extra_negatives:
                     if isinstance(entry, dict) and "path" in entry:
-                        entry["path"] = _normalize_context_path_alias(
-                            entry["path"]
-                        )
+                        entry["path"] = _normalize_context_path_alias(entry["path"])
 
     return normalized
 
@@ -858,8 +852,9 @@ def _extract_sampled_params_from_best_config(
         fixed_run_args_raw = hparam_context.get("fixed_run_args")
         if fixed_run_args_raw is not None:
             if not isinstance(fixed_run_args_raw, dict):
-                raise ValueError("Global best hparam_context.fixed_run_args must "
-                                 "be an object.")
+                raise ValueError(
+                    "Global best hparam_context.fixed_run_args must be an object."
+                )
             fixed_run_args = fixed_run_args_raw
 
     normalized: dict[str, Scalar] = {}
@@ -1251,19 +1246,15 @@ def _compute_test_pr_auc_objective(
     if model_name == "" or species == "":
         return None
 
-    default_train_target = (
-        "donor" if model_name in {"cnn_v2", "cnn_v3"} else "both"
-    )
+    default_train_target = "donor" if model_name in {"cnn_v2", "cnn_v3"} else "both"
     train_target_raw = merged_args.get("train_target", default_train_target)
     train_target = str(train_target_raw).strip().lower() or default_train_target
     if train_target not in {"both", "donor", "acceptor", "pair"}:
         return None
-    pair_mode_default = (
-        "independent" if model_name in {"cnn_v2", "cnn_v3"} else "pair"
+    pair_mode_default = "independent" if model_name in {"cnn_v2", "cnn_v3"} else "pair"
+    cnn_pair_v2_mode = (
+        str(merged_args.get("pair_mode", pair_mode_default)).strip().lower()
     )
-    cnn_pair_v2_mode = str(
-        merged_args.get("pair_mode", pair_mode_default)
-    ).strip().lower()
     if model_name in {"cnn_pair_v2", "cnn_pair_v3"}:
         cnn_pair_v2_mode = "pair"
     if model_name in {"cnn_v2", "cnn_v3"}:
@@ -2011,7 +2002,9 @@ def sample_trial_params_reinforce(
 
     raw_scores = [score for score, _ in history_trials]
     max_score = max(raw_scores)
-    scaled_scores = [math.exp((score - max_score) / temperature) for score in raw_scores]
+    scaled_scores = [
+        math.exp((score - max_score) / temperature) for score in raw_scores
+    ]
     anchor_index = _sample_weighted_index(scaled_scores, rng)
     sampled = dict(history_trials[anchor_index][1])
 
@@ -2845,9 +2838,7 @@ def _emit_trial_output_lines(
     stream_mode: str,
 ) -> None:
     """Mirror collected trial output lines to stdout based on stream mode."""
-    prefix = _compose_prefixed_log_line(
-        f"[hparam_search][{phase} {trial_id:04d}]"
-    )
+    prefix = _compose_prefixed_log_line(f"[hparam_search][{phase} {trial_id:04d}]")
     for raw_line in output_text.splitlines():
         if raw_line == "":
             continue
@@ -2869,9 +2860,7 @@ def _emit_trial_failure_output_excerpt(
     if not lines:
         return
     excerpt = lines[-max_lines:]
-    prefix = _compose_prefixed_log_line(
-        f"[hparam_search][{phase} {trial_id:04d}]"
-    )
+    prefix = _compose_prefixed_log_line(f"[hparam_search][{phase} {trial_id:04d}]")
     print(
         f"{prefix} failure log excerpt (last {len(excerpt)} lines):",
         flush=True,
@@ -2951,9 +2940,7 @@ def _run_command_with_streaming(
     try:
         collected: list[str] = []
         stream_mode = _ACTIVE_TRIAL_STREAM_MODE
-        prefix = _compose_prefixed_log_line(
-            f"[hparam_search][{phase} {trial_id:04d}]"
-        )
+        prefix = _compose_prefixed_log_line(f"[hparam_search][{phase} {trial_id:04d}]")
         for line in _iter_stream_lines(proc.stdout):
             collected.append(line)
             stripped = line.rstrip("\n")
@@ -3491,9 +3478,9 @@ def _rank_successful_trials_by_score(
         if row.status == "success" and row.objective_score is not None
     ]
     successful.sort(
-        key=lambda row: float(row.objective_score)
-        if row.objective_score is not None
-        else -1.0,
+        key=lambda row: (
+            float(row.objective_score) if row.objective_score is not None else -1.0
+        ),
         reverse=True,
     )
     return successful
@@ -3813,9 +3800,7 @@ def _sample_list_by_depth(
 
     sorted_candidates = sorted(set(candidates))
     if normalized_order not in {"nondecreasing", "nonincreasing"}:
-        raise ValueError(
-            "order must be one of: any, nondecreasing, nonincreasing."
-        )
+        raise ValueError("order must be one of: any, nondecreasing, nonincreasing.")
 
     sampled_indices: list[int] = [rng.randrange(len(sorted_candidates))]
     for _ in range(1, depth):
@@ -3866,8 +3851,7 @@ def _normalize_sampling_order(raw_value: object, *, key_name: str) -> str:
     normalized = alias_map.get(text)
     if normalized is None:
         raise ValueError(
-            f"{key_name} must be any|nondecreasing|nonincreasing "
-            f"(got {raw_value!r})."
+            f"{key_name} must be any|nondecreasing|nonincreasing (got {raw_value!r})."
         )
     return normalized
 
@@ -4866,7 +4850,9 @@ def _materialize_cnn_architecture_params(
             if explicit_dilations is None:
                 explicit_dilations = _parse_conv_channels(out.get("block_dilations"))
             if explicit_dilations is None:
-                explicit_dilations = _parse_conv_channels(base_args.get("block_dilations"))
+                explicit_dilations = _parse_conv_channels(
+                    base_args.get("block_dilations")
+                )
 
             explicit_residuals = _parse_conv_channels(out.get(residual_key))
             if explicit_residuals is None:
@@ -4874,7 +4860,9 @@ def _materialize_cnn_architecture_params(
             if explicit_residuals is None:
                 explicit_residuals = _parse_conv_channels(out.get("residual_channels"))
             if explicit_residuals is None:
-                explicit_residuals = _parse_conv_channels(base_args.get("residual_channels"))
+                explicit_residuals = _parse_conv_channels(
+                    base_args.get("residual_channels")
+                )
 
             if (
                 explicit_channels is not None
@@ -4981,9 +4969,14 @@ def _materialize_cnn_architecture_params(
             min_kernel_size = _normalize_kernel_size(min_kernel_size or 3)
             initial_kernel = _normalize_kernel_size(init_kernel_size or 9)
 
-            channels = [init_channels + (index * channel_step) for index in range(init_depth)]
+            channels = [
+                init_channels + (index * channel_step) for index in range(init_depth)
+            ]
             kernels = [
-                max(min_kernel_size, _normalize_kernel_size(initial_kernel - (2 * index)))
+                max(
+                    min_kernel_size,
+                    _normalize_kernel_size(initial_kernel - (2 * index)),
+                )
                 for index in range(init_depth)
             ]
             dilations = _default_cnn_v3_dilation_schedule(init_depth)
@@ -5693,16 +5686,24 @@ def estimate_cnn_pair_v3_param_complexity(
         base_args=base_args,
         branch_key="donor_kernel_sizes",
         depth=len(donor_conv_channels),
-        shared_kernel_raw=sampled_params.get("kernel_sizes", base_args.get("kernel_sizes")),
-        scalar_kernel_raw=sampled_params.get("kernel_size", base_args.get("kernel_size", 9)),
+        shared_kernel_raw=sampled_params.get(
+            "kernel_sizes", base_args.get("kernel_sizes")
+        ),
+        scalar_kernel_raw=sampled_params.get(
+            "kernel_size", base_args.get("kernel_size", 9)
+        ),
     )
     acceptor_kernel_sizes = _resolve_branch_kernel_sizes(
         sampled_params=sampled_params,
         base_args=base_args,
         branch_key="acceptor_kernel_sizes",
         depth=len(acceptor_conv_channels),
-        shared_kernel_raw=sampled_params.get("kernel_sizes", base_args.get("kernel_sizes")),
-        scalar_kernel_raw=sampled_params.get("kernel_size", base_args.get("kernel_size", 9)),
+        shared_kernel_raw=sampled_params.get(
+            "kernel_sizes", base_args.get("kernel_sizes")
+        ),
+        scalar_kernel_raw=sampled_params.get(
+            "kernel_size", base_args.get("kernel_size", 9)
+        ),
     )
     donor_residual_channels = _resolve_branch_list(
         branch_key="donor_residual_channels",
@@ -5795,7 +5796,9 @@ def estimate_model_param_complexity(
             base_args=base_args,
         )
     if model_name == "cnn_v3":
-        train_target_raw = sampled_params.get("train_target", base_args.get("train_target"))
+        train_target_raw = sampled_params.get(
+            "train_target", base_args.get("train_target")
+        )
         train_target = str(train_target_raw).strip().lower() or "donor"
         branch_prefix = "donor" if train_target != "acceptor" else "acceptor"
         branch_channels_raw = sampled_params.get(
@@ -6036,8 +6039,7 @@ def _print_trial_start(
     slot_label = "cpu" if assigned_gpu is None else f"gpu:{assigned_gpu}"
     print(
         _compose_prefixed_log_line(
-            f"[hparam_search] {phase} trial {trial_id:04d} started on "
-            f"{slot_label}."
+            f"[hparam_search] {phase} trial {trial_id:04d} started on {slot_label}."
         ),
         flush=True,
     )
@@ -6528,9 +6530,7 @@ def _run_quick_full_overlap_subprocess(
         max_parallel_trials,
     )
     previous_stream_mode = _set_active_trial_stream_mode(resolved_stream_mode)
-    previous_max_parallel_trials = _set_active_max_parallel_trials(
-        max_parallel_trials
-    )
+    previous_max_parallel_trials = _set_active_max_parallel_trials(max_parallel_trials)
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         slots: list[Optional[str]]
@@ -6571,8 +6571,7 @@ def _run_quick_full_overlap_subprocess(
         skipped_seed_context_match = 0
         running: dict[Future[TrialResult], tuple[int, ScheduledTrialTask]] = {}
         available_slots: list[tuple[int, Optional[str]]] = [
-            (slot_index, assigned_gpu)
-            for slot_index, assigned_gpu in enumerate(slots)
+            (slot_index, assigned_gpu) for slot_index, assigned_gpu in enumerate(slots)
         ]
         executor = ThreadPoolExecutor(max_workers=max(1, len(slots)))
 
@@ -6775,9 +6774,7 @@ def _run_quick_full_overlap_subprocess(
                         )
                     )
                     completed_count = (
-                        len(quick_rows)
-                        if task.phase == "quick"
-                        else len(full_rows)
+                        len(quick_rows) if task.phase == "quick" else len(full_rows)
                     )
                     if _should_print_trial_result_line(stream_mode):
                         _print_trial_result(
@@ -7023,9 +7020,8 @@ def maybe_update_global_best(
             flush=True,
         )
         return
-    if (
-        previous_sampled_params is not None
-        and _sampled_params_match(previous_sampled_params, best_row.sampled_params)
+    if previous_sampled_params is not None and _sampled_params_match(
+        previous_sampled_params, best_row.sampled_params
     ):
         score_text = "n/a"
         if previous_display_score is not None:
@@ -7426,7 +7422,10 @@ def run_search(config: SearchConfig) -> int:
     global_best_recheck_params: Optional[dict[str, Scalar]] = None
     global_best_recheck_context_mismatch = False
     global_best_sampled_params: Optional[dict[str, Scalar]] = None
-    if config.seed_best_config_path is None and config.global_best_config_path is not None:
+    if (
+        config.seed_best_config_path is None
+        and config.global_best_config_path is not None
+    ):
         try:
             global_best_config = load_seed_best_config(
                 path=config.global_best_config_path,
@@ -7549,9 +7548,7 @@ def run_search(config: SearchConfig) -> int:
             seed_best_params=seed_best_params,
             seed_best_context_mismatch=seed_best_context_mismatch,
             global_best_recheck_params=global_best_recheck_params,
-            global_best_recheck_context_mismatch=(
-                global_best_recheck_context_mismatch
-            ),
+            global_best_recheck_context_mismatch=(global_best_recheck_context_mismatch),
             quick_epochs_value=quick_epochs_value,
             full_epochs_value=full_epochs_value,
         )
@@ -7622,9 +7619,7 @@ def run_search(config: SearchConfig) -> int:
         if any(overrides is None for overrides in full_trial_overrides):
             raise ValueError("Internal error: exhausted full budget trial selected.")
         resolved_full_trial_overrides = [
-            overrides
-            for overrides in full_trial_overrides
-            if overrides is not None
+            overrides for overrides in full_trial_overrides if overrides is not None
         ]
         base_full_count = len(full_params)
         injected_best_full_recheck = False
@@ -7681,12 +7676,12 @@ def run_search(config: SearchConfig) -> int:
                 flush=True,
             )
         if full_count > 0:
-                full_rows = _run_phase_with_optional_trial_overrides(
-                    phase="full",
-                    config=config,
-                    trial_count=full_count,
-                    trial_params=full_params,
-                    overrides=full_overrides,
+            full_rows = _run_phase_with_optional_trial_overrides(
+                phase="full",
+                config=config,
+                trial_count=full_count,
+                trial_params=full_params,
+                overrides=full_overrides,
                 gpu_ids=gpu_ids,
                 max_parallel_trials=max_parallel_trials,
                 out_dir=config.output_dir,
@@ -7703,12 +7698,9 @@ def run_search(config: SearchConfig) -> int:
     if seed_best_params is not None and seed_best_context_mismatch:
         excluded_ranking_param_keys.add(_sampled_params_key(seed_best_params))
     elif (
-        global_best_recheck_params is not None
-        and global_best_recheck_context_mismatch
+        global_best_recheck_params is not None and global_best_recheck_context_mismatch
     ):
-        excluded_ranking_param_keys.add(
-            _sampled_params_key(global_best_recheck_params)
-        )
+        excluded_ranking_param_keys.add(_sampled_params_key(global_best_recheck_params))
 
     ranked_full = rank_successful_trials(full_rows)
     ranked_quick_for_export = _exclude_recheck_rows_from_ranking(

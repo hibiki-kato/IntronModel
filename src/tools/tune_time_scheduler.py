@@ -396,10 +396,12 @@ def _prepare_cycle_state(
     total_slot_count: int,
 ) -> CycleState:
     """Initialize one cycle state from the materialized hparam_search config."""
-    cycle_config, output_dir, config_path, stdout_log = _write_materialized_cycle_config(
-        template=template,
-        scheduler_config=scheduler_config,
-        cycle_index=cycle_index,
+    cycle_config, output_dir, config_path, stdout_log = (
+        _write_materialized_cycle_config(
+            template=template,
+            scheduler_config=scheduler_config,
+            cycle_index=cycle_index,
+        )
     )
     if cycle_config.trial_process_mode != "subprocess":
         raise ValueError(
@@ -507,14 +509,14 @@ def _prepare_cycle_state(
                 global_best_config is not None
                 and global_best_config.hparam_context is not None
             ):
-                global_best_recheck_context_mismatch = not hparam_search._contexts_match(
-                    global_best_config.hparam_context,
-                    current_hparam_context,
+                global_best_recheck_context_mismatch = (
+                    not hparam_search._contexts_match(
+                        global_best_config.hparam_context,
+                        current_hparam_context,
+                    )
                 )
                 if global_best_recheck_context_mismatch:
-                    global_best_recheck_params = dict(
-                        global_best_config.sampled_params
-                    )
+                    global_best_recheck_params = dict(global_best_config.sampled_params)
 
     full_priority_params: dict[str, Scalar] | None = None
     next_full_trial_id = 0
@@ -522,8 +524,7 @@ def _prepare_cycle_state(
         full_priority_params = dict(seed_best_params)
         next_full_trial_id = 1
     elif (
-        global_best_recheck_params is not None
-        and global_best_recheck_context_mismatch
+        global_best_recheck_params is not None and global_best_recheck_context_mismatch
     ):
         full_priority_params = dict(global_best_recheck_params)
         next_full_trial_id = 1
@@ -595,11 +596,7 @@ def _emit_cycle_start(
     worker_gpu_ids: list[str],
 ) -> None:
     """Emit the user-facing cycle-start summary and initialization details."""
-    assigned_gpu_text = (
-        ",".join(worker_gpu_ids)
-        if worker_gpu_ids
-        else "cpu-fallback"
-    )
+    assigned_gpu_text = ",".join(worker_gpu_ids) if worker_gpu_ids else "cpu-fallback"
     parallel_count = len(worker_gpu_ids) if worker_gpu_ids else 1
     _emit_scheduler_line(
         scheduler_config,
@@ -751,7 +748,9 @@ def _maybe_queue_priority_recheck(cycle: CycleState) -> None:
 
 def _maybe_promote_locked_rows(cycle: CycleState) -> None:
     """Promote mathematically locked quick rows into full tasks."""
-    unfinished_quick_count = len(cycle.quick_pending_indices) + cycle.quick_running_count
+    unfinished_quick_count = (
+        len(cycle.quick_pending_indices) + cycle.quick_running_count
+    )
     locked_rows = hparam_search._select_locked_quick_trials(
         completed_quick_rows=cycle.completed_quick_rows,
         unfinished_quick_count=unfinished_quick_count,
@@ -779,10 +778,7 @@ def _maybe_promote_locked_rows(cycle: CycleState) -> None:
             metrics_json_path=Path(row.metrics_json),
             objective_metric=cycle.config.objective_metric,
         )
-        if (
-            quick_best_epoch is not None
-            and quick_best_epoch == cycle.full_epochs_value
-        ):
+        if quick_best_epoch is not None and quick_best_epoch == cycle.full_epochs_value:
             cycle.skipped_same_best_epoch += 1
             cycle.full_consumed_keys.add(row_key)
             continue
@@ -797,7 +793,8 @@ def _maybe_promote_locked_rows(cycle: CycleState) -> None:
             sampled_params=dict(row.sampled_params),
             overrides=dict(cycle.full_overrides),
             metrics_json=str(
-                cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.metrics.json"
+                cycle.output_dir
+                / f"full_trial_{cycle.next_full_trial_id:04d}.metrics.json"
             ),
             log_file=str(
                 cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.log.txt"
@@ -837,10 +834,7 @@ def _build_non_overlap_full_queue(cycle: CycleState) -> None:
             metrics_json_path=Path(row.metrics_json),
             objective_metric=cycle.config.objective_metric,
         )
-        if (
-            quick_best_epoch is not None
-            and quick_best_epoch == cycle.full_epochs_value
-        ):
+        if quick_best_epoch is not None and quick_best_epoch == cycle.full_epochs_value:
             cycle.skipped_same_best_epoch += 1
             continue
         selected_for_full.append(row)
@@ -866,7 +860,8 @@ def _build_non_overlap_full_queue(cycle: CycleState) -> None:
             sampled_params=dict(row.sampled_params),
             overrides=dict(cycle.full_overrides),
             metrics_json=str(
-                cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.metrics.json"
+                cycle.output_dir
+                / f"full_trial_{cycle.next_full_trial_id:04d}.metrics.json"
             ),
             log_file=str(
                 cycle.output_dir / f"full_trial_{cycle.next_full_trial_id:04d}.log.txt"
@@ -904,7 +899,9 @@ def _pop_next_task(cycle: CycleState) -> ScheduledTrialTask | None:
             priority_score=0.0,
             sampled_params=dict(cycle.quick_params[trial_id]),
             overrides=dict(cycle.quick_overrides),
-            metrics_json=str(cycle.output_dir / f"quick_trial_{trial_id:04d}.metrics.json"),
+            metrics_json=str(
+                cycle.output_dir / f"quick_trial_{trial_id:04d}.metrics.json"
+            ),
             log_file=str(cycle.output_dir / f"quick_trial_{trial_id:04d}.log.txt"),
         )
     if cycle.pending_full_tasks:
@@ -972,7 +969,10 @@ def _snapshot_trial_count(cycle: CycleState, task: ScheduledTrialTask) -> int:
     return max(
         1,
         planned_full_count,
-        len(cycle.full_rows) + len(cycle.pending_full_tasks) + cycle.full_running_count + 1,
+        len(cycle.full_rows)
+        + len(cycle.pending_full_tasks)
+        + cycle.full_running_count
+        + 1,
     )
 
 
@@ -1116,9 +1116,13 @@ def _finalize_cycle(
     gpu_ids: list[str],
 ) -> int:
     """Write cycle artifacts and return the cycle exit code."""
-    hparam_search.write_trials_tsv(cycle.output_dir / "quick_trials.tsv", cycle.quick_rows)
+    hparam_search.write_trials_tsv(
+        cycle.output_dir / "quick_trials.tsv", cycle.quick_rows
+    )
     ranked_quick = hparam_search.rank_successful_trials(cycle.quick_rows)
-    hparam_search.write_trials_tsv(cycle.output_dir / "full_trials.tsv", cycle.full_rows)
+    hparam_search.write_trials_tsv(
+        cycle.output_dir / "full_trials.tsv", cycle.full_rows
+    )
 
     excluded_ranking_param_keys: set[str] = set()
     if cycle.seed_best_params is not None and cycle.seed_best_context_mismatch:
@@ -1266,10 +1270,7 @@ def run_scheduler(config: SchedulerConfig) -> int:
         worker_gpu_ids = list(config.selected_gpu_ids[:total_slot_count])
         _emit_scheduler_line(
             config,
-            (
-                "trial scheduler across GPUs: "
-                f"{','.join(worker_gpu_ids)}"
-            ),
+            (f"trial scheduler across GPUs: {','.join(worker_gpu_ids)}"),
         )
     else:
         worker_gpu_ids = []
@@ -1309,14 +1310,11 @@ def run_scheduler(config: SchedulerConfig) -> int:
             elapsed_seconds = int(now - start_time)
             remaining_seconds = max(0, int(deadline - now))
 
-            if (
-                not stop_submitting
-                and not _should_dispatch_next_cycle(
-                    script_name=config.script_name,
-                    remaining_seconds=remaining_seconds,
-                    total_cycle_seconds=total_cycle_seconds,
-                    completed_cycles=completed_cycles,
-                )
+            if not stop_submitting and not _should_dispatch_next_cycle(
+                script_name=config.script_name,
+                remaining_seconds=remaining_seconds,
+                total_cycle_seconds=total_cycle_seconds,
+                completed_cycles=completed_cycles,
             ):
                 stop_submitting = True
 

@@ -2055,9 +2055,7 @@ def train_task_model(
                 device=device,
                 log_prefix=task,
             )
-            initialized_from_checkpoint = (
-                warm_start_result.initialized_from_checkpoint
-            )
+            initialized_from_checkpoint = warm_start_result.initialized_from_checkpoint
             init_checkpoint_path = warm_start_result.init_checkpoint_path
 
             if compile_enabled_attempt:

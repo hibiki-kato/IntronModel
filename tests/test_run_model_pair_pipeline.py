@@ -178,7 +178,9 @@ class _DummyPublishedPairModelModule(_DummyPairModelModule):
     ) -> list[dict[str, object]]:
         del model_args
         assert str(common_args.pair_checkpoint_path).endswith("cnn_pair_v3.02.pt")
-        return super().infer_site(common_args=common_args, model_args=argparse.Namespace())
+        return super().infer_site(
+            common_args=common_args, model_args=argparse.Namespace()
+        )
 
 
 def _write_cnn_v2_best_config(
@@ -956,12 +958,7 @@ def test_run_pipeline_tuned_pair_run_uses_versioned_output_targets(
     pair_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     pair_checkpoint.write_bytes(b"pair-v3")
     pair_best = (
-        data_root
-        / "Dmel"
-        / "tuning"
-        / "cnn_pair_v3"
-        / "pair"
-        / "best_config.json"
+        data_root / "Dmel" / "tuning" / "cnn_pair_v3" / "pair" / "best_config.json"
     )
     pair_best.parent.mkdir(parents=True, exist_ok=True)
     pair_best.write_text(
