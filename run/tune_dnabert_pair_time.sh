@@ -510,12 +510,12 @@ while true; do
 		if [[ "${avg_cycle_seconds_guard}" -gt 0 ]] \
 			&& [[ "${remaining_seconds}" -lt "${avg_cycle_seconds_guard}" ]]; then
 			echo "[tune_dnabert_pair_time.sh] stop before next cycle: "\
-				"remaining=$(format_elapsed "${remaining_seconds}") "\
-				"< avg_cycle=$(format_elapsed "${avg_cycle_seconds_guard}")"
+				"remaining=$(intronmodel_format_elapsed "${remaining_seconds}") "\
+				"< avg_cycle=$(intronmodel_format_elapsed "${avg_cycle_seconds_guard}")"
 			break
 		fi
 	fi
-	remaining_hms="$(format_elapsed "${remaining_seconds}")"
+	remaining_hms="$(intronmodel_format_elapsed "${remaining_seconds}")"
 
 	scheduled_entry="${JOB_ORDER[$((job_index % ${#JOB_ORDER[@]}))]}"
 	raw_species="${scheduled_entry%%:*}"
@@ -672,7 +672,7 @@ JSON
 
 	job_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	job_start_seconds="${SECONDS}"
-	job_elapsed_hms="$(format_elapsed "${elapsed_seconds}")"
+	job_elapsed_hms="$(intronmodel_format_elapsed "${elapsed_seconds}")"
 	printf '[tune_dnabert_pair_time.sh] cycle=%s elapsed=%s start=%s ' \
 		"${job_index}" "${job_elapsed_hms}" "${job_start}"
 	printf 'ETA_remaining=%s species=%s target=%s\n' \
@@ -707,8 +707,8 @@ JSON
 	fi
 	printf '[tune_dnabert_pair_time.sh] cycle_done=%s cycle_time=%s avg_cycle=%s ' \
 		"${job_index}" \
-		"$(format_elapsed "${cycle_duration_seconds}")" \
-		"$(format_elapsed "${avg_cycle_seconds}")"
+		"$(intronmodel_format_elapsed "${cycle_duration_seconds}")" \
+		"$(intronmodel_format_elapsed "${avg_cycle_seconds}")"
 	printf 'ETA_cycles_left=%s\n' "${estimated_cycles_left}"
 
 	job_index=$((job_index + 1))
