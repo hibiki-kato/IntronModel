@@ -4,6 +4,7 @@ import pytest
 
 from util.training_control import (
     get_metric_value,
+    resolve_training_schedule,
     resolve_validation_metric,
     select_validation_score,
 )
@@ -60,3 +61,31 @@ def test_get_metric_value_returns_float_for_existing_metric() -> None:
 
 def test_get_metric_value_returns_none_for_missing_metric() -> None:
     assert get_metric_value(metrics={"pr_auc": 0.92}, metric_name="max_f1") is None
+
+
+def test_resolve_training_schedule_disables_early_stop_for_fixed_epochs() -> None:
+    schedule = resolve_training_schedule(
+        epochs_arg="6",
+        max_epochs=20,
+        patience_arg=7,
+        min_delta_arg=0.01,
+    )
+
+    assert schedule.resolved_epochs == 6
+    assert schedule.epochs_auto is False
+    assert schedule.early_stop_patience == 7
+    assert schedule.early_stop_min_delta == pytest.approx(0.01)
+    assert schedule.effective_early_stop_patience == 0
+
+
+def test_resolve_training_schedule_preserves_patience_for_auto_epochs() -> None:
+    schedule = resolve_training_schedule(
+        epochs_arg="auto",
+        max_epochs=14,
+        patience_arg=5,
+        min_delta_arg=0.0,
+    )
+
+    assert schedule.resolved_epochs == 14
+    assert schedule.epochs_auto is True
+    assert schedule.effective_early_stop_patience == 5

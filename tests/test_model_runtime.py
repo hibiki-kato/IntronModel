@@ -16,6 +16,7 @@ from util.model_runtime import (
     compile_model_with_fallback,
     configure_torch_compile_runtime,
     configure_triton_tool_paths,
+    extract_checkpoint_model_state,
     fallback_average_precision,
     fallback_max_f1,
     fallback_roc_auc,
@@ -29,6 +30,7 @@ from util.model_runtime import (
     resolve_mps_max_batch_size,
     resolve_num_workers,
     sigmoid_np,
+    warm_start_model,
 )
 
 
@@ -245,6 +247,39 @@ def test_compile_model_with_fallback_quick_alias_uses_default_strategy(
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
     assert mode_calls == [("default", False)]
+
+
+def test_extract_checkpoint_model_state_normalizes_compiled_prefixes() -> None:
+    state = extract_checkpoint_model_state(
+        {
+            "model_state": {
+                "_orig_mod.weight": torch.ones(2, 2),
+                "_orig_mod.bias": torch.zeros(2),
+            }
+        },
+        checkpoint_path="warm.pt",
+    )
+
+    assert set(state.keys()) == {"weight", "bias"}
+
+
+def test_warm_start_model_loads_matching_state_dict(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "linear.pt"
+    source_model = torch.nn.Linear(3, 2)
+    target_model = torch.nn.Linear(3, 2)
+    torch.save({"model_state": source_model.state_dict()}, checkpoint_path)
+
+    result = warm_start_model(
+        target_model,
+        init_checkpoint_path=str(checkpoint_path),
+        device="cpu",
+        log_prefix="pair",
+    )
+
+    assert result.initialized_from_checkpoint is True
+    assert result.init_checkpoint_path == str(checkpoint_path)
+    for key, value in source_model.state_dict().items():
+        assert torch.equal(value, target_model.state_dict()[key])
 
 
 def test_compile_model_with_fallback_full_alias_uses_default_strategy(

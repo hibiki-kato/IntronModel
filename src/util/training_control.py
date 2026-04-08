@@ -7,6 +7,7 @@ metric selection.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Mapping
 
 VALIDATION_METRIC_CHOICES: tuple[str, ...] = (
@@ -24,6 +25,17 @@ _VALIDATION_METRIC_FALLBACKS: dict[str, tuple[str, ...]] = {
     "max_f1": ("max_f1", "acc@0.5"),
     "acc@0.5": ("acc@0.5",),
 }
+
+
+@dataclass(frozen=True)
+class TrainingSchedule:
+    """Resolved epoch and early-stopping schedule for one training run."""
+
+    resolved_epochs: int
+    epochs_auto: bool
+    early_stop_patience: int
+    early_stop_min_delta: float
+    effective_early_stop_patience: int
 
 
 def resolve_training_epoch_budget(
@@ -98,6 +110,49 @@ def resolve_early_stopping_params(
         raise ValueError("--early_stop_min_delta must be >= 0.")
 
     return patience, min_delta
+
+
+def resolve_training_schedule(
+    *,
+    epochs_arg: object,
+    max_epochs: int,
+    patience_arg: object,
+    min_delta_arg: object,
+) -> TrainingSchedule:
+    """Resolve epoch budget and early-stopping settings together.
+
+    Parameters
+    ----------
+    epochs_arg : object
+        User-provided ``--epochs`` value.
+    max_epochs : int
+        Upper epoch bound used when ``epochs_arg`` is ``"auto"``.
+    patience_arg : object
+        User-provided ``--early_stop_patience`` value.
+    min_delta_arg : object
+        User-provided ``--early_stop_min_delta`` value.
+
+    Returns
+    -------
+    TrainingSchedule
+        Combined schedule object shared by model trainers.
+    """
+    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+        epochs_arg=epochs_arg,
+        max_epochs=max_epochs,
+    )
+    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
+        patience_arg=patience_arg,
+        min_delta_arg=min_delta_arg,
+    )
+    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
+    return TrainingSchedule(
+        resolved_epochs=resolved_epochs,
+        epochs_auto=epochs_auto,
+        early_stop_patience=early_stop_patience,
+        early_stop_min_delta=early_stop_min_delta,
+        effective_early_stop_patience=effective_early_stop_patience,
+    )
 
 
 def resolve_validation_metric(metric_arg: object) -> str:

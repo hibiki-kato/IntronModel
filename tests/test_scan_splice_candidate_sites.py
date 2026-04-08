@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
+import tools.scan_splice_candidate_sites as scan_splice_candidate_sites
+
 from tools.scan_splice_candidate_sites import (
     build_candidate_windows,
     load_resolved_best_model_paths,
@@ -28,7 +32,9 @@ def test_build_candidate_windows_keeps_donor_layout() -> None:
         acceptor_window_len=6,
     )
 
-    assert [(candidate.coordinate, candidate.window) for candidate in donor_candidates] == [
+    assert [
+        (candidate.coordinate, candidate.window) for candidate in donor_candidates
+    ] == [
         (3, "CCCGTA"),
     ]
 
@@ -44,8 +50,7 @@ def test_build_candidate_windows_uses_exon_start_acceptor_layout() -> None:
     )
 
     assert [
-        (candidate.coordinate, candidate.window)
-        for candidate in acceptor_candidates
+        (candidate.coordinate, candidate.window) for candidate in acceptor_candidates
     ] == [
         (7, "TAGCCA"),
     ]
@@ -143,3 +148,100 @@ def test_load_resolved_best_model_paths_uses_task_best_configs(
     assert resolved.acceptor_checkpoint_path == acceptor_checkpoint.resolve()
     assert resolved.donor_window_len == 50
     assert resolved.acceptor_window_len == 100
+
+
+def test_load_site_model_uses_dnabert_loader_for_dnabert2(monkeypatch) -> None:
+    """DNABERT-2 site scoring should load through the DNABERT module."""
+    fake_model = object()
+    fake_tokenizer = object()
+
+    def fake_load_task_model(
+        checkpoint_path: str,
+        device: str,
+    ) -> tuple[object, dict[str, object], object]:
+        assert checkpoint_path == "checkpoint.pt"
+        assert device == "cpu"
+        return fake_model, {"max_tokens": 128, "input_kmer": 6}, fake_tokenizer
+
+    monkeypatch.setattr(
+        scan_splice_candidate_sites.dnabert_model,
+        "load_task_model",
+        fake_load_task_model,
+    )
+
+    model, metadata = scan_splice_candidate_sites.load_site_model(
+        "checkpoint.pt",
+        "cpu",
+        "dnabert2",
+    )
+
+    assert model is fake_model
+    assert metadata["tokenizer"] is fake_tokenizer
+    assert metadata["max_tokens"] == 128
+    assert metadata["input_kmer"] == 6
+
+
+def test_score_site_sequences_uses_dnabert_metadata(monkeypatch) -> None:
+    """DNABERT-2 scoring should forward tokenizer and max-token metadata."""
+    captured: dict[str, object] = {}
+
+    def fake_score_sequences(
+        *,
+        model: object,
+        sequences: list[str],
+        tokenizer: object,
+        max_tokens: int,
+        device: str,
+        batch_size: int,
+        task_name: str,
+        input_kmer: int | None,
+        use_amp: bool,
+        amp_dtype: object,
+    ) -> np.ndarray:
+        captured["model"] = model
+        captured["sequences"] = sequences
+        captured["tokenizer"] = tokenizer
+        captured["max_tokens"] = max_tokens
+        captured["device"] = device
+        captured["batch_size"] = batch_size
+        captured["task_name"] = task_name
+        captured["input_kmer"] = input_kmer
+        captured["use_amp"] = use_amp
+        captured["amp_dtype"] = amp_dtype
+        return np.asarray([1.25, 2.5], dtype=np.float64)
+
+    monkeypatch.setattr(
+        scan_splice_candidate_sites.dnabert_model,
+        "score_sequences",
+        fake_score_sequences,
+    )
+
+    fake_model = object()
+    fake_tokenizer = object()
+    scores = scan_splice_candidate_sites.score_site_sequences(
+        model=fake_model,
+        sequences=["AAAA", "CCCC"],
+        window_len=50,
+        device="cpu",
+        batch_size=32,
+        model_name="dnabert2",
+        model_metadata={
+            "tokenizer": fake_tokenizer,
+            "max_tokens": "128",
+            "input_kmer": 6,
+        },
+    )
+
+    assert scores.tolist() == [1.25, 2.5]
+    assert captured == {
+        "model": fake_model,
+        "sequences": ["AAAA", "CCCC"],
+        "tokenizer": fake_tokenizer,
+        "max_tokens": 128,
+        "device": "cpu",
+        "batch_size": 32,
+        "task_name": "score_test_suite",
+        "input_kmer": 6,
+        "use_amp": False,
+        "amp_dtype": None,
+    }

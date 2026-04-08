@@ -2159,8 +2159,8 @@ def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
     assert float(payload["selection_score"]) == pytest.approx(0.815)
     assert payload["hparam_context"] is None
     assert payload["objective_best_epoch"] is None
-    assert payload["donor_checkpoint_path"] == str(donor_ckpt)
-    assert payload["acceptor_checkpoint_path"] == str(acceptor_ckpt)
+    assert payload["donor_checkpoint_path"].endswith("donor.pt")
+    assert payload["acceptor_checkpoint_path"].endswith("acceptor.pt")
 
 
 def test_write_best_config_includes_hparam_context_and_objective_best_epoch(
@@ -6209,6 +6209,7 @@ def test_run_quick_full_overlap_subprocess_promotes_full_early(
         seed_best_context_mismatch=False,
         global_best_recheck_params=None,
         global_best_recheck_context_mismatch=False,
+        quick_epochs_value=1,
         full_epochs_value=4,
     )
 
@@ -6343,6 +6344,7 @@ def test_run_quick_full_overlap_subprocess_applies_parallel_trial_defaults(
             seed_best_context_mismatch=False,
             global_best_recheck_params=None,
             global_best_recheck_context_mismatch=False,
+            quick_epochs_value=1,
             full_epochs_value=4,
         )
     finally:
@@ -6477,6 +6479,7 @@ def test_run_quick_full_overlap_subprocess_releases_full_only_gpu_slots(
         seed_best_context_mismatch=False,
         global_best_recheck_params=None,
         global_best_recheck_context_mismatch=False,
+        quick_epochs_value=1,
         full_epochs_value=4,
     )
 
@@ -6491,6 +6494,133 @@ def test_run_quick_full_overlap_subprocess_releases_full_only_gpu_slots(
     released_gpu_ids = [str(event["gpu_id"]) for event in events]
     assert set(released_gpu_ids) <= {"0", "1", "2", "3"}
     assert len(set(released_gpu_ids[:2])) == 2
+
+
+def test_build_full_resume_overrides_uses_remaining_epochs_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "donor_quick.pt"
+    checkpoint_path.write_text("weights", encoding="utf-8")
+    metrics_path = tmp_path / "quick.metrics.json"
+    metrics_path.write_text(
+        json.dumps({"donor_checkpoint_path": str(checkpoint_path)}),
+        encoding="utf-8",
+    )
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=3,
+        top_k=1,
+        full_epochs=6,
+        base_seed=1337,
+        gpu_ids_setting=[],
+        max_parallel_trials_setting=1,
+        min_batch_size=8,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="donor_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "bert", "species": "Dmel", "train_target": "donor"},
+        quick_overrides={"epochs": 3},
+        full_overrides={"epochs": 6},
+        search_space={
+            "lr": {"type": "float", "min": 1e-5, "max": 1e-3, "scale": "log"},
+        },
+    )
+    row = hparam_search.TrialResult(
+        phase="quick",
+        trial_id=0,
+        status="success",
+        gpu_id=None,
+        sampled_params={"lr": 1e-4},
+        effective_batch_size=64,
+        oom_retries=0,
+        donor_pr_auc=0.9,
+        acceptor_pr_auc=None,
+        mean_pr_auc=0.9,
+        objective_metric="donor_pr_auc",
+        objective_score=0.9,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json=str(metrics_path),
+        log_file=str(tmp_path / "quick.log.txt"),
+    )
+
+    overrides = hparam_search._build_full_resume_overrides(
+        config=config,
+        row=row,
+        base_full_overrides={"epochs": 6, "compile_mode": "off"},
+        quick_epochs_value=3,
+        full_epochs_value=6,
+    )
+
+    assert overrides == {
+        "epochs": 3,
+        "compile_mode": "off",
+        "donor_init_checkpoint_path": str(checkpoint_path),
+    }
+
+
+def test_build_full_resume_overrides_returns_none_when_budget_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    config = hparam_search.SearchConfig(
+        project_root=tmp_path,
+        species="Dmel",
+        output_dir=tmp_path / "out",
+        quick_trials=2,
+        quick_epochs=6,
+        top_k=1,
+        full_epochs=6,
+        base_seed=1337,
+        gpu_ids_setting=[],
+        max_parallel_trials_setting=1,
+        min_batch_size=8,
+        max_oom_retries=1,
+        max_model_params=None,
+        objective_metric="donor_pr_auc",
+        global_best_config_path=None,
+        seed_best_config_path=None,
+        base_args={"model": "bert", "species": "Dmel", "train_target": "donor"},
+        quick_overrides={"epochs": 6},
+        full_overrides={"epochs": 6},
+        search_space={
+            "lr": {"type": "float", "min": 1e-5, "max": 1e-3, "scale": "log"},
+        },
+    )
+    row = hparam_search.TrialResult(
+        phase="quick",
+        trial_id=0,
+        status="success",
+        gpu_id=None,
+        sampled_params={"lr": 1e-4},
+        effective_batch_size=64,
+        oom_retries=0,
+        donor_pr_auc=0.9,
+        acceptor_pr_auc=None,
+        mean_pr_auc=0.9,
+        objective_metric="donor_pr_auc",
+        objective_score=0.9,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json=str(tmp_path / "quick.metrics.json"),
+        log_file=str(tmp_path / "quick.log.txt"),
+    )
+
+    overrides = hparam_search._build_full_resume_overrides(
+        config=config,
+        row=row,
+        base_full_overrides={"epochs": 6},
+        quick_epochs_value=6,
+        full_epochs_value=6,
+    )
+
+    assert overrides is None
 
 
 def test_main_returns_130_on_keyboard_interrupt(

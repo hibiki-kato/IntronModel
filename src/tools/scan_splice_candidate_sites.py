@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from models import dnabert as dnabert_model
 from models import cnn_v3 as cnn_v3_model
 from models.cnn import load_task_model as load_cnn_v2_task_model
 from models.cnn import score_sequences as score_cnn_v2_sequences
@@ -82,6 +83,35 @@ def _is_cnn_v3_model_name(model_name: str) -> bool:
     return normalized.startswith("cnn_v3") or normalized.startswith("cnn_pair_v3")
 
 
+def _is_dnabert_model_name(model_name: str) -> bool:
+    """Return whether one model name should use the DNABERT loader."""
+    normalized = model_name.strip().lower()
+    return normalized.startswith("dnabert")
+
+
+def _optional_positive_int(raw_value: object) -> int | None:
+    """Normalize one optional positive integer from checkpoint metadata."""
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, bool):
+        return None
+    if isinstance(raw_value, int):
+        return raw_value if raw_value > 0 else None
+    if isinstance(raw_value, float) and raw_value.is_integer():
+        parsed_value = int(raw_value)
+        return parsed_value if parsed_value > 0 else None
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if text == "":
+            return None
+        try:
+            parsed_value = int(text)
+        except ValueError:
+            return None
+        return parsed_value if parsed_value > 0 else None
+    return None
+
+
 def load_site_model(
     checkpoint_path: str,
     device: str,
@@ -90,6 +120,14 @@ def load_site_model(
     """Load one site model checkpoint with the matching architecture."""
     if _is_cnn_v3_model_name(model_name):
         return cnn_v3_model.load_task_model(checkpoint_path, device)
+    if _is_dnabert_model_name(model_name):
+        model, model_config, tokenizer = dnabert_model.load_task_model(
+            checkpoint_path,
+            device,
+        )
+        metadata = dict(model_config)
+        metadata["tokenizer"] = tokenizer
+        return model, metadata
     return load_cnn_v2_task_model(checkpoint_path, device)
 
 
@@ -100,8 +138,32 @@ def score_site_sequences(
     device: str,
     batch_size: int,
     model_name: str,
+    model_metadata: dict[str, object] | None = None,
 ) -> np.ndarray:
     """Score site sequences with the matching CNN implementation."""
+    if _is_dnabert_model_name(model_name):
+        if model_metadata is None:
+            raise ValueError("DNABERT scoring requires model metadata.")
+        tokenizer = model_metadata.get("tokenizer")
+        if tokenizer is None:
+            raise ValueError("DNABERT scoring requires a tokenizer.")
+        max_tokens = _optional_positive_int(model_metadata.get("max_tokens"))
+        if max_tokens is None:
+            max_tokens = window_len
+        input_kmer = _optional_positive_int(model_metadata.get("input_kmer"))
+        scores = dnabert_model.score_sequences(
+            model=model,
+            sequences=sequences,
+            tokenizer=tokenizer,
+            max_tokens=max_tokens,
+            device=device,
+            batch_size=batch_size,
+            task_name="score_test_suite",
+            input_kmer=input_kmer,
+            use_amp=False,
+            amp_dtype=None,
+        )
+        return np.asarray(scores, dtype=np.float64)
     if _is_cnn_v3_model_name(model_name):
         return cnn_v3_model.score_sequences(
             model=model,
@@ -646,7 +708,7 @@ def score_candidate_windows(
     if not candidates:
         return []
 
-    model, _ = load_site_model(str(checkpoint_path), device, model_name)
+    model, model_metadata = load_site_model(str(checkpoint_path), device, model_name)
     windows = [candidate.window for candidate in candidates]
     scores = score_site_sequences(
         model=model,
@@ -655,6 +717,7 @@ def score_candidate_windows(
         device=device,
         batch_size=batch_size,
         model_name=model_name,
+        model_metadata=model_metadata,
     )
     return [float(score) for score in np.asarray(scores, dtype=np.float64)]
 

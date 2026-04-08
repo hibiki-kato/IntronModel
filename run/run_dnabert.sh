@@ -13,11 +13,11 @@ fi
 # Advanced per-task overrides are kept below.
 set -a
 DNABERT_VARIANT="2"
-SPECIES="Athal, Dmel, Mmus, Hsap"
+SPECIES="Dmel"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 TRUNC_MODE="off"
-INTRONMODEL_AUTO_TMUX="on"
+INTRONMODEL_AUTO_TMUX="off"
 
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
@@ -39,16 +39,16 @@ TRAIN_NEG_PATH=""
 MASK_TEST_TSV_PATH=""
 VISUALIZE="true"
 SKIP_TRAINING="0"
-CONTINUE_TRAINING="0"
+CONTINUE_TRAINING="1"
 TRAIN_ONLY="0"
 PRECOMPUTED_SITE_SCORE_TSV=""
 CHECKPOINT_TOP_K="3"
 CHECKPOINT_PRUNE_DRY_RUN="0"
 
-EPOCHS="6"
-MAX_EPOCHS="100"
-EARLY_STOP_PATIENCE="12"
-EARLY_STOP_MIN_DELTA="0.0"
+EPOCHS="auto"
+MAX_EPOCHS="10"
+EARLY_STOP_PATIENCE="2"
+EARLY_STOP_MIN_DELTA="0.01"
 BATCH_SIZE="64"
 INFER_BATCH_SIZE="256"
 LR="2e-5"
@@ -138,11 +138,11 @@ GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
-COMPILE_MODE="off"
+COMPILE_MODE="on"
 INFER_USE_AMP="1"
 INFER_AMP_DTYPE="auto"
 INFER_COMPILE="0"
-INFER_COMPILE_MODE="auto"
+INFER_COMPILE_MODE="off"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -172,32 +172,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 resolve_dnabert_relative_path() {
-	local variant="$1"
-	local relative_path_2="$2"
-	local relative_path_6="$3"
-	local relative_path_s="$4"
-
-	local normalized_variant="${variant,,}"
-	if [[ "${normalized_variant}" != "2" \
-		&& "${normalized_variant}" != "6" \
-		&& "${normalized_variant}" != "s" ]]; then
-		echo "[dnabert.sh] DNABERT_VARIANT must be 2, 6, or s." >&2
-		return 1
-	fi
-
-	local resolved_path
-	if [[ "${normalized_variant}" == "2" ]]; then
-		resolved_path="${relative_path_2}"
-	elif [[ "${normalized_variant}" == "6" ]]; then
-		resolved_path="${relative_path_6}"
-	else
-		resolved_path="${relative_path_s}"
-	fi
-	if [[ -z "${resolved_path}" ]]; then
-		echo "[dnabert.sh] pretrained relative path is empty for variant=${variant}." >&2
-		return 1
-	fi
-	printf '%s\n' "${resolved_path}"
+	intronmodel_resolve_dnabert_relative_path "dnabert.sh" "$@"
 }
 
 intronmodel_start_timer "dnabert.sh"

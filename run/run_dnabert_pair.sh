@@ -85,11 +85,11 @@ GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
-COMPILE_MODE="off"
+COMPILE_MODE="on"
 INFER_USE_AMP="1"
 INFER_AMP_DTYPE="auto"
 INFER_COMPILE="0"
-INFER_COMPILE_MODE="auto"
+INFER_COMPILE_MODE="off"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -117,32 +117,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 resolve_dnabert_relative_path() {
-	local variant="$1"
-	local relative_path_2="$2"
-	local relative_path_6="$3"
-	local relative_path_s="$4"
-
-	local normalized_variant="${variant,,}"
-	if [[ "${normalized_variant}" != "2" \
-		&& "${normalized_variant}" != "6" \
-		&& "${normalized_variant}" != "s" ]]; then
-		echo "[dnabert_pair.sh] DNABERT_VARIANT must be 2, 6, or s." >&2
-		return 1
-	fi
-
-	local resolved_path
-	if [[ "${normalized_variant}" == "2" ]]; then
-		resolved_path="${relative_path_2}"
-	elif [[ "${normalized_variant}" == "6" ]]; then
-		resolved_path="${relative_path_6}"
-	else
-		resolved_path="${relative_path_s}"
-	fi
-	if [[ -z "${resolved_path}" ]]; then
-		echo "[dnabert_pair.sh] pretrained relative path is empty for variant=${variant}." >&2
-		return 1
-	fi
-	printf '%s\n' "${resolved_path}"
+	intronmodel_resolve_dnabert_relative_path "dnabert_pair.sh" "$@"
 }
 
 intronmodel_start_timer "dnabert_pair.sh"

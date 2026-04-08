@@ -14,7 +14,7 @@ import argparse
 import csv
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import io
 import json
@@ -56,6 +56,7 @@ from util.path_format import (
     resolve_path_string,
 )
 from util.model_task_paths import checkpoint_tasks_for_model
+from util.model_capabilities import supports_quick_full_warm_start
 from util.process_title import apply_process_title_from_env
 from util.versioned_artifacts import (
     is_active_public_model,
@@ -226,6 +227,7 @@ class PersistentTrialTask:
     sampled_params: dict[str, Scalar]
     metrics_json: str
     log_file: str
+    overrides: dict[str, ArgValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2421,6 +2423,67 @@ def _extract_checkpoint_paths_from_metrics(
         for task_name, path in extracted.items()
     }
     return resolved
+
+
+def _supports_full_warm_start(model_name: object) -> bool:
+    """Return whether one model supports quick-to-full warm-start."""
+    return supports_quick_full_warm_start(model_name)
+
+
+def _resolve_full_resume_tasks(config: SearchConfig) -> tuple[str, ...]:
+    """Resolve task names that require checkpoint warm-start for one search."""
+    model_name = str(config.base_args.get("model", "")).strip()
+    task_names = checkpoint_tasks_for_model(model_name)
+    if len(task_names) <= 1:
+        return task_names
+
+    train_target = str(config.base_args.get("train_target", "both")).strip().lower()
+    if train_target in task_names:
+        return (train_target,)
+    return task_names
+
+
+def _build_full_resume_overrides(
+    *,
+    config: SearchConfig,
+    row: TrialResult,
+    base_full_overrides: dict[str, ArgValue],
+    quick_epochs_value: int,
+    full_epochs_value: int,
+) -> dict[str, ArgValue] | None:
+    """Build per-trial full overrides for warm-start continuation.
+
+    The full epoch budget is interpreted as inclusive of the quick phase, so a
+    quick run with ``quick_epochs=3`` and ``full_epochs=6`` resumes from the
+    quick checkpoint for 3 additional epochs.
+    """
+    model_name = config.base_args.get("model", "")
+    if not _supports_full_warm_start(model_name):
+        return dict(base_full_overrides)
+
+    remaining_epochs = full_epochs_value - quick_epochs_value
+    if remaining_epochs <= 0:
+        return None
+
+    checkpoint_paths = _extract_checkpoint_paths_from_metrics(row.metrics_json)
+    task_names = _resolve_full_resume_tasks(config)
+    overrides = dict(base_full_overrides)
+    overrides["epochs"] = remaining_epochs
+    for task_name in task_names:
+        checkpoint_key = f"{task_name}_checkpoint_path"
+        checkpoint_path = checkpoint_paths.get(checkpoint_key)
+        if checkpoint_path is None or checkpoint_path.strip() == "":
+            print(
+                "[hparam_search] Warm-start checkpoint missing for full phase; "
+                "fall back to full retrain from scratch. "
+                f"task={task_name}, metrics_json={row.metrics_json}",
+                flush=True,
+            )
+            return dict(base_full_overrides)
+        overrides[f"{task_name}_init_checkpoint_path"] = str(
+            normalize_checkpoint_path(checkpoint_path, base_dir=PROJECT_ROOT)
+        )
+    return overrides
 
 
 def _resolve_model_root(project_root: Path) -> Path:
@@ -6016,6 +6079,7 @@ def _run_phase_subprocess(
     overrides: dict[str, ArgValue],
     slots: list[Optional[str]],
     out_dir: Path,
+    trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
 ) -> list[TrialResult]:
     """Run one phase using subprocess-backed trials."""
     stream_mode = _ACTIVE_TRIAL_STREAM_MODE
@@ -6036,7 +6100,11 @@ def _run_phase_subprocess(
                     phase=phase,
                     trial_id=trial_id,
                     sampled_params=trial_params[trial_id],
-                    overrides=overrides,
+                    overrides=(
+                        trial_overrides[trial_id]
+                        if trial_overrides is not None
+                        else overrides
+                    ),
                     assigned_gpu_id=assigned_gpu,
                     metrics_json=metrics_json,
                     log_file=log_file,
@@ -6130,7 +6198,7 @@ def _persistent_trial_worker_main(
     assigned_gpu_id: Optional[str],
     config: SearchConfig,
     phase: str,
-    overrides: dict[str, ArgValue],
+    overrides: Optional[dict[str, ArgValue]] = None,
     stream_mode: str,
     max_parallel_trials: int,
     task_queue: object,
@@ -6161,7 +6229,7 @@ def _persistent_trial_worker_main(
                     phase=phase,
                     trial_id=task.trial_id,
                     sampled_params=task.sampled_params,
-                    overrides=overrides,
+                    overrides=task.overrides or dict(overrides or {}),
                     assigned_gpu_id=assigned_gpu_id,
                     metrics_json=Path(task.metrics_json),
                     log_file=Path(task.log_file),
@@ -6204,6 +6272,7 @@ def _run_phase_persistent(
     out_dir: Path,
     max_parallel_trials: int,
     stream_mode: str,
+    trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
 ) -> list[TrialResult]:
     """Run one phase using persistent in-process trial workers."""
     stream_mode = _ACTIVE_TRIAL_STREAM_MODE
@@ -6223,7 +6292,6 @@ def _run_phase_persistent(
                 "assigned_gpu_id": assigned_gpu,
                 "config": config,
                 "phase": phase,
-                "overrides": dict(overrides),
                 "stream_mode": stream_mode,
                 "max_parallel_trials": max_parallel_trials,
                 "task_queue": task_queues[slot_index],
@@ -6244,6 +6312,11 @@ def _run_phase_persistent(
                 task = PersistentTrialTask(
                     trial_id=trial_id,
                     sampled_params=trial_params[trial_id],
+                    overrides=(
+                        dict(trial_overrides[trial_id])
+                        if trial_overrides is not None
+                        else dict(overrides)
+                    ),
                     metrics_json=str(metrics_json),
                     log_file=str(log_file),
                 )
@@ -6308,6 +6381,7 @@ def run_phase(
     max_parallel_trials: int,
     out_dir: Path,
     execution_mode: str = "subprocess",
+    trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
 ) -> list[TrialResult]:
     """Run one phase with slot-based scheduling and selectable execution mode."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -6329,6 +6403,7 @@ def run_phase(
                 trial_count=trial_count,
                 trial_params=trial_params,
                 overrides=overrides,
+                trial_overrides=trial_overrides,
                 slots=slots,
                 out_dir=out_dir,
             )
@@ -6339,6 +6414,7 @@ def run_phase(
                 trial_count=trial_count,
                 trial_params=trial_params,
                 overrides=overrides,
+                trial_overrides=trial_overrides,
                 slots=slots,
                 out_dir=out_dir,
                 max_parallel_trials=max_parallel_trials,
@@ -6354,6 +6430,76 @@ def run_phase(
         _set_active_trial_stream_mode(previous_stream_mode)
 
 
+def _run_phase_with_optional_trial_overrides(
+    *,
+    phase: str,
+    config: SearchConfig,
+    trial_count: int,
+    trial_params: list[dict[str, Scalar]],
+    overrides: dict[str, ArgValue],
+    gpu_ids: list[str],
+    max_parallel_trials: int,
+    out_dir: Path,
+    execution_mode: str,
+    trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
+) -> list[TrialResult]:
+    """Call ``run_phase`` while remaining compatible with monkeypatched tests."""
+    run_phase_signature = inspect.signature(run_phase)
+    if "trial_overrides" in run_phase_signature.parameters:
+        return run_phase(
+            phase=phase,
+            config=config,
+            trial_count=trial_count,
+            trial_params=trial_params,
+            overrides=overrides,
+            gpu_ids=gpu_ids,
+            max_parallel_trials=max_parallel_trials,
+            out_dir=out_dir,
+            execution_mode=execution_mode,
+            trial_overrides=trial_overrides,
+        )
+    return run_phase(
+        phase=phase,
+        config=config,
+        trial_count=trial_count,
+        trial_params=trial_params,
+        overrides=overrides,
+        gpu_ids=gpu_ids,
+        max_parallel_trials=max_parallel_trials,
+        out_dir=out_dir,
+        execution_mode=execution_mode,
+    )
+
+
+def _build_trial_params_with_optional_exclusions(
+    *,
+    config: SearchConfig,
+    phase: str,
+    count: int,
+    seed_offset: int,
+    history_trials: list[tuple[float, dict[str, Scalar]]] | None = None,
+    excluded_sampled_params: list[dict[str, Scalar]] | None = None,
+) -> list[dict[str, Scalar]]:
+    """Call ``build_trial_params`` while remaining compatible with tests."""
+    build_signature = inspect.signature(build_trial_params)
+    if "excluded_sampled_params" in build_signature.parameters:
+        return build_trial_params(
+            config=config,
+            phase=phase,
+            count=count,
+            seed_offset=seed_offset,
+            history_trials=history_trials,
+            excluded_sampled_params=excluded_sampled_params,
+        )
+    return build_trial_params(
+        config=config,
+        phase=phase,
+        count=count,
+        seed_offset=seed_offset,
+        history_trials=history_trials,
+    )
+
+
 def _run_quick_full_overlap_subprocess(
     *,
     config: SearchConfig,
@@ -6367,6 +6513,7 @@ def _run_quick_full_overlap_subprocess(
     seed_best_context_mismatch: bool,
     global_best_recheck_params: Optional[dict[str, Scalar]],
     global_best_recheck_context_mismatch: bool,
+    quick_epochs_value: int,
     full_epochs_value: int,
 ) -> tuple[list[TrialResult], list[TrialResult]]:
     """Run quick/full tuning on one shared slot scheduler.
@@ -6420,7 +6567,7 @@ def _run_quick_full_overlap_subprocess(
         full_consumed_keys: set[str] = set()
         full_priority_inserted = False
         next_full_trial_id = 1 if full_priority_params is not None else 0
-        skipped_same_best_epoch = 0
+        skipped_exhausted_full_budget = 0
         skipped_seed_context_match = 0
         running: dict[Future[TrialResult], tuple[int, ScheduledTrialTask]] = {}
         available_slots: list[tuple[int, Optional[str]]] = [
@@ -6456,7 +6603,7 @@ def _run_quick_full_overlap_subprocess(
 
         def _maybe_promote_locked_rows() -> None:
             """Promote locked quick rows into the full queue."""
-            nonlocal next_full_trial_id, skipped_same_best_epoch
+            nonlocal next_full_trial_id, skipped_exhausted_full_budget
             nonlocal skipped_seed_context_match
             unfinished_quick_count = len(quick_pending_indices) + quick_running_count
             locked_rows = _select_locked_quick_trials(
@@ -6482,15 +6629,15 @@ def _run_quick_full_overlap_subprocess(
                     skipped_seed_context_match += 1
                     full_consumed_keys.add(row_key)
                     continue
-                quick_best_epoch = _read_objective_best_epoch_from_metrics(
-                    metrics_json_path=Path(row.metrics_json),
-                    objective_metric=config.objective_metric,
+                full_task_overrides = _build_full_resume_overrides(
+                    config=config,
+                    row=row,
+                    base_full_overrides=full_overrides,
+                    quick_epochs_value=quick_epochs_value,
+                    full_epochs_value=full_epochs_value,
                 )
-                if (
-                    quick_best_epoch is not None
-                    and quick_best_epoch == full_epochs_value
-                ):
-                    skipped_same_best_epoch += 1
+                if full_task_overrides is None:
+                    skipped_exhausted_full_budget += 1
                     full_consumed_keys.add(row_key)
                     continue
                 task = ScheduledTrialTask(
@@ -6502,7 +6649,7 @@ def _run_quick_full_overlap_subprocess(
                         else float("-inf")
                     ),
                     sampled_params=dict(row.sampled_params),
-                    overrides=dict(full_overrides),
+                    overrides=full_task_overrides,
                     metrics_json=str(
                         out_dir / f"full_trial_{next_full_trial_id:04d}.metrics.json"
                     ),
@@ -7242,7 +7389,8 @@ def run_search(config: SearchConfig) -> int:
             )
         except ValueError as exc:
             print(
-                f"[hparam_search] Seed best config ignored due to parse error: {exc}",
+                "[hparam_search] Seed best config ignored due to "
+                f"search-space mismatch or invalid schema: {exc}",
                 flush=True,
             )
         else:
@@ -7288,7 +7436,8 @@ def run_search(config: SearchConfig) -> int:
             )
         except ValueError as exc:
             print(
-                f"[hparam_search] Global best config ignored due to parse error: {exc}",
+                "[hparam_search] Global best config ignored due to "
+                f"search-space mismatch or invalid schema: {exc}",
                 flush=True,
             )
         else:
@@ -7326,7 +7475,7 @@ def run_search(config: SearchConfig) -> int:
         excluded_quick_sampled_params.append(dict(seed_best_params))
     if global_best_sampled_params is not None:
         excluded_quick_sampled_params.append(dict(global_best_sampled_params))
-    quick_params = build_trial_params(
+    quick_params = _build_trial_params_with_optional_exclusions(
         config=config,
         phase="quick",
         count=config.quick_trials,
@@ -7343,6 +7492,9 @@ def run_search(config: SearchConfig) -> int:
     quick_overrides = dict(config.quick_overrides)
     quick_overrides.setdefault("epochs", config.quick_epochs)
     quick_overrides.setdefault("compile_mode", "off")
+    quick_epochs_value = _to_positive_int(quick_overrides.get("epochs"))
+    if quick_epochs_value is None:
+        quick_epochs_value = config.quick_epochs
     print(
         f"[hparam_search] Quick phase: {config.quick_trials} trials, "
         f"epochs={quick_overrides.get('epochs')}.",
@@ -7400,6 +7552,7 @@ def run_search(config: SearchConfig) -> int:
             global_best_recheck_context_mismatch=(
                 global_best_recheck_context_mismatch
             ),
+            quick_epochs_value=quick_epochs_value,
             full_epochs_value=full_epochs_value,
         )
     else:
@@ -7416,7 +7569,7 @@ def run_search(config: SearchConfig) -> int:
         )
         selected_for_full: list[TrialResult] = []
         selected_for_full_keys: set[str] = set()
-        skipped_same_best_epoch = 0
+        skipped_exhausted_full_budget = 0
         skipped_seed_context_match = 0
         seed_best_key: Optional[str] = None
         if seed_best_params is not None:
@@ -7441,22 +7594,38 @@ def run_search(config: SearchConfig) -> int:
             ):
                 skipped_seed_context_match += 1
                 continue
-            quick_best_epoch = _read_objective_best_epoch_from_metrics(
-                metrics_json_path=row.metrics_json,
-                objective_metric=config.objective_metric,
+            full_task_overrides = _build_full_resume_overrides(
+                config=config,
+                row=row,
+                base_full_overrides=full_overrides,
+                quick_epochs_value=quick_epochs_value,
+                full_epochs_value=full_epochs_value,
             )
-            if (
-                full_epochs_value is not None
-                and quick_best_epoch is not None
-                and quick_best_epoch == full_epochs_value
-            ):
-                skipped_same_best_epoch += 1
+            if full_task_overrides is None:
+                skipped_exhausted_full_budget += 1
                 continue
             selected_for_full.append(row)
             selected_for_full_keys.add(row_key)
             if len(selected_for_full) >= config.top_k:
                 break
         full_params = [dict(row.sampled_params) for row in selected_for_full]
+        full_trial_overrides = [
+            _build_full_resume_overrides(
+                config=config,
+                row=row,
+                base_full_overrides=full_overrides,
+                quick_epochs_value=quick_epochs_value,
+                full_epochs_value=full_epochs_value,
+            )
+            for row in selected_for_full
+        ]
+        if any(overrides is None for overrides in full_trial_overrides):
+            raise ValueError("Internal error: exhausted full budget trial selected.")
+        resolved_full_trial_overrides = [
+            overrides
+            for overrides in full_trial_overrides
+            if overrides is not None
+        ]
         base_full_count = len(full_params)
         injected_best_full_recheck = False
         if seed_best_params is not None and seed_best_context_mismatch:
@@ -7464,6 +7633,10 @@ def run_search(config: SearchConfig) -> int:
                 full_params,
                 seed_best_params,
             )
+            resolved_full_trial_overrides = [
+                dict(full_overrides),
+                *resolved_full_trial_overrides,
+            ]
             injected_best_full_recheck = True
         elif (
             global_best_recheck_params is not None
@@ -7473,6 +7646,10 @@ def run_search(config: SearchConfig) -> int:
                 full_params,
                 global_best_recheck_params,
             )
+            resolved_full_trial_overrides = [
+                dict(full_overrides),
+                *resolved_full_trial_overrides,
+            ]
             injected_best_full_recheck = True
         full_count = len(full_params)
         full_execution_mode = _resolve_workload_execution_mode(
@@ -7482,7 +7659,8 @@ def run_search(config: SearchConfig) -> int:
         )
         print(
             f"[hparam_search] Full phase: top_k={config.top_k}, "
-            f"selected={base_full_count}, skipped_same_best_epoch={skipped_same_best_epoch}, "
+            f"selected={base_full_count}, "
+            f"skipped_exhausted_full_budget={skipped_exhausted_full_budget}, "
             f"skipped_seed_context_match={skipped_seed_context_match}, "
             f"injected_best_full_recheck={injected_best_full_recheck}, "
             f"epochs={full_overrides.get('epochs')}, objective={config.objective_metric}, "
@@ -7503,16 +7681,17 @@ def run_search(config: SearchConfig) -> int:
                 flush=True,
             )
         if full_count > 0:
-            full_rows = run_phase(
-                phase="full",
-                config=config,
-                trial_count=full_count,
-                trial_params=full_params,
-                overrides=full_overrides,
+                full_rows = _run_phase_with_optional_trial_overrides(
+                    phase="full",
+                    config=config,
+                    trial_count=full_count,
+                    trial_params=full_params,
+                    overrides=full_overrides,
                 gpu_ids=gpu_ids,
                 max_parallel_trials=max_parallel_trials,
                 out_dir=config.output_dir,
                 execution_mode=full_execution_mode,
+                trial_overrides=resolved_full_trial_overrides,
             )
         else:
             full_rows = []

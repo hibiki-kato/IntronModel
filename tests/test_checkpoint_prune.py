@@ -310,3 +310,65 @@ def test_prune_protects_checkpoint_referenced_by_metrics_json_field(
     assert report.deleted_count == 0
     assert ckpt_keep.exists()
     assert ckpt_drop.exists()
+
+
+def test_prune_ignores_directory_metrics_json_reference(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    species = "Dmel"
+    model_name = "cnn"
+
+    ckpt_keep = model_root / species / "donor" / "keep_dir_metrics.pt"
+    ckpt_drop = model_root / species / "donor" / "drop_dir_metrics.pt"
+    for path in (ckpt_keep, ckpt_drop):
+        _write_checkpoint(path)
+    acc = model_root / species / "acceptor" / "placeholder.pt"
+    _write_checkpoint(acc)
+
+    learning_metric = data_root / species / "learning_metric"
+    _write_train_summary(
+        path=learning_metric / "keep_dir_metrics.train.json",
+        model_name=model_name,
+        donor_checkpoint_path=ckpt_keep,
+        acceptor_checkpoint_path=acc,
+        donor_best_score=0.10,
+        acceptor_best_score=0.0,
+        donor_pr_auc=0.10,
+        acceptor_pr_auc=0.0,
+        validation_signature="sig_keep_dir_metrics",
+    )
+    _write_train_summary(
+        path=learning_metric / "drop_dir_metrics.train.json",
+        model_name=model_name,
+        donor_checkpoint_path=ckpt_drop,
+        acceptor_checkpoint_path=acc,
+        donor_best_score=0.90,
+        acceptor_best_score=0.0,
+        donor_pr_auc=0.90,
+        acceptor_pr_auc=0.0,
+        validation_signature="sig_keep_dir_metrics",
+    )
+
+    tuning_root = data_root / species / "tuning" / model_name / "donor"
+    tuning_root.mkdir(parents=True, exist_ok=True)
+    metrics_dir = data_root / species / "tuning" / model_name
+    (tuning_root / "best_config.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "metrics_json": str(metrics_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = prune_species_model_checkpoints(
+        data_root=data_root,
+        species=species,
+        model_name=model_name,
+        top_k=1,
+        dry_run=False,
+    )
+    assert report.deleted_count == 1
+    assert not ckpt_keep.exists()
+    assert ckpt_drop.exists()

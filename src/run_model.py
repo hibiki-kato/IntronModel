@@ -152,6 +152,9 @@ CHECKPOINT_NAME_EXCLUDED_FIELDS: frozenset[str] = frozenset(
         "donor_checkpoint_path",
         "acceptor_checkpoint_path",
         "pair_checkpoint_path",
+        "donor_init_checkpoint_path",
+        "acceptor_init_checkpoint_path",
+        "pair_init_checkpoint_path",
         "pretrained_model_name",
     }
 )
@@ -238,6 +241,21 @@ def _add_pipeline_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--intron_output_tsv", default=None)
     parser.add_argument("--transcript_output_tsv", default=None)
     parser.add_argument("--metrics_json", default=None)
+    parser.add_argument(
+        "--donor_init_checkpoint_path",
+        default="",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--acceptor_init_checkpoint_path",
+        default="",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--pair_init_checkpoint_path",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--donor_tuned_config_path", default=None)
     parser.add_argument("--acceptor_tuned_config_path", default=None)
     parser.add_argument("--pair_tuned_config_path", default=None)
@@ -1665,17 +1683,18 @@ def _apply_published_output_targets(
     *,
     args: argparse.Namespace,
     published_assets: Mapping[str, str],
+    force: bool = False,
 ) -> None:
     """Fill unset output paths from one published-asset payload."""
-    if not args.site_output_tsv:
+    if force or not args.site_output_tsv:
         args.site_output_tsv = published_assets["site_output_tsv"]
-    if not args.intron_output_tsv:
+    if force or not args.intron_output_tsv:
         args.intron_output_tsv = published_assets["intron_output_tsv"]
-    if not args.transcript_output_tsv:
+    if force or not args.transcript_output_tsv:
         args.transcript_output_tsv = published_assets["transcript_output_tsv"]
-    if not args.eval_output_txt:
+    if force or not args.eval_output_txt:
         args.eval_output_txt = published_assets["eval_output_txt"]
-    if getattr(args, "metrics_json", None) in {None, ""}:
+    if force or getattr(args, "metrics_json", None) in {None, ""}:
         args.metrics_json = published_assets["metrics_json"]
 
 
@@ -1792,7 +1811,11 @@ def _apply_tuned_published_output_targets(
     if resolved is None:
         return None
     published_name, published_assets = resolved
-    _apply_published_output_targets(args=args, published_assets=published_assets)
+    _apply_published_output_targets(
+        args=args,
+        published_assets=published_assets,
+        force=True,
+    )
     return published_name
 
 

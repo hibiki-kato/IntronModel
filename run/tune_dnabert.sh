@@ -11,7 +11,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-SPECIES="Hsap"
+SPECIES="Athal, Dmel, Mmus"
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
 INTRONMODEL_AUTO_TMUX="off"
@@ -39,9 +39,10 @@ HISTORY_TOP_N="128"
 GUIDED_RANDOM_FRACTION="0.35"
 GUIDED_MUTATION_RATE="0.25"
 
-GPU_IDS="auto"
+GPU_IDS="5,6,7"
 MAX_PARALLEL_TRIALS="auto"
 TRIAL_PROCESS_MODE="persistent_all"
+TRIAL_STREAM_MODE="full"
 
 DEVICE="auto"
 USE_AMP="1"
@@ -50,7 +51,7 @@ INFER_BATCH_SIZE="256"
 INFER_USE_AMP="1"
 INFER_AMP_DTYPE="auto"
 INFER_COMPILE="0"
-INFER_COMPILE_MODE="auto"
+INFER_COMPILE_MODE="off"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -63,7 +64,7 @@ MAX_OOM_RETRIES="8"
 SEARCH_SPACE_FILE="auto"
 
 QUICK_COMPILE_MODE="off"
-FULL_COMPILE_MODE="off"
+FULL_COMPILE_MODE="on"
 LR_SCHEDULE="cosine"
 WARMUP_RATIO="0.01"
 ADAM_BETA1="0.9"
@@ -207,51 +208,19 @@ resolve_dnabert_model() {
 	local relative_path_6="$5"
 	local relative_path_s="$6"
 
-	local normalized_variant="${variant,,}"
-	if [[ "${normalized_variant}" != "2" \
-		&& "${normalized_variant}" != "6" \
-		&& "${normalized_variant}" != "s" ]]; then
-		echo "[tune_dnabert.sh] DNABERT_VARIANT must be 2, 6, or s." >&2
-		return 1
-	fi
-
-	if [[ "${normalized_variant}" == "s" ]]; then
-		MODEL_NAME="dnaberts"
-	else
-		MODEL_NAME="dnabert${normalized_variant}"
-	fi
-	if [[ -n "${explicit_pretrained}" ]]; then
-		PRETRAINED_MODEL_NAME_RESOLVED="${explicit_pretrained}"
-		return 0
-	fi
-
-	local relative_path
-	if [[ "${normalized_variant}" == "2" ]]; then
-		relative_path="${relative_path_2}"
-	elif [[ "${normalized_variant}" == "6" ]]; then
-		relative_path="${relative_path_6}"
-	else
-		relative_path="${relative_path_s}"
-	fi
-
-	if [[ -z "${relative_path}" ]]; then
-		echo "[tune_dnabert.sh] pretrained relative path is empty for variant=${variant}." >&2
-		return 1
-	fi
-	if [[ "${relative_path}" == /* ]]; then
-		PRETRAINED_MODEL_NAME_RESOLVED="${relative_path}"
-		return 0
-	fi
-
-	local normalized_relative_path="${relative_path#./}"
-	while [[ "${normalized_relative_path}" == model/* ]]; do
-		normalized_relative_path="${normalized_relative_path#model/}"
-	done
-	if [[ -z "${normalized_relative_path}" ]]; then
-		echo "[tune_dnabert.sh] pretrained relative path resolved to empty value." >&2
-		return 1
-	fi
-	PRETRAINED_MODEL_NAME_RESOLVED="${model_root}/${normalized_relative_path}"
+	MODEL_NAME="$(
+		intronmodel_resolve_dnabert_model_name "tune_dnabert.sh" "${variant}"
+	)" || return 1
+	PRETRAINED_MODEL_NAME_RESOLVED="$(
+		intronmodel_resolve_dnabert_pretrained_name \
+			"tune_dnabert.sh" \
+			"${variant}" \
+			"${explicit_pretrained}" \
+			"${model_root}" \
+			"${relative_path_2}" \
+			"${relative_path_6}" \
+			"${relative_path_s}"
+	)" || return 1
 }
 
 resolve_search_space_file() {
@@ -260,29 +229,13 @@ resolve_search_space_file() {
 	local species="$3"
 	local target="$4"
 	local model_name="$5"
+	: "${project_root}"
 
-	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
-		if [[ -f "${explicit_file}" ]]; then
-			printf '%s\n' "${explicit_file}"
-			return 0
-		fi
-		echo "[tune_dnabert.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
-		return 2
-	fi
-
-	local target_file="${DATA_ROOT}/${species}/tuning/${model_name}/${target}/search_space.json"
-	if [[ -f "${target_file}" ]]; then
-		printf '%s\n' "${target_file}"
-		return 0
-	fi
-
-	local species_file="${DATA_ROOT}/${species}/tuning/${model_name}/search_space.json"
-	if [[ -f "${species_file}" ]]; then
-		printf '%s\n' "${species_file}"
-		return 0
-	fi
-
-	return 1
+	intronmodel_resolve_search_space_file \
+		"tune_dnabert.sh" \
+		"${explicit_file}" \
+		"${DATA_ROOT}/${species}/tuning/${model_name}/${target}/search_space.json" \
+		"${DATA_ROOT}/${species}/tuning/${model_name}/search_space.json"
 }
 
 normalize_json_object_file() {
@@ -457,6 +410,14 @@ if [[ "${TRIAL_PROCESS_MODE}" != "subprocess" \
 	&& "${TRIAL_PROCESS_MODE}" != "persistent_all" ]]; then
 	echo "[tune_dnabert.sh] TRIAL_PROCESS_MODE must be "\
 		"subprocess|persistent_quick|persistent_all." >&2
+	exit 1
+fi
+if [[ "${TRIAL_STREAM_MODE}" != "auto" \
+	&& "${TRIAL_STREAM_MODE}" != "full" \
+	&& "${TRIAL_STREAM_MODE}" != "errors" \
+	&& "${TRIAL_STREAM_MODE}" != "silent" ]]; then
+	echo "[tune_dnabert.sh] TRIAL_STREAM_MODE must be "\
+		"auto|full|errors|silent." >&2
 	exit 1
 fi
 if [[ "${QUICK_COMPILE_MODE}" != "off" && "${QUICK_COMPILE_MODE}" != "on" \
@@ -712,6 +673,7 @@ for TARGET in "${TARGET_LIST[@]}"; do
   "gpu_ids": "${GPU_IDS}",
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
+	"trial_stream_mode": "${TRIAL_STREAM_MODE}",
   "objective_metric": "${RESOLVED_OBJECTIVE_METRIC}",
   "global_best_config_path": "${GLOBAL_BEST_CONFIG_PATH}",
   "seed_best_config_path": null,

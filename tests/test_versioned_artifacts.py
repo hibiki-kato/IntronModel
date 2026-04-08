@@ -7,6 +7,7 @@ import pytest
 
 from util.versioned_artifacts import ensure_publication_seed
 from util.versioned_artifacts import finalize_published_version_outputs
+from util.versioned_artifacts import is_active_public_model
 from util.versioned_artifacts import publish_latest_best_version
 from util.versioned_artifacts import read_version_history
 from util.versioned_artifacts import refresh_published_version_if_improved
@@ -72,6 +73,15 @@ def _touch_public_outputs(base_dir: Path, stem: str) -> None:
     learning_metric.mkdir(parents=True, exist_ok=True)
     (learning_metric / f"{stem}.train.json").write_text("{}", encoding="utf-8")
     (learning_metric / f"{stem}_learning_curve.png").write_bytes(b"png")
+
+
+def test_is_active_public_model_excludes_archived_model_families() -> None:
+    assert is_active_public_model("cnn_v3") is True
+    assert is_active_public_model("dnabert2_pair") is True
+    assert is_active_public_model("bert_drosophila") is False
+    assert is_active_public_model("reservoir") is False
+    assert is_active_public_model("reservoir_legacy") is False
+    assert is_active_public_model("markov_xgboost") is False
 
 
 def test_ensure_publication_seed_migrates_live_cnn_v2_outputs(tmp_path: Path) -> None:

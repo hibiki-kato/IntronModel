@@ -46,7 +46,9 @@ from util.data_proc import (
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
+    attach_init_checkpoint_summary,
     resolve_required_checkpoint_paths,
+    resolve_task_init_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
 )
@@ -74,6 +76,7 @@ from util.model_runtime import (
     seed_worker as _seed_worker,
     set_seed,
     sigmoid_np,
+    warm_start_model as _warm_start_model,
 )
 from util.process_title import (
     apply_eta_process_title_from_epoch_progress,
@@ -86,8 +89,7 @@ from util.sequence_transform import (
 )
 from util.training_control import (
     get_metric_value,
-    resolve_early_stopping_params,
-    resolve_training_epoch_budget,
+    resolve_training_schedule,
     resolve_validation_metric,
     select_validation_score,
 )
@@ -718,6 +720,7 @@ def train_pair_model(
     pos_path: str,
     neg_path: str,
     checkpoint_path: str,
+    init_checkpoint_path: Optional[str],
     donor_window_len: int,
     acceptor_window_len: int,
     donor_len: Optional[int],
@@ -777,6 +780,8 @@ def train_pair_model(
         raise ValueError("--max_oom_retries must be >= 0.")
     if train_params.batch_size < min_batch_size:
         raise ValueError("--batch_size must be >= --min_batch_size.")
+    if init_checkpoint_path is not None and init_checkpoint_path.strip() == "":
+        init_checkpoint_path = None
     resolved_validation_metric = resolve_validation_metric(validation_metric)
     if sequence_transform not in SEQUENCE_TRANSFORM_CHOICES:
         raise ValueError(
@@ -1009,6 +1014,16 @@ def train_pair_model(
                 dropout=train_params.dropout,
                 fc_hidden=train_params.fc_hidden,
             ).to(device)
+            warm_start_result = _warm_start_model(
+                model,
+                init_checkpoint_path=init_checkpoint_path,
+                device=device,
+                log_prefix="pair",
+            )
+            initialized_from_checkpoint = (
+                warm_start_result.initialized_from_checkpoint
+            )
+            init_checkpoint_path = warm_start_result.init_checkpoint_path
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
@@ -1369,6 +1384,8 @@ def train_pair_model(
                 "quick_phase": quick_phase,
                 "optimizer_impl": optimizer_impl,
                 "sequence_transform": sequence_transform,
+                "initialized_from_checkpoint": initialized_from_checkpoint,
+                "init_checkpoint_path": init_checkpoint_path,
             }
         except RuntimeError as exc:
             is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
@@ -1834,6 +1851,10 @@ def train(
         tasks=("pair",),
     )
     pair_checkpoint_path = task_checkpoint_paths["pair"]
+    pair_init_checkpoint_path = resolve_task_init_checkpoint_paths(
+        common_args,
+        tasks=("pair",),
+    )["pair"]
 
     train_target = resolve_train_target(
         model_args,
@@ -1843,29 +1864,27 @@ def train(
     if tasks_to_train != ["pair"]:
         raise ValueError("cnn_pair expects train_target=pair.")
 
-    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+    schedule = resolve_training_schedule(
         epochs_arg=model_args.epochs,
         max_epochs=int(model_args.max_epochs),
-    )
-    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
         patience_arg=model_args.early_stop_patience,
         min_delta_arg=model_args.early_stop_min_delta,
     )
-    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
     train_params = _resolve_pair_train_params(model_args)
     pair_metrics = train_pair_model(
         pos_path=train_pos_path,
         neg_path=train_neg_path,
         checkpoint_path=pair_checkpoint_path,
+        init_checkpoint_path=pair_init_checkpoint_path,
         donor_window_len=donor_window_len,
         acceptor_window_len=acceptor_window_len,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
         train_params=train_params,
-        epochs=resolved_epochs,
-        early_stop_patience=effective_early_stop_patience,
-        early_stop_min_delta=early_stop_min_delta,
+        epochs=schedule.resolved_epochs,
+        early_stop_patience=schedule.effective_early_stop_patience,
+        early_stop_min_delta=schedule.early_stop_min_delta,
         validation_metric=model_args.validation_metric,
         sequence_transform=model_args.sequence_transform,
         seed=common_args.seed,
@@ -1895,7 +1914,7 @@ def train(
         acceptor_len=acceptor_len,
         lr=train_params.lr,
         batch_size=train_params.batch_size,
-        epochs=resolved_epochs,
+        epochs=schedule.resolved_epochs,
         tag=model_args.tag,
     )
     shared_conv_channels_summary: Optional[list[int]]
@@ -1926,12 +1945,12 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": resolved_epochs,
+        "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
-        "epochs_auto": epochs_auto,
+        "epochs_auto": schedule.epochs_auto,
         "max_epochs": model_args.max_epochs,
-        "early_stop_patience": early_stop_patience,
-        "early_stop_min_delta": early_stop_min_delta,
+        "early_stop_patience": schedule.early_stop_patience,
+        "early_stop_min_delta": schedule.early_stop_min_delta,
         "validation_metric": resolve_validation_metric(
             model_args.validation_metric
         ),
@@ -1943,6 +1962,7 @@ def train(
         "device": common_args.device,
         "checkpoint_name": os.path.basename(pair_checkpoint_path),
         "pair_checkpoint_path": pair_checkpoint_path,
+        "pair_init_checkpoint_path": pair_init_checkpoint_path or "",
         "lightweight": model_args.lightweight,
         "conv_channels": shared_conv_channels_summary,
         "donor_conv_channels": (

@@ -47,7 +47,9 @@ from util.data_proc import (
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
+    attach_init_checkpoint_summary,
     resolve_required_checkpoint_paths,
+    resolve_task_init_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
 )
@@ -75,14 +77,14 @@ from util.model_runtime import (
     seed_worker as _seed_worker,
     set_seed,
     sigmoid_np,
+    warm_start_model as _warm_start_model,
 )
 from util.process_title import (
     apply_eta_process_title_from_epoch_progress,
     apply_eta_process_title_placeholder,
 )
 from util.training_control import (
-    resolve_early_stopping_params,
-    resolve_training_epoch_budget,
+    resolve_training_schedule,
 )
 from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
@@ -646,6 +648,7 @@ def train_task_model(
     pos_path: str,
     neg_path: str,
     checkpoint_path: str,
+    init_checkpoint_path: Optional[str],
     window_len: int,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
@@ -702,6 +705,8 @@ def train_task_model(
         Negative training examples path.
     checkpoint_path : str
         Output checkpoint path.
+    init_checkpoint_path : str | None
+        Optional warm-start checkpoint used to initialize model weights.
     window_len : int
         Sequence window length in nucleotides.
     donor_len : int | None
@@ -829,6 +834,8 @@ def train_task_model(
         raise ValueError("--max_oom_retries must be >= 0.")
     if batch_size < min_batch_size:
         raise ValueError("--batch_size must be >= --min_batch_size.")
+    if init_checkpoint_path is not None and init_checkpoint_path.strip() == "":
+        init_checkpoint_path = None
 
     device = pick_device(device)
     resolved_num_workers = _resolve_num_workers(num_workers, device=device)
@@ -982,6 +989,16 @@ def train_task_model(
                 ff_mult=ff_mult,
                 dropout=dropout,
             ).to(device)
+            warm_start_result = _warm_start_model(
+                model,
+                init_checkpoint_path=init_checkpoint_path,
+                device=device,
+                log_prefix=task,
+            )
+            initialized_from_checkpoint = (
+                warm_start_result.initialized_from_checkpoint
+            )
+            init_checkpoint_path = warm_start_result.init_checkpoint_path
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
@@ -1298,6 +1315,8 @@ def train_task_model(
                 "gpu_id": gpu_id,
                 "quick_phase": quick_phase,
                 "optimizer_impl": optimizer_impl,
+                "initialized_from_checkpoint": initialized_from_checkpoint,
+                "init_checkpoint_path": init_checkpoint_path,
             }
         except RuntimeError as exc:
             is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(
@@ -1912,15 +1931,12 @@ def train(
     acceptor_checkpoint_path = task_checkpoint_paths["acceptor"]
     train_target = resolve_train_target(model_args)
 
-    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+    schedule = resolve_training_schedule(
         epochs_arg=model_args.epochs,
         max_epochs=int(model_args.max_epochs),
-    )
-    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
         patience_arg=model_args.early_stop_patience,
         min_delta_arg=model_args.early_stop_min_delta,
     )
-    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
     tasks_to_train = resolve_tasks_to_train(train_target)
     task_window_len = {
@@ -1930,6 +1946,7 @@ def train(
 
     task_hparams: dict[str, TaskTrainParams] = {}
     task_metrics: dict[str, Dict[str, object]] = {}
+    task_init_checkpoint_paths = resolve_task_init_checkpoint_paths(common_args)
     for task in tasks_to_train:
         resolved = _resolve_task_train_params(task=task, model_args=model_args)
         task_hparams[task] = resolved
@@ -1938,12 +1955,13 @@ def train(
             pos_path=train_pos_path,
             neg_path=train_neg_path,
             checkpoint_path=task_checkpoint_paths[task],
+            init_checkpoint_path=task_init_checkpoint_paths[task],
             window_len=task_window_len[task],
             donor_len=donor_len,
             acceptor_len=acceptor_len,
-            epochs=resolved_epochs,
-            early_stop_patience=effective_early_stop_patience,
-            early_stop_min_delta=early_stop_min_delta,
+            epochs=schedule.resolved_epochs,
+            early_stop_patience=schedule.effective_early_stop_patience,
+            early_stop_min_delta=schedule.early_stop_min_delta,
             batch_size=resolved.batch_size,
             lr=resolved.lr,
             seed=common_args.seed,
@@ -1996,7 +2014,7 @@ def train(
         acceptor_len=acceptor_len,
         lr=run_name_lr,
         batch_size=run_name_batch_size,
-        epochs=resolved_epochs,
+        epochs=schedule.resolved_epochs,
         tag=model_args.tag,
     )
 
@@ -2032,12 +2050,12 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": resolved_epochs,
+        "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
-        "epochs_auto": epochs_auto,
+        "epochs_auto": schedule.epochs_auto,
         "max_epochs": model_args.max_epochs,
-        "early_stop_patience": early_stop_patience,
-        "early_stop_min_delta": early_stop_min_delta,
+        "early_stop_patience": schedule.early_stop_patience,
+        "early_stop_min_delta": schedule.early_stop_min_delta,
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,
@@ -2080,6 +2098,10 @@ def train(
         "inferred_train_len": inferred_train_len,
         "task_hyperparameters": task_hparams_summary,
     }
+    attach_init_checkpoint_summary(
+        summary,
+        task_init_checkpoint_paths=task_init_checkpoint_paths,
+    )
     summary.update(task_metrics)
     return summary
 

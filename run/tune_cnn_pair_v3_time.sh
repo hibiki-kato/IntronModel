@@ -195,18 +195,6 @@ intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 # Keep process title fixed during tune_time runs.
 export INTRONMODEL_DISABLE_ETA_PROCESS_TITLE="1"
 
-format_elapsed() {
-	intronmodel_format_elapsed "$1"
-}
-
-format_eta() {
-	intronmodel_format_eta_epoch "$1"
-}
-
-build_eta_process_title() {
-	intronmodel_build_eta_process_title "$1"
-}
-
 resolve_species_case() {
 	intronmodel_resolve_species_case "$1" "$2" ""
 }
@@ -227,41 +215,22 @@ resolve_search_space_file() {
 	local explicit_file="$1"
 	local species="$2"
 	local tuning_model_name="$3"
+	local -a candidates=(
+		"${DATA_ROOT}/${species}/tuning/${tuning_model_name}/pair/search_space.json"
+		"${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
+	)
 
-	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
-		if [[ -f "${explicit_file}" ]]; then
-			printf '%s\n' "${explicit_file}"
-			return 0
-		fi
-		echo "[tune_cnn_pair_v3_time.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
-		return 2
-	fi
-
-	local target_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/pair/search_space.json"
-	if [[ -f "${target_file}" ]]; then
-		printf '%s\n' "${target_file}"
-		return 0
-	fi
-
-	local species_file="${DATA_ROOT}/${species}/tuning/${tuning_model_name}/search_space.json"
-	if [[ -f "${species_file}" ]]; then
-		printf '%s\n' "${species_file}"
-		return 0
-	fi
 	if [[ "${tuning_model_name}" != "cnn_pair" ]]; then
-		local base_target_file="${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
-		if [[ -f "${base_target_file}" ]]; then
-			printf '%s\n' "${base_target_file}"
-			return 0
-		fi
-		local base_species_file="${DATA_ROOT}/${species}/tuning/cnn_pair/search_space.json"
-		if [[ -f "${base_species_file}" ]]; then
-			printf '%s\n' "${base_species_file}"
-			return 0
-		fi
+		candidates+=(
+			"${DATA_ROOT}/${species}/tuning/cnn_pair/pair/search_space.json"
+			"${DATA_ROOT}/${species}/tuning/cnn_pair/search_space.json"
+		)
 	fi
 
-	return 1
+	intronmodel_resolve_search_space_file \
+		"tune_cnn_pair_v3_time.sh" \
+		"${explicit_file}" \
+		"${candidates[@]}"
 }
 
 normalize_json_object_file() {
@@ -861,8 +830,10 @@ START_SECONDS="${SECONDS}"
 START_UNIX_SECONDS="$(date +%s)"
 BUDGET_SECONDS=$((TIME_BUDGET_MINUTES * 60))
 ETA_DEADLINE_EPOCH=$((START_UNIX_SECONDS + BUDGET_SECONDS))
-ETA_DEADLINE_LABEL="$(format_eta "${ETA_DEADLINE_EPOCH}")"
-RUNTIME_PROCESS_TITLE="$(build_eta_process_title "${ETA_DEADLINE_LABEL}")"
+ETA_DEADLINE_LABEL="$(intronmodel_format_eta_epoch "${ETA_DEADLINE_EPOCH}")"
+RUNTIME_PROCESS_TITLE="$(
+	intronmodel_build_eta_process_title "${ETA_DEADLINE_LABEL}"
+)"
 ETA_SCOPE="$(intronmodel_resolve_eta_scope \
 	"tune_cnn_pair_v3_time.sh" \
 	"${GPU_IDS}" \

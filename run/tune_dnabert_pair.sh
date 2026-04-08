@@ -61,7 +61,7 @@ MAX_OOM_RETRIES="8"
 SEARCH_SPACE_FILE="auto"
 
 QUICK_COMPILE_MODE="off"
-FULL_COMPILE_MODE="off"
+FULL_COMPILE_MODE="on"
 LR_SCHEDULE="cosine"
 WARMUP_RATIO="0.01"
 ADAM_BETA1="0.9"
@@ -311,51 +311,21 @@ resolve_dnabert_model() {
 	local relative_path_6="$5"
 	local relative_path_s="$6"
 
-	local normalized_variant="${variant,,}"
-	if [[ "${normalized_variant}" != "2" \
-		&& "${normalized_variant}" != "6" \
-		&& "${normalized_variant}" != "s" ]]; then
-		echo "[tune_dnabert_pair.sh] DNABERT_VARIANT must be 2, 6, or s." >&2
-		return 1
-	fi
-
-	if [[ "${normalized_variant}" == "s" ]]; then
-		MODEL_NAME="dnaberts"
-	else
-		MODEL_NAME="dnabert${normalized_variant}"
-	fi
-	if [[ -n "${explicit_pretrained}" ]]; then
-		PRETRAINED_MODEL_NAME_RESOLVED="${explicit_pretrained}"
-		return 0
-	fi
-
-	local relative_path
-	if [[ "${normalized_variant}" == "2" ]]; then
-		relative_path="${relative_path_2}"
-	elif [[ "${normalized_variant}" == "6" ]]; then
-		relative_path="${relative_path_6}"
-	else
-		relative_path="${relative_path_s}"
-	fi
-
-	if [[ -z "${relative_path}" ]]; then
-		echo "[tune_dnabert_pair.sh] pretrained relative path is empty for variant=${variant}." >&2
-		return 1
-	fi
-	if [[ "${relative_path}" == /* ]]; then
-		PRETRAINED_MODEL_NAME_RESOLVED="${relative_path}"
-		return 0
-	fi
-
-	local normalized_relative_path="${relative_path#./}"
-	while [[ "${normalized_relative_path}" == model/* ]]; do
-		normalized_relative_path="${normalized_relative_path#model/}"
-	done
-	if [[ -z "${normalized_relative_path}" ]]; then
-		echo "[tune_dnabert_pair.sh] pretrained relative path resolved to empty value." >&2
-		return 1
-	fi
-	PRETRAINED_MODEL_NAME_RESOLVED="${model_root}/${normalized_relative_path}"
+	MODEL_NAME="$(
+		intronmodel_resolve_dnabert_model_name \
+			"tune_dnabert_pair.sh" \
+			"${variant}"
+	)" || return 1
+	PRETRAINED_MODEL_NAME_RESOLVED="$(
+		intronmodel_resolve_dnabert_pretrained_name \
+			"tune_dnabert_pair.sh" \
+			"${variant}" \
+			"${explicit_pretrained}" \
+			"${model_root}" \
+			"${relative_path_2}" \
+			"${relative_path_6}" \
+			"${relative_path_s}"
+	)" || return 1
 }
 
 resolve_search_space_file() {
@@ -364,44 +334,24 @@ resolve_search_space_file() {
 	local species="$3"
 	local target="$4"
 	local model_name="$5"
-
-	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
-		if [[ -f "${explicit_file}" ]]; then
-			printf '%s\n' "${explicit_file}"
-			return 0
-		fi
-		echo "[tune_dnabert_pair.sh] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
-		return 2
-	fi
-
-	local target_file="${DATA_ROOT}/${species}/tuning/${model_name}/${target}/search_space.json"
-	if [[ -f "${target_file}" ]]; then
-		printf '%s\n' "${target_file}"
-		return 0
-	fi
-
-	local species_file="${DATA_ROOT}/${species}/tuning/${model_name}/search_space.json"
-	if [[ -f "${species_file}" ]]; then
-		printf '%s\n' "${species_file}"
-		return 0
-	fi
+	local -a candidates=(
+		"${DATA_ROOT}/${species}/tuning/${model_name}/${target}/search_space.json"
+		"${DATA_ROOT}/${species}/tuning/${model_name}/search_space.json"
+	)
+	: "${project_root}"
 
 	if [[ "${model_name}" == *_synth ]]; then
 		local base_model_name="${model_name%_synth}"
-		local synth_target_file="${DATA_ROOT}/${species}/tuning/${base_model_name}/${target}/search_space.json"
-		if [[ -f "${synth_target_file}" ]]; then
-			printf '%s\n' "${synth_target_file}"
-			return 0
-		fi
-
-		local synth_species_file="${DATA_ROOT}/${species}/tuning/${base_model_name}/search_space.json"
-		if [[ -f "${synth_species_file}" ]]; then
-			printf '%s\n' "${synth_species_file}"
-			return 0
-		fi
+		candidates+=(
+			"${DATA_ROOT}/${species}/tuning/${base_model_name}/${target}/search_space.json"
+			"${DATA_ROOT}/${species}/tuning/${base_model_name}/search_space.json"
+		)
 	fi
 
-	return 1
+	intronmodel_resolve_search_space_file \
+		"tune_dnabert_pair.sh" \
+		"${explicit_file}" \
+		"${candidates[@]}"
 }
 
 normalize_json_object_file() {

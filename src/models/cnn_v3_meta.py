@@ -32,16 +32,18 @@ from util.data_proc import (
     validate_window_args,
 )
 from util.model_task_paths import (
+    attach_init_checkpoint_summary,
     resolve_required_checkpoint_paths,
+    resolve_task_init_checkpoint_paths,
     resolve_train_target,
 )
-from util.model_runtime import log10_sigmoid_np
+from util.model_runtime import log10_sigmoid_np, warm_start_model
 from util.sequence_transform import (
     PairSequenceRecord,
     apply_pair_sequence_transform,
 )
 from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
-from util.training_control import resolve_training_epoch_budget
+from util.training_control import resolve_training_schedule
 
 try:
     from sklearn.metrics import average_precision_score
@@ -463,18 +465,31 @@ def train(
         tasks=("pair",),
     )
     pair_checkpoint_path = task_checkpoint_paths["pair"]
+    pair_init_checkpoint_path = resolve_task_init_checkpoint_paths(
+        common_args,
+        tasks=("pair",),
+    )["pair"]
     checkpoint_parent = Path(pair_checkpoint_path).parent
     checkpoint_parent.mkdir(parents=True, exist_ok=True)
 
-    resolved_epochs, _epochs_auto = resolve_training_epoch_budget(
+    schedule = resolve_training_schedule(
         epochs_arg=model_args.epochs,
         max_epochs=int(model_args.max_epochs),
+        patience_arg=0,
+        min_delta_arg=0.0,
     )
     model = _MetaPairMLP(
         input_dim=int(features.shape[1]),
         hidden_dim=int(model_args.meta_hidden_dim),
         dropout=float(model_args.meta_dropout),
     ).to(device)
+    warm_start_result = warm_start_model(
+        model,
+        init_checkpoint_path=pair_init_checkpoint_path,
+        device=device,
+        log_prefix="cnn_v3_meta",
+    )
+    pair_init_checkpoint_path = warm_start_result.init_checkpoint_path
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(model_args.lr),
@@ -486,7 +501,7 @@ def train(
     best_max_f1: Optional[float] = None
     history: list[dict[str, object]] = []
     best_state: dict[str, torch.Tensor] | None = None
-    for epoch in range(1, resolved_epochs + 1):
+    for epoch in range(1, schedule.resolved_epochs + 1):
         model.train()
         for x_batch, y_batch in train_loader:
             logits = model(x_batch.to(device))
@@ -542,17 +557,17 @@ def train(
         acceptor_len=acceptor_len,
         lr=float(model_args.lr),
         batch_size=int(model_args.batch_size),
-        epochs=resolved_epochs,
+        epochs=schedule.resolved_epochs,
         tag=model_args.tag,
     )
 
-    return {
+    summary = {
         "model": "cnn_v3_meta",
         "species": common_args.species,
         "base_pair_checkpoints": list(base_checkpoints),
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": resolved_epochs,
+        "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
         "max_epochs": model_args.max_epochs,
         "batch_size": model_args.batch_size,
@@ -577,8 +592,14 @@ def train(
             "checkpoint": pair_checkpoint_path,
             "num_examples": int(labels.shape[0]),
             "num_base_models": len(base_checkpoints),
+            "init_checkpoint_path": pair_init_checkpoint_path,
         },
     }
+    attach_init_checkpoint_summary(
+        summary,
+        task_init_checkpoint_paths={"pair": pair_init_checkpoint_path},
+    )
+    return summary
 
 
 def infer_site(

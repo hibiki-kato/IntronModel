@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import math
 import os
 import random
@@ -51,6 +52,15 @@ _COMPILE_DISABLED_MODES_CACHE: set[str] = set()
 
 _AUTO_NUM_WORKERS_MIN_PER_GPU: int = 4
 _AUTO_NUM_WORKERS_MAX_PER_GPU: int = 8
+
+
+@dataclass(frozen=True)
+class WarmStartLoadResult:
+    """Result of attempting to initialize one model from a checkpoint."""
+
+    initialized_from_checkpoint: bool
+    init_checkpoint_path: str | None
+    error_detail: str | None = None
 
 
 def binary_clf_curve(
@@ -955,6 +965,116 @@ def normalize_checkpoint_state_dict(
             stripped_key = key[len(compiled_prefix) :]
             normalized.setdefault(stripped_key, value)
     return normalized
+
+
+def extract_checkpoint_model_state(
+    checkpoint_payload: object,
+    *,
+    checkpoint_path: str,
+) -> dict[str, torch.Tensor]:
+    """Extract one normalized tensor state dict from a checkpoint payload.
+
+    Parameters
+    ----------
+    checkpoint_payload : object
+        Raw object loaded from a checkpoint file.
+    checkpoint_path : str
+        Source path used for error reporting.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        Normalized tensor-only state dict.
+
+    Raises
+    ------
+    ValueError
+        If the payload is not a compatible checkpoint object.
+    """
+    if not isinstance(checkpoint_payload, dict):
+        raise ValueError(f"Invalid init checkpoint payload: {checkpoint_path}")
+    state_dict_obj = checkpoint_payload.get("model_state", checkpoint_payload)
+    if not isinstance(state_dict_obj, Mapping):
+        raise ValueError(f"Init checkpoint missing model_state: {checkpoint_path}")
+    tensor_state = {
+        str(key): value
+        for key, value in state_dict_obj.items()
+        if isinstance(value, torch.Tensor)
+    }
+    if not tensor_state:
+        raise ValueError(f"Init checkpoint has no tensor weights: {checkpoint_path}")
+    return normalize_checkpoint_state_dict(tensor_state)
+
+
+def warm_start_model(
+    model: nn.Module,
+    *,
+    init_checkpoint_path: str | None,
+    device: str,
+    log_prefix: str,
+) -> WarmStartLoadResult:
+    """Initialize one model from a checkpoint when a path is provided.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model instance to initialize.
+    init_checkpoint_path : str | None
+        Optional checkpoint path. Empty values are treated as ``None``.
+    device : str
+        Runtime device used for ``torch.load``.
+    log_prefix : str
+        Human-readable prefix used in printed diagnostics.
+
+    Returns
+    -------
+    WarmStartLoadResult
+        Outcome metadata for the attempted warm start.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint payload is structurally invalid.
+    """
+    normalized_checkpoint_path = None
+    if init_checkpoint_path is not None:
+        candidate = init_checkpoint_path.strip()
+        normalized_checkpoint_path = candidate if candidate != "" else None
+    if normalized_checkpoint_path is None:
+        return WarmStartLoadResult(
+            initialized_from_checkpoint=False,
+            init_checkpoint_path=None,
+        )
+
+    checkpoint_payload = torch.load(
+        normalized_checkpoint_path,
+        map_location=device,
+        weights_only=False,
+    )
+    model_state = extract_checkpoint_model_state(
+        checkpoint_payload,
+        checkpoint_path=normalized_checkpoint_path,
+    )
+    try:
+        model.load_state_dict(model_state)
+    except RuntimeError as exc:
+        print(
+            f"[{log_prefix}] warm-start checkpoint incompatible; "
+            "continue from random initialization."
+        )
+        print(f"[{log_prefix}] warm-start checkpoint: {normalized_checkpoint_path}")
+        print(f"[{log_prefix}] warm-start detail: {exc}")
+        return WarmStartLoadResult(
+            initialized_from_checkpoint=False,
+            init_checkpoint_path=normalized_checkpoint_path,
+            error_detail=str(exc),
+        )
+
+    print(f"[{log_prefix}] initialized from checkpoint: {normalized_checkpoint_path}")
+    return WarmStartLoadResult(
+        initialized_from_checkpoint=True,
+        init_checkpoint_path=normalized_checkpoint_path,
+    )
 
 
 def set_seed(

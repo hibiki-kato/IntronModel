@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 from util.model_task_paths import (
+    attach_init_checkpoint_summary,
     checkpoint_tasks_for_model,
     resolve_required_checkpoint_paths,
+    resolve_task_init_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
 )
@@ -113,3 +115,26 @@ def test_resolve_train_target_accepts_pair_only_mode() -> None:
 
     assert target == "pair"
     assert tasks == ["pair"]
+
+
+def test_resolve_task_init_checkpoint_paths_normalizes_blank_values() -> None:
+    args = Namespace(
+        donor_init_checkpoint_path=" donor.pt ",
+        acceptor_init_checkpoint_path="",
+    )
+
+    resolved = resolve_task_init_checkpoint_paths(args)
+
+    assert resolved == {"donor": "donor.pt", "acceptor": None}
+
+
+def test_attach_init_checkpoint_summary_writes_empty_string_for_missing() -> None:
+    summary: dict[str, object] = {}
+
+    attach_init_checkpoint_summary(
+        summary,
+        task_init_checkpoint_paths={"pair": None, "donor": "donor.pt"},
+    )
+
+    assert summary["pair_init_checkpoint_path"] == ""
+    assert summary["donor_init_checkpoint_path"] == "donor.pt"

@@ -1,9 +1,10 @@
 ##gff-version 3
 # gffread v0.12.7
 # gffread -F
-NC_004354.4	HMM	transcript	1	3252	.	.	.	ID=cds-NP_477286.2.fa.0
-NC_004354.4	HMM	CDS	1	289	6709.97	.	0	Parent=cds-NP_477286.2.fa.0;state=E0
-NC_004354.4	HMM	CDS	352	1010	6709.97	.	2	Parent=cds-NP_477286.2.fa.0;state=E2
-NC_004354.4	HMM	CDS	1065	2490	6709.97	.	0	Parent=cds-NP_477286.2.fa.0;state=E2
-NC_004354.4	HMM	CDS	2552	2703	6709.97	.	2	Parent=cds-NP_477286.2.fa.0;state=E0
-NC_004354.4	HMM	CDS	2766	3252	6709.97	.	0	Parent=cds-NP_477286.2.fa.0;state=E2
+NC_004354.4	HMM	transcript	1	394	.	.	.	ID=cds-NP_477286.2.fa.0
+NC_004354.4	HMM	CDS	1	394	6237.06	.	0	Parent=cds-NP_477286.2.fa.0;state=E0
+NC_004354.4	HMM	transcript	405	2908	.	.	.	ID=cds-NP_477286.2.fa.1
+NC_004354.4	HMM	CDS	405	2609	6237.06	.	0	Parent=cds-NP_477286.2.fa.1;state=E2
+NC_004354.4	HMM	CDS	2680	2908	6237.06	.	0	Parent=cds-NP_477286.2.fa.1;state=E0
+NC_004354.4	HMM	transcript	2913	3252	.	.	.	ID=cds-NP_477286.2.fa.2
+NC_004354.4	HMM	CDS	2913	3252	6237.06	.	0	Parent=cds-NP_477286.2.fa.2;state=E2

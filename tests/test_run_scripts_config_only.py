@@ -111,10 +111,8 @@ def test_run_cnn_v3_sh_rejects_cli_arguments() -> None:
 
 
 def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
-    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
-        encoding="utf-8"
-    )
-    assert 'INTRONMODEL_AUTO_TMUX=' in content
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(encoding="utf-8")
+    assert "INTRONMODEL_AUTO_TMUX=" in content
     assert 'DEVICE="auto"' in content
     assert 'GPU_IDS="auto"' in content
     assert 'MAX_PARALLEL_TRIALS="auto"' in content
@@ -142,25 +140,39 @@ def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     assert "--validation_metric" in content
     assert "--seed" in content
     assert "--checkpoint_top_k" in content
-    assert 'append_arg_if_set "donor_tuned_config_path" "${donor_tuned_config_path}"' in content
-    assert 'append_arg_if_set "acceptor_tuned_config_path" "${acceptor_tuned_config_path}"' in content
-    assert 'for task_name in donor acceptor; do' not in content
+    assert (
+        'append_arg_if_set "donor_tuned_config_path" "${donor_tuned_config_path}"'
+        in content
+    )
+    assert (
+        'append_arg_if_set "acceptor_tuned_config_path" "${acceptor_tuned_config_path}"'
+        in content
+    )
+    assert "for task_name in donor acceptor; do" not in content
 
 
 def test_run_cnn_v2_sh_ignores_cnn_v2_only_tuned_keys() -> None:
-    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
-        encoding="utf-8"
-    )
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(encoding="utf-8")
     assert "run_model.py forces cnn_v2 into pair_mode=independent" in content
-    assert '|input_mode | pair_mode | sequence_transform | embedding_dim \\' in content
-    assert '|bpe_pretrained_model_name | bpe_pretrained_revision \\' in content
-    assert 'printf \'%s\\n\' "shared"' not in content[
-        content.index('|input_mode | pair_mode | sequence_transform | embedding_dim \\') :
-    ]
-    assert 'printf \'%s\\n\' "ignore"' in content[
-        content.index('|input_mode | pair_mode | sequence_transform | embedding_dim \\') :
-    ]
-    assert 'mode=independent tasks=donor,acceptor' in content
+    assert "|input_mode | pair_mode | sequence_transform | embedding_dim \\" in content
+    assert "|bpe_pretrained_model_name | bpe_pretrained_revision \\" in content
+    assert (
+        "printf '%s\\n' \"shared\""
+        not in content[
+            content.index(
+                "|input_mode | pair_mode | sequence_transform | embedding_dim \\"
+            ) :
+        ]
+    )
+    assert (
+        "printf '%s\\n' \"ignore\""
+        in content[
+            content.index(
+                "|input_mode | pair_mode | sequence_transform | embedding_dim \\"
+            ) :
+        ]
+    )
+    assert "mode=independent tasks=donor,acceptor" in content
 
 
 def test_run_cnn_pair_v2_sh_rejects_cli_arguments() -> None:
@@ -220,21 +232,42 @@ def test_run_cnn_pair_v2_sh_omits_empty_optional_loss_alpha_args() -> None:
     assert 'ASYM_ALPHA_POS=""' in content
 
 
+def test_run_test_llms_h_sh_exponentiates_negative_values_before_c_scaling() -> None:
+    content = (_project_root() / "score_test_suite" / "run_test_llms.h.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if ($F[1] < 0) {$F[1] = 10**$F[1];}" in content
+    assert "$score=log($F[1]*2)*500+50" in content
+
+
+def test_run_test_llms_h2_sh_uses_c_like_transform_for_dnabert2() -> None:
+    content = (_project_root() / "score_test_suite" / "run_test_llms.h2.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'input_tag="${INPUT_TAG:-h2}"' in content
+    assert "$score=log($F[1]*2)*500+50" in content
+    assert "if ($F[1] < 0)" not in content
+
+
 def test_eval_intron_pr_auc_sh_supports_latest_published_site_score_names() -> None:
     content = (_project_root() / "run" / "eval_intron_pr_auc.sh").read_text(
         encoding="utf-8"
     )
     assert "resolve_site_score_input()" in content
     assert "intronmodel_resolve_latest_published_data_path" in content
-    assert 'cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3' not in content
+    assert "cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3" not in content
 
 
-def test_eval_trans_score_sh_supports_latest_published_score_names_generically() -> None:
+def test_eval_trans_score_sh_supports_latest_published_score_names_generically() -> (
+    None
+):
     content = (_project_root() / "run" / "eval_trans_score.sh").read_text(
         encoding="utf-8"
     )
     assert "intronmodel_resolve_latest_published_data_path" in content
-    assert 'cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3' not in content
+    assert "cnn_v2 | cnn_pair_v2 | cnn_v3 | cnn_pair_v3" not in content
 
 
 def test_rerun_active_best_scores_and_evals_uses_model_alias_for_intron_eval() -> None:
@@ -242,7 +275,7 @@ def test_rerun_active_best_scores_and_evals_uses_model_alias_for_intron_eval() -
         _project_root() / "run" / "rerun_active_best_scores_and_evals.sh"
     ).read_text(encoding="utf-8")
     assert '--site-score-tsv "cnn_v2"' in content
-    assert 'site_score/cnn_v2.tsv' not in content
+    assert "site_score/cnn_v2.tsv" not in content
 
 
 def test_run_cnn_pair_v2_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
@@ -251,12 +284,14 @@ def test_run_cnn_pair_v2_sh_uses_best_hparams_when_tuned_is_loaded() -> None:
     )
 
     assert 'if [[ "${use_wrapper_hparams}" == "1" ]]; then' in content
-    assert '--batch_size "${BATCH_SIZE}"' in content[
-        content.index('if [[ "${use_wrapper_hparams}" == "1" ]]; then') :
-    ]
-    assert '--lr "${LR}"' in content[
-        content.index('if [[ "${use_wrapper_hparams}" == "1" ]]; then') :
-    ]
+    assert (
+        '--batch_size "${BATCH_SIZE}"'
+        in content[content.index('if [[ "${use_wrapper_hparams}" == "1" ]]; then') :]
+    )
+    assert (
+        '--lr "${LR}"'
+        in content[content.index('if [[ "${use_wrapper_hparams}" == "1" ]]; then') :]
+    )
 
 
 def test_run_cnn_pair_v2_sh_uses_single_pair_tuning_namespace() -> None:
@@ -279,9 +314,7 @@ def test_run_cnn_pair_v2_sh_uses_single_pair_tuning_namespace() -> None:
 
 
 def test_run_cnn_v3_sh_exposes_resdil_wrapper_knobs() -> None:
-    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(
-        encoding="utf-8"
-    )
+    content = (_project_root() / "run" / "run_cnn_v3.sh").read_text(encoding="utf-8")
     assert 'MODEL="cnn_v3"' in content
     assert 'BLOCK_DILATIONS="1,2,4,8"' in content
     assert 'RESIDUAL_CHANNELS="32,64,96,128"' in content
@@ -289,8 +322,11 @@ def test_run_cnn_v3_sh_exposes_resdil_wrapper_knobs() -> None:
     assert '--block_dilations "${BLOCK_DILATIONS}"' in content
     assert '--residual_channels "${RESIDUAL_CHANNELS}"' in content
     assert '--pool_every "${POOL_EVERY}"' in content
-    assert 'task_tuned_path="${DATA_ROOT}/${species}/tuning/cnn_v3/${task_name}/best_config.json"' in content
-    assert 'mode=independent tasks=donor,acceptor' in content
+    assert (
+        'task_tuned_path="${DATA_ROOT}/${species}/tuning/cnn_v3/${task_name}/best_config.json"'
+        in content
+    )
+    assert "mode=independent tasks=donor,acceptor" in content
 
 
 def test_run_cnn_pair_v3_sh_rejects_cli_arguments() -> None:
@@ -336,7 +372,7 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
     assert '"enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON}' in content
     assert '"gpu_release_events_path": "${gpu_release_events_path}"' in content
-    assert 'cycle_stdout.log' in content
+    assert "cycle_stdout.log" in content
     assert "MAX_MODEL_PARAMS" not in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
@@ -356,7 +392,7 @@ def test_tune_cnn_pair_v2_time_omits_max_model_params() -> None:
     assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
     assert '"enable_phase_overlap": true' in content
     assert '"gpu_release_events_path": "${gpu_release_events_path}"' in content
-    assert 'cycle_stdout.log' in content
+    assert "cycle_stdout.log" in content
     assert "MAX_MODEL_PARAMS" not in content
     assert '"mask": {' in content
     assert '"sequence_transform": {' not in content
@@ -403,7 +439,7 @@ def test_tune_cnn_v3_time_sh_uses_reinforce_search_defaults() -> None:
     assert '"arch_add_block_prob"' in content
     assert '"pool_every": ${POOL_EVERY}' in content
     assert '"validation_metric": "${OBJECTIVE_METRIC}"' in content
-    assert 'intronmodel_run_with_process_title \\' in content
+    assert "intronmodel_run_with_process_title \\" in content
     assert '"${RUNTIME_PROCESS_TITLE}" \\' in content
 
 
@@ -411,7 +447,7 @@ def test_tune_cnn_pair_v3_time_sh_uses_eta_process_title_for_scheduler() -> None
     content = (_project_root() / "run" / "tune_cnn_pair_v3_time.sh").read_text(
         encoding="utf-8"
     )
-    assert 'intronmodel_run_with_process_title \\' in content
+    assert "intronmodel_run_with_process_title \\" in content
     assert '"${RUNTIME_PROCESS_TITLE}" \\' in content
 
 
@@ -555,7 +591,7 @@ def test_cnn_resdil_sh_rejects_cli_arguments() -> None:
 
 def test_sync_sh_pushes_run_scripts_with_checksum() -> None:
     content = (_project_root() / "sync.sh").read_text(encoding="utf-8")
-    assert 'CHECKSUM_SYNC_PATHS=(' in content
+    assert "CHECKSUM_SYNC_PATHS=(" in content
     assert '"run/"' in content
     assert '"src/scripts/"' in content
     assert '--exclude "$sync_path"' in content
@@ -621,9 +657,7 @@ def test_run_dnabert_pair_sh_exposes_synthesize_mode() -> None:
 
 def test_tune_dnabert_pair_scripts_expose_synthesize_mode() -> None:
     for script_name in ("tune_dnabert_pair.sh", "tune_dnabert_pair_time.sh"):
-        content = (_project_root() / "run" / script_name).read_text(
-            encoding="utf-8"
-        )
+        content = (_project_root() / "run" / script_name).read_text(encoding="utf-8")
         assert 'SYNTHESIZE_MODE="off"' in content
         assert "intronmodel_resolve_synth_tuning_model_name" in content
         assert "intronmodel_resolve_pair_best_config_filename" in content
@@ -780,9 +814,7 @@ def test_run_tcn_sh_includes_head_type_config() -> None:
 
 
 def test_run_cnn_v2_sh_includes_gpu_parallel_config() -> None:
-    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(
-        encoding="utf-8"
-    )
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(encoding="utf-8")
     assert 'GPU_IDS="auto"' in content
     assert 'MAX_PARALLEL_TRIALS="auto"' in content
 

@@ -11,7 +11,7 @@ fi
 # CONFIG (edit here)
 # --------------------------
 CONDA_ENV="${CONDA_ENV:-intronmodel}"
-MODEL="${MODEL:-cnn_v2}"
+MODEL="${MODEL:-cnn_v3}"
 SPECIES="${SPECIES:-Dmel}"
 TAG="${TAG:-h}"
 SUITE_ROOT="${SUITE_ROOT:-}"

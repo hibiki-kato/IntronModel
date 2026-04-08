@@ -40,6 +40,8 @@ from util.unique_intron import (
     UNIQUE_TRANSCRIPTS_TRUNC_TSV_NAME,
     UNIQUE_TRANSCRIPTS_TSV_NAME,
 )
+from util.versioned_artifacts import is_active_public_model
+from util.versioned_artifacts import resolve_latest_published_name
 from util.process_title import apply_process_title_from_env
 
 _ = apply_process_title_from_env()
@@ -950,6 +952,40 @@ def _check_dnabert_skip_training_preconditions(run_args: list[str]) -> None:
         raise ValueError("Missing checkpoint(s) for SKIP_TRAINING=1.")
 
 
+def _resolve_dnabert_versioned_output_stem(
+    *,
+    spec: WrapperSpec,
+    env: Mapping[str, str],
+    data_root: Path,
+    species: str,
+    model_name: str,
+    output_stem: str,
+) -> str:
+    """Resolve versioned output stem for DNABERT skip-training wrappers."""
+
+    if spec.script_name not in {"dnabert.sh", "dnabert_pair.sh"}:
+        return output_stem
+    if env.get("SKIP_TRAINING", "0") != "1":
+        return output_stem
+    if env.get("TRAIN_ONLY", "0") == "1":
+        return output_stem
+    if env.get("PRECOMPUTED_SITE_SCORE_TSV", "").strip() != "":
+        return output_stem
+    if not is_active_public_model(model_name):
+        return output_stem
+
+    latest_published = resolve_latest_published_name(
+        data_root=data_root,
+        species=species,
+        model_name=model_name,
+    )
+    if latest_published is None:
+        return output_stem
+
+    print(f"[{spec.script_name}] Versioned output targets: {latest_published}")
+    return latest_published
+
+
 def _parse_species_list(raw_species: str) -> list[str]:
     """Parse one-or-many species string into ordered unique entries."""
     tokens = re.split(r"[\s,]+", raw_species.strip())
@@ -1283,24 +1319,22 @@ def _harmonize_min_batch_size(
     batch_keys = ["BATCH_SIZE"]
     if len(model_tasks) > 1:
         batch_keys.extend([f"{task.upper()}_BATCH_SIZE" for task in model_tasks])
-
-    candidate_batch_sizes: list[int] = []
+    active_batch_sizes: list[int] = []
     for key in batch_keys:
-        raw = env.get(key, "").strip()
-        if raw == "":
+        raw_value = env.get(key)
+        if raw_value is None or raw_value.strip() == "":
             continue
-        candidate_batch_sizes.append(_as_int(raw, key))
-
-    if not candidate_batch_sizes:
-        return
-    effective_max_min_batch_size = min(candidate_batch_sizes)
-    if min_batch_size <= effective_max_min_batch_size:
+        active_batch_sizes.append(_as_int(raw_value, key))
+    if not active_batch_sizes:
         return
 
-    env["MIN_BATCH_SIZE"] = str(effective_max_min_batch_size)
+    max_allowed_min_batch_size = min(active_batch_sizes)
+    if min_batch_size <= max_allowed_min_batch_size:
+        return
+    env["MIN_BATCH_SIZE"] = str(max_allowed_min_batch_size)
     print(
         f"[{script_name}] MIN_BATCH_SIZE adjusted: {min_batch_size} -> "
-        f"{effective_max_min_batch_size}",
+        f"{max_allowed_min_batch_size}",
         file=sys.stderr,
     )
 
@@ -1312,7 +1346,7 @@ def _run_subprocess_with_species_log_prefix(
     script_name: str,
     species: str,
 ) -> int:
-    """Run one subprocess and prefix each output line with species context.
+    """Run one subprocess while prefixing each output line with species context.
 
     Parameters
     ----------
@@ -1409,6 +1443,14 @@ def _run_single_species(
         fallback_train_len=None,
         name_fields=name_fields,
         name_params=params,
+    )
+    output_stem = _resolve_dnabert_versioned_output_stem(
+        spec=spec,
+        env=env,
+        data_root=data_root,
+        species=species,
+        model_name=model_name,
+        output_stem=output_stem,
     )
 
     raw_test_tsv_path = env.get("TEST_TSV_PATH", "").strip()
@@ -1508,7 +1550,7 @@ def _run_single_species(
     if spec.script_name in {"dnabert.sh", "dnabert_pair.sh"}:
         is_skip = env.get("SKIP_TRAINING", "0") == "1"
         has_precomputed = env.get("PRECOMPUTED_SITE_SCORE_TSV", "") != ""
-        if is_skip and not has_precomputed:
+        if is_skip and not has_precomputed and not is_active_public_model(model_name):
             _check_dnabert_skip_training_preconditions(run_args)
 
     print(f"[{spec.script_name}] Start unified pipeline")

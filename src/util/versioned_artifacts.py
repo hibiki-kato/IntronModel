@@ -36,6 +36,29 @@ LEGACY_PUBLIC_OUTPUT_STEMS: dict[str, tuple[str, ...]] = {
     "cnn_pair_v2": ("cnn_v2_pair",),
 }
 KNOWN_MODEL_NAMES: frozenset[str] = frozenset(available_models())
+ACTIVE_PUBLIC_MODEL_NAMES: frozenset[str] = frozenset(
+    {
+        "cnn",
+        "cnn_pair",
+        "cnn_v2",
+        "cnn_pair_v2",
+        "cnn_v3",
+        "cnn_pair_v3",
+        "cnn_v3_meta",
+        "bilstm_pair",
+        "tcn",
+        "bert",
+        "dnabert",
+        "dnabert2",
+        "dnabert6",
+        "dnaberts",
+        "dnabert_pair",
+        "dnabert2_pair",
+        "dnabert6_pair",
+        "dnaberts_pair",
+        "cnn_resdil",
+    }
+)
 VERSION_HISTORY_COLUMNS: tuple[str, ...] = (
     "version",
     "published_name",
@@ -102,6 +125,8 @@ def publication_tasks_for_model(model_name: str) -> tuple[str, ...] | None:
     if public_model_name == "":
         return None
     if public_model_name not in KNOWN_MODEL_NAMES:
+        return None
+    if public_model_name not in ACTIVE_PUBLIC_MODEL_NAMES:
         return None
     tasks = checkpoint_tasks_for_model(public_model_name)
     if tasks == SITE_PUBLICATION_TASKS:

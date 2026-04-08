@@ -1267,6 +1267,178 @@ def test_run_pipeline_tuned_cnn_v2_run_uses_versioned_output_targets(
     assert (data_root / "Dmel" / "learning_metric" / "cnn_v2.01.train.json").exists()
 
 
+def test_run_pipeline_tuned_cnn_v2_run_forces_versioned_outputs_over_explicit_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    donor_checkpoint = model_root / "Dmel" / "donor" / "cnn_v2.01.pt"
+    acceptor_checkpoint = model_root / "Dmel" / "acceptor" / "cnn_v2.01.pt"
+    donor_best = data_root / "Dmel" / "tuning" / "cnn_v2" / "donor" / "best_config.json"
+    acceptor_best = (
+        data_root / "Dmel" / "tuning" / "cnn_v2" / "acceptor" / "best_config.json"
+    )
+    _write_cnn_v2_best_config(
+        donor_best,
+        task="donor",
+        published_name="cnn_v2.01",
+        checkpoint_path=donor_checkpoint,
+        batch_size=512,
+        sampled_params={
+            "donor_len": 50,
+            "acceptor_len": 70,
+            "input_mode": "kmer3",
+        },
+    )
+    _write_cnn_v2_best_config(
+        acceptor_best,
+        task="acceptor",
+        published_name="cnn_v2.01",
+        checkpoint_path=acceptor_checkpoint,
+        batch_size=256,
+        sampled_params={
+            "donor_len": 90,
+            "acceptor_len": 100,
+            "input_mode": "onehot",
+        },
+    )
+    write_version_history(
+        data_root,
+        "Dmel",
+        "cnn_v2",
+        [
+            VersionHistoryEntry(
+                version=1,
+                published_name="cnn_v2.01",
+                published_at="2026-04-06T00:00:00Z",
+                source_best_config="data/Dmel/tuning/cnn_v2/donor/best_config.json",
+                objective_metric="pr_auc",
+                objective_score="0.81",
+                updated_side="donor",
+                carry_forward_side="acceptor",
+                donor_checkpoint_path="model/Dmel/donor/cnn_v2.01.pt",
+                acceptor_checkpoint_path="model/Dmel/acceptor/cnn_v2.01.pt",
+                pair_checkpoint_path="",
+                metrics_json="data/Dmel/learning_metric/cnn_v2.01.train.json",
+                archive_status="live",
+            )
+        ],
+    )
+
+    class_file = tmp_path / "class.txt"
+    class_file.write_text("tx1\t1\n", encoding="utf-8")
+    test_tsv = tmp_path / "transcripts.tsv"
+    test_tsv.write_text(
+        "transcript_id\tsite_type\tintron_index\tseq\n",
+        encoding="utf-8",
+    )
+    ref_gff = tmp_path / "ref.gff"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: _DummyCnnV2PairRowsModule(),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "prune_species_model_checkpoints",
+        lambda **_: SimpleNamespace(
+            total_candidates=0,
+            kept_count=0,
+            deleted_count=0,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_: ["ok"],
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "plot_eval_scores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("tx1", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("tx1", 2): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda species: {("tx1", 1): 1, ("tx1", 2): 0},
+    )
+
+    parser = run_model._build_parser(
+        selected_model="cnn_v2",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "cnn_v2",
+            "--species",
+            "Dmel",
+            "--donor_len",
+            "100",
+            "--acceptor_len",
+            "100",
+            "--test_tsv",
+            str(test_tsv),
+            "--class_file",
+            str(class_file),
+            "--ref_gff",
+            str(ref_gff),
+            "--donor_tuned_config_path",
+            str(donor_best),
+            "--acceptor_tuned_config_path",
+            str(acceptor_best),
+            "--site_output_tsv",
+            str(tmp_path / "custom_site.tsv"),
+            "--intron_output_tsv",
+            str(tmp_path / "custom_intron.tsv"),
+            "--transcript_output_tsv",
+            str(tmp_path / "custom_trans.tsv"),
+            "--eval_output_txt",
+            str(tmp_path / "custom_eval.txt"),
+            "--metrics_json",
+            str(tmp_path / "custom_metrics.json"),
+        ]
+    )
+    args.batch_size = 64
+    args.donor_batch_size = 512
+    args.acceptor_batch_size = 256
+    args.val_frac = 0.2
+
+    run_model.run_pipeline(args)
+    captured = capsys.readouterr()
+
+    assert "Versioned output targets: cnn_v2.01" in captured.out
+    assert (data_root / "Dmel" / "site_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "intron_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "trans_score" / "cnn_v2.01.tsv").exists()
+    assert (data_root / "Dmel" / "eval_score" / "cnn_v2.01.txt").exists()
+    assert (data_root / "Dmel" / "learning_metric" / "cnn_v2.01.train.json").exists()
+    assert not (tmp_path / "custom_site.tsv").exists()
+    assert not (tmp_path / "custom_intron.tsv").exists()
+    assert not (tmp_path / "custom_trans.tsv").exists()
+    assert not (tmp_path / "custom_eval.txt").exists()
+    assert not (tmp_path / "custom_metrics.json").exists()
+
+
 def test_run_pipeline_tuned_cnn_v2_run_uses_version_history_when_best_config_lacks_published_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

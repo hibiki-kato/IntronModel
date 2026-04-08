@@ -29,7 +29,7 @@ def read_json_object(path: Path) -> dict[str, object] | None:
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, IsADirectoryError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -172,7 +172,9 @@ def resolve_existing_checkpoint_path(
             if candidate.is_file():
                 return candidate.resolve()
             if len(relative_parts) >= 2:
-                scoped_root = model_root_dir.joinpath(relative_parts[0], relative_parts[1])
+                scoped_root = model_root_dir.joinpath(
+                    relative_parts[0], relative_parts[1]
+                )
                 search_roots.append(scoped_root)
     search_roots.append(model_root_dir)
     preferred_roots = [scoped_root] if scoped_root is not None else search_roots

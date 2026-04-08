@@ -53,8 +53,10 @@ from util.data_proc import (
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
+    attach_init_checkpoint_summary,
     checkpoint_tasks_for_model,
     resolve_required_checkpoint_paths,
+    resolve_task_init_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
 )
@@ -82,14 +84,14 @@ from util.model_runtime import (
     seed_worker as _seed_worker,
     set_seed,
     sigmoid_np,
+    warm_start_model as _warm_start_model,
 )
 from util.process_title import (
     apply_eta_process_title_from_epoch_progress,
     apply_eta_process_title_placeholder,
 )
 from util.training_control import (
-    resolve_early_stopping_params,
-    resolve_training_epoch_budget,
+    resolve_training_schedule,
 )
 from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 
@@ -881,6 +883,22 @@ class DnaBertPairTokenDataset(Dataset):
         )
 
 
+def _run_backbone_forward_eager(
+    backbone: nn.Module,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> object:
+    """Run DNABERT backbone in eager mode to avoid dynamic-shape recompiles."""
+    return backbone(input_ids=input_ids, attention_mask=attention_mask)
+
+
+_dynamo_module = getattr(torch, "_dynamo", None)
+_dynamo_disable = getattr(_dynamo_module, "disable", None)
+if callable(_dynamo_disable):
+    _run_backbone_forward_eager = _dynamo_disable(_run_backbone_forward_eager)
+
+
 class DnaBertBinaryClassifier(nn.Module):
     """Binary classifier with selectable readout on top of a DNABERT backbone."""
 
@@ -995,7 +1013,8 @@ class DnaBertBinaryClassifier(nn.Module):
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Run forward pass and return binary logits of shape ``(batch,)``."""
-        outputs = self.backbone(
+        outputs = _run_backbone_forward_eager(
+            self.backbone,
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
@@ -2030,26 +2049,16 @@ def train_task_model(
                 readout_mlp_hidden_dim=readout_mlp_hidden_dim,
                 readout_mlp_layers=readout_mlp_layers,
             ).to(device)
-            initialized_from_checkpoint = False
-            if init_checkpoint_path is not None:
-                ckpt = torch.load(
-                    init_checkpoint_path,
-                    map_location=device,
-                    weights_only=False,
-                )
-                if not isinstance(ckpt, dict):
-                    raise ValueError(
-                        f"Invalid init checkpoint payload: {init_checkpoint_path}"
-                    )
-                model_state_obj = ckpt.get("model_state")
-                if not isinstance(model_state_obj, dict):
-                    raise ValueError(
-                        f"Init checkpoint missing model_state: {init_checkpoint_path}"
-                    )
-                normalized_state = _normalize_checkpoint_state_dict(model_state_obj)
-                model.load_state_dict(normalized_state)
-                initialized_from_checkpoint = True
-                print(f"[{task}] initialized from checkpoint: {init_checkpoint_path}")
+            warm_start_result = _warm_start_model(
+                model,
+                init_checkpoint_path=init_checkpoint_path,
+                device=device,
+                log_prefix=task,
+            )
+            initialized_from_checkpoint = (
+                warm_start_result.initialized_from_checkpoint
+            )
+            init_checkpoint_path = warm_start_result.init_checkpoint_path
 
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
@@ -3438,26 +3447,21 @@ def train(
         allowed_targets=allowed_train_targets,
     )
 
-    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+    schedule = resolve_training_schedule(
         epochs_arg=model_args.epochs,
         max_epochs=int(model_args.max_epochs),
-    )
-    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
         patience_arg=model_args.early_stop_patience,
         min_delta_arg=model_args.early_stop_min_delta,
     )
-    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
     tasks_to_train = resolve_tasks_to_train(
         train_target,
         both_tasks=model_tasks,
     )
-    task_init_checkpoint_paths: dict[str, Optional[str]] = {}
-    for task in model_tasks:
-        raw_init_path = str(
-            getattr(common_args, f"{task}_init_checkpoint_path", "")
-        ).strip()
-        task_init_checkpoint_paths[task] = raw_init_path or None
+    task_init_checkpoint_paths = resolve_task_init_checkpoint_paths(
+        common_args,
+        tasks=model_tasks,
+    )
     task_window_len = {
         "donor": donor_window_len,
         "acceptor": acceptor_window_len,
@@ -3480,9 +3484,9 @@ def train(
             pretrained_model_name=model_args.pretrained_model_name,
             pretrained_revision=model_args.pretrained_revision,
             trust_remote_code=model_args.trust_remote_code,
-            epochs=resolved_epochs,
-            early_stop_patience=effective_early_stop_patience,
-            early_stop_min_delta=early_stop_min_delta,
+            epochs=schedule.resolved_epochs,
+            early_stop_patience=schedule.effective_early_stop_patience,
+            early_stop_min_delta=schedule.early_stop_min_delta,
             batch_size=resolved.batch_size,
             lr=resolved.lr,
             seed=common_args.seed,
@@ -3541,7 +3545,7 @@ def train(
         acceptor_len=acceptor_len,
         lr=run_name_lr,
         batch_size=run_name_batch_size,
-        epochs=resolved_epochs,
+        epochs=schedule.resolved_epochs,
         tag=model_args.tag,
     )
 
@@ -3585,12 +3589,12 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": resolved_epochs,
+        "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
-        "epochs_auto": epochs_auto,
+        "epochs_auto": schedule.epochs_auto,
         "max_epochs": model_args.max_epochs,
-        "early_stop_patience": early_stop_patience,
-        "early_stop_min_delta": early_stop_min_delta,
+        "early_stop_patience": schedule.early_stop_patience,
+        "early_stop_min_delta": schedule.early_stop_min_delta,
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,
@@ -3641,7 +3645,10 @@ def train(
     }
     for task in model_tasks:
         summary[f"{task}_checkpoint_path"] = task_checkpoint_paths[task]
-        summary[f"{task}_init_checkpoint_path"] = task_init_checkpoint_paths[task] or ""
+    attach_init_checkpoint_summary(
+        summary,
+        task_init_checkpoint_paths=task_init_checkpoint_paths,
+    )
     summary.update(task_metrics)
     return summary
 

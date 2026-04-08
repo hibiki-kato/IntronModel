@@ -1,34 +1,9 @@
 #!/usr/bin/env bash
 
 if ! declare -F intronmodel_is_active_public_model >/dev/null 2>&1; then
-	intronmodel_is_active_public_model() {
-		local script_tag="$1"
-		local model_name="$2"
-		local python_bin="python3"
-		local resolved_project_root="${PROJECT_ROOT:-$(pwd)}"
-
-		if ! command -v "${python_bin}" >/dev/null 2>&1; then
-			python_bin="python"
-		fi
-		if ! command -v "${python_bin}" >/dev/null 2>&1; then
-			echo "[${script_tag}] python interpreter not found (python3/python)." >&2
-			return 1
-		fi
-		(
-			export PYTHONPATH="${resolved_project_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
-			"${python_bin}" - "${model_name}" <<'PY'
-from __future__ import annotations
-
-import sys
-
-from util.versioned_artifacts import is_active_public_model
-
-
-model_name = sys.argv[1]
-print("1" if is_active_public_model(model_name) else "0")
-PY
-		)
-	}
+	_TUNED_CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	# shellcheck source=/dev/null
+	source "${_TUNED_CONFIG_DIR}/common.sh"
 fi
 
 intronmodel_normalize_use_tuned_mode() {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import os
 from typing import Sequence
 
@@ -88,6 +89,57 @@ def resolve_required_checkpoint_paths(
             )
         resolved[task] = checkpoint_path
     return resolved
+
+
+def resolve_task_init_checkpoint_paths(
+    common_args: object,
+    *,
+    tasks: Sequence[str] | None = None,
+) -> dict[str, str | None]:
+    """Resolve optional init-checkpoint paths for specified tasks.
+
+    Parameters
+    ----------
+    common_args : object
+        Namespace-like object that may provide ``<task>_init_checkpoint_path``
+        fields.
+    tasks : Sequence[str] | None, default=None
+        Task names. Defaults to donor/acceptor.
+
+    Returns
+    -------
+    dict[str, str | None]
+        Mapping from task name to a normalized path string or ``None`` when
+        no init checkpoint was requested.
+    """
+    task_names = tuple(tasks) if tasks is not None else DEFAULT_TASKS
+    if not task_names:
+        raise ValueError("tasks must contain at least one task name.")
+
+    resolved: dict[str, str | None] = {}
+    for task in task_names:
+        key_name = f"{task}_init_checkpoint_path"
+        raw_path = str(getattr(common_args, key_name, "")).strip()
+        resolved[task] = raw_path or None
+    return resolved
+
+
+def attach_init_checkpoint_summary(
+    summary: dict[str, object],
+    *,
+    task_init_checkpoint_paths: Mapping[str, str | None],
+) -> None:
+    """Attach per-task init-checkpoint paths to one summary payload.
+
+    Parameters
+    ----------
+    summary : dict[str, object]
+        Mutable training summary.
+    task_init_checkpoint_paths : Mapping[str, str | None]
+        Optional init-checkpoint paths keyed by task name.
+    """
+    for task, checkpoint_path in task_init_checkpoint_paths.items():
+        summary[f"{task}_init_checkpoint_path"] = checkpoint_path or ""
 
 
 def resolve_train_target(

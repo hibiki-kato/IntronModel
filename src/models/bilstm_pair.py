@@ -37,7 +37,9 @@ from util.data_proc import (
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
+    attach_init_checkpoint_summary,
     resolve_required_checkpoint_paths,
+    resolve_task_init_checkpoint_paths,
     resolve_tasks_to_train,
     resolve_train_target,
 )
@@ -56,6 +58,7 @@ from util.model_runtime import (
     seed_worker as _seed_worker,
     set_seed,
     sigmoid_np,
+    warm_start_model as _warm_start_model,
 )
 from util.sequence_transform import (
     SEQUENCE_TRANSFORM_CHOICES,
@@ -63,8 +66,7 @@ from util.sequence_transform import (
     apply_pair_sequence_transform,
 )
 from util.training_control import (
-    resolve_early_stopping_params,
-    resolve_training_epoch_budget,
+    resolve_training_schedule,
 )
 from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
 from models.cnn_common import _apply_split_fusion_head
@@ -825,6 +827,7 @@ def train_pair_model(
     pos_path: str,
     neg_path: str,
     checkpoint_path: str,
+    init_checkpoint_path: str | None,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
     train_params: PairTrainParams,
@@ -1015,6 +1018,14 @@ def train_pair_model(
         dropout=train_params.dropout,
         fc_hidden=train_params.fc_hidden,
     ).to(device_name)
+    warm_start_result = _warm_start_model(
+        model,
+        init_checkpoint_path=init_checkpoint_path,
+        device=device_name,
+        log_prefix="pair",
+    )
+    initialized_from_checkpoint = warm_start_result.initialized_from_checkpoint
+    init_checkpoint_path = warm_start_result.init_checkpoint_path
 
     compile_enabled_effective = False
     compile_selected_mode: Optional[str] = None
@@ -1303,6 +1314,8 @@ def train_pair_model(
         "early_stop_patience": early_stop_patience,
         "early_stop_min_delta": early_stop_min_delta,
         "checkpoint": checkpoint_path,
+        "initialized_from_checkpoint": initialized_from_checkpoint,
+        "init_checkpoint_path": init_checkpoint_path,
         "loss": train_params.loss_name,
         "input_mode": train_params.input_mode,
         "bpe_pretrained_model_name": train_params.bpe_pretrained_model_name,
@@ -1677,33 +1690,35 @@ def train(
         tasks=("pair",),
     )
     pair_checkpoint_path = task_checkpoint_paths["pair"]
+    pair_init_checkpoint_path = resolve_task_init_checkpoint_paths(
+        common_args,
+        tasks=("pair",),
+    )["pair"]
 
     train_target = resolve_train_target(model_args, allowed_targets=("pair",))
     tasks_to_train = resolve_tasks_to_train(train_target, both_tasks=("pair",))
     if tasks_to_train != ["pair"]:
         raise ValueError("bilstm_pair expects train_target=pair.")
 
-    resolved_epochs, epochs_auto = resolve_training_epoch_budget(
+    schedule = resolve_training_schedule(
         epochs_arg=model_args.epochs,
         max_epochs=int(model_args.max_epochs),
-    )
-    early_stop_patience, early_stop_min_delta = resolve_early_stopping_params(
         patience_arg=model_args.early_stop_patience,
         min_delta_arg=model_args.early_stop_min_delta,
     )
-    effective_early_stop_patience = early_stop_patience if epochs_auto else 0
 
     train_params = _resolve_pair_train_params(model_args)
     pair_metrics = train_pair_model(
         pos_path=train_pos_path,
         neg_path=train_neg_path,
         checkpoint_path=pair_checkpoint_path,
+        init_checkpoint_path=pair_init_checkpoint_path,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
         train_params=train_params,
-        epochs=resolved_epochs,
-        early_stop_patience=effective_early_stop_patience,
-        early_stop_min_delta=early_stop_min_delta,
+        epochs=schedule.resolved_epochs,
+        early_stop_patience=schedule.effective_early_stop_patience,
+        early_stop_min_delta=schedule.early_stop_min_delta,
         sequence_transform=model_args.sequence_transform,
         seed=common_args.seed,
         device=common_args.device,
@@ -1727,23 +1742,22 @@ def train(
         acceptor_len=acceptor_len,
         lr=train_params.lr,
         batch_size=train_params.batch_size,
-        epochs=resolved_epochs,
+        epochs=schedule.resolved_epochs,
         tag=model_args.tag,
     )
-
-    return {
+    summary = {
         "model": "bilstm_pair",
         "species": common_args.species,
         "train_pos_path": train_pos_path,
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
-        "epochs": resolved_epochs,
+        "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
-        "epochs_auto": epochs_auto,
+        "epochs_auto": schedule.epochs_auto,
         "max_epochs": model_args.max_epochs,
-        "early_stop_patience": early_stop_patience,
-        "early_stop_min_delta": early_stop_min_delta,
+        "early_stop_patience": schedule.early_stop_patience,
+        "early_stop_min_delta": schedule.early_stop_min_delta,
         "batch_size": model_args.batch_size,
         "lr": model_args.lr,
         "train_target": train_target,
@@ -1820,6 +1834,11 @@ def train(
             }
         },
     }
+    attach_init_checkpoint_summary(
+        summary,
+        task_init_checkpoint_paths={"pair": pair_init_checkpoint_path},
+    )
+    return summary
 
 
 def infer_site(

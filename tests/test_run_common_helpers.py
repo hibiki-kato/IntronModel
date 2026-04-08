@@ -73,6 +73,57 @@ def test_common_build_eta_process_title_formats_eta_prefix() -> None:
     assert run.stdout.strip() == "ETA:01/01 1:31"
 
 
+def test_common_resolve_dnabert_relative_path_supports_variant_s() -> None:
+    run = _run_common_shell(
+        'intronmodel_resolve_dnabert_relative_path '
+        '"test_common.sh" "S" "pretrained/dnabert2" '
+        '"pretrained/dnabert6" "pretrained/dnabert-s"'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "pretrained/dnabert-s"
+
+
+def test_common_resolve_dnabert_pretrained_name_normalizes_model_prefix() -> None:
+    run = _run_common_shell(
+        'intronmodel_resolve_dnabert_pretrained_name '
+        '"test_common.sh" "2" "" "/tmp/model-root" '
+        '"model/pretrained/dnabert2" "pretrained/dnabert6" '
+        '"pretrained/dnabert-s"'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "/tmp/model-root/pretrained/dnabert2"
+
+
+def test_common_resolve_search_space_file_prefers_first_existing_candidate(
+    tmp_path: Path,
+) -> None:
+    first_candidate = tmp_path / "first.json"
+    second_candidate = tmp_path / "second.json"
+    first_candidate.write_text("{}", encoding="utf-8")
+    second_candidate.write_text("{}", encoding="utf-8")
+
+    run = _run_common_shell(
+        "intronmodel_resolve_search_space_file "
+        '"test_common.sh" "" '
+        f'"{first_candidate}" "{second_candidate}"'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == str(first_candidate)
+
+
+def test_common_resolve_search_space_file_rejects_missing_explicit_path() -> None:
+    run = _run_common_shell(
+        'intronmodel_resolve_search_space_file '
+        '"test_common.sh" "/tmp/does-not-exist.json" "/tmp/fallback.json"'
+    )
+
+    assert run.returncode == 2
+    assert "SEARCH_SPACE_FILE not found" in run.stderr
+
+
 def test_common_resolve_eta_scope_uses_gpu_when_slots_are_short(
 ) -> None:
     run = _run_common_shell(
@@ -363,14 +414,16 @@ def test_common_resolve_latest_published_name_uses_data_root_override(
 
 def test_common_is_active_public_model_supports_generic_models() -> None:
     run = _run_common_shell(
-        'printf "%s\\n%s\\n%s\\n" '
+        'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" '
         '"$(intronmodel_is_active_public_model test_common.sh cnn_resdil)" '
         '"$(intronmodel_is_active_public_model test_common.sh bilstm_pair)" '
+        '"$(intronmodel_is_active_public_model test_common.sh reservoir)" '
+        '"$(intronmodel_is_active_public_model test_common.sh markov_xgboost)" '
         '"$(intronmodel_is_active_public_model test_common.sh nonexistent_model)"\n'
     )
 
     assert run.returncode == 0, run.stderr
-    assert run.stdout.strip().splitlines() == ["1", "1", "0"]
+    assert run.stdout.strip().splitlines() == ["1", "1", "0", "0", "0"]
 
 
 def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:

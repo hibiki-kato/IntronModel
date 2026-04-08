@@ -459,7 +459,8 @@ def _prepare_cycle_state(
             _emit_scheduler_line(
                 scheduler_config,
                 (
-                    "seed best config ignored due to parse error "
+                    "seed best config ignored due to "
+                    "search-space mismatch or invalid schema "
                     f"(cycle={cycle_index}): {exc}"
                 ),
             )
@@ -494,7 +495,8 @@ def _prepare_cycle_state(
             _emit_scheduler_line(
                 scheduler_config,
                 (
-                    "global best config ignored due to parse error "
+                    "global best config ignored due to "
+                    "search-space mismatch or invalid schema "
                     f"(cycle={cycle_index}): {exc}"
                 ),
             )

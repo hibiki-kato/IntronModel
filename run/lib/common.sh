@@ -465,6 +465,136 @@ intronmodel_resolve_python_bin() {
 }
 
 
+intronmodel_resolve_dnabert_variant() {
+	local script_tag="$1"
+	local variant="$2"
+	local normalized_variant="${variant,,}"
+
+	if [[ "${normalized_variant}" != "2" \
+		&& "${normalized_variant}" != "6" \
+		&& "${normalized_variant}" != "s" ]]; then
+		echo "[${script_tag}] DNABERT_VARIANT must be 2, 6, or s." >&2
+		return 1
+	fi
+	printf '%s\n' "${normalized_variant}"
+}
+
+
+intronmodel_resolve_dnabert_model_name() {
+	local script_tag="$1"
+	local variant="$2"
+	local normalized_variant
+	normalized_variant="$(
+		intronmodel_resolve_dnabert_variant "${script_tag}" "${variant}"
+	)" || return 1
+
+	if [[ "${normalized_variant}" == "s" ]]; then
+		printf '%s\n' "dnaberts"
+		return 0
+	fi
+	printf '%s\n' "dnabert${normalized_variant}"
+}
+
+
+intronmodel_resolve_dnabert_relative_path() {
+	local script_tag="$1"
+	local variant="$2"
+	local relative_path_2="$3"
+	local relative_path_6="$4"
+	local relative_path_s="$5"
+	local normalized_variant
+	normalized_variant="$(
+		intronmodel_resolve_dnabert_variant "${script_tag}" "${variant}"
+	)" || return 1
+
+	local resolved_path=""
+	if [[ "${normalized_variant}" == "2" ]]; then
+		resolved_path="${relative_path_2}"
+	elif [[ "${normalized_variant}" == "6" ]]; then
+		resolved_path="${relative_path_6}"
+	else
+		resolved_path="${relative_path_s}"
+	fi
+	if [[ -z "${resolved_path}" ]]; then
+		echo "[${script_tag}] pretrained relative path is empty for "\
+			"variant=${variant}." >&2
+		return 1
+	fi
+	printf '%s\n' "${resolved_path}"
+}
+
+
+intronmodel_resolve_dnabert_pretrained_name() {
+	local script_tag="$1"
+	local variant="$2"
+	local explicit_pretrained="$3"
+	local model_root="$4"
+	local relative_path_2="$5"
+	local relative_path_6="$6"
+	local relative_path_s="$7"
+
+	if [[ -n "${explicit_pretrained}" ]]; then
+		printf '%s\n' "${explicit_pretrained}"
+		return 0
+	fi
+
+	local relative_path
+	relative_path="$(
+		intronmodel_resolve_dnabert_relative_path \
+			"${script_tag}" \
+			"${variant}" \
+			"${relative_path_2}" \
+			"${relative_path_6}" \
+			"${relative_path_s}"
+	)" || return 1
+	if [[ "${relative_path}" == /* ]]; then
+		printf '%s\n' "${relative_path}"
+		return 0
+	fi
+
+	local normalized_relative_path="${relative_path#./}"
+	while [[ "${normalized_relative_path}" == model/* ]]; do
+		normalized_relative_path="${normalized_relative_path#model/}"
+	done
+	if [[ -z "${normalized_relative_path}" ]]; then
+		echo "[${script_tag}] pretrained relative path resolved to "\
+			"empty value." >&2
+		return 1
+	fi
+	printf '%s\n' "${model_root}/${normalized_relative_path}"
+}
+
+
+_intronmodel_print_first_existing_file() {
+	local candidate=""
+	for candidate in "$@"; do
+		if [[ -n "${candidate}" && -f "${candidate}" ]]; then
+			printf '%s\n' "${candidate}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+
+intronmodel_resolve_search_space_file() {
+	local script_tag="$1"
+	local explicit_file="$2"
+	shift 2 || true
+
+	if [[ -n "${explicit_file}" && "${explicit_file}" != "auto" ]]; then
+		if [[ -f "${explicit_file}" ]]; then
+			printf '%s\n' "${explicit_file}"
+			return 0
+		fi
+		echo "[${script_tag}] SEARCH_SPACE_FILE not found: ${explicit_file}" >&2
+		return 2
+	fi
+
+	_intronmodel_print_first_existing_file "$@"
+}
+
+
 intronmodel_resolve_latest_published_name() {
 	local script_tag="$1"
 	local species="$2"
