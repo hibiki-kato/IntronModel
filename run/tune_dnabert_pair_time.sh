@@ -12,10 +12,10 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="60"
+TIME_BUDGET_MINUTES="120"
 
 INTRONMODEL_AUTO_TMUX="on"
-CHEAT_MODE="on"
+CHEAT_MODE="off"
 OBJECTIVE_METRIC="max_f1"
 TRUNC_MODE="on"
 DONOR_LEN="100"
@@ -47,7 +47,7 @@ ADAM_BETA1="0.9"
 ADAM_BETA2="0.98"
 ADAM_EPS="1e-8"
 
-GPU_IDS="0,1,5"
+GPU_IDS="auto"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 TRIAL_PROCESS_MODE="persistent_all"
@@ -90,8 +90,10 @@ SEARCH_SPACE_FILE="auto"
 
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
+	"Dmel"
 	"Hsap"
 	"Mmus"
+	"Athal"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
