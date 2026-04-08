@@ -2,12 +2,8 @@
 # gffread v0.12.7
 # gffread -F
 NC_004354.4	HMM	transcript	1	827	.	.	.	ID=cds-NP_569892.1.fa.0
-NC_004354.4	HMM	CDS	1	191	5238.36	.	0	Parent=cds-NP_569892.1.fa.0;state=E0
-NC_004354.4	HMM	CDS	667	827	5238.35	.	1	Parent=cds-NP_569892.1.fa.0;state=E1
-NC_004354.4	HMM	transcript	862	940	.	.	.	ID=cds-NP_569892.1.fa.1
-NC_004354.4	HMM	CDS	862	940	5238.35	.	0	Parent=cds-NP_569892.1.fa.1;state=E0
-NC_004354.4	HMM	transcript	949	982	.	.	.	ID=cds-NP_569892.1.fa.2
-NC_004354.4	HMM	CDS	949	982	5238.35	.	0	Parent=cds-NP_569892.1.fa.2;state=E0
-NC_004354.4	HMM	transcript	1011	3302	.	.	.	ID=cds-NP_569892.1.fa.3
-NC_004354.4	HMM	CDS	1011	1250	5238.35	.	0	Parent=cds-NP_569892.1.fa.3;state=E2
-NC_004354.4	HMM	CDS	1328	3302	5238.35	.	0	Parent=cds-NP_569892.1.fa.3;state=E1
+NC_004354.4	HMM	CDS	1	54	5072.94	.	0	Parent=cds-NP_569892.1.fa.0;state=E0
+NC_004354.4	HMM	CDS	566	827	5072.93	.	0	Parent=cds-NP_569892.1.fa.0;state=E1
+NC_004354.4	HMM	transcript	1143	3302	.	.	.	ID=cds-NP_569892.1.fa.1
+NC_004354.4	HMM	CDS	1143	1230	5072.93	.	0	Parent=cds-NP_569892.1.fa.1;state=E2
+NC_004354.4	HMM	CDS	1311	3302	5072.93	.	2	Parent=cds-NP_569892.1.fa.1;state=E1

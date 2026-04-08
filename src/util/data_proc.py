@@ -298,9 +298,11 @@ def normalize_tag_name_value(model_name: str, tag_value: object) -> str:
     Returns
     -------
     str
-        Sanitized tag token with a duplicated leading ``<model_name>_`` removed.
+        Sanitized tag token with a duplicated model-name token removed.
     """
     text = str(tag_value).strip()
+    if text == model_name:
+        return ""
     prefix = f"{model_name}_"
     if text.startswith(prefix):
         text = text[len(prefix) :]
@@ -521,7 +523,9 @@ def build_run_name(
     del donor_len, acceptor_len
     base = f"{model_name}_lr{lr:g}_bs{batch_size}_ep{epochs}"
     if tag:
-        return f"{base}_{tag}"
+        normalized_tag = normalize_tag_name_value(model_name, tag)
+        if normalized_tag != "":
+            return f"{base}_{normalized_tag}"
     return base
 
 

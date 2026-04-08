@@ -72,6 +72,7 @@ from util.unique_intron import (
     load_unique_map,
 )
 from util.versioned_artifacts import (
+    archive_stale_eval_score_versions_for_species,
     finalize_published_version_outputs,
     refresh_published_version_if_improved,
     is_active_public_model,
@@ -2216,22 +2217,23 @@ def run_pipeline(args: argparse.Namespace) -> None:
             "[pipeline] site-score unique collapse: "
             f"input_rows={len(site_rows)} unique_rows={len(unique_site_rows)}"
         )
+    intron_labels = _load_optional_intron_labels(args.species)
     if args.site_score_tsv:
         print(
             "[pipeline] intron evaluation uses unique-collapsed site rows from "
             f"--site_score_tsv: {site_score_tsv}"
         )
-    else:
-        intron_labels = _load_optional_intron_labels(args.species)
-        write_site_scores(
-            site_output_tsv,
-            unique_site_rows,
-            labels=intron_labels,
+        print(
+            "[pipeline] rewriting normalized site scores to canonical output: "
+            f"{site_output_tsv}"
         )
-        site_score_tsv = site_output_tsv
-        print(f"Saved site scores: {site_output_tsv}")
-    if args.site_score_tsv:
-        intron_labels = _load_optional_intron_labels(args.species)
+    write_site_scores(
+        site_output_tsv,
+        unique_site_rows,
+        labels=intron_labels,
+    )
+    site_score_tsv = site_output_tsv
+    print(f"Saved site scores: {site_output_tsv}")
     infer_stage_elapsed_sec = time.perf_counter() - infer_stage_started_at
     print(f"[pipeline] inference stage elapsed: {infer_stage_elapsed_sec:.3f}s")
 
@@ -2303,6 +2305,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
             )
 
     if args.visualize != "none":
+        archived_eval_paths = archive_stale_eval_score_versions_for_species(
+            project_root=Path(project_root()),
+            species=str(args.species),
+        )
+        if archived_eval_paths:
+            archived_text = ", ".join(path.name for path in archived_eval_paths)
+            print(
+                "[pipeline] Archived stale eval_score files before plot: "
+                f"{archived_text}"
+            )
         print(
             "[pipeline] Plot request: "
             f"species={args.species} "

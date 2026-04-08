@@ -29,6 +29,8 @@ from util.checkpoint_io import (
     resolve_existing_checkpoint_path,
 )
 from util.model_runtime import pick_device
+from util.score_format import format_score_text
+from util.transcript_eval import coerce_score_to_probability
 from util.versioned_artifacts import (
     is_active_public_model,
     resolve_latest_published_name,
@@ -389,11 +391,20 @@ def resolve_task_best_config_path(
     """
     if task not in {"donor", "acceptor"}:
         raise ValueError(f"Unsupported task: {task}")
-    candidate = data_root / species / "tuning" / model_name / task / "best_config.json"
+    model_dir = data_root / species / "tuning" / model_name
+    task_dir = model_dir / task
+    candidate = task_dir / "best_config.json"
     if candidate.is_file():
         return candidate.resolve()
+    fallback = model_dir / "checkpoint_prune_top3.json"
+    if fallback.is_file():
+        return fallback.resolve()
+    fallback = task_dir / "checkpoint_prune_top3.json"
+    if fallback.is_file():
+        return fallback.resolve()
     raise FileNotFoundError(
-        "No canonical task-specific best_config.json found for "
+        "No canonical task-specific best_config.json or model-level "
+        "checkpoint_prune_top3.json "
         f"species={species} model={model_name} task={task} under {data_root}."
     )
 
@@ -653,9 +664,12 @@ def _load_task_checkpoint_path_with_local_fallback(
         If neither the payload reference nor the local fallback can be
         resolved.
     """
+    fallback_only_payload = best_config_path.name == "checkpoint_prune_top3.json"
     try:
         return load_task_checkpoint_path(best_config_path, task)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
+        if not fallback_only_payload:
+            raise
         fallback = resolve_latest_local_task_checkpoint(
             species=species,
             task=task,
@@ -734,7 +748,10 @@ def write_scores(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         for candidate, score in zip(candidates, scores):
-            handle.write(f"{candidate.coordinate}\t{score:.6f}\n")
+            probability_score = coerce_score_to_probability(float(score))
+            handle.write(
+                f"{candidate.coordinate}\t{format_score_text(probability_score)}\n"
+            )
 
 
 def discover_score_test_suite_cases(suite_root: Path) -> list[ScoreTestSuiteCase]:

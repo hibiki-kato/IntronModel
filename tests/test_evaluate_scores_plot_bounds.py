@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib
 import pytest
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 
 from evaluate_scores import resolve_plot_bounds, resolve_plot_output
 from evaluate_scores import plot_eval_scores
+from evaluate_scores import run_plot_command
 
 
 def test_resolve_plot_bounds_for_known_species() -> None:
@@ -106,3 +108,56 @@ def test_plot_eval_scores_places_legend_outside_right(
     assert bbox.y0 == pytest.approx(1.0)
 
     plt.close("all")
+
+
+def test_run_plot_command_archives_stale_eval_scores_before_plot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eval_dir = tmp_path / "data" / "SpX" / "eval_score"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "cnn_v2.01.txt").write_text("old\n", encoding="utf-8")
+    (eval_dir / "cnn_v2.02.txt").write_text("new\n", encoding="utf-8")
+
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr("evaluate_scores.resolve_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "evaluate_scores.finalize_ready_published_outputs_for_species",
+        lambda *, project_root, species: [],
+    )
+    monkeypatch.setattr(
+        "evaluate_scores.plot_eval_scores",
+        lambda *,
+        species,
+        output_png,
+        interactive,
+        x_min,
+        x_max,
+        y_min,
+        y_max: calls.append((species, output_png)),
+    )
+
+    run_plot_command(
+        SimpleNamespace(
+            species="SpX",
+            output_png=None,
+            interactive=False,
+            x_min=0.0,
+            x_max=1.0,
+            y_min=0.0,
+            y_max=1.0,
+        )
+    )
+
+    assert calls == [("SpX", None)]
+    assert not (eval_dir / "cnn_v2.01.txt").exists()
+    assert (eval_dir / "cnn_v2.02.txt").exists()
+    assert (
+        tmp_path
+        / "archive"
+        / "eval_score_latest_only"
+        / "SpX"
+        / "cnn_v2"
+        / "cnn_v2.01.txt"
+    ).is_file()

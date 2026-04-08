@@ -19,6 +19,7 @@ my %state_name = (
 
 my $MIN_INTRON = 30;   # minimum intron length in bases
 my $MIN_EXON = 40;   # minimum exon length in bases
+my $MIN_INTER = 200; # minimum intergenic space in bases
 
 #------------------------------------------------------------
 # Command line:
@@ -98,7 +99,7 @@ $trans{6}{6} = $max_log_prob;   # I2 -> I2
 # and coordinate-dependent emissions
 #------------------------------------------------------------
 
-my (@dp, @bt, @intron_len, @exon_len);
+my (@dp, @bt, @intron_len, @exon_len, @inter_len);
 
 # Initialization at position 0 — force start in E0
 for my $s (@states) {
@@ -108,6 +109,7 @@ for my $s (@states) {
     $bt[0][$s] = -1;
     $intron_len[0][$s] = is_intron($s) ? 1 : 0;
     $exon_len[0][$s] = is_exon($s) ? 1 : 0;
+    $inter_len[0][$s] = $s==0 ? 1 : 0;
 }
 
 for (my $i = 1; $i < $L; $i++) {
@@ -182,8 +184,9 @@ for (my $i = 1; $i < $L; $i++) {
             # Noncoding ->exon after START codon (ATG)
             #--------------------------------------------------------
             if (is_exon($to) && $from == 0 && $i >= 2) {
+                my $len = $inter_len[$i-1][0];
                 my $codon = $seq[$i-2] . $seq[$i-1] . $seq[$i];
-                if ($codon eq 'ATG') {
+                if ($codon eq 'ATG' && $len >= $MIN_INTER) {
                     print STDERR "DEBUG at $i trying transition $state_name{$from} $state_name{$to} score $dp[$i-1][$from] emission $emit_log\n";
                     my $frame = $to-1;   # E0=1→0, E1=2→1, E2=3→2
                     if ( (($i-2) % 3) == $frame ) {
@@ -223,6 +226,16 @@ for (my $i = 1; $i < $L; $i++) {
           }
         } else {
           $exon_len[$i][$to] = 0;
+        }
+        # Track inter length
+        if ($to == 0) {
+          if ($best_from == 0) {
+            $inter_len[$i][$to] = $inter_len[$i-1][$best_from] + 1;
+          } else {
+            $inter_len[$i][$to] = 1;
+          }
+        } else {
+          $inter_len[$i][$to] = 0;
         }
     }
 }

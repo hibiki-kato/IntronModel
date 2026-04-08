@@ -24,6 +24,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from util.model_runtime import log10_sigmoid_np
+from util.score_format import SCORE_TEXT_DECIMAL_DIGITS
 from util.transcript_eval import probability_to_log10_score
 
 try:
@@ -32,7 +33,7 @@ except ImportError:
     roc_auc_score = None
     average_precision_score = None
 
-SCORE_OUTPUT_PRECISION = 6
+SCORE_OUTPUT_PRECISION = SCORE_TEXT_DECIMAL_DIGITS
 
 
 # --------------------------

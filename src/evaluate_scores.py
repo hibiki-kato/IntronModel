@@ -16,6 +16,8 @@ from matplotlib.backend_bases import PickEvent
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.text import Text
+from util.score_format import format_score_text
+from util.versioned_artifacts import archive_stale_eval_score_versions_for_species
 from util.versioned_artifacts import finalize_ready_published_outputs_for_species
 
 PLOT_BOUNDS_BY_SPECIES: dict[str, tuple[float, float, float, float]] = {
@@ -134,12 +136,12 @@ def count_reference_transcripts(ref_gff: str | Path) -> int:
     return reference_count
 
 
-def _truncate_percent(numerator: int, denominator: int) -> float:
-    """Compute truncated percentage with two decimals."""
+def _compute_percent(numerator: int, denominator: int) -> float:
+    """Compute one exact percentage in ``[0, 100]`` units."""
 
     if denominator <= 0:
         raise ValueError("denominator must be positive")
-    return int((numerator / denominator) * 10000.0) / 100.0
+    return 100.0 * (numerator / denominator)
 
 
 def evaluate_score_file(
@@ -208,13 +210,22 @@ def evaluate_score_file(
         if running_total <= 0:
             continue
 
-        sensitivity = _truncate_percent(running_good, reference_count)
-        precision = _truncate_percent(running_good, running_total)
+        sensitivity = _compute_percent(running_good, reference_count)
+        precision = _compute_percent(running_good, running_total)
         f1 = 0.0
         if sensitivity + precision > 0.0:
             f1 = 2.0 * (sensitivity * precision) / (sensitivity + precision)
         output_lines.append(
-            f"{transcript_id} {score} {class_code} {sensitivity} {precision} {f1}"
+            " ".join(
+                [
+                    transcript_id,
+                    format_score_text(score),
+                    class_code,
+                    format_score_text(sensitivity),
+                    format_score_text(precision),
+                    format_score_text(f1),
+                ]
+            )
         )
 
     return output_lines
@@ -607,6 +618,13 @@ def run_eval_command(args: argparse.Namespace) -> None:
     print(f"Evaluation scores saved to {output_file}")
 
     if args.visualize != "none":
+        archived_paths = archive_stale_eval_score_versions_for_species(
+            project_root=resolve_project_root(),
+            species=species_for_output,
+        )
+        if archived_paths:
+            archived_text = ", ".join(path.name for path in archived_paths)
+            print(f"[plot_eval] archived stale eval_score files: {archived_text}")
         plot_eval_scores(
             species=species_for_output,
             output_png=args.output_png,
@@ -621,8 +639,9 @@ def run_eval_command(args: argparse.Namespace) -> None:
 def run_plot_command(args: argparse.Namespace) -> None:
     """Run `plot` subcommand."""
 
+    project_root = resolve_project_root()
     finalized_entries = finalize_ready_published_outputs_for_species(
-        project_root=resolve_project_root(),
+        project_root=project_root,
         species=args.species,
     )
     if finalized_entries:
@@ -630,6 +649,13 @@ def run_plot_command(args: argparse.Namespace) -> None:
             sorted(entry.published_name for entry in finalized_entries)
         )
         print(f"[plot_eval] finalized published outputs: {kept}")
+    archived_paths = archive_stale_eval_score_versions_for_species(
+        project_root=project_root,
+        species=args.species,
+    )
+    if archived_paths:
+        archived_text = ", ".join(path.name for path in archived_paths)
+        print(f"[plot_eval] archived stale eval_score files: {archived_text}")
 
     plot_eval_scores(
         species=args.species,

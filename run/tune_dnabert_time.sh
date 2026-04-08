@@ -39,7 +39,7 @@ ADAM_BETA1="0.9"
 ADAM_BETA2="0.98"
 ADAM_EPS="1e-8"
 
-GPU_IDS="0,2,3,7"
+GPU_IDS="6,7"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 TRIAL_PROCESS_MODE="persistent_all"
@@ -79,6 +79,8 @@ SEARCH_SPACE_FILE="auto"
 # Hsap-priority scheduling with acceptor-heavy target mix.
 # Keep Hsap:others around 3:1.
 JOB_ORDER=(
+	"Dmel:acceptor"
+	"Dmel:donor"
 	"Hsap:acceptor"
 	"Hsap:donor"
 	"Athal:acceptor"

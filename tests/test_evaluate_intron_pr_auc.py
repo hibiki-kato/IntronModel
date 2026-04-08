@@ -40,7 +40,7 @@ def _write_site_score_wide_tsv(
     for transcript_id, intron_index, donor_score, acceptor_score, label in rows:
         lines.append(
             f"{transcript_id}\t{intron_index}\t"
-            f"{donor_score:.6f}\t{acceptor_score:.6f}\t{label}"
+            f"{donor_score:.14f}\t{acceptor_score:.14f}\t{label}"
         )
     _write_text(path, "\n".join(lines) + "\n")
 

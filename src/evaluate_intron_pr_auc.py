@@ -12,19 +12,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import sys
 
 import numpy as np
 from util.transcript_eval import (
-    SCORE_OUTPUT_PRECISION,
     SCORE_SPACE_FIELD,
-    SCORE_SPACE_LOG10,
-    probability_to_log10_score,
+    coerce_score_to_probability,
+    read_site_scores,
 )
 from util.unique_intron import UNIQUE_MAP_TSV_NAME, invert_unique_map, load_unique_map
+from util.score_format import format_score_text
 
 try:
     from sklearn.metrics import average_precision_score, roc_auc_score
@@ -41,25 +40,6 @@ SCORE_SOURCE_CHOICES: tuple[str, ...] = (
     "acceptor",
 )
 SCORE_COLLAPSE_TOLERANCE: float = 2e-4
-
-
-def _format_log10_score(value: float) -> str:
-    """Format a log10 score for TSV output."""
-    if math.isinf(value) and value < 0.0:
-        return "-inf"
-    return f"{value:.{SCORE_OUTPUT_PRECISION}f}"
-
-
-def _log10_sum(values: list[float]) -> float:
-    """Return log10(sum(10**value for value in values)) in a stable way."""
-    if not values:
-        raise ValueError("values must not be empty")
-    finite_values = [value for value in values if not math.isinf(value)]
-    if not finite_values:
-        return -math.inf
-    max_value = max(finite_values)
-    total = math.fsum(10.0 ** (value - max_value) for value in finite_values)
-    return max_value + math.log10(total)
 
 
 def _set_csv_field_limit_max() -> None:
@@ -370,147 +350,30 @@ def _read_site_scores(path: Path) -> dict[tuple[str, int], dict[str, float]]:
     if not path.exists():
         raise FileNotFoundError(f"Site score TSV not found: {path}")
     _set_csv_field_limit_max()
-
-    legacy_required = {"transcript_id", "intron_index", "site_type", "score"}
-    wide_required = {
-        "transcript_id",
-        "intron_index",
-        "donor_score",
-        "acceptor_score",
-    }
-    prior_wide_required = {"Transcript number", "donor score", "acceptor score"}
     site_scores: dict[tuple[str, int], dict[str, float]] = {}
-    explicit_log10_keys: set[tuple[str, int]] = set()
-
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames is None:
-            raise ValueError(f"Site score TSV is missing header: {path}")
-        fieldnames = set(reader.fieldnames)
-
-        if legacy_required.issubset(fieldnames):
-            for line_no, raw in enumerate(reader, start=2):
-                transcript_id = str(raw["transcript_id"]).strip()
-                if transcript_id == "":
-                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
-                try:
-                    intron_index = int(str(raw["intron_index"]))
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Invalid intron_index at {path}:{line_no}"
-                    ) from exc
-                site_type = str(raw["site_type"]).strip().lower()
-                if site_type not in {"donor", "acceptor", "pair"}:
-                    raise ValueError(
-                        f"Unsupported site_type '{site_type}' at {path}:{line_no}"
-                    )
-                try:
-                    score = float(str(raw["score"]))
-                except ValueError as exc:
-                    raise ValueError(f"Invalid score at {path}:{line_no}") from exc
-                score_space = str(raw.get(SCORE_SPACE_FIELD, "")).strip().lower()
-
-                key = (transcript_id, intron_index)
-                per_site = site_scores.setdefault(key, {})
-                if site_type in per_site:
-                    raise ValueError(
-                        "Duplicate site score for key "
-                        f"{transcript_id}:{intron_index}:{site_type} in {path}"
-                    )
-                per_site[site_type] = score
-                if score_space == SCORE_SPACE_LOG10:
-                    explicit_log10_keys.add(key)
-        elif wide_required.issubset(fieldnames):
-            for line_no, raw in enumerate(reader, start=2):
-                transcript_id = str(raw["transcript_id"]).strip()
-                if transcript_id == "":
-                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
-                try:
-                    intron_index = int(str(raw["intron_index"]))
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Invalid intron_index at {path}:{line_no}"
-                    ) from exc
-
-                donor_raw = str(raw["donor_score"]).strip()
-                acceptor_raw = str(raw["acceptor_score"]).strip()
-                donor_score = float(donor_raw) if donor_raw != "" else None
-                acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
-                score_space = str(raw.get(SCORE_SPACE_FIELD, "")).strip().lower()
-
-                key = (transcript_id, intron_index)
-                per_site = site_scores.setdefault(key, {})
-                if donor_score is not None:
-                    per_site["donor"] = donor_score
-                if acceptor_score is not None:
-                    per_site["acceptor"] = acceptor_score
-                if score_space == SCORE_SPACE_LOG10:
-                    explicit_log10_keys.add(key)
-        elif prior_wide_required.issubset(fieldnames):
-            for line_no, raw in enumerate(reader, start=2):
-                transcript_number = str(raw["Transcript number"]).strip()
-                parts = transcript_number.rsplit(":", 2)
-                if len(parts) != 3:
-                    raise ValueError(
-                        "Transcript number must be "
-                        "'<transcript_id>:<intron_index>:<combined_score>' "
-                        f"at {path}:{line_no}"
-                    )
-                transcript_id = parts[0].strip()
-                if transcript_id == "":
-                    raise ValueError(f"Empty transcript_id at {path}:{line_no}")
-                try:
-                    intron_index = int(parts[1].strip())
-                except ValueError as exc:
-                    raise ValueError(
-                        "Invalid intron_index in Transcript number at "
-                        f"{path}:{line_no}"
-                    ) from exc
-                combined_raw = parts[2].strip()
-                try:
-                    combined_score = (
-                        float(combined_raw) if combined_raw != "" else None
-                    )
-                except ValueError as exc:
-                    raise ValueError(
-                        "Invalid combined score in Transcript number at "
-                        f"{path}:{line_no}"
-                    ) from exc
-
-                donor_raw = str(raw["donor score"]).strip()
-                acceptor_raw = str(raw["acceptor score"]).strip()
-                donor_score = float(donor_raw) if donor_raw != "" else None
-                acceptor_score = float(acceptor_raw) if acceptor_raw != "" else None
-                score_space = str(raw.get(SCORE_SPACE_FIELD, "")).strip().lower()
-
-                key = (transcript_id, intron_index)
-                per_site = site_scores.setdefault(key, {})
-                if donor_score is not None:
-                    per_site["donor"] = donor_score
-                if acceptor_score is not None:
-                    per_site["acceptor"] = acceptor_score
-                if (
-                    donor_score is None
-                    and acceptor_score is None
-                    and combined_score is not None
-                ):
-                    per_site["pair"] = combined_score
-                if score_space == SCORE_SPACE_LOG10:
-                    explicit_log10_keys.add(key)
-        else:
+    rows = read_site_scores(str(path))
+    for row in rows:
+        transcript_id = str(row["transcript_id"]).strip()
+        if transcript_id == "":
+            raise ValueError(f"Empty transcript_id in {path}")
+        intron_index = int(row["intron_index"])
+        site_type = str(row["site_type"]).strip().lower()
+        if site_type not in {"donor", "acceptor", "pair"}:
             raise ValueError(
-                "Site score TSV must include columns: "
-                "transcript_id, intron_index, site_type, score "
-                "or transcript_id, intron_index, donor_score, acceptor_score"
+                f"Unsupported site_type '{site_type}' in {path}"
             )
 
-    for key, per_site in site_scores.items():
-        if key in explicit_log10_keys:
-            continue
-        if any(score < 0.0 or score > 1.0 for score in per_site.values()):
-            continue
-        for site_type, score in list(per_site.items()):
-            per_site[site_type] = probability_to_log10_score(float(score))
+        key = (transcript_id, intron_index)
+        per_site = site_scores.setdefault(key, {})
+        if site_type in per_site:
+            raise ValueError(
+                "Duplicate site score for key "
+                f"{transcript_id}:{intron_index}:{site_type} in {path}"
+            )
+        per_site[site_type] = coerce_score_to_probability(
+            float(row["score"]),
+            score_space=str(row.get(SCORE_SPACE_FIELD, "")),
+        )
 
     if not site_scores:
         raise ValueError(f"No valid site score rows found: {path}")
@@ -578,23 +441,14 @@ def _collapse_site_scores_to_unique(
 
 
 def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
-    """Combine donor/acceptor scores that are already in log10 space.
-
-    The operator is applied in the current score space. In particular,
-    ``"+"`` performs log-space addition via ``log10(a) + log10(b)``.
-    """
-    if op == "+":
-        return donor_score + acceptor_score
-    if op == "*":
+    """Combine donor/acceptor probabilities into one intron probability."""
+    if op in {"+", "*"}:
         return donor_score * acceptor_score
     if op == "harmonic":
-        # log10(2ab / (a + b)) = log10(2) + log10(a) + log10(b) - log10(a + b)
-        return (
-            math.log10(2.0)
-            + donor_score
-            + acceptor_score
-            - _log10_sum([donor_score, acceptor_score])
-        )
+        denominator = donor_score + acceptor_score
+        if denominator == 0.0:
+            return 0.0
+        return float((2.0 * donor_score * acceptor_score) / denominator)
     if op == "min":
         return float(min(donor_score, acceptor_score))
     raise ValueError(
@@ -848,21 +702,21 @@ def _write_eval_rows_tsv(path: Path, rows: list[IntronEvalRow]) -> None:
                     "transcript_id": row.transcript_id,
                     "intron_index": row.intron_index,
                     "label": row.label,
-                    "intron_score": _format_log10_score(row.intron_score),
+                    "intron_score": format_score_text(row.intron_score),
                     "donor_score": (
                         ""
                         if row.donor_score is None
-                        else _format_log10_score(row.donor_score)
+                        else format_score_text(row.donor_score)
                     ),
                     "acceptor_score": (
                         ""
                         if row.acceptor_score is None
-                        else _format_log10_score(row.acceptor_score)
+                        else format_score_text(row.acceptor_score)
                     ),
                     "pair_score": (
                         ""
                         if row.pair_score is None
-                        else _format_log10_score(row.pair_score)
+                        else format_score_text(row.pair_score)
                     ),
                     "seen_train_pos_coord": row.seen_train_pos_coord,
                     "seen_train_neg_seq": row.seen_train_neg_seq,
@@ -950,8 +804,8 @@ def main(argv: list[str] | None = None) -> int:
         f"non_train_leak={summary.non_train_leak_introns} "
         f"missing={summary.skipped_missing_score_introns} "
         f"unlabeled_site_only={summary.unlabeled_site_score_introns} "
-        f"pr_auc={summary.pr_auc:.6f} "
-        f"roc_auc={summary.roc_auc:.6f}"
+        f"pr_auc={format_score_text(summary.pr_auc)} "
+        f"roc_auc={format_score_text(summary.roc_auc)}"
     )
 
     output_json = str(args.output_json).strip()

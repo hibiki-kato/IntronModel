@@ -43,6 +43,19 @@ def test_build_output_stem_keeps_pair_before_trunc_tag_for_dnabert() -> None:
     assert stem == "dnabert2_pair_trunc"
 
 
+def test_build_output_stem_drops_exact_duplicate_model_tag() -> None:
+    stem = build_output_stem(
+        model_name="dnabert2",
+        donor_len=100,
+        acceptor_len=100,
+        fallback_train_len=None,
+        name_fields=["tag"],
+        name_params={"tag": "dnabert2"},
+    )
+
+    assert stem == "dnabert2"
+
+
 def test_build_run_name_does_not_append_bp_suffix_by_default() -> None:
     run_name = build_run_name(
         model_name="cnn_v2",
@@ -69,3 +82,17 @@ def test_build_run_name_appends_tag_without_bp_suffix() -> None:
     )
 
     assert run_name == "cnn_v2_lr0.0005_bs512_ep10_expA"
+
+
+def test_build_run_name_drops_exact_duplicate_model_tag() -> None:
+    run_name = build_run_name(
+        model_name="dnabert2",
+        donor_len=100,
+        acceptor_len=100,
+        lr=2e-5,
+        batch_size=64,
+        epochs=6,
+        tag="dnabert2",
+    )
+
+    assert run_name == "dnabert2_lr2e-05_bs64_ep6"

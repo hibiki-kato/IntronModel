@@ -13,10 +13,13 @@ from collections import defaultdict
 from statistics import median
 from typing import Dict, Iterable, List, Mapping, Sequence
 
+from util.score_format import SCORE_TEXT_DECIMAL_DIGITS, format_score_text
+
 INTRON_SCORE_OP_CHOICES: tuple[str, ...] = ("+", "*", "harmonic", "min")
 TRANSCRIPT_SCORE_COLUMN: str = "trans_score"
-SCORE_OUTPUT_PRECISION: int = 6
+SCORE_OUTPUT_PRECISION: int = SCORE_TEXT_DECIMAL_DIGITS
 SCORE_SPACE_LOG10: str = "log10"
+SCORE_SPACE_PROBABILITY: str = "probability"
 SCORE_SPACE_FIELD: str = "_score_space"
 LEGACY_TRANSCRIPT_SCORE_COLUMNS: tuple[str, ...] = (
     "min_donor_plus_acceptor",
@@ -36,19 +39,17 @@ TRANSCRIPT_SCORE_AGG_CHOICES: tuple[str, ...] = (
 
 
 def _combine_intron_score(donor_score: float, acceptor_score: float, op: str) -> float:
-    """Combine donor/acceptor scores that are already in log10 space.
+    """Combine donor/acceptor probabilities into one intron probability."""
+    _validate_probability_score(donor_score, field_name="donor_score")
+    _validate_probability_score(acceptor_score, field_name="acceptor_score")
 
-    The operator is applied in the current score space. In particular,
-    ``"+"`` performs log-space addition via ``log10(a) + log10(b)``.
-    """
-    if op == "+":
-        return donor_score + acceptor_score
-    if op == "*":
+    if op in {"+", "*"}:
         return donor_score * acceptor_score
     if op == "harmonic":
-        return math.log10(2.0) + donor_score + acceptor_score - _log10_sum(
-            [donor_score, acceptor_score]
-        )
+        denominator = donor_score + acceptor_score
+        if denominator == 0.0:
+            return 0.0
+        return float((2.0 * donor_score * acceptor_score) / denominator)
     if op == "min":
         return float(min(donor_score, acceptor_score))
     raise ValueError(f"Unsupported intron score operation: {op}")
@@ -97,11 +98,56 @@ def log10_to_probability_score(value: float) -> float:
     return float(10.0 ** value)
 
 
-def _format_log10_score(value: float) -> str:
-    """Format a log10 score for TSV output."""
-    if math.isinf(value) and value < 0.0:
-        return "-inf"
-    return f"{value:.{SCORE_OUTPUT_PRECISION}f}"
+def _validate_probability_score(value: float, *, field_name: str = "score") -> None:
+    """Validate that one score lies in the closed unit interval."""
+    if value < 0.0 or value > 1.0:
+        raise ValueError(
+            f"{field_name} must lie in [0, 1], got: {value}"
+        )
+
+
+def coerce_score_to_probability(
+    value: float,
+    *,
+    score_space: str = "",
+) -> float:
+    """Convert one raw score value to probability space.
+
+    Parameters
+    ----------
+    value : float
+        Raw score value that may already be a probability or may be a legacy
+        log10 score.
+    score_space : str, default=""
+        Optional explicit score-space marker. Supported values are ``""``,
+        ``"probability"``, and ``"log10"``.
+
+    Returns
+    -------
+    float
+        Probability score in ``[0, 1]``.
+
+    Raises
+    ------
+    ValueError
+        If an explicitly marked probability is outside ``[0, 1]`` or the
+        marker is unsupported.
+    """
+    normalized_score_space = score_space.strip().lower()
+    if normalized_score_space == SCORE_SPACE_LOG10:
+        probability = log10_to_probability_score(value)
+        _validate_probability_score(probability)
+        return probability
+    if normalized_score_space in {"", SCORE_SPACE_PROBABILITY}:
+        if normalized_score_space == SCORE_SPACE_PROBABILITY:
+            _validate_probability_score(value)
+            return value
+        if value < 0.0 or value > 1.0:
+            probability = log10_to_probability_score(value)
+            _validate_probability_score(probability)
+            return probability
+        return value
+    raise ValueError(f"Unsupported score space: {score_space}")
 
 
 def _row_scores_look_like_log10(scores: Sequence[float]) -> bool:
@@ -116,23 +162,19 @@ def _row_has_log10_score_space(row: Mapping[str, object]) -> bool:
     return str(row.get(SCORE_SPACE_FIELD, "")).strip().lower() == SCORE_SPACE_LOG10
 
 
-def _normalize_scores_to_log10(scores: Sequence[float]) -> list[float]:
-    """Normalize a score sequence to log10 space."""
-    if _row_scores_look_like_log10(scores):
-        return [float(score) for score in scores]
-    return [probability_to_log10_score(float(score)) for score in scores]
+def _row_has_probability_score_space(row: Mapping[str, object]) -> bool:
+    """Return whether one row is explicitly marked as probability-valued."""
+    return (
+        str(row.get(SCORE_SPACE_FIELD, "")).strip().lower()
+        == SCORE_SPACE_PROBABILITY
+    )
 
 
-def _log10_sum(scores: Sequence[float]) -> float:
-    """Return ``log10(sum(10**score for score in scores))`` stably."""
-    if not scores:
-        raise ValueError("scores must not be empty")
-    max_score = max(scores)
-    if math.isinf(max_score) and max_score < 0.0:
-        return -math.inf
-    return float(
-        max_score
-        + math.log10(math.fsum(10.0 ** (score - max_score) for score in scores))
+def _score_from_row(row: Mapping[str, object]) -> float:
+    """Return one score row normalized to probability space."""
+    return coerce_score_to_probability(
+        float(row["score"]),
+        score_space=str(row.get(SCORE_SPACE_FIELD, "")),
     )
 
 
@@ -185,11 +227,13 @@ def _aggregate_transcript_score(
     agg: str,
     softmin_tau: float = 1.0,
 ) -> float:
-    """Aggregate intron scores into a transcript score."""
+    """Aggregate intron probabilities into one transcript probability."""
     if not scores:
         raise ValueError("scores must not be empty")
     if softmin_tau <= 0.0:
         raise ValueError(f"softmin_tau must be positive, got: {softmin_tau}")
+    for score in scores:
+        _validate_probability_score(float(score))
 
     if agg == "min":
         return float(min(scores))
@@ -198,15 +242,9 @@ def _aggregate_transcript_score(
     if agg == "softmin_wavg":
         return _softmin_weighted_average(scores=scores, tau=softmin_tau)
     if agg == "+":
-        max_score = max(scores)
-        return float(
-            max_score
-            + math.log10(
-                math.fsum(10.0 ** (score - max_score) for score in scores)
-            )
-        )
+        return float(1.0 - math.prod(1.0 - score for score in scores))
     if agg == "*":
-        return float(math.fsum(scores))
+        return float(math.prod(scores))
     if agg in {"mean", "avg"}:
         return float(sum(scores) / len(scores))
     if agg == "median":
@@ -267,7 +305,7 @@ def aggregate_transcript_scores(
         tid = str(row["transcript_id"])
         iidx = int(row["intron_index"])
         stype = str(row["site_type"])
-        score = float(row["score"])
+        score = _score_from_row(row)
         transcript_introns[tid][iidx][stype] = score
 
     results: List[Dict[str, object]] = []
@@ -279,16 +317,15 @@ def aggregate_transcript_scores(
             pair_raw = per_site.get("pair")
 
             if donor_raw is not None and acceptor_raw is not None:
-                donor_score, acceptor_score = _normalize_scores_to_log10(
-                    [float(donor_raw), float(acceptor_raw)]
-                )
+                donor_score = float(donor_raw)
+                acceptor_score = float(acceptor_raw)
                 intron_score = _combine_intron_score(
                     donor_score=donor_score,
                     acceptor_score=acceptor_score,
                     op=intron_score_op,
                 )
             elif pair_raw is not None:
-                intron_score = _normalize_scores_to_log10([float(pair_raw)])[0]
+                intron_score = float(pair_raw)
                 donor_score = intron_score
                 acceptor_score = intron_score
             else:
@@ -313,7 +350,7 @@ def aggregate_transcript_scores(
                 "Score_donor": donor_score,
                 "Score_acceptor": acceptor_score,
                 TRANSCRIPT_SCORE_COLUMN: transcript_score,
-                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
+                SCORE_SPACE_FIELD: SCORE_SPACE_PROBABILITY,
             }
         )
 
@@ -369,14 +406,14 @@ def aggregate_pair_transcript_scores(
     for row in site_score_rows:
         tid = str(row["transcript_id"])
         iidx = int(row["intron_index"])
-        score = float(row["score"])
+        score = _score_from_row(row)
         transcript_introns[tid][iidx] = score
 
     results: List[Dict[str, object]] = []
     for tid, introns in transcript_introns.items():
         if not introns:
             continue
-        normalized_scores = _normalize_scores_to_log10(list(introns.values()))
+        normalized_scores = [float(score) for score in introns.values()]
         normalized_items = list(zip(introns.keys(), normalized_scores, strict=True))
         min_iidx = min(normalized_items, key=lambda item: item[1])[0]
         min_score = dict(normalized_items)[min_iidx]
@@ -392,7 +429,7 @@ def aggregate_pair_transcript_scores(
                 "Score_donor": min_score,
                 "Score_acceptor": min_score,
                 TRANSCRIPT_SCORE_COLUMN: transcript_score,
-                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
+                SCORE_SPACE_FIELD: SCORE_SPACE_PROBABILITY,
             }
         )
 
@@ -432,7 +469,7 @@ def build_intron_scores(
         transcript_id = str(row["transcript_id"])
         intron_index = int(row["intron_index"])
         site_type = str(row["site_type"]).strip().lower()
-        score = float(row["score"])
+        score = _score_from_row(row)
         grouped[(transcript_id, intron_index)][site_type] = score
 
     results: List[Dict[str, object]] = []
@@ -440,11 +477,10 @@ def build_intron_scores(
         transcript_id, intron_index = key
         per_site = grouped[key]
         if "pair" in per_site:
-            intron_score = _normalize_scores_to_log10([float(per_site["pair"])])[0]
+            intron_score = float(per_site["pair"])
         elif "donor" in per_site and "acceptor" in per_site:
-            donor_score, acceptor_score = _normalize_scores_to_log10(
-                [float(per_site["donor"]), float(per_site["acceptor"])]
-            )
+            donor_score = float(per_site["donor"])
+            acceptor_score = float(per_site["acceptor"])
             intron_score = _combine_intron_score(
                 donor_score=donor_score,
                 acceptor_score=acceptor_score,
@@ -457,7 +493,7 @@ def build_intron_scores(
                 "transcript_id": transcript_id,
                 "intron_index": intron_index,
                 "score": intron_score,
-                SCORE_SPACE_FIELD: SCORE_SPACE_LOG10,
+                SCORE_SPACE_FIELD: SCORE_SPACE_PROBABILITY,
             }
         )
     return results
@@ -504,7 +540,6 @@ def write_intron_scores(
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(["intron_id", "score", "label"])
         for row in rows:
-            log10_score_space = _row_has_log10_score_space(row)
             intron_id = str(row.get("intron_id", "")).strip()
             transcript_id = str(row.get("transcript_id", "")).strip()
             intron_index_text = str(row.get("intron_index", "")).strip()
@@ -518,12 +553,12 @@ def write_intron_scores(
             label = label_map.get(intron_id)
             if label is None and transcript_id != "" and intron_index_text != "":
                 label = label_map.get((transcript_id, int(intron_index_text)))
-            score = float(row["score"])
+            score = coerce_score_to_probability(
+                float(row["score"]),
+                score_space=str(row.get(SCORE_SPACE_FIELD, "")),
+            )
             label_text = "" if label is None else str(int(label))
-            if log10_score_space or _row_scores_look_like_log10([score]):
-                score_text = _format_log10_score(score)
-            else:
-                score_text = _format_log10_score(probability_to_log10_score(score))
+            score_text = format_score_text(score)
             writer.writerow([intron_id, score_text, label_text])
 
 
@@ -575,26 +610,25 @@ def write_transcript_scores(output_tsv: str, rows: List[Dict[str, object]]) -> N
             f"Score_acceptor\t{TRANSCRIPT_SCORE_COLUMN}\n"
         )
         for r in rows:
-            log10_score_space = _row_has_log10_score_space(r)
-            raw_scores = [
-                float(r["Score_donor"]),
-                float(r["Score_acceptor"]),
-                _get_transcript_score(r),
-            ]
-            if log10_score_space or _row_scores_look_like_log10(raw_scores):
-                donor_text = _format_log10_score(float(r["Score_donor"]))
-                acceptor_text = _format_log10_score(float(r["Score_acceptor"]))
-                transcript_text = _format_log10_score(_get_transcript_score(r))
-            else:
-                donor_text = _format_log10_score(
-                    probability_to_log10_score(float(r["Score_donor"]))
+            score_space = str(r.get(SCORE_SPACE_FIELD, ""))
+            donor_text = format_score_text(
+                coerce_score_to_probability(
+                    float(r["Score_donor"]),
+                    score_space=score_space,
                 )
-                acceptor_text = _format_log10_score(
-                    probability_to_log10_score(float(r["Score_acceptor"]))
+            )
+            acceptor_text = format_score_text(
+                coerce_score_to_probability(
+                    float(r["Score_acceptor"]),
+                    score_space=score_space,
                 )
-                transcript_text = _format_log10_score(
-                    probability_to_log10_score(_get_transcript_score(r))
+            )
+            transcript_text = format_score_text(
+                coerce_score_to_probability(
+                    _get_transcript_score(r),
+                    score_space=score_space,
                 )
+            )
             f.write(
                 f"{r['transcript_id']}\t"
                 f"{r['min_intron_index']}\t"
@@ -614,9 +648,9 @@ def write_site_scores(
     Output schema:
     ``transcript_id``, ``intron_index``, ``donor_score``,
     ``acceptor_score``, ``label``, ``_score_space``.
-    Donor/acceptor columns are written in log10 space. Probability inputs are
-    converted to log10 values, while log10 inputs are preserved. When
-    ``labels`` is provided, ``label`` is filled from
+    Donor/acceptor columns are written in probability space. Legacy log10
+    inputs are converted back to probabilities. When ``labels`` is provided,
+    ``label`` is filled from
     ``(transcript_id, intron_index) -> {0,1}`` mapping.
     """
     outdir = os.path.dirname(output_tsv)
@@ -629,11 +663,14 @@ def write_site_scores(
         transcript_id = str(row["transcript_id"])
         intron_index = int(row["intron_index"])
         site_type = str(row["site_type"]).strip().lower()
-        score = float(row["score"])
+        score = coerce_score_to_probability(
+            float(row["score"]),
+            score_space=str(row.get(SCORE_SPACE_FIELD, "")),
+        )
         group = grouped[(transcript_id, intron_index)]
         group[site_type] = score
-        if _row_has_log10_score_space(row):
-            group[SCORE_SPACE_FIELD] = SCORE_SPACE_LOG10
+        if _row_has_probability_score_space(row):
+            group[SCORE_SPACE_FIELD] = SCORE_SPACE_PROBABILITY
 
     with open(output_tsv, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -661,10 +698,6 @@ def write_site_scores(
             pair_score = (
                 float(per_site["pair"]) if per_site.get("pair") is not None else None
             )
-            raw_scores = [
-                score for score in (donor_score, acceptor_score, pair_score)
-                if score is not None
-            ]
             if (
                 donor_score is None
                 and acceptor_score is None
@@ -672,32 +705,12 @@ def write_site_scores(
             ):
                 continue
 
-            explicit_log10 = (
-                str(per_site.get(SCORE_SPACE_FIELD, "")).strip().lower()
-                == SCORE_SPACE_LOG10
+            donor_text = (
+                "" if donor_score is None else format_score_text(donor_score)
             )
-            if explicit_log10 or _row_scores_look_like_log10(raw_scores):
-                donor_text = (
-                    "" if donor_score is None else _format_log10_score(donor_score)
-                )
-                acceptor_text = (
-                    ""
-                    if acceptor_score is None
-                    else _format_log10_score(acceptor_score)
-                )
-            else:
-                donor_text = (
-                    ""
-                    if donor_score is None
-                    else _format_log10_score(probability_to_log10_score(donor_score))
-                )
-                acceptor_text = (
-                    ""
-                    if acceptor_score is None
-                    else _format_log10_score(
-                        probability_to_log10_score(acceptor_score)
-                    )
-                )
+            acceptor_text = (
+                "" if acceptor_score is None else format_score_text(acceptor_score)
+            )
             label = label_map.get((transcript_id, intron_index))
             label_text = "" if label is None else str(int(label))
             writer.writerow(
@@ -707,7 +720,7 @@ def write_site_scores(
                     donor_text,
                     acceptor_text,
                     label_text,
-                    SCORE_SPACE_LOG10,
+                    SCORE_SPACE_PROBABILITY,
                 ]
             )
 
@@ -730,28 +743,19 @@ def _parse_transcript_number(value: str) -> tuple[str, int, float | None]:
 
 
 def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
-    """Read site-score TSV in legacy long or new wide format."""
+    """Read site-score TSV in legacy long or wide format.
+
+    Score values are preserved as encoded in the file. Legacy log10 rows retain
+    their ``_score_space`` marker when present, while probability rows remain
+    in raw ``[0, 1]`` space.
+    """
     rows: List[Dict[str, object]] = []
-    raw_scores: list[float] = []
-    saw_explicit_log10 = False
 
     def _append_row(row: Dict[str, object]) -> None:
-        nonlocal saw_explicit_log10
         score_space = str(row.get(SCORE_SPACE_FIELD, "")).strip()
         if score_space == "":
             row.pop(SCORE_SPACE_FIELD, None)
         rows.append(row)
-        raw_scores.append(float(row["score"]))
-        if _row_has_log10_score_space(row):
-            saw_explicit_log10 = True
-
-    def _finalize_rows() -> None:
-        if saw_explicit_log10:
-            return
-        if _row_scores_look_like_log10(raw_scores):
-            return
-        for row in rows:
-            row["score"] = probability_to_log10_score(float(row["score"]))
 
     with open(site_score_tsv, "r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -778,7 +782,6 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                         SCORE_SPACE_FIELD: str(raw.get(SCORE_SPACE_FIELD, "")).strip(),
                     }
                 )
-            _finalize_rows()
             return rows
 
         if wide_required.issubset(fieldnames):
@@ -813,7 +816,6 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             ).strip(),
                         }
                     )
-            _finalize_rows()
             return rows
 
         if prior_wide_required.issubset(fieldnames):
@@ -865,7 +867,6 @@ def read_site_scores(site_score_tsv: str) -> List[Dict[str, object]]:
                             ).strip(),
                         }
                     )
-            _finalize_rows()
             return rows
 
     raise ValueError(

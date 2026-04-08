@@ -10,6 +10,7 @@ import tools.scan_splice_candidate_sites as scan_splice_candidate_sites
 from tools.scan_splice_candidate_sites import (
     build_candidate_windows,
     load_resolved_best_model_paths,
+    write_scores,
 )
 
 
@@ -150,6 +151,48 @@ def test_load_resolved_best_model_paths_uses_task_best_configs(
     assert resolved.acceptor_window_len == 100
 
 
+def test_load_resolved_best_model_paths_falls_back_to_checkpoint_prune_top3(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Scan should accept checkpoint_prune_top3.json when best_config is absent."""
+
+    data_root = tmp_path / "data"
+    model_root = tmp_path / "model"
+    donor_checkpoint = model_root / "Dmel" / "donor" / "dnaberts.01.pt"
+    acceptor_checkpoint = model_root / "Dmel" / "acceptor" / "dnaberts.02.pt"
+    _write_checkpoint(donor_checkpoint, window_len=50)
+    _write_checkpoint(acceptor_checkpoint, window_len=100)
+
+    model_best = data_root / "Dmel" / "tuning" / "dnaberts" / "checkpoint_prune_top3.json"
+    model_best.parent.mkdir(parents=True, exist_ok=True)
+    model_best.write_text(
+        json.dumps(
+            {
+                "species": "Dmel",
+                "model": "dnaberts",
+                "top_k": 3,
+                "signatures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INTRONMODEL_MODEL_ROOT", str(model_root))
+
+    resolved = load_resolved_best_model_paths(
+        data_root=data_root,
+        species="Dmel",
+        model_name="dnaberts",
+        device="cpu",
+    )
+
+    assert resolved.best_config_path == model_best.resolve()
+    assert resolved.donor_checkpoint_path == donor_checkpoint.resolve()
+    assert resolved.acceptor_checkpoint_path == acceptor_checkpoint.resolve()
+    assert resolved.donor_window_len == 50
+    assert resolved.acceptor_window_len == 100
+
+
 def test_load_site_model_uses_dnabert_loader_for_dnabert2(monkeypatch) -> None:
     """DNABERT-2 site scoring should load through the DNABERT module."""
     fake_model = object()
@@ -245,3 +288,22 @@ def test_score_site_sequences_uses_dnabert_metadata(monkeypatch) -> None:
         "use_amp": False,
         "amp_dtype": None,
     }
+
+
+def test_write_scores_uses_scientific_notation(tmp_path: Path) -> None:
+    """Sparse candidate score files should preserve full scientific notation."""
+    output_path = tmp_path / "out.gt.txt"
+    candidates = [
+        scan_splice_candidate_sites.ScoredCandidate(
+            kind="gt",
+            coordinate=43,
+            window="ACGTAC",
+        )
+    ]
+
+    write_scores(output_path, candidates, [1.23456789012345e-4])
+
+    assert (
+        output_path.read_text(encoding="utf-8")
+        == "43\t1.23456789012345e-04\n"
+    )

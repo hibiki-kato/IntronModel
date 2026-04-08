@@ -16,6 +16,7 @@ import csv
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import Iterable, Mapping
 
@@ -112,6 +113,16 @@ class VersionHistoryEntry:
             "metrics_json": self.metrics_json,
             "archive_status": self.archive_status,
         }
+
+
+@dataclass(frozen=True)
+class EvalScoreVersionCandidate:
+    """One top-level ``eval_score`` text file assigned to a model family."""
+
+    path: Path
+    canonical_model_name: str
+    matched_stem: str
+    version: int
 
 
 def normalize_public_model_name(model_name: str) -> str:
@@ -995,6 +1006,169 @@ def finalize_ready_published_outputs_for_species(
         if finalized_entry is not None:
             finalized_entries.append(finalized_entry)
     return finalized_entries
+
+
+def archive_stale_eval_score_versions_for_species(
+    *,
+    project_root: Path,
+    species: str,
+) -> list[Path]:
+    """Archive stale top-level eval-score versions inferred from filenames.
+
+    This helper complements version-history finalization for cases where
+    multiple ``data/<species>/eval_score/*.txt`` files from the same model
+    family still coexist. It groups matching filenames by public model family,
+    keeps the newest detected version, and moves the rest under
+    ``archive/eval_score_latest_only``.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+    species : str
+        Species key under ``data``.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Archived destination paths, in deterministic family/name order.
+
+    Raises
+    ------
+    ValueError
+        If ``species`` is empty.
+
+    Notes
+    -----
+    The grouping pass is ``O(F * A)``, where ``F`` is the number of top-level
+    eval-score files and ``A`` is the number of recognized public-model aliases.
+    """
+    normalized_species = species.strip()
+    if normalized_species == "":
+        raise ValueError("species must not be empty.")
+
+    data_root = _resolve_data_root(project_root)
+    eval_dir = data_root / normalized_species / "eval_score"
+    if not eval_dir.is_dir():
+        return []
+
+    alias_to_family = _build_eval_score_alias_to_family_map()
+    grouped_candidates: dict[str, list[EvalScoreVersionCandidate]] = {}
+    for eval_path in sorted(eval_dir.glob("*.txt")):
+        candidate = _parse_eval_score_version_candidate(
+            path=eval_path,
+            alias_to_family=alias_to_family,
+        )
+        if candidate is None:
+            continue
+        grouped_candidates.setdefault(candidate.canonical_model_name, []).append(
+            candidate
+        )
+
+    archive_root = (
+        project_root / "archive" / "eval_score_latest_only" / normalized_species
+    )
+    archived_paths: list[Path] = []
+    for family_name, candidates in sorted(grouped_candidates.items()):
+        if len(candidates) <= 1:
+            continue
+        live_candidate = _select_latest_eval_score_candidate(candidates)
+        for candidate in sorted(candidates, key=lambda item: item.path.name):
+            if candidate.path == live_candidate.path:
+                continue
+            archived_paths.append(
+                _archive_eval_score_candidate(
+                    archive_root=archive_root,
+                    family_name=family_name,
+                    candidate=candidate,
+                )
+            )
+    return archived_paths
+
+
+def _build_eval_score_alias_to_family_map() -> dict[str, str]:
+    """Return canonical-family mapping for public-model output stems."""
+    alias_to_family: dict[str, str] = {}
+    for public_model_name in sorted(ACTIVE_PUBLIC_MODEL_NAMES):
+        alias_to_family[public_model_name] = public_model_name
+        for legacy_stem in LEGACY_PUBLIC_OUTPUT_STEMS.get(public_model_name, ()):
+            alias_to_family[legacy_stem] = public_model_name
+    return alias_to_family
+
+
+def _parse_eval_score_version_candidate(
+    *,
+    path: Path,
+    alias_to_family: Mapping[str, str],
+) -> EvalScoreVersionCandidate | None:
+    """Parse one eval-score filename into a public-model family candidate."""
+    stem = path.stem
+    for alias in sorted(alias_to_family, key=len, reverse=True):
+        if stem == alias:
+            return EvalScoreVersionCandidate(
+                path=path,
+                canonical_model_name=alias_to_family[alias],
+                matched_stem=alias,
+                version=0,
+            )
+        match = re.fullmatch(rf"{re.escape(alias)}\.(\d+)", stem)
+        if match is None:
+            continue
+        return EvalScoreVersionCandidate(
+            path=path,
+            canonical_model_name=alias_to_family[alias],
+            matched_stem=alias,
+            version=int(match.group(1)),
+        )
+    return None
+
+
+def _select_latest_eval_score_candidate(
+    candidates: list[EvalScoreVersionCandidate],
+) -> EvalScoreVersionCandidate:
+    """Select the newest eval-score candidate for one model family."""
+
+    def _candidate_key(
+        candidate: EvalScoreVersionCandidate,
+    ) -> tuple[int, int, int, str]:
+        return (
+            candidate.version,
+            int(candidate.matched_stem == candidate.canonical_model_name),
+            candidate.path.stat().st_mtime_ns,
+            candidate.path.name,
+        )
+
+    return max(candidates, key=_candidate_key)
+
+
+def _archive_eval_score_candidate(
+    *,
+    archive_root: Path,
+    family_name: str,
+    candidate: EvalScoreVersionCandidate,
+) -> Path:
+    """Move one stale eval-score file under the cleanup archive root."""
+    destination = _resolve_available_archive_destination(
+        archive_root / family_name / candidate.path.name
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(candidate.path), str(destination))
+    return destination
+
+
+def _resolve_available_archive_destination(destination: Path) -> Path:
+    """Return a non-conflicting archive destination for one moved file."""
+    if not destination.exists():
+        return destination
+
+    suffix_index = 1
+    while True:
+        candidate = destination.with_name(
+            f"{destination.stem}__{suffix_index}{destination.suffix}"
+        )
+        if not candidate.exists():
+            return candidate
+        suffix_index += 1
 
 
 def _publish_independent_public_version(

@@ -162,15 +162,25 @@ run_args: list[str] = [
     "1.0",
 ]
 
+model_tasks = checkpoint_tasks_for_model(model_name)
+
 full_epochs = hparam_context.get("full_epochs")
 if isinstance(full_epochs, int) and full_epochs > 0:
     run_args.extend(["--epochs", str(full_epochs)])
 
-for key in ("seed", "train_target", "pair_mode", "val_frac"):
+for key in ("seed", "pair_mode", "val_frac"):
     value = fixed_run_args.get(key)
     if value is None:
         continue
     run_args.extend([f"--{key}", _scalar_to_text(value)])
+
+train_target_value = fixed_run_args.get("train_target")
+if (
+    train_target_value is not None
+    and len(model_tasks) == 1
+    and model_tasks[0] == "pair"
+):
+    run_args.extend(["--train_target", _scalar_to_text(train_target_value)])
 
 for key in sorted(sampled_params):
     if key == "mask":

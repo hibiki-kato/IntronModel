@@ -1696,3 +1696,125 @@ def test_run_pipeline_pair_model_uses_unique_intron_scores_and_maps_back(
     )
     assert len(transcript_lines) == 3
     assert {line.split("\t")[0] for line in transcript_lines[1:]} == {"txA", "txB"}
+
+
+def test_run_pipeline_site_score_tsv_reaggregates_log10_scores_for_dnabert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site_score_tsv = tmp_path / "site.tsv"
+    site_output_tsv = tmp_path / "site.normalized.tsv"
+    intron_output_tsv = tmp_path / "intron.tsv"
+    transcript_output_tsv = tmp_path / "transcript.tsv"
+    eval_output_txt = tmp_path / "eval.txt"
+    class_file = tmp_path / "class.txt"
+    ref_gff = tmp_path / "ref.gff"
+
+    site_score_tsv.write_text(
+        "\n".join(
+            [
+                "transcript_id\tintron_index\tdonor_score\tacceptor_score\tlabel\t_score_space",
+                "uintron_00000001\t1\t-2.29000000000000e-03\t-8.03580000000000e-02\t1\tlog10",
+                "uintron_00000002\t1\t-4.00000000000000e+00\t-1.00000000000000e-02\t0\tlog10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    class_file.write_text("tx1\t=\n", encoding="utf-8")
+    ref_gff.write_text(
+        "chr\tsrc\texon\t1\t10\t.\t+\t.\tParent=tx1\n"
+        "chr\tsrc\texon\t11\t20\t.\t+\t.\tParent=tx1\n",
+        encoding="utf-8",
+    )
+
+    parser = run_model._build_parser(
+        selected_model="dnabert2",
+        skip_model_import_error=True,
+    )
+    args = parser.parse_args(
+        [
+            "--model",
+            "dnabert2",
+            "--species",
+            "Dmel",
+            "--skip_train",
+            "--site_score_tsv",
+            str(site_score_tsv),
+            "--class_file",
+            str(class_file),
+            "--ref_gff",
+            str(ref_gff),
+            "--site_output_tsv",
+            str(site_output_tsv),
+            "--intron_output_tsv",
+            str(intron_output_tsv),
+            "--transcript_output_tsv",
+            str(transcript_output_tsv),
+            "--eval_output_txt",
+            str(eval_output_txt),
+            "--intron_score_op",
+            "*",
+            "--transcript_score_agg",
+            "min",
+            "--softmin_tau",
+            "1.0",
+            "--visualize",
+            "none",
+        ]
+    )
+
+    monkeypatch.setattr(
+        run_model,
+        "load_model_module",
+        lambda model_name: SimpleNamespace(
+            add_train_args=lambda parser: None,
+            add_infer_args=lambda parser: None,
+        ),
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda species: {
+            ("uintron_00000001", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=1),
+            ],
+            ("uintron_00000002", 1): [
+                UniqueMapMember(transcript_id="tx1", intron_index=2),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_resolve_missing_checkpoints_for_skip_train",
+        lambda **kwargs: {},
+    )
+
+    run_model.run_pipeline(args)
+
+    transcript_lines = transcript_output_tsv.read_text(encoding="utf-8").splitlines()
+    assert transcript_lines[0].endswith("trans_score")
+    fields = transcript_lines[1].split("\t")
+    assert fields[0] == "tx1"
+    assert fields[1] == "2"
+    assert float(fields[2]) == pytest.approx(1.0e-4, rel=1e-6)
+    assert float(fields[3]) == pytest.approx(10.0 ** -0.01, rel=1e-6)
+    assert float(fields[4]) == pytest.approx((10.0 ** -4.0) * (10.0 ** -0.01))
+
+    intron_lines = intron_output_tsv.read_text(encoding="utf-8").splitlines()
+    assert intron_lines[1].split("\t")[0:2] == ["uintron_00000001", "8.26707732953027e-01"]
+    assert intron_lines[2].split("\t")[0:2] == ["uintron_00000002", "9.77237220955811e-05"]
+
+    normalized_site_lines = site_output_tsv.read_text(encoding="utf-8").splitlines()
+    assert normalized_site_lines[0].endswith("_score_space")
+    first_site_fields = normalized_site_lines[1].split("\t")
+    assert first_site_fields[0:2] == ["uintron_00000001", "1"]
+    assert float(first_site_fields[2]) == pytest.approx(10.0 ** -0.00229, rel=1e-12)
+    assert float(first_site_fields[3]) == pytest.approx(10.0 ** -0.080358, rel=1e-12)
+    assert first_site_fields[5] == "probability"
+
+    second_site_fields = normalized_site_lines[2].split("\t")
+    assert second_site_fields[0:2] == ["uintron_00000002", "1"]
+    assert float(second_site_fields[2]) == pytest.approx(1.0e-4, rel=1e-12)
+    assert float(second_site_fields[3]) == pytest.approx(10.0 ** -0.01, rel=1e-12)
+    assert second_site_fields[5] == "probability"

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from util.versioned_artifacts import ensure_publication_seed
+from util.versioned_artifacts import archive_stale_eval_score_versions_for_species
 from util.versioned_artifacts import finalize_published_version_outputs
 from util.versioned_artifacts import is_active_public_model
 from util.versioned_artifacts import publish_latest_best_version
@@ -332,6 +333,71 @@ def test_finalize_published_version_outputs_archives_stale_site_outputs(
     )
     assert archived_eval.is_file()
     assert archived_checkpoint.is_file()
+
+
+def test_archive_stale_eval_score_versions_for_species_keeps_latest_per_family(
+    tmp_path: Path,
+) -> None:
+    eval_dir = tmp_path / "data" / "SpX" / "eval_score"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "cnn_v2.txt").write_text("base\n", encoding="utf-8")
+    (eval_dir / "cnn_v2.01.txt").write_text("old\n", encoding="utf-8")
+    (eval_dir / "cnn_v2.02.txt").write_text("latest\n", encoding="utf-8")
+    (eval_dir / "cnn_pair_v2.txt").write_text("pair-base\n", encoding="utf-8")
+    (eval_dir / "cnn_v2_pair.txt").write_text("pair-legacy\n", encoding="utf-8")
+    (eval_dir / "cnn_pair_v2.03.txt").write_text("pair-latest\n", encoding="utf-8")
+    (eval_dir / "random.txt").write_text("random\n", encoding="utf-8")
+
+    archived_paths = archive_stale_eval_score_versions_for_species(
+        project_root=tmp_path,
+        species="SpX",
+    )
+
+    assert [path.name for path in archived_paths] == [
+        "cnn_pair_v2.txt",
+        "cnn_v2_pair.txt",
+        "cnn_v2.01.txt",
+        "cnn_v2.txt",
+    ]
+    assert not (eval_dir / "cnn_v2.txt").exists()
+    assert not (eval_dir / "cnn_v2.01.txt").exists()
+    assert (eval_dir / "cnn_v2.02.txt").exists()
+    assert not (eval_dir / "cnn_pair_v2.txt").exists()
+    assert not (eval_dir / "cnn_v2_pair.txt").exists()
+    assert (eval_dir / "cnn_pair_v2.03.txt").exists()
+    assert (eval_dir / "random.txt").exists()
+    assert (
+        tmp_path
+        / "archive"
+        / "eval_score_latest_only"
+        / "SpX"
+        / "cnn_v2"
+        / "cnn_v2.txt"
+    ).is_file()
+    assert (
+        tmp_path
+        / "archive"
+        / "eval_score_latest_only"
+        / "SpX"
+        / "cnn_v2"
+        / "cnn_v2.01.txt"
+    ).is_file()
+    assert (
+        tmp_path
+        / "archive"
+        / "eval_score_latest_only"
+        / "SpX"
+        / "cnn_pair_v2"
+        / "cnn_pair_v2.txt"
+    ).is_file()
+    assert (
+        tmp_path
+        / "archive"
+        / "eval_score_latest_only"
+        / "SpX"
+        / "cnn_pair_v2"
+        / "cnn_v2_pair.txt"
+    ).is_file()
 
 
 def test_publish_latest_best_version_acceptor_update_ignores_stale_donor_payload(
