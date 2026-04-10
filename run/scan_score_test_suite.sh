@@ -19,6 +19,11 @@ STUDENTS_DIR="${STUDENTS_DIR:-}"
 DEVICE="${DEVICE:-auto}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 BEST_CONFIG_PATH="${BEST_CONFIG_PATH:-}"
+# Optional DNABERT pair model for score adjustment.
+# Set to e.g. "dnabert2_pair" to enable; leave empty to skip pair scoring.
+PAIR_MODEL="${PAIR_MODEL:-dnabert2_pair}"
+PAIR_BATCH_SIZE="${PAIR_BATCH_SIZE:-}"
+PAIR_CHECKPOINT_PATH="${PAIR_CHECKPOINT_PATH:-}"
 
 # --------------------------
 # Runtime implementation
@@ -53,6 +58,16 @@ args=(
 
 if [[ -n "${BEST_CONFIG_PATH}" ]]; then
 	args+=(--best-config-path "${BEST_CONFIG_PATH}")
+fi
+
+if [[ -n "${PAIR_MODEL}" ]]; then
+	args+=(--pair-model-name "${PAIR_MODEL}")
+	if [[ -n "${PAIR_BATCH_SIZE}" ]]; then
+		args+=(--pair-batch-size "${PAIR_BATCH_SIZE}")
+	fi
+	if [[ -n "${PAIR_CHECKPOINT_PATH}" ]]; then
+		args+=(--pair-checkpoint-path "${PAIR_CHECKPOINT_PATH}")
+	fi
 fi
 
 PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \

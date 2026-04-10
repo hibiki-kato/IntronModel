@@ -30,6 +30,11 @@ from util.checkpoint_io import (
 )
 from util.model_runtime import pick_device
 from util.score_format import format_score_text
+from util.score_test_suite_pair_filter import (
+    apply_pair_score_adjustments,
+    build_pair_candidates,
+    write_sparse_scores,
+)
 from util.transcript_eval import coerce_score_to_probability
 from util.versioned_artifacts import (
     is_active_public_model,
@@ -77,6 +82,33 @@ class ScoreTestSuiteSummary:
     acceptor_candidate_count: int
     donor_output_path: Path
     acceptor_output_path: Path
+
+
+@dataclass(frozen=True)
+class LoadedDnabertPairModel:
+    """Loaded DNABERT pair model with scoring metadata."""
+
+    model: nn.Module
+    tokenizer: object
+    max_tokens: int
+    input_kmer: int | None
+    donor_window_len: int
+    acceptor_window_len: int
+
+
+@dataclass(frozen=True)
+class PairScoringConfig:
+    """Optional pair-scoring pass applied after individual site scoring."""
+
+    loaded_pair_model: LoadedDnabertPairModel
+    inactive_score: float = -1000.0
+    pair_score_center: float = -2.0
+    pair_score_scale: float = 50.0
+    pair_delta_min: float = -150.0
+    pair_delta_max: float = 100.0
+    no_pair_penalty: float = -150.0
+    min_intron_length: int = 30
+    pair_batch_size: int = 256
 
 
 def _is_cnn_v3_model_name(model_name: str) -> bool:
@@ -754,6 +786,159 @@ def write_scores(
             )
 
 
+def resolve_dnabert_pair_checkpoint_path(
+    data_root: Path,
+    species: str,
+    pair_model_name: str,
+    *,
+    explicit_checkpoint_path: Path | None,
+) -> Path:
+    """Resolve the best pair checkpoint for one dnabert pair model.
+
+    Parameters
+    ----------
+    data_root : Path
+        Repository data root.
+    species : str
+        Species identifier.
+    pair_model_name : str
+        Pair model name, e.g. ``dnabert2_pair``.
+    explicit_checkpoint_path : Path | None
+        Optional explicit checkpoint override.
+
+    Returns
+    -------
+    Path
+        Resolved checkpoint path.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no checkpoint can be resolved.
+    """
+    if explicit_checkpoint_path is not None:
+        return explicit_checkpoint_path.resolve()
+
+    best_config_path = (
+        data_root / species / "tuning" / pair_model_name / "pair" / "best_config.json"
+    )
+    if best_config_path.is_file():
+        payload = read_json_object(best_config_path)
+        if payload is not None and str(payload.get("status", "")).strip().lower() == "ok":
+            checkpoint = extract_task_checkpoint_path(
+                payload,
+                task="pair",
+                base_dir=best_config_path.parent,
+            )
+            if checkpoint is not None:
+                root_dir = Path(model_root()).resolve()
+                return resolve_existing_checkpoint_path(
+                    checkpoint, model_root_dir=root_dir
+                )
+
+    local_pair_dir = Path(model_root()).resolve() / species / "pair"
+    if local_pair_dir.is_dir():
+        for path in sorted(
+            local_pair_dir.iterdir(),
+            key=lambda p: (p.stat().st_mtime_ns, p.name),
+            reverse=True,
+        ):
+            if path.is_file() and path.suffix == ".pt" and (
+                path.name == f"{pair_model_name}.pt"
+                or path.name.startswith(f"{pair_model_name}_")
+                or path.name.startswith(f"{pair_model_name}.")
+            ):
+                return path.resolve()
+
+    raise FileNotFoundError(
+        f"No pair checkpoint found for species={species} model={pair_model_name}."
+    )
+
+
+def load_dnabert_pair_model(
+    checkpoint_path: Path,
+    device: str,
+) -> LoadedDnabertPairModel:
+    """Load one DNABERT pair model checkpoint.
+
+    Parameters
+    ----------
+    checkpoint_path : Path
+        Path to the ``*.pt`` pair checkpoint.
+    device : str
+        PyTorch device string.
+
+    Returns
+    -------
+    LoadedDnabertPairModel
+        Loaded model with tokenizer and window metadata.
+    """
+    raw_ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    if not isinstance(raw_ckpt, dict):
+        raise ValueError(f"Invalid pair checkpoint payload: {checkpoint_path}")
+    donor_window_len = int(raw_ckpt.get("donor_window_len", 100))
+    acceptor_window_len = int(raw_ckpt.get("acceptor_window_len", 100))
+
+    model, model_config, tokenizer = dnabert_model.load_task_model(
+        str(checkpoint_path), device
+    )
+    max_tokens = _optional_positive_int(model_config.get("max_tokens")) or donor_window_len
+    input_kmer = _optional_positive_int(model_config.get("input_kmer"))
+
+    return LoadedDnabertPairModel(
+        model=model,
+        tokenizer=tokenizer,
+        max_tokens=max_tokens,
+        input_kmer=input_kmer,
+        donor_window_len=donor_window_len,
+        acceptor_window_len=acceptor_window_len,
+    )
+
+
+def score_dnabert_pair_candidates(
+    loaded_pair: LoadedDnabertPairModel,
+    pair_candidates: Sequence,
+    device: str,
+    batch_size: int,
+) -> list[float]:
+    """Score donor/acceptor pair candidates with a DNABERT pair model.
+
+    Parameters
+    ----------
+    loaded_pair : LoadedDnabertPairModel
+        Loaded pair model.
+    pair_candidates : Sequence
+        ``PairCandidate`` objects with ``donor_window`` and ``acceptor_window``.
+    device : str
+        PyTorch device string.
+    batch_size : int
+        Inference batch size.
+
+    Returns
+    -------
+    list[float]
+        Pair scores in candidate order.
+    """
+    if not pair_candidates:
+        return []
+    donor_seqs = [c.donor_window for c in pair_candidates]
+    acceptor_seqs = [c.acceptor_window for c in pair_candidates]
+    scores = dnabert_model.score_sequence_pairs(
+        model=loaded_pair.model,
+        donor_sequences=donor_seqs,
+        acceptor_sequences=acceptor_seqs,
+        tokenizer=loaded_pair.tokenizer,
+        max_tokens=loaded_pair.max_tokens,
+        device=device,
+        batch_size=batch_size,
+        task_name="pair_scan",
+        input_kmer=loaded_pair.input_kmer,
+        use_amp=False,
+        amp_dtype=None,
+    )
+    return [float(s) for s in np.asarray(scores, dtype=np.float64)]
+
+
 def discover_score_test_suite_cases(suite_root: Path) -> list[ScoreTestSuiteCase]:
     """Discover score-test-suite FASTA cases under one suite root.
 
@@ -903,6 +1088,7 @@ def score_test_suite_cases(
     resolved: ResolvedBestModelPaths,
     device: str,
     batch_size: int,
+    pair_config: PairScoringConfig | None = None,
 ) -> list[ScoreTestSuiteSummary]:
     """Score every discovered score-test-suite FASTA and write student outputs.
 
@@ -921,6 +1107,9 @@ def score_test_suite_cases(
         Torch device string.
     batch_size : int
         Inference batch size.
+    pair_config : PairScoringConfig | None
+        Optional DNABERT pair model config. When provided, site scores are
+        adjusted using the best pair score touching each candidate site.
 
     Returns
     -------
@@ -947,6 +1136,21 @@ def score_test_suite_cases(
         )
         write_scores(donor_output_path, donor_candidates, donor_scores)
         write_scores(acceptor_output_path, acceptor_candidates, acceptor_scores)
+
+        if pair_config is not None:
+            _apply_pair_scoring_to_case(
+                sequence=sequence,
+                donor_candidates=donor_candidates,
+                donor_scores=donor_scores,
+                acceptor_candidates=acceptor_candidates,
+                acceptor_scores=acceptor_scores,
+                donor_output_path=donor_output_path,
+                acceptor_output_path=acceptor_output_path,
+                pair_config=pair_config,
+                device=device,
+                case_name=case.case_name,
+            )
+
         summaries.append(
             ScoreTestSuiteSummary(
                 case_name=case.case_name,
@@ -958,6 +1162,73 @@ def score_test_suite_cases(
         )
 
     return summaries
+
+
+def _apply_pair_scoring_to_case(
+    *,
+    sequence: str,
+    donor_candidates: Sequence[ScoredCandidate],
+    donor_scores: Sequence[float],
+    acceptor_candidates: Sequence[ScoredCandidate],
+    acceptor_scores: Sequence[float],
+    donor_output_path: Path,
+    acceptor_output_path: Path,
+    pair_config: PairScoringConfig,
+    device: str,
+    case_name: str,
+) -> None:
+    """Score GT/AG pair combinations and adjust site scores in-place on disk."""
+    donor_score_map = {
+        c.coordinate: float(s)
+        for c, s in zip(donor_candidates, donor_scores)
+    }
+    acceptor_score_map = {
+        c.coordinate: float(s)
+        for c, s in zip(acceptor_candidates, acceptor_scores)
+    }
+
+    lpm = pair_config.loaded_pair_model
+    pair_candidates = build_pair_candidates(
+        sequence=sequence,
+        donor_scores=donor_score_map,
+        acceptor_scores=acceptor_score_map,
+        donor_window_len=lpm.donor_window_len,
+        acceptor_window_len=lpm.acceptor_window_len,
+        inactive_score=pair_config.inactive_score,
+        min_intron_length=pair_config.min_intron_length,
+    )
+
+    pair_scores_list = score_dnabert_pair_candidates(
+        lpm,
+        pair_candidates,
+        device,
+        pair_config.pair_batch_size,
+    )
+
+    donor_adjusted, acceptor_adjusted, summary = apply_pair_score_adjustments(
+        donor_scores=donor_score_map,
+        acceptor_scores=acceptor_score_map,
+        pair_candidates=pair_candidates,
+        pair_scores=pair_scores_list,
+        inactive_score=pair_config.inactive_score,
+        pair_score_center=pair_config.pair_score_center,
+        pair_score_scale=pair_config.pair_score_scale,
+        pair_delta_min=pair_config.pair_delta_min,
+        pair_delta_max=pair_config.pair_delta_max,
+        no_pair_penalty=pair_config.no_pair_penalty,
+    )
+
+    write_sparse_scores(donor_adjusted, donor_output_path)
+    write_sparse_scores(acceptor_adjusted, acceptor_output_path)
+
+    print(
+        f"[scan_splice_candidate_sites] pair_scoring case={case_name} "
+        f"pair_candidates={len(pair_candidates)} "
+        f"donor(+{summary.donor_bonus_count}/-{summary.donor_penalty_count}/"
+        f"nopair={summary.donor_no_pair_count}) "
+        f"acceptor(+{summary.acceptor_bonus_count}/-{summary.acceptor_penalty_count}/"
+        f"nopair={summary.acceptor_no_pair_count})"
+    )
 
 
 def resolve_model_paths_from_args(
@@ -1057,6 +1328,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--best-config-path", type=Path, default=None)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--batch-size", type=int, default=512)
+    # Optional DNABERT pair model for score adjustment after site scoring.
+    parser.add_argument("--pair-model-name", type=str, default=None)
+    parser.add_argument("--pair-checkpoint-path", type=Path, default=None)
+    parser.add_argument("--pair-batch-size", type=int, default=None)
+    parser.add_argument("--pair-inactive-score", type=float, default=-1000.0)
+    parser.add_argument("--pair-score-center", type=float, default=-2.0)
+    parser.add_argument("--pair-score-scale", type=float, default=50.0)
+    parser.add_argument("--pair-delta-min", type=float, default=-150.0)
+    parser.add_argument("--pair-delta-max", type=float, default=100.0)
+    parser.add_argument("--pair-no-pair-penalty", type=float, default=-150.0)
+    parser.add_argument("--pair-min-intron-length", type=int, default=30)
     return parser
 
 
@@ -1092,6 +1374,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.students_dir is not None
             else (suite_root / "Students").resolve()
         )
+
+        pair_config: PairScoringConfig | None = None
+        pair_model_name = (
+            str(args.pair_model_name).strip()
+            if args.pair_model_name is not None
+            else ""
+        )
+        if pair_model_name != "":
+            pair_checkpoint_path = resolve_dnabert_pair_checkpoint_path(
+                data_root=args.data_root.resolve(),
+                species=str(args.species),
+                pair_model_name=pair_model_name,
+                explicit_checkpoint_path=args.pair_checkpoint_path,
+            )
+            loaded_pair = load_dnabert_pair_model(pair_checkpoint_path, device)
+            pair_batch_size = (
+                int(args.pair_batch_size)
+                if args.pair_batch_size is not None
+                else int(args.batch_size)
+            )
+            pair_config = PairScoringConfig(
+                loaded_pair_model=loaded_pair,
+                inactive_score=float(args.pair_inactive_score),
+                pair_score_center=float(args.pair_score_center),
+                pair_score_scale=float(args.pair_score_scale),
+                pair_delta_min=float(args.pair_delta_min),
+                pair_delta_max=float(args.pair_delta_max),
+                no_pair_penalty=float(args.pair_no_pair_penalty),
+                min_intron_length=int(args.pair_min_intron_length),
+                pair_batch_size=pair_batch_size,
+            )
+            print(
+                "[scan_splice_candidate_sites] "
+                f"pair_model={pair_model_name} "
+                f"pair_checkpoint={pair_checkpoint_path}"
+            )
+
         summaries = score_test_suite_cases(
             suite_root=suite_root,
             students_dir=students_dir,
@@ -1099,6 +1418,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             resolved=resolved,
             device=device,
             batch_size=int(args.batch_size),
+            pair_config=pair_config,
         )
         print(
             "[scan_splice_candidate_sites] "
