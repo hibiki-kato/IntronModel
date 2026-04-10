@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import math
 import pickle
 import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
-from models import cnn_pair, cnn_pair_v3, cnn_v2
+from models import cnn_pair_v3, cnn_v2, dnabert
 from util.checkpoint_io import (
     extract_task_checkpoint_path,
     read_json_object,
@@ -30,6 +31,7 @@ from util.score_test_suite_pair_filter import (
     apply_pair_score_adjustments,
     apply_pair_score_filter,
     build_pair_candidates,
+    compute_best_pair_scores,
     read_fasta_sequence,
     read_sparse_scores,
     write_sparse_scores,
@@ -37,10 +39,11 @@ from util.score_test_suite_pair_filter import (
 
 DEFAULT_PAIR_MODEL_NAME = "cnn_pair_v2"
 LEGACY_MODEL_ALIASES: dict[str, tuple[str, ...]] = {
-    "cnn_pair_v2": ("cnn_pair", "cnn_v2"),
-    "cnn_v2_pair": ("cnn_pair_v2", "cnn_pair", "cnn_v2"),
+    "cnn_pair_v2": ("cnn_v2",),
+    "cnn_v2_pair": ("cnn_v2",),
     "cnn_pair_v3": ("cnn_pair_v3",),
     "cnn_v3_pair": ("cnn_pair_v3",),
+    "dnabert2_pair": ("dnabert_pair",),
 }
 
 PairLoadFn = Callable[[str, str], tuple[object, dict[str, object]]]
@@ -67,27 +70,6 @@ class LoadedPairModel:
     model: object
     checkpoint_payload: dict[str, object]
     checkpoint_path: Path
-
-
-def _score_pairs_with_cnn_pair(
-    model: object,
-    checkpoint_payload: dict[str, object],
-    pairs: Sequence[tuple[str, str]],
-    device: str,
-    batch_size: int,
-) -> list[float]:
-    """Score pairs with the legacy ``cnn_pair`` backend."""
-    scores = cnn_pair.score_pair_sequences(
-        model=model,
-        pairs=pairs,
-        donor_window_len=int(checkpoint_payload.get("donor_window_len", 50)),
-        acceptor_window_len=int(checkpoint_payload.get("acceptor_window_len", 50)),
-        device=device,
-        batch_size=batch_size,
-        use_amp=False,
-        amp_dtype=None,
-    )
-    return [float(score) for score in scores.tolist()]
 
 
 def _score_pairs_with_cnn_pair_v3(
@@ -162,12 +144,65 @@ def _score_pairs_with_cnn_v2(
     return [float(score) for score in scores.tolist()]
 
 
+def _load_dnabert_pair_model(
+    checkpoint_path: str,
+    device: str,
+) -> tuple[object, dict[str, object]]:
+    """Load one DNABERT pair checkpoint into this backend contract."""
+    model, model_config, tokenizer = dnabert.load_task_model(checkpoint_path, device)
+    max_tokens_obj = model_config.get("max_tokens")
+    max_tokens = int(max_tokens_obj) if isinstance(max_tokens_obj, int) else 128
+    if max_tokens <= 0:
+        max_tokens = 128
+    input_kmer_obj = model_config.get("input_kmer")
+    input_kmer = int(input_kmer_obj) if isinstance(input_kmer_obj, int) else None
+
+    payload: dict[str, object] = {
+        "tokenizer": tokenizer,
+        "max_tokens": max_tokens,
+        "input_kmer": input_kmer,
+        "donor_window_len": int(model_config.get("donor_window_len", 100)),
+        "acceptor_window_len": int(model_config.get("acceptor_window_len", 100)),
+    }
+    return model, payload
+
+
+def _score_pairs_with_dnabert(
+    model: object,
+    checkpoint_payload: dict[str, object],
+    pairs: Sequence[tuple[str, str]],
+    device: str,
+    batch_size: int,
+) -> list[float]:
+    """Score pairs with the ``dnabert_pair`` backend."""
+    tokenizer = checkpoint_payload.get("tokenizer")
+    if tokenizer is None:
+        raise ValueError("DNABERT backend requires tokenizer.")
+    max_tokens_obj = checkpoint_payload.get("max_tokens")
+    if not isinstance(max_tokens_obj, int) or max_tokens_obj <= 0:
+        raise ValueError("DNABERT backend requires positive max_tokens.")
+    input_kmer_obj = checkpoint_payload.get("input_kmer")
+    input_kmer = int(input_kmer_obj) if isinstance(input_kmer_obj, int) else None
+
+    donor_sequences = [pair[0] for pair in pairs]
+    acceptor_sequences = [pair[1] for pair in pairs]
+    scores = dnabert.score_sequence_pairs(
+        model=model,
+        donor_sequences=donor_sequences,
+        acceptor_sequences=acceptor_sequences,
+        tokenizer=tokenizer,
+        max_tokens=max_tokens_obj,
+        device=device,
+        batch_size=batch_size,
+        task_name="pair_filter",
+        input_kmer=input_kmer,
+        use_amp=False,
+        amp_dtype=None,
+    )
+    return [float(score) for score in scores.tolist()]
+
+
 PAIR_BACKEND_SPECS: dict[str, PairBackendSpec] = {
-    "cnn_pair": PairBackendSpec(
-        name="cnn_pair",
-        load_model=cnn_pair.load_pair_model,
-        score_pairs=_score_pairs_with_cnn_pair,
-    ),
     "cnn_pair_v3": PairBackendSpec(
         name="cnn_pair_v3",
         load_model=cnn_pair_v3.load_pair_model,
@@ -177,6 +212,11 @@ PAIR_BACKEND_SPECS: dict[str, PairBackendSpec] = {
         name="cnn_v2",
         load_model=cnn_v2.load_pair_model,
         score_pairs=_score_pairs_with_cnn_v2,
+    ),
+    "dnabert_pair": PairBackendSpec(
+        name="dnabert_pair",
+        load_model=_load_dnabert_pair_model,
+        score_pairs=_score_pairs_with_dnabert,
     ),
 }
 
@@ -215,15 +255,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--inactive-score", type=float, default=-1000.0)
     parser.add_argument(
         "--site-score-mode",
-        choices=("additive", "hard_reject"),
+        choices=("additive", "hard_reject", "max_pair"),
         default="additive",
     )
-    parser.add_argument("--pair-min-score", type=float, default=-2.0)
-    parser.add_argument("--pair-score-center", type=float, default=-2.0)
-    parser.add_argument("--pair-score-scale", type=float, default=50.0)
-    parser.add_argument("--pair-delta-min", type=float, default=-150.0)
-    parser.add_argument("--pair-delta-max", type=float, default=100.0)
-    parser.add_argument("--no-pair-penalty", type=float, default=-150.0)
+    parser.add_argument("--site-keep-threshold", type=float, default=0.01)
+    parser.add_argument("--pair-min-score", type=float, default=-4.0)
+    parser.add_argument("--pair-score-center", type=float, default=-4.0)
+    parser.add_argument("--pair-score-scale", type=float, default=0.02)
+    parser.add_argument("--pair-delta-min", type=float, default=0.0)
+    parser.add_argument("--pair-delta-max", type=float, default=0.03)
+    parser.add_argument("--no-pair-penalty", type=float, default=0.0)
     parser.add_argument("--min-intron-length", type=int, default=30)
     parser.add_argument(
         "--missing-pair-model-mode",
@@ -296,16 +337,18 @@ def backend_names_for_model_name(model_name: str) -> tuple[str, ...]:
     if normalized.startswith("cnn_pair_v3"):
         return ("cnn_pair_v3",)
     if normalized.startswith("cnn_pair_v2"):
-        return ("cnn_pair", "cnn_v2")
+        return ("cnn_v2",)
     if normalized.startswith("cnn_v3_pair"):
         return ("cnn_pair_v3",)
     if normalized.startswith("cnn_v2_pair"):
-        return ("cnn_pair", "cnn_v2")
+        return ("cnn_v2",)
     if normalized.startswith("cnn_pair"):
-        return ("cnn_pair",)
+        return ("cnn_v2",)
     if normalized.startswith("cnn_v2"):
-        return ("cnn_v2", "cnn_pair")
-    return ("cnn_pair", "cnn_pair_v3", "cnn_v2")
+        return ("cnn_v2",)
+    if normalized.startswith("dnabert"):
+        return ("dnabert_pair",)
+    return ("cnn_pair_v3", "cnn_v2")
 
 
 def ordered_backend_specs(model_names: Sequence[str]) -> list[PairBackendSpec]:
@@ -605,24 +648,55 @@ def run(argv: Sequence[str] | None = None) -> int:
             write_sparse_scores(donor_scores, args.donor_output)
             write_sparse_scores(acceptor_scores, args.acceptor_output)
             print(
-                "[filter_score_test_suite_pairs] "
-                f"pair filtering skipped: {exc}",
+                f"[filter_score_test_suite_pairs] pair filtering skipped: {exc}",
                 file=sys.stderr,
             )
             return 0
         raise
 
+    inactive_score = float(args.inactive_score)
     donor_window_len = int(loaded_model.checkpoint_payload.get("donor_window_len", 50))
     acceptor_window_len = int(
         loaded_model.checkpoint_payload.get("acceptor_window_len", 50)
     )
+
+    donor_for_pair = {int(key): float(value) for key, value in donor_scores.items()}
+    acceptor_for_pair = {
+        int(key): float(value) for key, value in acceptor_scores.items()
+    }
+    donor_prefilter_pruned_count = 0
+    acceptor_prefilter_pruned_count = 0
+    if args.site_score_mode == "max_pair":
+        site_keep_threshold = float(args.site_keep_threshold)
+        donor_for_pair = {}
+        for coordinate, score in donor_scores.items():
+            numeric_score = float(score)
+            keep = (
+                numeric_score > inactive_score and numeric_score >= site_keep_threshold
+            )
+            donor_for_pair[int(coordinate)] = numeric_score if keep else inactive_score
+            if numeric_score > inactive_score and not keep:
+                donor_prefilter_pruned_count += 1
+
+        acceptor_for_pair = {}
+        for coordinate, score in acceptor_scores.items():
+            numeric_score = float(score)
+            keep = (
+                numeric_score > inactive_score and numeric_score >= site_keep_threshold
+            )
+            acceptor_for_pair[int(coordinate)] = (
+                numeric_score if keep else inactive_score
+            )
+            if numeric_score > inactive_score and not keep:
+                acceptor_prefilter_pruned_count += 1
+
     pair_candidates = build_pair_candidates(
         sequence=sequence,
-        donor_scores=donor_scores,
-        acceptor_scores=acceptor_scores,
+        donor_scores=donor_for_pair,
+        acceptor_scores=acceptor_for_pair,
         donor_window_len=donor_window_len,
         acceptor_window_len=acceptor_window_len,
-        inactive_score=float(args.inactive_score),
+        inactive_score=inactive_score,
         min_intron_length=int(args.min_intron_length),
     )
 
@@ -636,16 +710,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
 
     donor_input_active_count = sum(
-        1 for score in donor_scores.values() if score > float(args.inactive_score)
+        1 for score in donor_scores.values() if score > inactive_score
     )
     acceptor_input_active_count = sum(
-        1 for score in acceptor_scores.values() if score > float(args.inactive_score)
+        1 for score in acceptor_scores.values() if score > inactive_score
     )
-    score_summary_threshold = (
-        float(args.pair_min_score)
-        if args.site_score_mode == "hard_reject"
-        else float(args.pair_score_center)
-    )
+    if args.site_score_mode == "hard_reject":
+        score_summary_threshold = float(args.pair_min_score)
+    elif args.site_score_mode == "max_pair":
+        score_summary_threshold = float(args.site_keep_threshold)
+    else:
+        score_summary_threshold = float(args.pair_score_center)
 
     if args.site_score_mode == "hard_reject":
         donor_output, acceptor_output, filter_summary = apply_pair_score_filter(
@@ -653,7 +728,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             acceptor_scores=acceptor_scores,
             pair_candidates=pair_candidates,
             pair_scores=pair_scores,
-            inactive_score=float(args.inactive_score),
+            inactive_score=inactive_score,
             pair_keep_threshold=float(args.pair_min_score),
         )
         update_summary_text = (
@@ -663,6 +738,46 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         donor_input_active_count = filter_summary.donor_input_active_count
         acceptor_input_active_count = filter_summary.acceptor_input_active_count
+    elif args.site_score_mode == "max_pair":
+        donor_best, acceptor_best = compute_best_pair_scores(
+            donor_scores=donor_for_pair,
+            acceptor_scores=acceptor_for_pair,
+            pair_candidates=pair_candidates,
+            pair_scores=pair_scores,
+            inactive_score=inactive_score,
+        )
+
+        donor_output = {int(key): inactive_score for key in donor_scores}
+        acceptor_output = {int(key): inactive_score for key in acceptor_scores}
+        donor_no_pair_count = 0
+        for coordinate, best_score in donor_best.items():
+            if best_score == float("-inf"):
+                donor_no_pair_count += 1
+                continue
+            donor_output[coordinate] = 10.0 ** float(best_score)
+
+        acceptor_no_pair_count = 0
+        for coordinate, best_score in acceptor_best.items():
+            if best_score == float("-inf"):
+                acceptor_no_pair_count += 1
+                continue
+            acceptor_output[coordinate] = 10.0 ** float(best_score)
+
+        donor_prefilter_kept_count = sum(
+            1 for score in donor_for_pair.values() if score > inactive_score
+        )
+        acceptor_prefilter_kept_count = sum(
+            1 for score in acceptor_for_pair.values() if score > inactive_score
+        )
+        update_summary_text = (
+            "pair_max="
+            f"donor_prefilter={donor_input_active_count}->{donor_prefilter_kept_count} "
+            f"acceptor_prefilter={acceptor_input_active_count}->{acceptor_prefilter_kept_count} "
+            f"donor_pruned={donor_prefilter_pruned_count} "
+            f"acceptor_pruned={acceptor_prefilter_pruned_count} "
+            f"donor_nopair={donor_no_pair_count} "
+            f"acceptor_nopair={acceptor_no_pair_count}"
+        )
     else:
         donor_output, acceptor_output, adjustment_summary = (
             apply_pair_score_adjustments(
@@ -670,7 +785,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 acceptor_scores=acceptor_scores,
                 pair_candidates=pair_candidates,
                 pair_scores=pair_scores,
-                inactive_score=float(args.inactive_score),
+                inactive_score=inactive_score,
                 pair_score_center=float(args.pair_score_center),
                 pair_score_scale=float(args.pair_score_scale),
                 pair_delta_min=float(args.pair_delta_min),
@@ -680,17 +795,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         update_summary_text = format_adjustment_summary(adjustment_summary)
         donor_input_active_count = adjustment_summary.donor_input_active_count
-        acceptor_input_active_count = (
-            adjustment_summary.acceptor_input_active_count
-        )
+        acceptor_input_active_count = adjustment_summary.acceptor_input_active_count
     write_sparse_scores(donor_output, args.donor_output)
     write_sparse_scores(acceptor_output, args.acceptor_output)
 
     donor_remaining = sum(
-        1 for score in donor_output.values() if score > float(args.inactive_score)
+        1 for score in donor_output.values() if score > inactive_score
     )
     acceptor_remaining = sum(
-        1 for score in acceptor_output.values() if score > float(args.inactive_score)
+        1 for score in acceptor_output.values() if score > inactive_score
     )
     score_summary = format_pair_score_summary(
         pair_scores,
@@ -711,6 +824,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _stable_sigmoid(value: float) -> float:
+    """Return one numerically stable sigmoid probability."""
+    if value >= 0.0:
+        exp_term = float(math.exp(-value))
+        return 1.0 / (1.0 + exp_term)
+    exp_term = float(math.exp(value))
+    return exp_term / (1.0 + exp_term)
 
 
 def _deduplicate_paths(paths: Sequence[Path]) -> list[Path]:
@@ -767,10 +889,7 @@ def _summarize_load_error(
     first_line = str(exc).splitlines()[0].strip()
     if first_line == "":
         first_line = exc.__class__.__name__
-    return (
-        f"{path.name} via {backend_name}: "
-        f"{exc.__class__.__name__}: {first_line}"
-    )
+    return f"{path.name} via {backend_name}: {exc.__class__.__name__}: {first_line}"
 
 
 def _format_load_error_lines(errors: Sequence[str], *, limit: int = 6) -> str:

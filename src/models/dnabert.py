@@ -133,6 +133,10 @@ SPECIAL_TOKENS: frozenset[str] = frozenset(
     {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"}
 )
 READOUT_TYPE_CHOICES: tuple[str, ...] = ("linear",)
+LEGACY_READOUT_TYPE_ALIASES: dict[str, str] = {
+    "cnn": "linear",
+    "mlp": "linear",
+}
 DEFAULT_READOUT_TYPE: str = "linear"
 LR_SCHEDULE_CHOICES: tuple[str, ...] = ("cosine", "linear")
 DEFAULT_LR_SCHEDULE: str = "cosine"
@@ -244,7 +248,10 @@ def _normalize_choice(
 
 
 def _normalize_readout_type(readout_type: str, *, arg_name: str) -> str:
-    return _normalize_choice(readout_type, READOUT_TYPE_CHOICES, arg_name=arg_name)
+    """Normalize one readout type with backward-compatible aliases."""
+    normalized = readout_type.strip().lower()
+    aliased = LEGACY_READOUT_TYPE_ALIASES.get(normalized, normalized)
+    return _normalize_choice(aliased, READOUT_TYPE_CHOICES, arg_name=arg_name)
 
 
 def _normalize_lr_schedule(lr_schedule: str, *, arg_name: str) -> str:
@@ -2674,18 +2681,8 @@ def infer_site_scores(
 
     donor_max_tokens = _int_from_checkpoint(donor_config, "max_tokens", 128)
     acceptor_max_tokens = _int_from_checkpoint(acceptor_config, "max_tokens", 128)
-    donor_input_kmer_obj = donor_config.get("input_kmer")
-    donor_input_kmer = (
-        int(donor_input_kmer_obj)
-        if isinstance(donor_input_kmer_obj, int) and donor_input_kmer_obj > 0
-        else None
-    )
-    acceptor_input_kmer_obj = acceptor_config.get("input_kmer")
-    acceptor_input_kmer = (
-        int(acceptor_input_kmer_obj)
-        if isinstance(acceptor_input_kmer_obj, int) and acceptor_input_kmer_obj > 0
-        else None
-    )
+    donor_input_kmer = _optional_positive_int(donor_config.get("input_kmer"))
+    acceptor_input_kmer = _optional_positive_int(acceptor_config.get("input_kmer"))
 
     donor_seqs = [str(row["seq"]) for row in site_rows if row["site_type"] == "donor"]
     acceptor_seqs = [
@@ -2785,12 +2782,7 @@ def infer_pair_site_scores(
         compile_mode=infer_compile_mode,
     )
     pair_max_tokens = _int_from_checkpoint(pair_config, "max_tokens", 128)
-    pair_input_kmer_obj = pair_config.get("input_kmer")
-    pair_input_kmer = (
-        int(pair_input_kmer_obj)
-        if isinstance(pair_input_kmer_obj, int) and pair_input_kmer_obj > 0
-        else None
-    )
+    pair_input_kmer = _optional_positive_int(pair_config.get("input_kmer"))
 
     donor_sequences = [str(row["donor_seq"]) for row in pair_rows]
     acceptor_sequences = [str(row["acceptor_seq"]) for row in pair_rows]

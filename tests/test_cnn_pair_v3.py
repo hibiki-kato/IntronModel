@@ -186,6 +186,7 @@ def test_train_pair_model_forwards_model_args(
             min_batch_size=1,
             max_oom_retries=0,
             quick_phase=False,
+            init_checkpoint_path=None,
         )
 
     assert captured["model_args"] is model_args

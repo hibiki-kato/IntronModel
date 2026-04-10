@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from util.score_format import format_score_text
+
 
 @dataclass(frozen=True)
 class PairCandidate:
@@ -158,9 +160,7 @@ def read_sparse_scores(path: Path) -> dict[int, float]:
                 continue
             fields = line.split("\t")
             if len(fields) < 2:
-                raise ValueError(
-                    f"Expected coordinate and score at {path}:{line_no}."
-                )
+                raise ValueError(f"Expected coordinate and score at {path}:{line_no}.")
             coordinate = int(fields[0])
             if coordinate < 0:
                 raise ValueError(
@@ -168,9 +168,7 @@ def read_sparse_scores(path: Path) -> dict[int, float]:
                 )
             score = float(fields[1])
             if coordinate in scores:
-                raise ValueError(
-                    f"Duplicate coordinate {coordinate} found in {path}."
-                )
+                raise ValueError(f"Duplicate coordinate {coordinate} found in {path}.")
             scores[coordinate] = score
     return scores
 
@@ -193,7 +191,9 @@ def write_sparse_scores(scores: Mapping[int, float], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         for coordinate in sorted(scores):
-            handle.write(f"{coordinate}\t{scores[coordinate]:.6f}\n")
+            handle.write(
+                f"{coordinate}\t{format_score_text(float(scores[coordinate]))}\n"
+            )
 
 
 def extract_donor_window(sequence: str, coordinate: int, window_len: int) -> str | None:
@@ -489,9 +489,7 @@ def apply_pair_score_filter(
         If ``pair_candidates`` and ``pair_scores`` do not have the same length.
     """
     donor_output = {int(key): float(value) for key, value in donor_scores.items()}
-    acceptor_output = {
-        int(key): float(value) for key, value in acceptor_scores.items()
-    }
+    acceptor_output = {int(key): float(value) for key, value in acceptor_scores.items()}
 
     donor_best, acceptor_best = compute_best_pair_scores(
         donor_scores=donor_scores,
@@ -624,9 +622,7 @@ def apply_pair_score_adjustments(
         Updated donor scores, updated acceptor scores, and one summary object.
     """
     donor_output = {int(key): float(value) for key, value in donor_scores.items()}
-    acceptor_output = {
-        int(key): float(value) for key, value in acceptor_scores.items()
-    }
+    acceptor_output = {int(key): float(value) for key, value in acceptor_scores.items()}
     donor_best, acceptor_best = compute_best_pair_scores(
         donor_scores=donor_scores,
         acceptor_scores=acceptor_scores,

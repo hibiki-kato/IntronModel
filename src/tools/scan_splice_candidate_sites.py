@@ -9,10 +9,11 @@ type.
 from __future__ import annotations
 
 import argparse
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -34,6 +35,11 @@ from util.score_test_suite_pair_filter import (
     apply_pair_score_adjustments,
     build_pair_candidates,
     write_sparse_scores,
+)
+from tools.filter_score_test_suite_pairs import (
+    PAIR_BACKEND_SPECS,
+    LoadedPairModel,
+    load_pair_model_with_fallback,
 )
 from util.transcript_eval import coerce_score_to_probability
 from util.versioned_artifacts import (
@@ -100,13 +106,13 @@ class LoadedDnabertPairModel:
 class PairScoringConfig:
     """Optional pair-scoring pass applied after individual site scoring."""
 
-    loaded_pair_model: LoadedDnabertPairModel
+    loaded_pair_model: LoadedPairModel
     inactive_score: float = -1000.0
-    pair_score_center: float = -2.0
-    pair_score_scale: float = 50.0
-    pair_delta_min: float = -150.0
-    pair_delta_max: float = 100.0
-    no_pair_penalty: float = -150.0
+    pair_score_center: float = -4.0
+    pair_score_scale: float = 0.02
+    pair_delta_min: float = 0.0
+    pair_delta_max: float = 0.03
+    no_pair_penalty: float = 0.0
     min_intron_length: int = 30
     pair_batch_size: int = 256
 
@@ -824,7 +830,10 @@ def resolve_dnabert_pair_checkpoint_path(
     )
     if best_config_path.is_file():
         payload = read_json_object(best_config_path)
-        if payload is not None and str(payload.get("status", "")).strip().lower() == "ok":
+        if (
+            payload is not None
+            and str(payload.get("status", "")).strip().lower() == "ok"
+        ):
             checkpoint = extract_task_checkpoint_path(
                 payload,
                 task="pair",
@@ -843,10 +852,14 @@ def resolve_dnabert_pair_checkpoint_path(
             key=lambda p: (p.stat().st_mtime_ns, p.name),
             reverse=True,
         ):
-            if path.is_file() and path.suffix == ".pt" and (
-                path.name == f"{pair_model_name}.pt"
-                or path.name.startswith(f"{pair_model_name}_")
-                or path.name.startswith(f"{pair_model_name}.")
+            if (
+                path.is_file()
+                and path.suffix == ".pt"
+                and (
+                    path.name == f"{pair_model_name}.pt"
+                    or path.name.startswith(f"{pair_model_name}_")
+                    or path.name.startswith(f"{pair_model_name}.")
+                )
             ):
                 return path.resolve()
 
@@ -882,7 +895,9 @@ def load_dnabert_pair_model(
     model, model_config, tokenizer = dnabert_model.load_task_model(
         str(checkpoint_path), device
     )
-    max_tokens = _optional_positive_int(model_config.get("max_tokens")) or donor_window_len
+    max_tokens = (
+        _optional_positive_int(model_config.get("max_tokens")) or donor_window_len
+    )
     input_kmer = _optional_positive_int(model_config.get("input_kmer"))
 
     return LoadedDnabertPairModel(
@@ -937,6 +952,59 @@ def score_dnabert_pair_candidates(
         amp_dtype=None,
     )
     return [float(s) for s in np.asarray(scores, dtype=np.float64)]
+
+
+def _normalize_sparse_scores_to_open_probability(
+    scores: Mapping[int, float],
+) -> dict[int, float]:
+    """Convert sparse scores to probabilities in the open interval ``(0, 1)``.
+
+    This avoids downstream ``log(0)`` failures in the score-test-suite Perl
+    wrappers, which assume strictly positive probabilities.
+    """
+    epsilon = 1e-12
+    normalized: dict[int, float] = {}
+    for coordinate, score in scores.items():
+        raw_score = float(score)
+        # Pair adjustments operate on probability-like site scores. Preserve
+        # that scale by clamping mild out-of-range values and only fall back
+        # to sigmoid when values are clearly not probability-scale.
+        if -1.0 <= raw_score <= 2.0:
+            probability = raw_score
+        else:
+            if raw_score >= 0.0:
+                exp_term = math.exp(-raw_score)
+                probability = 1.0 / (1.0 + exp_term)
+            else:
+                exp_term = math.exp(raw_score)
+                probability = exp_term / (1.0 + exp_term)
+        probability = min(max(probability, epsilon), 1.0 - epsilon)
+        normalized[int(coordinate)] = probability
+    return normalized
+
+
+def score_pair_candidates_with_backend(
+    loaded_pair: LoadedPairModel,
+    pair_candidates: Sequence[PairCandidate],
+    *,
+    device: str,
+    batch_size: int,
+) -> list[float]:
+    """Score pair candidates with one loaded pair-model backend."""
+    if not pair_candidates:
+        return []
+    backend_spec = PAIR_BACKEND_SPECS[loaded_pair.backend_name]
+    pair_sequences = [
+        (candidate.donor_window, candidate.acceptor_window)
+        for candidate in pair_candidates
+    ]
+    return backend_spec.score_pairs(
+        loaded_pair.model,
+        loaded_pair.checkpoint_payload,
+        pair_sequences,
+        device,
+        batch_size,
+    )
 
 
 def discover_score_test_suite_cases(suite_root: Path) -> list[ScoreTestSuiteCase]:
@@ -1179,30 +1247,30 @@ def _apply_pair_scoring_to_case(
 ) -> None:
     """Score GT/AG pair combinations and adjust site scores in-place on disk."""
     donor_score_map = {
-        c.coordinate: float(s)
-        for c, s in zip(donor_candidates, donor_scores)
+        c.coordinate: float(s) for c, s in zip(donor_candidates, donor_scores)
     }
     acceptor_score_map = {
-        c.coordinate: float(s)
-        for c, s in zip(acceptor_candidates, acceptor_scores)
+        c.coordinate: float(s) for c, s in zip(acceptor_candidates, acceptor_scores)
     }
 
     lpm = pair_config.loaded_pair_model
+    donor_window_len = int(lpm.checkpoint_payload.get("donor_window_len", 100))
+    acceptor_window_len = int(lpm.checkpoint_payload.get("acceptor_window_len", 100))
     pair_candidates = build_pair_candidates(
         sequence=sequence,
         donor_scores=donor_score_map,
         acceptor_scores=acceptor_score_map,
-        donor_window_len=lpm.donor_window_len,
-        acceptor_window_len=lpm.acceptor_window_len,
+        donor_window_len=donor_window_len,
+        acceptor_window_len=acceptor_window_len,
         inactive_score=pair_config.inactive_score,
         min_intron_length=pair_config.min_intron_length,
     )
 
-    pair_scores_list = score_dnabert_pair_candidates(
+    pair_scores_list = score_pair_candidates_with_backend(
         lpm,
         pair_candidates,
-        device,
-        pair_config.pair_batch_size,
+        device=device,
+        batch_size=pair_config.pair_batch_size,
     )
 
     donor_adjusted, acceptor_adjusted, summary = apply_pair_score_adjustments(
@@ -1218,8 +1286,12 @@ def _apply_pair_scoring_to_case(
         no_pair_penalty=pair_config.no_pair_penalty,
     )
 
-    write_sparse_scores(donor_adjusted, donor_output_path)
-    write_sparse_scores(acceptor_adjusted, acceptor_output_path)
+    donor_probabilities = _normalize_sparse_scores_to_open_probability(donor_adjusted)
+    acceptor_probabilities = _normalize_sparse_scores_to_open_probability(
+        acceptor_adjusted
+    )
+    write_sparse_scores(donor_probabilities, donor_output_path)
+    write_sparse_scores(acceptor_probabilities, acceptor_output_path)
 
     print(
         f"[scan_splice_candidate_sites] pair_scoring case={case_name} "
@@ -1333,11 +1405,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pair-checkpoint-path", type=Path, default=None)
     parser.add_argument("--pair-batch-size", type=int, default=None)
     parser.add_argument("--pair-inactive-score", type=float, default=-1000.0)
-    parser.add_argument("--pair-score-center", type=float, default=-2.0)
-    parser.add_argument("--pair-score-scale", type=float, default=50.0)
-    parser.add_argument("--pair-delta-min", type=float, default=-150.0)
-    parser.add_argument("--pair-delta-max", type=float, default=100.0)
-    parser.add_argument("--pair-no-pair-penalty", type=float, default=-150.0)
+    parser.add_argument("--pair-score-center", type=float, default=-4.0)
+    parser.add_argument("--pair-score-scale", type=float, default=0.02)
+    parser.add_argument("--pair-delta-min", type=float, default=0.0)
+    parser.add_argument("--pair-delta-max", type=float, default=0.03)
+    parser.add_argument("--pair-no-pair-penalty", type=float, default=0.0)
     parser.add_argument("--pair-min-intron-length", type=int, default=30)
     return parser
 
@@ -1382,13 +1454,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             else ""
         )
         if pair_model_name != "":
-            pair_checkpoint_path = resolve_dnabert_pair_checkpoint_path(
-                data_root=args.data_root.resolve(),
+            pair_best_config_path = (
+                args.data_root.resolve()
+                / str(args.species)
+                / "tuning"
+                / pair_model_name
+                / "pair"
+                / "best_config.json"
+            )
+            loaded_pair = load_pair_model_with_fallback(
                 species=str(args.species),
-                pair_model_name=pair_model_name,
+                model_name=pair_model_name,
+                device=device,
+                best_config_path=(
+                    pair_best_config_path if pair_best_config_path.is_file() else None
+                ),
                 explicit_checkpoint_path=args.pair_checkpoint_path,
             )
-            loaded_pair = load_dnabert_pair_model(pair_checkpoint_path, device)
             pair_batch_size = (
                 int(args.pair_batch_size)
                 if args.pair_batch_size is not None
@@ -1408,7 +1490,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "[scan_splice_candidate_sites] "
                 f"pair_model={pair_model_name} "
-                f"pair_checkpoint={pair_checkpoint_path}"
+                f"pair_backend={loaded_pair.backend_name} "
+                f"pair_checkpoint={loaded_pair.checkpoint_path}"
             )
 
         summaries = score_test_suite_cases(

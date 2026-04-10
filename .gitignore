@@ -19,6 +19,7 @@ wheels/
 # Externalized runtime data (raw/train/site_score/trans_score/eval_score)
 data
 archive
+model
 
 # Dropbox
 .dropboxignore

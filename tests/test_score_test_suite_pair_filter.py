@@ -150,8 +150,8 @@ def test_apply_pair_score_adjustments_uses_no_pair_penalty_without_reject() -> N
 
 
 def test_backend_names_for_model_name_prefers_real_pair_backends() -> None:
-    assert backend_names_for_model_name("cnn_pair_v2") == ("cnn_pair", "cnn_v2")
-    assert backend_names_for_model_name("cnn_pair_v2.01") == ("cnn_pair", "cnn_v2")
+    assert backend_names_for_model_name("cnn_pair_v2") == ("cnn_v2",)
+    assert backend_names_for_model_name("cnn_pair_v2.01") == ("cnn_v2",)
     assert backend_names_for_model_name("cnn_pair_v3") == ("cnn_pair_v3",)
 
 
