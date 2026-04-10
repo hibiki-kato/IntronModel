@@ -281,6 +281,13 @@ def _lr_schedule_multiplier(
         Learning-rate multiplier in ``(0, 1]`` during warmup and
         ``[eta_min_ratio, 1]`` during decay.
     """
+    if total_steps <= 0:
+        raise ValueError("total_steps must be positive.")
+    if warmup_steps < 0 or warmup_steps > total_steps:
+        raise ValueError("warmup_steps must be in [0, total_steps].")
+    if eta_min_ratio < 0.0 or eta_min_ratio > 1.0:
+        raise ValueError("eta_min_ratio must be in [0, 1].")
+
     bounded_step = min(step_index, total_steps - 1)
     if warmup_steps > 0 and bounded_step < warmup_steps:
         return float(bounded_step + 1) / float(warmup_steps)
@@ -906,6 +913,7 @@ class DnaBertBinaryClassifier(nn.Module):
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
         self.backbone = backbone
+        self.readout_type = DEFAULT_READOUT_TYPE
         self.head_norm = nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
         self.dropout = nn.Dropout(dropout)
 
@@ -1924,8 +1932,6 @@ def train_task_model(
                     compile_selected_mode,
                     compile_setup_error,
                 ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
-                if compile_enabled_attempt:
-                    eval_model = warm_start_result and eval_model
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(

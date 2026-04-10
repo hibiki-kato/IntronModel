@@ -20,7 +20,6 @@ TOP_K="4"
 FULL_EPOCHS="4"
 
 INTRONMODEL_AUTO_TMUX="on"
-CHEAT_MODE="off"
 OBJECTIVE_METRIC="max_f1"
 TRUNC_MODE="on"
 VAL_FRAC="0.25"
@@ -68,7 +67,7 @@ MAX_OOM_RETRIES="5"
 
 VISUALIZE="none"
 NAME_FIELDS="none"
-# Optional output/data overrides for trunc/cheat-data tuning runs.
+# Optional output/data overrides for trunc/synth-data tuning runs.
 TAG=""
 SYNTHESIZE_MODE="off"
 TRAIN_POS_PATH=""
@@ -322,10 +321,6 @@ if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
 	echo "[tune_dnabert_pair_time.sh] TRUNC_MODE must be off|on." >&2
 	exit 1
 fi
-if [[ "${CHEAT_MODE}" != "off" && "${CHEAT_MODE}" != "on" ]]; then
-	echo "[tune_dnabert_pair_time.sh] CHEAT_MODE must be off|on." >&2
-	exit 1
-fi
 if [[ "${OBJECTIVE_METRIC}" != "pr_auc" \
 	&& "${OBJECTIVE_METRIC}" != "max_f1" ]]; then
 	echo "[tune_dnabert_pair_time.sh] OBJECTIVE_METRIC must be pr_auc|max_f1." >&2
@@ -396,19 +391,6 @@ if [[ "${SYNTHESIZE_MODE}" == "on" ]]; then
 		NAME_FIELDS="${NAME_FIELDS},tag"
 	fi
 fi
-if [[ "${CHEAT_MODE}" == "on" ]]; then
-	if [[ -z "${TAG}" ]]; then
-		TAG="cheat"
-	elif [[ "${TAG}" != *"cheat"* ]]; then
-		TAG="${TAG}_cheat"
-	fi
-	if [[ "${NAME_FIELDS}" == "none" || -z "${NAME_FIELDS}" ]]; then
-		NAME_FIELDS="tag"
-	elif [[ ",${NAME_FIELDS}," != *",tag,"* ]]; then
-		NAME_FIELDS="${NAME_FIELDS},tag"
-	fi
-fi
-
 PYTHON_BIN="$(resolve_python_bin)"
 MODEL_NAME=""
 PRETRAINED_MODEL_NAME_RESOLVED=""
@@ -420,9 +402,6 @@ resolve_dnabert_model \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_6}" \
 	"${PRETRAINED_MODEL_RELATIVE_PATH_S}"
 TUNING_MODEL_NAME="${MODEL_NAME}_pair"
-if [[ "${TRUNC_MODE}" == "on" ]]; then
-	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_trunc"
-fi
 TUNING_MODEL_NAME="$(
 	intronmodel_resolve_pair_tuning_model_name "${TUNING_MODEL_NAME}"
 )"
@@ -431,9 +410,6 @@ TUNING_MODEL_NAME="$(
 		"${TUNING_MODEL_NAME}" \
 		"${SYNTHESIZE_MODE}"
 )"
-if [[ "${CHEAT_MODE}" == "on" ]]; then
-	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_cheat"
-fi
 BEST_CONFIG_FILENAME="$(
 	intronmodel_resolve_pair_best_config_filename "${SYNTHESIZE_MODE}"
 )"
@@ -505,9 +481,6 @@ while true; do
 			"${TUNING_MODEL_NAME}"
 	)"
 	resolved_objective_metric="pair_${OBJECTIVE_METRIC}"
-	if [[ "${CHEAT_MODE}" == "on" ]]; then
-		resolved_objective_metric="test_${OBJECTIVE_METRIC}"
-	fi
 	config_path="${output_dir}/hparam_search_config.json"
 	mkdir -p "${output_dir}"
 	TAG_JSON="$(intronmodel_json_string_or_null "${PYTHON_BIN}" "${TAG}")"
