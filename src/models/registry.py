@@ -39,7 +39,8 @@ class ModelModuleProtocol(Protocol):
 
 _MODEL_TO_MODULE: dict[str, str] = {
     "cnn": "models.cnn",
-    "cnn_pair": "models.cnn_pair",
+    # cnn_pair is an alias for cnn_v2 (cnn_pair.py archived)
+    "cnn_pair": "models.cnn_v2",
     "cnn_v2": "models.cnn_v2",
     "cnn_pair_v2": "models.cnn_v2",
     "cnn_v3": "models.cnn_v3",
@@ -58,7 +59,6 @@ _MODEL_TO_MODULE: dict[str, str] = {
     "dnabert6_pair": "models.dnabert",
     "dnaberts_pair": "models.dnabert",
     "reservoir": "models.reservoir",
-    "reservoir_legacy": "models.reservoir_legacy",
     "cnn_resdil": "models.cnn_resdil",
 }
 

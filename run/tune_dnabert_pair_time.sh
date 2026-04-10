@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="30"
+TIME_BUDGET_MINUTES="300"
 GPU_IDS="4,5,6,7"
 QUICK_TRIALS="8"
 QUICK_EPOCHS="2"
@@ -87,12 +87,15 @@ SEARCH_SPACE_FILE="auto"
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
 	"Dmel"
+	"Athal"
+	"Hsap"
+	"Mmus"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
+  "acceptor_len": {"type": "int", "min": 60, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
   "lr_schedule": {
     "type": "categorical",
@@ -421,6 +424,9 @@ if [[ "${TRUNC_MODE}" == "on" ]]; then
 	TUNING_MODEL_NAME="${TUNING_MODEL_NAME}_trunc"
 fi
 TUNING_MODEL_NAME="$(
+	intronmodel_resolve_pair_tuning_model_name "${TUNING_MODEL_NAME}"
+)"
+TUNING_MODEL_NAME="$(
 	intronmodel_resolve_synth_tuning_model_name \
 		"${TUNING_MODEL_NAME}" \
 		"${SYNTHESIZE_MODE}"
@@ -492,7 +498,12 @@ while true; do
 	run_stamp="$(date +%Y%m%d_%H%M%S)"
 	run_id="${run_stamp}_c$(printf '%03d' "${job_index}")"
 	output_dir="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${run_id}"
-	global_best_path="${DATA_ROOT}/${species}/tuning/${TUNING_MODEL_NAME}/pair/${BEST_CONFIG_FILENAME}"
+	global_best_path="$(
+		intronmodel_resolve_pair_best_config_path \
+			"${DATA_ROOT}" \
+			"${species}" \
+			"${TUNING_MODEL_NAME}"
+	)"
 	resolved_objective_metric="pair_${OBJECTIVE_METRIC}"
 	if [[ "${CHEAT_MODE}" == "on" ]]; then
 		resolved_objective_metric="test_${OBJECTIVE_METRIC}"
@@ -509,15 +520,33 @@ while true; do
 	)" || exit 1
 	IFS=$'\t' read -r TRAIN_POS_PATH_RESOLVED TRAIN_NEG_PATH_RESOLVED <<< \
 		"${resolved_train_paths}"
+	TRAIN_POS_PATH_CONFIG=""
+	if [[ -n "${TRAIN_POS_PATH_RESOLVED}" ]]; then
+		TRAIN_POS_PATH_CONFIG="$(
+			intronmodel_relpath_from_project_root "${TRAIN_POS_PATH_RESOLVED}"
+		)"
+	fi
 	TRAIN_POS_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"${TRAIN_POS_PATH_RESOLVED}"
+			"${TRAIN_POS_PATH_CONFIG}"
 	)"
+	TRAIN_NEG_PATH_CONFIG=""
+	if [[ -n "${TRAIN_NEG_PATH_RESOLVED}" ]]; then
+		TRAIN_NEG_PATH_CONFIG="$(
+			intronmodel_relpath_from_project_root "${TRAIN_NEG_PATH_RESOLVED}"
+		)"
+	fi
 	TRAIN_NEG_PATH_JSON="$(
 		intronmodel_json_string_or_null \
 			"${PYTHON_BIN}" \
-			"${TRAIN_NEG_PATH_RESOLVED}"
+			"${TRAIN_NEG_PATH_CONFIG}"
+		)"
+	output_dir_rel="$(
+		intronmodel_relpath_from_project_root "${output_dir}"
+	)"
+	global_best_path_rel="$(
+		intronmodel_relpath_from_project_root "${global_best_path}"
 	)"
 	target_search_space_json="${DEFAULT_SEARCH_SPACE_JSON_PAIR}"
 	search_space_path=""
@@ -552,9 +581,9 @@ while true; do
 
 	cat > "${config_path}" <<JSON
 {
-  "project_root": "${PROJECT_ROOT}",
+  "project_root": ".",
   "species": "${species}",
-  "output_dir": "${output_dir}",
+  "output_dir": "${output_dir_rel}",
   "quick_trials": ${QUICK_TRIALS},
   "quick_epochs": ${QUICK_EPOCHS},
   "top_k": ${TOP_K},
@@ -564,7 +593,7 @@ while true; do
   "max_parallel_trials": "${MAX_PARALLEL_TRIALS}",
   "trial_process_mode": "${TRIAL_PROCESS_MODE}",
   "objective_metric": "${resolved_objective_metric}",
-  "global_best_config_path": "${global_best_path}",
+  "global_best_config_path": "${global_best_path_rel}",
   "seed_best_config_path": null,
   "search_algo": "${SEARCH_ALGO}",
   "history_top_n": ${HISTORY_TOP_N},

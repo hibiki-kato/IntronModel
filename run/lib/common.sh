@@ -933,7 +933,7 @@ intronmodel_resolve_synth_tuning_model_name() {
 intronmodel_resolve_pair_tuning_model_name() {
 	local requested_model_name="${1:-cnn_pair_v2}"
 	case "${requested_model_name}" in
-		cnn_pair_v2 | cnn_pair_v3)
+		cnn_pair_v2 | cnn_pair_v3 | dnabert_pair | dnabert2_pair | dnabert6_pair | dnaberts_pair)
 			printf '%s\n' "${requested_model_name}"
 			;;
 		*)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import os
 from pathlib import Path
 from typing import Iterator, Mapping
@@ -200,7 +201,7 @@ def test_resolve_compile_enabled_full_forces_compile_on_cuda() -> None:
     assert enabled is True
 
 
-def test_compile_model_with_fallback_uses_default_strategy(
+def test_compile_model_with_fallback_uses_reduce_overhead_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mode_calls: list[tuple[str | None, bool | None]] = []
@@ -220,10 +221,10 @@ def test_compile_model_with_fallback_uses_default_strategy(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("default", False)]
+    assert mode_calls == [("reduce-overhead", False)]
 
 
-def test_compile_model_with_fallback_quick_alias_uses_default_strategy(
+def test_compile_model_with_fallback_quick_alias_uses_reduce_overhead_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mode_calls: list[tuple[str | None, bool | None]] = []
@@ -246,7 +247,7 @@ def test_compile_model_with_fallback_quick_alias_uses_default_strategy(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("default", False)]
+    assert mode_calls == [("reduce-overhead", False)]
 
 
 def test_extract_checkpoint_model_state_normalizes_compiled_prefixes() -> None:
@@ -282,7 +283,7 @@ def test_warm_start_model_loads_matching_state_dict(tmp_path: Path) -> None:
         assert torch.equal(value, target_model.state_dict()[key])
 
 
-def test_compile_model_with_fallback_full_alias_uses_default_strategy(
+def test_compile_model_with_fallback_full_alias_uses_reduce_overhead_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mode_calls: list[tuple[str | None, bool | None]] = []
@@ -305,7 +306,7 @@ def test_compile_model_with_fallback_full_alias_uses_default_strategy(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("default", False)]
+    assert mode_calls == [("reduce-overhead", False)]
 
 
 def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> None:
@@ -334,6 +335,41 @@ def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> Non
         assert config_obj.max_autotune is False
     if isinstance(max_autotune_gemm_obj, bool):
         assert config_obj.max_autotune_gemm is False
+
+
+def test_configure_torch_compile_runtime_installs_warning_filter() -> None:
+    logger = logging.getLogger("torch._inductor.utils")
+    logger.filters = [
+        existing_filter
+        for existing_filter in logger.filters
+        if not isinstance(
+            existing_filter,
+            model_runtime._SuppressInactiveMaxAutotuneWarnings,
+        )
+    ]
+
+    configure_torch_compile_runtime()
+
+    installed = [
+        existing_filter
+        for existing_filter in logger.filters
+        if isinstance(
+            existing_filter,
+            model_runtime._SuppressInactiveMaxAutotuneWarnings,
+        )
+    ]
+    assert len(installed) == 1
+
+    record = logging.LogRecord(
+        name="torch._inductor.utils",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="Not enough SMs to use max_autotune_gemm mode",
+        args=(),
+        exc_info=None,
+    )
+    assert installed[0].filter(record) is False
 
 
 def test_compile_model_with_fallback_applies_runtime_config(
@@ -401,7 +437,7 @@ def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("default", False)]
+    assert mode_calls == [("reduce-overhead", False)]
 
 
 def test_compile_model_with_fallback_on_ignores_max_autotune_strategy(
@@ -436,8 +472,8 @@ def test_compile_model_with_fallback_on_ignores_max_autotune_strategy(
     assert second[2] == "reduce-overhead"
     assert second[3] is None
     assert mode_calls == [
-        ("default", False),
-        ("default", False),
+        ("reduce-overhead", False),
+        ("reduce-overhead", False),
     ]
 
 
@@ -458,7 +494,7 @@ def test_compile_model_with_fallback_uses_default_backend_mode_for_eval(
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
     _ = compile_model_with_fallback(model)
-    assert mode_calls == [("default", False)]
+    assert mode_calls == [("reduce-overhead", False)]
 
 
 def test_compile_model_with_fallback_disables_max_autotune_for_default_mode(

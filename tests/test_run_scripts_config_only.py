@@ -653,6 +653,11 @@ def test_run_dnabert_pair_sh_exposes_synthesize_mode() -> None:
     )
     assert 'SYNTHESIZE_MODE="off"' in content
     assert 'TAG=""' in content
+    assert "intronmodel_resolve_pair_tuning_model_name" in content
+    assert "intronmodel_resolve_pair_best_config_filename" in content
+    assert "intronmodel_resolve_tuned_config_path" in content
+    assert 'append_arg_if_set "pair_tuned_config_path" "${tuned_path}"' in content
+    assert "intronmodel_append_versioned_output_args" in content
 
 
 def test_tune_dnabert_pair_scripts_expose_synthesize_mode() -> None:
@@ -661,6 +666,16 @@ def test_tune_dnabert_pair_scripts_expose_synthesize_mode() -> None:
         assert 'SYNTHESIZE_MODE="off"' in content
         assert "intronmodel_resolve_synth_tuning_model_name" in content
         assert "intronmodel_resolve_pair_best_config_filename" in content
+
+
+def test_tune_dnabert_pair_time_uses_pair_tuning_helpers() -> None:
+    content = (_project_root() / "run" / "tune_dnabert_pair_time.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "intronmodel_resolve_pair_tuning_model_name" in content
+    assert "intronmodel_resolve_pair_best_config_path" in content
+    assert 'TUNING_MODEL_NAME="$(' in content
+    assert '"project_root": "."' in content
 
 
 def test_reservoir_sh_rejects_cli_arguments() -> None:

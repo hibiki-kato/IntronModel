@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 import math
 import os
 import random
@@ -52,6 +53,46 @@ _COMPILE_DISABLED_MODES_CACHE: set[str] = set()
 
 _AUTO_NUM_WORKERS_MIN_PER_GPU: int = 4
 _AUTO_NUM_WORKERS_MAX_PER_GPU: int = 8
+_INDUCTOR_UTILS_LOGGER_NAME: str = "torch._inductor.utils"
+_INACTIVE_MAX_AUTOTUNE_WARNING_MESSAGES: frozenset[str] = frozenset(
+    {
+        "Not enough SMs to use max_autotune_gemm mode",
+        "GPU arch does not support max_autotune_gemm mode usage",
+    }
+)
+
+
+class _SuppressInactiveMaxAutotuneWarnings(logging.Filter):
+    """Suppress noisy Inductor autotune warnings when autotune is disabled."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if message not in _INACTIVE_MAX_AUTOTUNE_WARNING_MESSAGES:
+            return True
+        max_autotune_env = os.environ.get(_TORCHINDUCTOR_MAX_AUTOTUNE_ENV)
+        max_autotune_gemm_env = os.environ.get(_TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_ENV)
+        if max_autotune_env == "0" and max_autotune_gemm_env == "0":
+            return False
+        inductor_module = getattr(torch, "_inductor", None)
+        config_obj = getattr(inductor_module, "config", None) if inductor_module else None
+        if config_obj is None:
+            return True
+        max_autotune = getattr(config_obj, "max_autotune", None)
+        max_autotune_gemm = getattr(config_obj, "max_autotune_gemm", None)
+        if max_autotune is False and max_autotune_gemm is False:
+            return False
+        return True
+
+
+def _install_inactive_max_autotune_warning_filter() -> None:
+    """Install one logger filter that hides inactive autotune warnings."""
+    logger = logging.getLogger(_INDUCTOR_UTILS_LOGGER_NAME)
+    if any(
+        isinstance(existing_filter, _SuppressInactiveMaxAutotuneWarnings)
+        for existing_filter in logger.filters
+    ):
+        return
+    logger.addFilter(_SuppressInactiveMaxAutotuneWarnings())
 
 
 @dataclass(frozen=True)
@@ -522,14 +563,7 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
             f"Unsupported compile mode '{mode}'. "
             f"Expected one of: {', '.join(_COMPILE_MODE_CHOICES)}."
         )
-    torch_mode = mode
     if mode == _COMPILE_MODE_REDUCE_OVERHEAD:
-        # ``reduce-overhead`` is implemented as cudagraph-enabled Inductor. On
-        # these sequence models that tends to fragment into several partitions,
-        # producing noisy perf hints without a matching runtime benefit. Keep
-        # the same public compile policy, but compile with the default
-        # no-cudagraph Inductor mode under the hood.
-        torch_mode = "default"
         # Explicitly disable max_autotune_gemm for reduce-overhead mode to prevent
         # Inductor from attempting GEMM autotuning which can be noisy.
         inductor_module = getattr(torch, "_inductor", None)
@@ -543,12 +577,12 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
     elif model.training and mode == _COMPILE_MODE_MAX_AUTOTUNE:
         # Keep autotuning for training, but skip cudagraph capture to avoid the
         # same graph partition issue as ``reduce-overhead``.
-        torch_mode = "max-autotune-no-cudagraphs"
+        mode = "max-autotune-no-cudagraphs"
     with _temporary_max_autotune_setting(mode == _COMPILE_MODE_MAX_AUTOTUNE):
         # The training/inference entry points that enable compile already keep
         # loaders and padded inference batches shape-stable. Asking Inductor to
         # avoid dynamic shape graphs lets cudagraph capture remain intact.
-        return compile_fn(model, mode=torch_mode, dynamic=False)
+        return compile_fn(model, mode=mode, dynamic=False)
 
 
 def compile_model_with_fallback(
@@ -824,6 +858,7 @@ def configure_triton_tool_paths() -> None:
 
 def configure_torch_compile_runtime() -> None:
     """Apply conservative ``torch.compile`` runtime settings for stability."""
+    _install_inactive_max_autotune_warning_filter()
     dynamo_module = getattr(torch, "_dynamo", None)
     if dynamo_module is None:
         return

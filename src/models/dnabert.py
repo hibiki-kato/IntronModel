@@ -212,22 +212,26 @@ def _without_none_kwargs(kwargs: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in kwargs.items() if value is not None}
 
 
-def _normalize_readout_type(readout_type: str, *, arg_name: str) -> str:
-    """Normalize and validate one DNABERT readout type name."""
-    normalized = readout_type.strip().lower()
-    if normalized not in READOUT_TYPE_CHOICES:
-        choices_text = ", ".join(READOUT_TYPE_CHOICES)
+def _normalize_choice(
+    value: str,
+    choices: tuple[str, ...],
+    *,
+    arg_name: str,
+) -> str:
+    """Normalize and validate a string choice against an allowed set."""
+    normalized = value.strip().lower()
+    if normalized not in choices:
+        choices_text = ", ".join(choices)
         raise ValueError(f"{arg_name} must be one of: {choices_text}.")
     return normalized
+
+
+def _normalize_readout_type(readout_type: str, *, arg_name: str) -> str:
+    return _normalize_choice(readout_type, READOUT_TYPE_CHOICES, arg_name=arg_name)
 
 
 def _normalize_lr_schedule(lr_schedule: str, *, arg_name: str) -> str:
-    """Normalize and validate one learning-rate schedule name."""
-    normalized = lr_schedule.strip().lower()
-    if normalized not in LR_SCHEDULE_CHOICES:
-        choices_text = ", ".join(LR_SCHEDULE_CHOICES)
-        raise ValueError(f"{arg_name} must be one of: {choices_text}.")
-    return normalized
+    return _normalize_choice(lr_schedule, LR_SCHEDULE_CHOICES, arg_name=arg_name)
 
 
 def _lr_schedule_multiplier(
@@ -251,32 +255,15 @@ def _lr_schedule_multiplier(
     eta_min_ratio : float
         Final learning-rate ratio relative to the base learning rate.
     lr_schedule : str
-        Decay family name (``cosine`` or ``linear``).
+        Normalized decay family name (``cosine`` or ``linear``).
+        Must be pre-validated with ``_normalize_lr_schedule``.
 
     Returns
     -------
     float
         Learning-rate multiplier in ``(0, 1]`` during warmup and
         ``[eta_min_ratio, 1]`` during decay.
-
-    Raises
-    ------
-    ValueError
-        If any argument is outside the supported range.
     """
-    if total_steps <= 0:
-        raise ValueError("total_steps must be positive.")
-    if warmup_steps < 0 or warmup_steps > total_steps:
-        raise ValueError("warmup_steps must satisfy 0 <= warmup_steps <= total_steps.")
-    if step_index < 0:
-        raise ValueError("step_index must be non-negative.")
-    if not (0.0 <= eta_min_ratio <= 1.0):
-        raise ValueError("eta_min_ratio must satisfy 0 <= eta_min_ratio <= 1.")
-    normalized_schedule = _normalize_lr_schedule(
-        lr_schedule,
-        arg_name="lr_schedule",
-    )
-
     bounded_step = min(step_index, total_steps - 1)
     if warmup_steps > 0 and bounded_step < warmup_steps:
         return float(bounded_step + 1) / float(warmup_steps)
@@ -289,7 +276,7 @@ def _lr_schedule_multiplier(
         progress = float(bounded_step - decay_start) / float(decay_steps - 1)
     progress = min(max(progress, 0.0), 1.0)
 
-    if normalized_schedule == "cosine":
+    if lr_schedule == "cosine":
         decay_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
         return eta_min_ratio + (1.0 - eta_min_ratio) * decay_factor
     return eta_min_ratio + (1.0 - eta_min_ratio) * (1.0 - progress)
@@ -530,6 +517,28 @@ def _resolve_max_tokens(
     return resolved
 
 
+def _extract_tokenizer_tensors(
+    encoded_obj: Mapping[str, object],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Extract input_ids and attention_mask tensors from tokenizer output."""
+    input_ids_obj = encoded_obj.get("input_ids")
+    attention_mask_obj = encoded_obj.get("attention_mask")
+
+    if isinstance(input_ids_obj, torch.Tensor):
+        input_ids = input_ids_obj.long()
+    else:
+        input_ids = torch.as_tensor(input_ids_obj, dtype=torch.long)
+
+    if attention_mask_obj is None:
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+    elif isinstance(attention_mask_obj, torch.Tensor):
+        attention_mask = attention_mask_obj.long()
+    else:
+        attention_mask = torch.as_tensor(attention_mask_obj, dtype=torch.long)
+
+    return input_ids, attention_mask
+
+
 def _tokenize_sequences(
     tokenizer: object,
     sequences: Sequence[str],
@@ -554,23 +563,7 @@ def _tokenize_sequences(
     )
     if not isinstance(encoded_obj, Mapping):
         raise TypeError("Tokenizer output must be a mapping.")
-
-    input_ids_obj = encoded_obj.get("input_ids")
-    attention_mask_obj = encoded_obj.get("attention_mask")
-
-    if isinstance(input_ids_obj, torch.Tensor):
-        input_ids = input_ids_obj.long()
-    else:
-        input_ids = torch.as_tensor(input_ids_obj, dtype=torch.long)
-
-    if attention_mask_obj is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
-    elif isinstance(attention_mask_obj, torch.Tensor):
-        attention_mask = attention_mask_obj.long()
-    else:
-        attention_mask = torch.as_tensor(attention_mask_obj, dtype=torch.long)
-
-    return input_ids, attention_mask
+    return _extract_tokenizer_tensors(encoded_obj)
 
 
 def _tokenize_sequence_pairs(
@@ -607,22 +600,7 @@ def _tokenize_sequence_pairs(
     )
     if not isinstance(encoded_obj, Mapping):
         raise TypeError("Tokenizer output must be a mapping.")
-
-    input_ids_obj = encoded_obj.get("input_ids")
-    attention_mask_obj = encoded_obj.get("attention_mask")
-
-    if isinstance(input_ids_obj, torch.Tensor):
-        input_ids = input_ids_obj.long()
-    else:
-        input_ids = torch.as_tensor(input_ids_obj, dtype=torch.long)
-
-    if attention_mask_obj is None:
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long)
-    elif isinstance(attention_mask_obj, torch.Tensor):
-        attention_mask = attention_mask_obj.long()
-    else:
-        attention_mask = torch.as_tensor(attention_mask_obj, dtype=torch.long)
-    return input_ids, attention_mask
+    return _extract_tokenizer_tensors(encoded_obj)
 
 
 def _build_tokenizer_cache_key(
@@ -911,7 +889,6 @@ class DnaBertBinaryClassifier(nn.Module):
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
         self.backbone = backbone
-        self.readout_type: str = DEFAULT_READOUT_TYPE
         self.head_norm = nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
         self.dropout = nn.Dropout(dropout)
 
@@ -1415,19 +1392,19 @@ def evaluate(
     all_labels: list[np.ndarray] = []
     use_non_blocking = device == "cuda"
 
+    if use_amp and device == "cuda" and amp_dtype is not None:
+        amp_context: ContextManager[object] = torch.autocast(
+            device_type="cuda",
+            dtype=amp_dtype,
+            enabled=True,
+        )
+    else:
+        amp_context = nullcontext()
+
     for input_ids, attention_mask, labels in loader:
         input_ids = input_ids.to(device, non_blocking=use_non_blocking)
         attention_mask = attention_mask.to(device, non_blocking=use_non_blocking)
         labels = labels.to(device, non_blocking=use_non_blocking)
-
-        if use_amp and device == "cuda" and amp_dtype is not None:
-            amp_context: ContextManager[object] = torch.autocast(
-                device_type="cuda",
-                dtype=amp_dtype,
-                enabled=True,
-            )
-        else:
-            amp_context = nullcontext()
 
         with amp_context:
             logits = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -2375,6 +2352,15 @@ def _float_from_checkpoint(
     return default
 
 
+def _optional_positive_int(value: object) -> Optional[int]:
+    """Return value as int if it is a positive integer, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
 def load_task_model(
     checkpoint_path: str,
     device: str,
@@ -2504,6 +2490,15 @@ def score_sequences(
     log_every_batches = 200
     use_non_blocking = device == "cuda"
 
+    if use_amp and device == "cuda" and amp_dtype is not None:
+        amp_context: ContextManager[object] = torch.autocast(
+            device_type="cuda",
+            dtype=amp_dtype,
+            enabled=True,
+        )
+    else:
+        amp_context = nullcontext()
+
     for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
         batch_sequences = sequences[start : start + batch_size]
         ids_tensor, mask_tensor = _tokenize_sequences(
@@ -2515,14 +2510,6 @@ def score_sequences(
         ids_tensor = ids_tensor.to(device, non_blocking=use_non_blocking)
         mask_tensor = mask_tensor.to(device, non_blocking=use_non_blocking)
 
-        if use_amp and device == "cuda" and amp_dtype is not None:
-            amp_context: ContextManager[object] = torch.autocast(
-                device_type="cuda",
-                dtype=amp_dtype,
-                enabled=True,
-            )
-        else:
-            amp_context = nullcontext()
         with amp_context:
             logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
         log_scores = log10_sigmoid_np(logits.float().cpu().numpy())
@@ -2573,6 +2560,15 @@ def score_sequence_pairs(
     log_every_batches = 200
     use_non_blocking = device == "cuda"
 
+    if use_amp and device == "cuda" and amp_dtype is not None:
+        amp_context: ContextManager[object] = torch.autocast(
+            device_type="cuda",
+            dtype=amp_dtype,
+            enabled=True,
+        )
+    else:
+        amp_context = nullcontext()
+
     for batch_idx, start in enumerate(range(0, total, batch_size), start=1):
         batch_donor_sequences = donor_sequences[start : start + batch_size]
         batch_acceptor_sequences = acceptor_sequences[start : start + batch_size]
@@ -2586,14 +2582,6 @@ def score_sequence_pairs(
         ids_tensor = ids_tensor.to(device, non_blocking=use_non_blocking)
         mask_tensor = mask_tensor.to(device, non_blocking=use_non_blocking)
 
-        if use_amp and device == "cuda" and amp_dtype is not None:
-            amp_context: ContextManager[object] = torch.autocast(
-                device_type="cuda",
-                dtype=amp_dtype,
-                enabled=True,
-            )
-        else:
-            amp_context = nullcontext()
         with amp_context:
             logits = model(input_ids=ids_tensor, attention_mask=mask_tensor)
         log_scores = log10_sigmoid_np(logits.float().cpu().numpy())

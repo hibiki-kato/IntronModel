@@ -21,6 +21,8 @@ EPOCHS="auto"
 MAX_EPOCHS="10"
 EARLY_STOP_PATIENCE="2"
 EARLY_STOP_MIN_DELTA="0.005"
+SKIP_TRAINING="0"
+CONTINUE_TRAINING="0"
 
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
@@ -41,8 +43,6 @@ TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 MASK_TEST_TSV_PATH=""
 VISUALIZE="true"
-SKIP_TRAINING="0"
-CONTINUE_TRAINING="0"
 TRAIN_ONLY="0"
 PRECOMPUTED_SITE_SCORE_TSV=""
 CHECKPOINT_TOP_K="3"
@@ -105,6 +105,7 @@ set +a
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/tuned_config.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
 
@@ -114,6 +115,26 @@ intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 resolve_dnabert_relative_path() {
 	intronmodel_resolve_dnabert_relative_path "dnabert_pair.sh" "$@"
+}
+
+append_arg_if_set() {
+	local flag="$1"
+	local value="$2"
+	if [[ -n "${value}" ]]; then
+		args+=("--${flag}" "${value}")
+	fi
+}
+
+append_flag_if_truthy() {
+	local flag="$1"
+	local value="$2"
+	local normalized
+	normalized="$(echo "${value}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	case "${normalized}" in
+		1 | true | on | yes)
+			args+=("--${flag}")
+			;;
+	esac
 }
 
 intronmodel_start_timer "dnabert_pair.sh"
@@ -188,8 +209,146 @@ if [[ -z "${TAG}" ]]; then
 	export TAG
 fi
 
+USE_TUNED_HPARAMS_MODE="$(
+	intronmodel_normalize_use_tuned_mode "${USE_TUNED_HPARAMS}" "dnabert_pair.sh"
+)"
+if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
+	RESOLVED_TUNED_TARGET="$(
+		intronmodel_resolve_tuned_target "pair" "pair"
+	)"
+fi
+
+tuned_model_name="$(
+	intronmodel_resolve_pair_tuning_model_name "${MODEL:-dnabert_pair}"
+)"
+best_config_filename="$(
+	intronmodel_resolve_pair_best_config_filename "${SYNTHESIZE_MODE}"
+)"
+tuned_path=""
+tuned_output=""
+tuned_args=()
+use_wrapper_hparams="1"
+args=()
+
+append_flag_if_truthy "skip_train" "${SKIP_TRAINING}"
+append_flag_if_truthy "continue_train" "${CONTINUE_TRAINING}"
+append_flag_if_truthy "train_only" "${TRAIN_ONLY}"
+if [[ -n "${TAG}" ]]; then
+	append_arg_if_set "tag" "${TAG}"
+fi
+append_arg_if_set "train_pos_path" "${TRAIN_POS_PATH}"
+append_arg_if_set "train_neg_path" "${TRAIN_NEG_PATH}"
+append_arg_if_set "mask_test_tsv" "${MASK_TEST_TSV_PATH}"
+if [[ "${SKIP_TRAINING}" == "1" && "${TRAIN_ONLY}" != "1" ]]; then
+	intronmodel_append_versioned_output_args \
+		"dnabert_pair.sh" "${SPECIES}" "${MODEL:-dnabert_pair}" args
+fi
+
+if [[ "${USE_TUNED_HPARAMS_MODE}" != "off" ]]; then
+	tuned_path="$(
+		intronmodel_resolve_tuned_config_path \
+			"${DATA_ROOT}" \
+			"${SPECIES}" \
+			"${tuned_model_name}" \
+			"${RESOLVED_TUNED_TARGET}" \
+			"${PAIR_TUNED_CONFIG_PATH}" \
+			"${SHARED_TUNED_CONFIG_PATH}" \
+			"${best_config_filename}"
+	)"
+	if [[ -z "${tuned_path}" ]]; then
+		if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+			echo "[dnabert_pair.sh] tuned config is required but not found: "\
+				"species=${SPECIES} target=${RESOLVED_TUNED_TARGET}" >&2
+			exit 1
+		fi
+		echo "[dnabert_pair.sh] tuned config not found; using CONFIG defaults." >&2
+	elif [[ ! -f "${tuned_path}" ]]; then
+		if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+			echo "[dnabert_pair.sh] tuned config path not found: ${tuned_path}" >&2
+			exit 1
+		fi
+		echo "[dnabert_pair.sh] tuned config path not found: ${tuned_path}; "\
+			"using CONFIG defaults." >&2
+		tuned_path=""
+	fi
+fi
+
+if [[ -n "${tuned_path}" ]]; then
+	if ! tuned_output="$(intronmodel_load_tuned_overrides "${tuned_path}" 2>&1)"; then
+		if [[ "${USE_TUNED_HPARAMS_MODE}" == "required" ]]; then
+			echo "[dnabert_pair.sh] failed to load tuned config: ${tuned_path}" >&2
+			echo "[dnabert_pair.sh] detail: ${tuned_output}" >&2
+			exit 1
+		fi
+		echo "[dnabert_pair.sh] failed to load tuned config: ${tuned_path}; "\
+			"using CONFIG defaults." >&2
+	else
+		use_wrapper_hparams="0"
+		loaded_count=0
+		while IFS= read -r line; do
+			if [[ -z "${line}" ]]; then
+				continue
+			fi
+			IFS=$'\t' read -r tuned_key tuned_value <<<"${line}"
+			if [[ -z "${tuned_key}" || -z "${tuned_value}" ]]; then
+				continue
+			fi
+			if [[ "${tuned_key}" == "tag" ]]; then
+				continue
+			fi
+			tuned_args+=(--"${tuned_key}" "${tuned_value}")
+			loaded_count=$((loaded_count + 1))
+		done <<<"${tuned_output}"
+		echo "[dnabert_pair.sh] tuned params loaded from ${tuned_path} "\
+			"(count=${loaded_count})"
+	fi
+fi
+append_arg_if_set "pair_tuned_config_path" "${tuned_path}"
+if [[ -n "${tuned_path}" ]]; then
+	PAIR_TUNED_CONFIG_PATH="${tuned_path}"
+	export PAIR_TUNED_CONFIG_PATH
+fi
+
+if [[ "${use_wrapper_hparams}" == "1" ]]; then
+	args+=(
+		--donor_len "${DONOR_LEN}"
+		--acceptor_len "${ACCEPTOR_LEN}"
+		--seed "${SEED}"
+		--batch_size "${BATCH_SIZE}"
+		--lr "${LR}"
+		--loss "${LOSS}"
+		--max_tokens "${MAX_TOKENS}"
+		--dropout "${DROPOUT}"
+		--head_layer_norm "${HEAD_LAYER_NORM}"
+		--weight_decay "${WEIGHT_DECAY}"
+		--eta_min_ratio "${ETA_MIN_RATIO}"
+		--lr_schedule "${LR_SCHEDULE}"
+		--warmup_ratio "${WARMUP_RATIO}"
+		--adam_beta1 "${ADAM_BETA1}"
+		--adam_beta2 "${ADAM_BETA2}"
+		--adam_eps "${ADAM_EPS}"
+		--val_frac "${VAL_FRAC}"
+		--grad_clip "${GRAD_CLIP}"
+		--pos_weight_cap "${POS_WEIGHT_CAP}"
+		--focal_gamma "${FOCAL_GAMMA}"
+	)
+	append_arg_if_set "focal_alpha_pos" "${FOCAL_ALPHA_POS}"
+	append_arg_if_set "asym_gamma_pos" "${ASYM_GAMMA_POS}"
+	append_arg_if_set "asym_gamma_neg" "${ASYM_GAMMA_NEG}"
+	append_arg_if_set "asym_alpha_pos" "${ASYM_ALPHA_POS}"
+fi
+
+if [[ ${#tuned_args[@]} -gt 0 ]]; then
+	args+=("${tuned_args[@]}")
+fi
+
 (
 	export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+	if [[ ${#args[@]} -gt 0 ]]; then
+		printf '[dnabert_pair.sh] prepared run args:'
+		printf ' %q' "${args[@]}"
+		printf '\n'
+	fi
 	intronmodel_run_with_process_title \
 		"${PROCESS_TITLE}" \
 		python3 "${PROJECT_ROOT}/src/tools/run_wrapper_pipeline.py" \

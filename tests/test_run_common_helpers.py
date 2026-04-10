@@ -294,13 +294,18 @@ def test_common_resolve_pair_best_config_path_supports_cnn_pair_v3(
 
 def test_common_resolve_pair_tuning_model_name_supports_active_pair_models() -> None:
     run = _run_common_shell(
-        'printf "%s\\n%s\\n" '
+        'printf "%s\\n%s\\n%s\\n" '
         '"$(intronmodel_resolve_pair_tuning_model_name cnn_pair_v2)" '
-        '"$(intronmodel_resolve_pair_tuning_model_name cnn_pair_v3)"\n'
+        '"$(intronmodel_resolve_pair_tuning_model_name cnn_pair_v3)" '
+        '"$(intronmodel_resolve_pair_tuning_model_name dnabert2_pair)"\n'
     )
 
     assert run.returncode == 0, run.stderr
-    assert run.stdout.strip().splitlines() == ["cnn_pair_v2", "cnn_pair_v3"]
+    assert run.stdout.strip().splitlines() == [
+        "cnn_pair_v2",
+        "cnn_pair_v3",
+        "dnabert2_pair",
+    ]
 
 
 def test_common_resolve_latest_published_name_does_not_seed_when_history_missing(
