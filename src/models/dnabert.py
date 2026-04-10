@@ -173,6 +173,23 @@ _BACKBONE_TEMPLATE_CACHE: dict[_BackboneCacheKey, _CachedBackboneTemplate] = {}
 SequenceT = TypeVar("SequenceT")
 
 
+def _is_torch_compile_active() -> bool:
+    """Return whether execution is currently inside ``torch.compile``."""
+    compiler_module = getattr(torch, "compiler", None)
+    if compiler_module is not None:
+        is_compiling = getattr(compiler_module, "is_compiling", None)
+        if callable(is_compiling):
+            return bool(is_compiling())
+
+    dynamo_module = getattr(torch, "_dynamo", None)
+    if dynamo_module is None:
+        return False
+    is_compiling = getattr(dynamo_module, "is_compiling", None)
+    if not callable(is_compiling):
+        return False
+    return bool(is_compiling())
+
+
 def _clear_pretrained_resource_caches() -> None:
     """Clear tokenizer and backbone template caches used in one process."""
     _TOKENIZER_CACHE.clear()
@@ -942,12 +959,13 @@ class DnaBertBinaryClassifier(nn.Module):
         else:
             raise RuntimeError("Unsupported backbone output format.")
 
-        if attention_mask.dim() != 2:
-            raise RuntimeError("attention_mask must have shape (batch, tokens).")
-        if hidden.shape[:2] != attention_mask.shape:
-            raise RuntimeError(
-                "backbone hidden and attention_mask token lengths must match."
-            )
+        if not _is_torch_compile_active():
+            if attention_mask.dim() != 2:
+                raise RuntimeError("attention_mask must have shape (batch, tokens).")
+            if hidden.shape[:2] != attention_mask.shape:
+                raise RuntimeError(
+                    "backbone hidden and attention_mask token lengths must match."
+                )
 
         token_hidden = self.dropout(self.head_norm(hidden))
         pooled_hidden = self._masked_mean(token_hidden, attention_mask)
@@ -1889,6 +1907,7 @@ def train_task_model(
             initialized_from_checkpoint = warm_start_result.initialized_from_checkpoint
             init_checkpoint_path = warm_start_result.init_checkpoint_path
 
+            eval_model = model
             if compile_enabled_attempt:
                 _configure_triton_tool_paths()
                 _configure_torch_compile_runtime()
@@ -1905,6 +1924,8 @@ def train_task_model(
                     compile_selected_mode,
                     compile_setup_error,
                 ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
+                if compile_enabled_attempt:
+                    eval_model = warm_start_result and eval_model
                 compile_enabled = compile_enabled_attempt
                 if (not compile_enabled_attempt) and compile_setup_error is not None:
                     print(
@@ -2051,14 +2072,14 @@ def train_task_model(
                 train_loss = float(running_loss / max(1, len(train_loader)))
 
                 val_metrics = evaluate(
-                    model=model,
+                    model=eval_model,
                     loader=val_loader,
                     device=device,
                     use_amp=use_amp_bool,
                     amp_dtype=amp_dtype_resolved,
                 )
                 train_metrics = evaluate(
-                    model=model,
+                    model=eval_model,
                     loader=train_eval_loader,
                     device=device,
                     use_amp=use_amp_bool,
