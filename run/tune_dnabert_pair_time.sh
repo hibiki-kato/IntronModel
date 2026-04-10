@@ -12,7 +12,7 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="120"
+TIME_BUDGET_MINUTES="30"
 
 INTRONMODEL_AUTO_TMUX="on"
 CHEAT_MODE="off"
@@ -35,11 +35,11 @@ PRETRAINED_MODEL_RELATIVE_PATH_S="pretrained/dnabert-s"
 PRETRAINED_REVISION=""
 TRUST_REMOTE_CODE="1"
 
-QUICK_TRIALS="12"
+QUICK_TRIALS="6"
 QUICK_EPOCHS="2"
 TOP_K="2"
-FULL_EPOCHS="3"
-QUICK_COMPILE_MODE="off"
+FULL_EPOCHS="4"
+QUICK_COMPILE_MODE="on"
 FULL_COMPILE_MODE="on"
 LR_SCHEDULE="cosine"
 WARMUP_RATIO="0.01"
@@ -91,9 +91,6 @@ SEARCH_SPACE_FILE="auto"
 # Species scheduling order for repeated short cycles.
 JOB_ORDER=(
 	"Dmel"
-	"Hsap"
-	"Mmus"
-	"Athal"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
@@ -103,7 +100,7 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
   "batch_size": {
     "type": "categorical",
-    "values": [8, 12, 16, 24, 32, 48, 64, 96, 128]
+    "values": [48, 96, 128]
   },
   "loss": {
     "type": "categorical",
