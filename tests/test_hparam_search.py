@@ -4608,13 +4608,12 @@ def test_build_trial_params_skips_duplicate_quick_samples(
     ]
 
 
-def test_build_trial_params_dnabert_linear_drops_inactive_readout_keys(
+def test_build_trial_params_dnabert_drops_legacy_readout_keys(
     tmp_path: Path,
 ) -> None:
     search_space = hparam_search._validate_search_space(
         {
             "readout_type": {"type": "categorical", "values": ["linear"]},
-            "readout_cnn_kernel_size": {"type": "categorical", "values": [3, 5, 7]},
             "readout_mlp_hidden_dim": {
                 "type": "categorical",
                 "values": [128, 256, 512],
@@ -4644,7 +4643,6 @@ def test_build_trial_params_dnabert_linear_drops_inactive_readout_keys(
             "species": "Dmel",
             "batch_size": 16,
             "readout_type": "linear",
-            "readout_cnn_kernel_size": 3,
             "readout_mlp_hidden_dim": 256,
             "readout_mlp_layers": 1,
         },
@@ -4660,19 +4658,17 @@ def test_build_trial_params_dnabert_linear_drops_inactive_readout_keys(
         seed_offset=0,
     )[0]
 
-    assert params["readout_type"] == "linear"
-    assert "readout_cnn_kernel_size" not in params
+    assert "readout_type" not in params
     assert "readout_mlp_hidden_dim" not in params
     assert "readout_mlp_layers" not in params
 
 
-def test_build_trial_params_history_guided_normalizes_dnabert_readout_keys(
+def test_build_trial_params_history_guided_drops_dnabert_readout_keys(
     tmp_path: Path,
 ) -> None:
     search_space = hparam_search._validate_search_space(
         {
             "readout_type": {"type": "categorical", "values": ["linear", "mlp"]},
-            "readout_cnn_kernel_size": {"type": "categorical", "values": [3, 5, 7]},
             "readout_mlp_hidden_dim": {
                 "type": "categorical",
                 "values": [128, 256, 512],
@@ -4702,7 +4698,6 @@ def test_build_trial_params_history_guided_normalizes_dnabert_readout_keys(
             "species": "Dmel",
             "batch_size": 16,
             "readout_type": "linear",
-            "readout_cnn_kernel_size": 3,
             "readout_mlp_hidden_dim": 256,
             "readout_mlp_layers": 1,
         },
@@ -4718,7 +4713,6 @@ def test_build_trial_params_history_guided_normalizes_dnabert_readout_keys(
             0.8,
             {
                 "readout_type": "linear",
-                "readout_cnn_kernel_size": 7,
                 "readout_mlp_hidden_dim": 512,
                 "readout_mlp_layers": 3,
             },
@@ -4733,8 +4727,7 @@ def test_build_trial_params_history_guided_normalizes_dnabert_readout_keys(
         history_trials=history_trials,
     )[0]
 
-    assert params["readout_type"] == "linear"
-    assert "readout_cnn_kernel_size" not in params
+    assert "readout_type" not in params
     assert "readout_mlp_hidden_dim" not in params
     assert "readout_mlp_layers" not in params
 

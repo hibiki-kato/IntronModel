@@ -705,19 +705,6 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
             _require_env(env, "HEAD_LAYER_NORM"),
             "HEAD_LAYER_NORM",
         )
-        base["readout_type"] = _require_env(env, "READOUT_TYPE")
-        base["readout_cnn_kernel_size"] = _as_int(
-            _require_env(env, "READOUT_CNN_KERNEL_SIZE"),
-            "READOUT_CNN_KERNEL_SIZE",
-        )
-        base["readout_mlp_hidden_dim"] = _as_int(
-            _require_env(env, "READOUT_MLP_HIDDEN_DIM"),
-            "READOUT_MLP_HIDDEN_DIM",
-        )
-        base["readout_mlp_layers"] = _as_int(
-            _require_env(env, "READOUT_MLP_LAYERS"),
-            "READOUT_MLP_LAYERS",
-        )
 
     return base
 
@@ -2948,10 +2935,6 @@ SPECS: dict[str, WrapperSpec] = {
             "max_tokens": "MAX_TOKENS",
             "dropout": "DROPOUT",
             "head_layer_norm": "HEAD_LAYER_NORM",
-            "readout_type": "READOUT_TYPE",
-            "readout_cnn_kernel_size": "READOUT_CNN_KERNEL_SIZE",
-            "readout_mlp_hidden_dim": "READOUT_MLP_HIDDEN_DIM",
-            "readout_mlp_layers": "READOUT_MLP_LAYERS",
             "weight_decay": "WEIGHT_DECAY",
             "eta_min_ratio": "ETA_MIN_RATIO",
             "lr_schedule": "LR_SCHEDULE",
@@ -2987,10 +2970,6 @@ SPECS: dict[str, WrapperSpec] = {
             "MAX_TOKENS",
             "DROPOUT",
             "HEAD_LAYER_NORM",
-            "READOUT_TYPE",
-            "READOUT_CNN_KERNEL_SIZE",
-            "READOUT_MLP_HIDDEN_DIM",
-            "READOUT_MLP_LAYERS",
             "WEIGHT_DECAY",
             "ETA_MIN_RATIO",
             "GRAD_CLIP",
@@ -3024,10 +3003,6 @@ SPECS: dict[str, WrapperSpec] = {
             "MAX_TOKENS",
             "DROPOUT",
             "HEAD_LAYER_NORM",
-            "READOUT_TYPE",
-            "READOUT_CNN_KERNEL_SIZE",
-            "READOUT_MLP_HIDDEN_DIM",
-            "READOUT_MLP_LAYERS",
             "WEIGHT_DECAY",
             "ETA_MIN_RATIO",
             "LR_SCHEDULE",
@@ -3056,10 +3031,6 @@ SPECS: dict[str, WrapperSpec] = {
             "max_tokens": "MAX_TOKENS",
             "dropout": "DROPOUT",
             "head_layer_norm": "HEAD_LAYER_NORM",
-            "readout_type": "READOUT_TYPE",
-            "readout_cnn_kernel_size": "READOUT_CNN_KERNEL_SIZE",
-            "readout_mlp_hidden_dim": "READOUT_MLP_HIDDEN_DIM",
-            "readout_mlp_layers": "READOUT_MLP_LAYERS",
             "weight_decay": "WEIGHT_DECAY",
             "eta_min_ratio": "ETA_MIN_RATIO",
             "lr_schedule": "LR_SCHEDULE",
@@ -3095,10 +3066,6 @@ SPECS: dict[str, WrapperSpec] = {
             "MAX_TOKENS",
             "DROPOUT",
             "HEAD_LAYER_NORM",
-            "READOUT_TYPE",
-            "READOUT_CNN_KERNEL_SIZE",
-            "READOUT_MLP_HIDDEN_DIM",
-            "READOUT_MLP_LAYERS",
             "WEIGHT_DECAY",
             "ETA_MIN_RATIO",
             "GRAD_CLIP",

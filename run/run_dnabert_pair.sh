@@ -14,10 +14,13 @@ fi
 set -a
 DNABERT_VARIANT="2"
 SPECIES="Dmel"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
 TRUNC_MODE="on"
 INTRONMODEL_AUTO_TMUX="on"
+GPU_IDS="auto"
+EPOCHS="auto"
+MAX_EPOCHS="10"
+EARLY_STOP_PATIENCE="2"
+EARLY_STOP_MIN_DELTA="0.005"
 
 PRETRAINED_MODEL_NAME=""
 PRETRAINED_MODEL_RELATIVE_PATH_2="pretrained/dnabert2-117m-7bce263b15377fc15361f52cfab88f8b586abda0"
@@ -45,10 +48,8 @@ PRECOMPUTED_SITE_SCORE_TSV=""
 CHECKPOINT_TOP_K="3"
 CHECKPOINT_PRUNE_DRY_RUN="0"
 
-EPOCHS="auto"
-MAX_EPOCHS="100"
-EARLY_STOP_PATIENCE="3"
-EARLY_STOP_MIN_DELTA="0.01"
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
 BATCH_SIZE="64"
 INFER_BATCH_SIZE="256"
 LR="2e-5"
@@ -56,10 +57,6 @@ LOSS="weighted_bce"
 MAX_TOKENS="auto"
 DROPOUT="0.1"
 HEAD_LAYER_NORM="1"
-READOUT_TYPE="cnn"
-READOUT_CNN_KERNEL_SIZE="3"
-READOUT_MLP_HIDDEN_DIM="256"
-READOUT_MLP_LAYERS="1"
 WEIGHT_DECAY="0.01"
 ETA_MIN_RATIO="0.01"
 LR_SCHEDULE="cosine"
@@ -81,7 +78,6 @@ PAIR_TUNED_CONFIG_PATH=""
 SHARED_TUNED_CONFIG_PATH=""
 
 DEVICE="auto"
-GPU_IDS="auto"
 MAX_PARALLEL_TRIALS="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
@@ -139,28 +135,6 @@ if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
 fi
 if [[ "${HEAD_LAYER_NORM}" != "0" && "${HEAD_LAYER_NORM}" != "1" ]]; then
 	echo "[dnabert_pair.sh] HEAD_LAYER_NORM must be 0 or 1." >&2
-	exit 1
-fi
-if [[ "${READOUT_TYPE}" != "cnn" \
-	&& "${READOUT_TYPE}" != "linear" \
-	&& "${READOUT_TYPE}" != "mlp" ]]; then
-	echo "[dnabert_pair.sh] READOUT_TYPE must be cnn|linear|mlp." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_CNN_KERNEL_SIZE}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_CNN_KERNEL_SIZE}" -le 0 ]] \
-	|| (( READOUT_CNN_KERNEL_SIZE % 2 == 0 )); then
-	echo "[dnabert_pair.sh] READOUT_CNN_KERNEL_SIZE must be a positive odd integer." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_MLP_HIDDEN_DIM}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_MLP_HIDDEN_DIM}" -le 0 ]]; then
-	echo "[dnabert_pair.sh] READOUT_MLP_HIDDEN_DIM must be a positive integer." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_MLP_LAYERS}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_MLP_LAYERS}" -le 0 ]]; then
-	echo "[dnabert_pair.sh] READOUT_MLP_LAYERS must be a positive integer." >&2
 	exit 1
 fi
 if [[ "${LR_SCHEDULE}" != "cosine" && "${LR_SCHEDULE}" != "linear" ]]; then

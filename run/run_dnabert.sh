@@ -56,10 +56,6 @@ LOSS="weighted_bce"
 MAX_TOKENS="auto"
 DROPOUT="0.1"
 HEAD_LAYER_NORM="1"
-READOUT_TYPE="cnn"
-READOUT_CNN_KERNEL_SIZE="3"
-READOUT_MLP_HIDDEN_DIM="256"
-READOUT_MLP_LAYERS="1"
 WEIGHT_DECAY="0.01"
 ETA_MIN_RATIO="0.01"
 LR_SCHEDULE="cosine"
@@ -94,14 +90,6 @@ DONOR_DROPOUT=""
 ACCEPTOR_DROPOUT=""
 DONOR_HEAD_LAYER_NORM=""
 ACCEPTOR_HEAD_LAYER_NORM=""
-DONOR_READOUT_TYPE=""
-ACCEPTOR_READOUT_TYPE=""
-DONOR_READOUT_CNN_KERNEL_SIZE=""
-ACCEPTOR_READOUT_CNN_KERNEL_SIZE=""
-DONOR_READOUT_MLP_HIDDEN_DIM=""
-ACCEPTOR_READOUT_MLP_HIDDEN_DIM=""
-DONOR_READOUT_MLP_LAYERS=""
-ACCEPTOR_READOUT_MLP_LAYERS=""
 DONOR_WEIGHT_DECAY=""
 ACCEPTOR_WEIGHT_DECAY=""
 DONOR_ETA_MIN_RATIO=""
@@ -194,28 +182,6 @@ if [[ "${TRUNC_MODE}" != "off" && "${TRUNC_MODE}" != "on" ]]; then
 fi
 if [[ "${HEAD_LAYER_NORM}" != "0" && "${HEAD_LAYER_NORM}" != "1" ]]; then
 	echo "[dnabert.sh] HEAD_LAYER_NORM must be 0 or 1." >&2
-	exit 1
-fi
-if [[ "${READOUT_TYPE}" != "cnn" \
-	&& "${READOUT_TYPE}" != "linear" \
-	&& "${READOUT_TYPE}" != "mlp" ]]; then
-	echo "[dnabert.sh] READOUT_TYPE must be cnn|linear|mlp." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_CNN_KERNEL_SIZE}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_CNN_KERNEL_SIZE}" -le 0 ]] \
-	|| (( READOUT_CNN_KERNEL_SIZE % 2 == 0 )); then
-	echo "[dnabert.sh] READOUT_CNN_KERNEL_SIZE must be a positive odd integer." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_MLP_HIDDEN_DIM}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_MLP_HIDDEN_DIM}" -le 0 ]]; then
-	echo "[dnabert.sh] READOUT_MLP_HIDDEN_DIM must be a positive integer." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_MLP_LAYERS}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_MLP_LAYERS}" -le 0 ]]; then
-	echo "[dnabert.sh] READOUT_MLP_LAYERS must be a positive integer." >&2
 	exit 1
 fi
 if [[ "${LR_SCHEDULE}" != "cosine" && "${LR_SCHEDULE}" != "linear" ]]; then

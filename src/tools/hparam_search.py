@@ -108,12 +108,7 @@ _SITE_WINDOW_LEN_DEFAULT: int = 100
 _SITE_WINDOW_LEN_MIN: int = 40
 _SITE_WINDOW_LEN_MAX: int = 100
 _SITE_WINDOW_LEN_STEP: int = 10
-_DNABERT_READOUT_CHOICES: tuple[str, ...] = ("cnn", "linear", "mlp")
 _DNABERT_MODEL_PREFIX: str = "dnabert"
-_DNABERT_CNN_ONLY_KEYS: frozenset[str] = frozenset({"readout_cnn_kernel_size"})
-_DNABERT_MLP_ONLY_KEYS: frozenset[str] = frozenset(
-    {"readout_mlp_hidden_dim", "readout_mlp_layers"}
-)
 _MASK_HPARAM_VALUES: frozenset[str] = frozenset({"off", "on"})
 _MASK_SEQUENCE_TRANSFORM_OFF: str = "none"
 _MASK_SEQUENCE_TRANSFORM_ON: str = "mask_outside_intron_n"
@@ -1744,48 +1739,19 @@ def _is_dnabert_model_name(model_name: str) -> bool:
     return model_name.strip().lower().startswith(_DNABERT_MODEL_PREFIX)
 
 
-def _normalize_dnabert_readout_type(raw_value: object) -> str:
-    """Normalize DNABERT readout type with strict value validation."""
-    normalized = str(raw_value).strip().lower()
-    if normalized not in _DNABERT_READOUT_CHOICES:
-        choices_text = ", ".join(_DNABERT_READOUT_CHOICES)
-        raise ValueError(f"readout_type must be one of: {choices_text}.")
-    return normalized
-
-
 def _materialize_dnabert_readout_params(
     *,
     model_name: str,
     sampled_params: dict[str, Scalar],
     base_args: dict[str, ArgValue],
 ) -> dict[str, Scalar]:
-    """Drop inactive DNABERT readout params and fill active defaults."""
+    """Drop legacy DNABERT readout params for linear-only compatibility."""
     out = dict(sampled_params)
     if not _is_dnabert_model_name(model_name):
         return out
-
-    readout_raw = out.get("readout_type", base_args.get("readout_type", "cnn"))
-    readout_type = _normalize_dnabert_readout_type(readout_raw)
-    out["readout_type"] = readout_type
-
-    active_keys: frozenset[str]
-    if readout_type == "cnn":
-        active_keys = _DNABERT_CNN_ONLY_KEYS
-    elif readout_type == "mlp":
-        active_keys = _DNABERT_MLP_ONLY_KEYS
-    else:
-        active_keys = frozenset()
-
-    for key in active_keys:
-        if key in out:
-            continue
-        candidate = base_args.get(key)
-        if isinstance(candidate, (int, float, str, bool)):
-            out[key] = candidate
-
-    inactive_keys = (_DNABERT_CNN_ONLY_KEYS | _DNABERT_MLP_ONLY_KEYS) - active_keys
-    for inactive_key in inactive_keys:
-        out.pop(inactive_key, None)
+    out.pop("readout_type", None)
+    out.pop("readout_mlp_hidden_dim", None)
+    out.pop("readout_mlp_layers", None)
     return out
 
 

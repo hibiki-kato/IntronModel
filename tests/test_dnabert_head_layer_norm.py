@@ -110,7 +110,6 @@ def test_classifier_supports_linear_readout() -> None:
         hidden_size=8,
         dropout=0.1,
         head_layer_norm=True,
-        readout_type="linear",
     )
     logits = model(
         input_ids=torch.ones((2, 4), dtype=torch.long),
@@ -118,25 +117,6 @@ def test_classifier_supports_linear_readout() -> None:
     )
     assert logits.shape == (2,)
     assert model.readout_type == "linear"
-
-
-def test_classifier_supports_mlp_readout() -> None:
-    model = dnabert.DnaBertBinaryClassifier(
-        backbone=_DummyBackbone(hidden_size=8),
-        hidden_size=8,
-        dropout=0.1,
-        head_layer_norm=True,
-        readout_type="mlp",
-        readout_mlp_hidden_dim=16,
-        readout_mlp_layers=2,
-    )
-    logits = model(
-        input_ids=torch.ones((2, 4), dtype=torch.long),
-        attention_mask=torch.ones((2, 4), dtype=torch.long),
-    )
-    assert logits.shape == (2,)
-    assert model.readout_type == "mlp"
-
 
 def test_add_train_args_includes_head_layer_norm_options() -> None:
     parser = argparse.ArgumentParser()
@@ -156,31 +136,15 @@ def test_add_train_args_includes_head_layer_norm_options() -> None:
     assert args.acceptor_head_layer_norm == 0
 
 
-def test_add_train_args_includes_readout_options() -> None:
+def test_add_train_args_omits_removed_readout_options() -> None:
     parser = argparse.ArgumentParser()
     dnabert.add_train_args(parser)
-    args = parser.parse_args(
-        [
-            "--readout_type",
-            "mlp",
-            "--readout_cnn_kernel_size",
-            "5",
-            "--readout_mlp_hidden_dim",
-            "384",
-            "--readout_mlp_layers",
-            "2",
-            "--donor_readout_type",
-            "linear",
-            "--acceptor_readout_type",
-            "cnn",
-        ]
-    )
-    assert args.readout_type == "mlp"
-    assert args.readout_cnn_kernel_size == 5
-    assert args.readout_mlp_hidden_dim == 384
-    assert args.readout_mlp_layers == 2
-    assert args.donor_readout_type == "linear"
-    assert args.acceptor_readout_type == "cnn"
+    args = parser.parse_args([])
+    assert not hasattr(args, "readout_type")
+    assert not hasattr(args, "readout_mlp_hidden_dim")
+    assert not hasattr(args, "readout_mlp_layers")
+    assert not hasattr(args, "donor_readout_type")
+    assert not hasattr(args, "acceptor_readout_type")
 
 
 def test_add_train_args_accepts_pair_train_target() -> None:

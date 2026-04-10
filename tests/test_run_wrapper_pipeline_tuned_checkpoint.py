@@ -415,9 +415,6 @@ def test_apply_tuned_overrides_reads_cheat_tuning_dir_for_dnabert(
         "DONOR_LR": "",
         "DONOR_BATCH_SIZE": "",
         "DONOR_HEAD_LAYER_NORM": "",
-        "DONOR_READOUT_TYPE": "",
-        "DONOR_READOUT_MLP_HIDDEN_DIM": "",
-        "DONOR_READOUT_MLP_LAYERS": "",
     }
     resolved = _apply_tuned_overrides(SPECS["dnabert.sh"], env, tmp_path)
 
@@ -425,9 +422,6 @@ def test_apply_tuned_overrides_reads_cheat_tuning_dir_for_dnabert(
     assert env["DONOR_LR"] == "1.7e-05"
     assert env["DONOR_BATCH_SIZE"] == "16"
     assert env["DONOR_HEAD_LAYER_NORM"] == "0"
-    assert env["DONOR_READOUT_TYPE"] == "mlp"
-    assert env["DONOR_READOUT_MLP_HIDDEN_DIM"] == "384"
-    assert env["DONOR_READOUT_MLP_LAYERS"] == "2"
 
 
 def test_apply_tuned_overrides_reads_trunc_tuning_dir_for_dnabert_pair(
@@ -469,7 +463,6 @@ def test_apply_tuned_overrides_reads_trunc_tuning_dir_for_dnabert_pair(
         "LR": "",
         "BATCH_SIZE": "",
         "HEAD_LAYER_NORM": "",
-        "READOUT_TYPE": "",
     }
     resolved = _apply_tuned_overrides(SPECS["dnabert_pair.sh"], env, tmp_path)
 
@@ -477,7 +470,6 @@ def test_apply_tuned_overrides_reads_trunc_tuning_dir_for_dnabert_pair(
     assert env["LR"] == "1.3e-05"
     assert env["BATCH_SIZE"] == "24"
     assert env["HEAD_LAYER_NORM"] == "1"
-    assert env["READOUT_TYPE"] == "linear"
 
 
 def test_apply_tuned_overrides_reads_synth_tuning_dir_for_dnabert_pair(
@@ -518,14 +510,12 @@ def test_apply_tuned_overrides_reads_synth_tuning_dir_for_dnabert_pair(
         "SHARED_TUNED_CONFIG_PATH": "",
         "LR": "",
         "BATCH_SIZE": "",
-        "READOUT_TYPE": "",
     }
     resolved = _apply_tuned_overrides(SPECS["dnabert_pair.sh"], env, tmp_path)
 
     assert resolved["pair"] == tuned_config.resolve()
     assert env["LR"] == "1.3e-05"
     assert env["BATCH_SIZE"] == "24"
-    assert env["READOUT_TYPE"] == "linear"
 
 
 def test_apply_tuned_overrides_loads_target_specific_window_len(

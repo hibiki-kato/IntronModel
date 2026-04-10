@@ -35,7 +35,6 @@ from typing import (
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from util.data_proc import (
@@ -133,11 +132,8 @@ DNA_BASE_SET: frozenset[str] = frozenset({"A", "C", "G", "T"})
 SPECIAL_TOKENS: frozenset[str] = frozenset(
     {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"}
 )
-READOUT_TYPE_CHOICES: tuple[str, ...] = ("cnn", "linear", "mlp")
-DEFAULT_READOUT_TYPE: str = "cnn"
-DEFAULT_READOUT_CNN_KERNEL_SIZE: int = 3
-DEFAULT_READOUT_MLP_HIDDEN_DIM: int = 256
-DEFAULT_READOUT_MLP_LAYERS: int = 1
+READOUT_TYPE_CHOICES: tuple[str, ...] = ("linear",)
+DEFAULT_READOUT_TYPE: str = "linear"
 LR_SCHEDULE_CHOICES: tuple[str, ...] = ("cosine", "linear")
 DEFAULT_LR_SCHEDULE: str = "cosine"
 DEFAULT_WARMUP_RATIO: float = 0.01
@@ -908,83 +904,20 @@ class DnaBertBinaryClassifier(nn.Module):
         hidden_size: int,
         dropout: float,
         head_layer_norm: bool,
-        readout_type: str = DEFAULT_READOUT_TYPE,
-        readout_cnn_kernel_size: int = DEFAULT_READOUT_CNN_KERNEL_SIZE,
-        readout_mlp_hidden_dim: int = DEFAULT_READOUT_MLP_HIDDEN_DIM,
-        readout_mlp_layers: int = DEFAULT_READOUT_MLP_LAYERS,
     ) -> None:
         super().__init__()
         if hidden_size <= 0:
             raise ValueError("hidden_size must be positive.")
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
-        resolved_readout_type = _normalize_readout_type(
-            readout_type,
-            arg_name="readout_type",
-        )
-        if resolved_readout_type == "cnn":
-            if readout_cnn_kernel_size <= 0:
-                raise ValueError("readout_cnn_kernel_size must be positive.")
-            if readout_cnn_kernel_size % 2 == 0:
-                raise ValueError("readout_cnn_kernel_size must be odd.")
-        if resolved_readout_type == "mlp":
-            if readout_mlp_hidden_dim <= 0:
-                raise ValueError("readout_mlp_hidden_dim must be positive.")
-            if readout_mlp_layers <= 0:
-                raise ValueError("readout_mlp_layers must be positive.")
         self.backbone = backbone
-        self.readout_type: str = resolved_readout_type
+        self.readout_type: str = DEFAULT_READOUT_TYPE
         self.head_norm = nn.LayerNorm(hidden_size) if head_layer_norm else nn.Identity()
         self.dropout = nn.Dropout(dropout)
-        self.readout_cnn_kernel_size: int = int(readout_cnn_kernel_size)
-        self.readout_cnn_padding: int = self.readout_cnn_kernel_size // 2
-        self.readout_mlp_hidden_dim: int = int(readout_mlp_hidden_dim)
-        self.readout_mlp_layers: int = int(readout_mlp_layers)
-        self.mlp_hidden: nn.Module
-
-        classifier_input_dim = hidden_size
-        if self.readout_type == "mlp":
-            mlp_layers: list[nn.Module] = []
-            mlp_input_dim = hidden_size
-            for _ in range(self.readout_mlp_layers):
-                mlp_layers.append(
-                    nn.Linear(
-                        mlp_input_dim,
-                        self.readout_mlp_hidden_dim,
-                    )
-                )
-                mlp_layers.append(nn.GELU())
-                mlp_layers.append(nn.Dropout(dropout))
-                mlp_input_dim = self.readout_mlp_hidden_dim
-            self.mlp_hidden = nn.Sequential(*mlp_layers)
-            classifier_input_dim = self.readout_mlp_hidden_dim
-        else:
-            self.mlp_hidden = nn.Identity()
 
         # Keep the historical parameter name "classifier" for checkpoint
         # compatibility across readout variants.
-        self.classifier = nn.Linear(classifier_input_dim, 1)
-
-        if self.readout_type == "cnn":
-            temporal_kernel = torch.arange(
-                1,
-                self.readout_cnn_kernel_size + 1,
-                dtype=torch.float32,
-            )
-            center = float(self.readout_cnn_padding + 1)
-            temporal_kernel = center - torch.abs(temporal_kernel - center)
-            temporal_kernel = temporal_kernel / temporal_kernel.sum()
-            self.register_buffer(
-                "_frozen_temporal_kernel",
-                temporal_kernel,
-                persistent=False,
-            )
-        else:
-            self.register_buffer(
-                "_frozen_temporal_kernel",
-                torch.zeros((1,), dtype=torch.float32),
-                persistent=False,
-            )
+        self.classifier = nn.Linear(hidden_size, 1)
 
     def freeze_backbone(self) -> None:
         """Freeze all backbone parameters to train only the task head."""
@@ -1040,27 +973,8 @@ class DnaBertBinaryClassifier(nn.Module):
             )
 
         token_hidden = self.dropout(self.head_norm(hidden))
-        if self.readout_type == "cnn":
-            token_features = token_hidden.transpose(1, 2).contiguous()
-            frozen_kernel = self.classifier.weight.view(
-                1, -1, 1
-            ) * self._frozen_temporal_kernel.view(1, 1, -1)
-            logits_map = F.conv1d(
-                token_features,
-                weight=frozen_kernel,
-                bias=self.classifier.bias,
-                padding=self.readout_cnn_padding,
-            )
-            mask = attention_mask.to(dtype=logits_map.dtype).unsqueeze(1)
-            masked_sum = (logits_map * mask).sum(dim=2)
-            mask_denom = mask.sum(dim=2).clamp_min(1.0)
-            logits = masked_sum / mask_denom
-            return logits.squeeze(1)
         pooled_hidden = self._masked_mean(token_hidden, attention_mask)
-        if self.readout_type == "linear":
-            return self.classifier(pooled_hidden).squeeze(1)
-        hidden_features = self.mlp_hidden(pooled_hidden)
-        return self.classifier(hidden_features).squeeze(1)
+        return self.classifier(pooled_hidden).squeeze(1)
 
 
 def _resolve_hidden_size(backbone: nn.Module) -> int:
@@ -1233,10 +1147,6 @@ def _build_dnabert_model(
     trust_remote_code: bool,
     dropout: float,
     head_layer_norm: bool,
-    readout_type: str = DEFAULT_READOUT_TYPE,
-    readout_cnn_kernel_size: int = DEFAULT_READOUT_CNN_KERNEL_SIZE,
-    readout_mlp_hidden_dim: int = DEFAULT_READOUT_MLP_HIDDEN_DIM,
-    readout_mlp_layers: int = DEFAULT_READOUT_MLP_LAYERS,
 ) -> DnaBertBinaryClassifier:
     """Build DNABERT classifier from a cached pretrained backbone template."""
     cached_template = _get_cached_backbone_template(
@@ -1250,10 +1160,6 @@ def _build_dnabert_model(
         hidden_size=cached_template.hidden_size,
         dropout=dropout,
         head_layer_norm=head_layer_norm,
-        readout_type=readout_type,
-        readout_cnn_kernel_size=readout_cnn_kernel_size,
-        readout_mlp_hidden_dim=readout_mlp_hidden_dim,
-        readout_mlp_layers=readout_mlp_layers,
     )
 
 
@@ -1307,10 +1213,6 @@ class TaskTrainParams:
     max_tokens: str
     dropout: float
     head_layer_norm: int
-    readout_type: str
-    readout_cnn_kernel_size: int
-    readout_mlp_hidden_dim: int
-    readout_mlp_layers: int
     weight_decay: float
     eta_min_ratio: float
     lr_schedule: str
@@ -1362,25 +1264,6 @@ def _resolve_task_train_params(
         dropout=float(_override_or_default("dropout", model_args.dropout)),
         head_layer_norm=int(
             _override_or_default("head_layer_norm", model_args.head_layer_norm)
-        ),
-        readout_type=str(_override_or_default("readout_type", model_args.readout_type)),
-        readout_cnn_kernel_size=int(
-            _override_or_default(
-                "readout_cnn_kernel_size",
-                model_args.readout_cnn_kernel_size,
-            )
-        ),
-        readout_mlp_hidden_dim=int(
-            _override_or_default(
-                "readout_mlp_hidden_dim",
-                model_args.readout_mlp_hidden_dim,
-            )
-        ),
-        readout_mlp_layers=int(
-            _override_or_default(
-                "readout_mlp_layers",
-                model_args.readout_mlp_layers,
-            )
         ),
         weight_decay=float(
             _override_or_default("weight_decay", model_args.weight_decay)
@@ -1622,10 +1505,6 @@ def train_task_model(
     max_tokens: Union[str, int] = "auto",
     dropout: float = 0.1,
     head_layer_norm: Union[bool, int] = 1,
-    readout_type: str = DEFAULT_READOUT_TYPE,
-    readout_cnn_kernel_size: int = DEFAULT_READOUT_CNN_KERNEL_SIZE,
-    readout_mlp_hidden_dim: int = DEFAULT_READOUT_MLP_HIDDEN_DIM,
-    readout_mlp_layers: int = DEFAULT_READOUT_MLP_LAYERS,
     weight_decay: float = 0.01,
     eta_min_ratio: float = 0.01,
     lr_schedule: str = DEFAULT_LR_SCHEDULE,
@@ -1698,14 +1577,6 @@ def train_task_model(
         Dropout rate of classification head.
     head_layer_norm : bool | int, default=1
         Whether to apply LayerNorm before the classification head.
-    readout_type : str, default="cnn"
-        Readout head variant: ``cnn``, ``linear``, or ``mlp``.
-    readout_cnn_kernel_size : int, default=3
-        Odd kernel size used when ``readout_type="cnn"``.
-    readout_mlp_hidden_dim : int, default=256
-        Hidden width used when ``readout_type="mlp"``.
-    readout_mlp_layers : int, default=1
-        Number of hidden MLP layers used when ``readout_type="mlp"``.
     weight_decay : float, default=0.01
         AdamW weight decay.
     eta_min_ratio : float, default=0.01
@@ -1795,20 +1666,6 @@ def train_task_model(
         raise ValueError("--dropout must satisfy 0 <= dropout < 1.")
     if isinstance(head_layer_norm, int) and head_layer_norm not in (0, 1):
         raise ValueError("--head_layer_norm must be 0 or 1.")
-    normalized_readout_type = _normalize_readout_type(
-        readout_type,
-        arg_name="--readout_type",
-    )
-    if normalized_readout_type == "cnn":
-        if readout_cnn_kernel_size <= 0:
-            raise ValueError("--readout_cnn_kernel_size must be positive.")
-        if readout_cnn_kernel_size % 2 == 0:
-            raise ValueError("--readout_cnn_kernel_size must be odd.")
-    if normalized_readout_type == "mlp":
-        if readout_mlp_hidden_dim <= 0:
-            raise ValueError("--readout_mlp_hidden_dim must be positive.")
-        if readout_mlp_layers <= 0:
-            raise ValueError("--readout_mlp_layers must be positive.")
     if weight_decay < 0.0:
         raise ValueError("--weight_decay must be non-negative.")
     if eta_min_ratio < 0.0 or eta_min_ratio > 1.0:
@@ -1997,6 +1854,7 @@ def train_task_model(
             "dataset": train_ds,
             "batch_size": effective_batch_size,
             "shuffle": True,
+            "drop_last": True,
             "num_workers": resolved_num_workers,
             "pin_memory": use_pin_memory,
             "worker_init_fn": _seed_worker if resolved_num_workers > 0 else None,
@@ -2044,10 +1902,6 @@ def train_task_model(
                 trust_remote_code=trust_remote_code_bool,
                 dropout=dropout,
                 head_layer_norm=head_layer_norm_bool,
-                readout_type=normalized_readout_type,
-                readout_cnn_kernel_size=readout_cnn_kernel_size,
-                readout_mlp_hidden_dim=readout_mlp_hidden_dim,
-                readout_mlp_layers=readout_mlp_layers,
             ).to(device)
             warm_start_result = _warm_start_model(
                 model,
@@ -2287,10 +2141,7 @@ def train_task_model(
                                 "input_kmer": resolved_input_kmer,
                                 "dropout": dropout,
                                 "head_layer_norm": head_layer_norm_bool,
-                                "readout_type": normalized_readout_type,
-                                "readout_cnn_kernel_size": readout_cnn_kernel_size,
-                                "readout_mlp_hidden_dim": readout_mlp_hidden_dim,
-                                "readout_mlp_layers": readout_mlp_layers,
+                                "readout_type": DEFAULT_READOUT_TYPE,
                                 "lr_schedule": normalized_lr_schedule,
                                 "warmup_ratio": warmup_ratio,
                                 "adam_beta1": adam_beta1,
@@ -2402,10 +2253,7 @@ def train_task_model(
                 "input_kmer": resolved_input_kmer,
                 "dropout": dropout,
                 "head_layer_norm": head_layer_norm_bool,
-                "readout_type": normalized_readout_type,
-                "readout_cnn_kernel_size": readout_cnn_kernel_size,
-                "readout_mlp_hidden_dim": readout_mlp_hidden_dim,
-                "readout_mlp_layers": readout_mlp_layers,
+                "readout_type": DEFAULT_READOUT_TYPE,
                 "weight_decay": weight_decay,
                 "eta_min_ratio": eta_min_ratio,
                 "lr_schedule": normalized_lr_schedule,
@@ -2601,39 +2449,6 @@ def load_task_model(
         str(readout_type_raw),
         arg_name="checkpoint readout_type",
     )
-    readout_cnn_kernel_size = _int_from_checkpoint(
-        model_config,
-        "readout_cnn_kernel_size",
-        DEFAULT_READOUT_CNN_KERNEL_SIZE,
-    )
-    readout_mlp_hidden_dim = _int_from_checkpoint(
-        model_config,
-        "readout_mlp_hidden_dim",
-        DEFAULT_READOUT_MLP_HIDDEN_DIM,
-    )
-    readout_mlp_layers = _int_from_checkpoint(
-        model_config,
-        "readout_mlp_layers",
-        DEFAULT_READOUT_MLP_LAYERS,
-    )
-    if readout_type == "cnn":
-        if readout_cnn_kernel_size <= 0:
-            raise ValueError(
-                "Checkpoint model_config.readout_cnn_kernel_size must be positive."
-            )
-        if readout_cnn_kernel_size % 2 == 0:
-            raise ValueError(
-                "Checkpoint model_config.readout_cnn_kernel_size must be odd."
-            )
-    if readout_type == "mlp":
-        if readout_mlp_hidden_dim <= 0:
-            raise ValueError(
-                "Checkpoint model_config.readout_mlp_hidden_dim must be positive."
-            )
-        if readout_mlp_layers <= 0:
-            raise ValueError(
-                "Checkpoint model_config.readout_mlp_layers must be positive."
-            )
 
     model = _build_dnabert_model(
         pretrained_model_name=pretrained_model_name,
@@ -2641,10 +2456,6 @@ def load_task_model(
         trust_remote_code=trust_remote_code,
         dropout=dropout,
         head_layer_norm=head_layer_norm,
-        readout_type=readout_type,
-        readout_cnn_kernel_size=readout_cnn_kernel_size,
-        readout_mlp_hidden_dim=readout_mlp_hidden_dim,
-        readout_mlp_layers=readout_mlp_layers,
     ).to(device)
     model.load_state_dict(normalized_state)
     model.eval()
@@ -2664,9 +2475,6 @@ def load_task_model(
         "dropout": dropout,
         "head_layer_norm": head_layer_norm,
         "readout_type": readout_type,
-        "readout_cnn_kernel_size": readout_cnn_kernel_size,
-        "readout_mlp_hidden_dim": readout_mlp_hidden_dim,
-        "readout_mlp_layers": readout_mlp_layers,
     }
     return model, resolved_config, tokenizer
 
@@ -3076,30 +2884,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         default=1,
         help="Apply LayerNorm before the DNABERT classification head.",
     )
-    parser.add_argument(
-        "--readout_type",
-        choices=list(READOUT_TYPE_CHOICES),
-        default=DEFAULT_READOUT_TYPE,
-        help="Readout type on top of DNABERT token features.",
-    )
-    parser.add_argument(
-        "--readout_cnn_kernel_size",
-        type=int,
-        default=DEFAULT_READOUT_CNN_KERNEL_SIZE,
-        help="Odd kernel size used when --readout_type=cnn.",
-    )
-    parser.add_argument(
-        "--readout_mlp_hidden_dim",
-        type=int,
-        default=DEFAULT_READOUT_MLP_HIDDEN_DIM,
-        help="MLP hidden width used when --readout_type=mlp.",
-    )
-    parser.add_argument(
-        "--readout_mlp_layers",
-        type=int,
-        default=DEFAULT_READOUT_MLP_LAYERS,
-        help="Number of hidden MLP layers used when --readout_type=mlp.",
-    )
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--eta_min_ratio", type=float, default=0.01)
     parser.add_argument(
@@ -3177,22 +2961,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--acceptor_dropout", type=float, default=None)
     parser.add_argument("--donor_head_layer_norm", type=int, default=None)
     parser.add_argument("--acceptor_head_layer_norm", type=int, default=None)
-    parser.add_argument(
-        "--donor_readout_type",
-        choices=list(READOUT_TYPE_CHOICES),
-        default=None,
-    )
-    parser.add_argument(
-        "--acceptor_readout_type",
-        choices=list(READOUT_TYPE_CHOICES),
-        default=None,
-    )
-    parser.add_argument("--donor_readout_cnn_kernel_size", type=int, default=None)
-    parser.add_argument("--acceptor_readout_cnn_kernel_size", type=int, default=None)
-    parser.add_argument("--donor_readout_mlp_hidden_dim", type=int, default=None)
-    parser.add_argument("--acceptor_readout_mlp_hidden_dim", type=int, default=None)
-    parser.add_argument("--donor_readout_mlp_layers", type=int, default=None)
-    parser.add_argument("--acceptor_readout_mlp_layers", type=int, default=None)
     parser.add_argument("--donor_weight_decay", type=float, default=None)
     parser.add_argument("--acceptor_weight_decay", type=float, default=None)
     parser.add_argument("--donor_eta_min_ratio", type=float, default=None)
@@ -3491,10 +3259,6 @@ def train(
             max_tokens=resolved.max_tokens,
             dropout=resolved.dropout,
             head_layer_norm=resolved.head_layer_norm,
-            readout_type=resolved.readout_type,
-            readout_cnn_kernel_size=resolved.readout_cnn_kernel_size,
-            readout_mlp_hidden_dim=resolved.readout_mlp_hidden_dim,
-            readout_mlp_layers=resolved.readout_mlp_layers,
             weight_decay=resolved.weight_decay,
             eta_min_ratio=resolved.eta_min_ratio,
             lr_schedule=resolved.lr_schedule,
@@ -3556,10 +3320,6 @@ def train(
             "max_tokens": params.max_tokens,
             "dropout": params.dropout,
             "head_layer_norm": bool(params.head_layer_norm),
-            "readout_type": params.readout_type,
-            "readout_cnn_kernel_size": params.readout_cnn_kernel_size,
-            "readout_mlp_hidden_dim": params.readout_mlp_hidden_dim,
-            "readout_mlp_layers": params.readout_mlp_layers,
             "weight_decay": params.weight_decay,
             "eta_min_ratio": params.eta_min_ratio,
             "lr_schedule": params.lr_schedule,
@@ -3605,10 +3365,7 @@ def train(
         "max_tokens": model_args.max_tokens,
         "dropout": model_args.dropout,
         "head_layer_norm": bool(model_args.head_layer_norm),
-        "readout_type": model_args.readout_type,
-        "readout_cnn_kernel_size": model_args.readout_cnn_kernel_size,
-        "readout_mlp_hidden_dim": model_args.readout_mlp_hidden_dim,
-        "readout_mlp_layers": model_args.readout_mlp_layers,
+        "readout_type": DEFAULT_READOUT_TYPE,
         "weight_decay": model_args.weight_decay,
         "eta_min_ratio": model_args.eta_min_ratio,
         "lr_schedule": model_args.lr_schedule,

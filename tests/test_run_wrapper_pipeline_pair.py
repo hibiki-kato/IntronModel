@@ -19,6 +19,7 @@ from tools.run_wrapper_pipeline import (
 
 def test_resolve_tasks_for_target_accepts_single_task_model() -> None:
     tasks = _resolve_tasks_for_target(
+        model_name="cnn_pair",
         train_target="pair",
         model_tasks=("pair",),
         train_only=False,
@@ -60,7 +61,7 @@ def test_build_run_args_accepts_train_data_path_overrides() -> None:
         "DONOR_KERNEL_SIZES": "13,9,5",
         "ACCEPTOR_KERNEL_SIZES": "9,7,5",
     }
-    args = _build_run_args(spec, env)
+    args = _build_run_args(spec, env, tuned_config_paths={})
     assert "--train_pos_path" in args
     assert "/tmp/train.pos.err" in args
     assert "--train_neg_path" in args
@@ -88,7 +89,7 @@ def test_build_run_args_forwards_pair_fusion_mode() -> None:
         "FUSION_MODE": "early",
     }
 
-    args = _build_run_args(spec, env)
+    args = _build_run_args(spec, env, tuned_config_paths={})
 
     assert "--fusion_mode" in args
     assert "early" in args
@@ -111,7 +112,7 @@ def test_build_run_args_forwards_pair_max_pool_flag() -> None:
         "HEAD_TYPE": "center",
     }
 
-    args = _build_run_args(spec, env)
+    args = _build_run_args(spec, env, tuned_config_paths={})
 
     assert "--max_pool_size" in args
     assert args[args.index("--max_pool_size") + 1] == "1"
@@ -141,6 +142,7 @@ def test_build_run_args_forwards_dnabert_infer_runtime_overrides() -> None:
             "INFER_COMPILE": "1",
             "INFER_COMPILE_MODE": "on",
         },
+        tuned_config_paths={},
     )
 
     assert "--infer_batch_size" in args
@@ -301,17 +303,14 @@ def test_stem_params_for_dnabert_pair_excludes_intron_score_op() -> None:
             "MAX_TOKENS": "auto",
             "DROPOUT": "0.1",
             "HEAD_LAYER_NORM": "1",
-            "READOUT_TYPE": "cnn",
-            "READOUT_CNN_KERNEL_SIZE": "3",
-            "READOUT_MLP_HIDDEN_DIM": "256",
-            "READOUT_MLP_LAYERS": "1",
         },
     )
 
     assert params["train_target"] == "pair"
     assert "intron_score_op" not in params
-    assert params["readout_type"] == "cnn"
-    assert params["readout_cnn_kernel_size"] == 3
+    assert "readout_type" not in params
+    assert "readout_mlp_hidden_dim" not in params
+    assert "readout_mlp_layers" not in params
 
 
 def test_resolve_species_path_template_replaces_all_tokens() -> None:

@@ -13,19 +13,18 @@ fi
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
 TIME_BUDGET_MINUTES="30"
+GPU_IDS="4,5,6,7"
+QUICK_TRIALS="8"
+QUICK_EPOCHS="2"
+TOP_K="4"
+FULL_EPOCHS="4"
 
 INTRONMODEL_AUTO_TMUX="on"
 CHEAT_MODE="off"
 OBJECTIVE_METRIC="max_f1"
 TRUNC_MODE="on"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
 VAL_FRAC="0.25"
 HEAD_LAYER_NORM="1"
-READOUT_TYPE="mlp"
-READOUT_CNN_KERNEL_SIZE="3"
-READOUT_MLP_HIDDEN_DIM="256"
-READOUT_MLP_LAYERS="1"
 BASE_SEED="1337"
 DNABERT_VARIANT="2"
 PRETRAINED_MODEL_NAME=""
@@ -35,10 +34,6 @@ PRETRAINED_MODEL_RELATIVE_PATH_S="pretrained/dnabert-s"
 PRETRAINED_REVISION=""
 TRUST_REMOTE_CODE="1"
 
-QUICK_TRIALS="6"
-QUICK_EPOCHS="2"
-TOP_K="2"
-FULL_EPOCHS="4"
 QUICK_COMPILE_MODE="on"
 FULL_COMPILE_MODE="on"
 LR_SCHEDULE="cosine"
@@ -47,13 +42,14 @@ ADAM_BETA1="0.9"
 ADAM_BETA2="0.98"
 ADAM_EPS="1e-8"
 
-GPU_IDS="auto"
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 TRIAL_PROCESS_MODE="persistent_all"
 
 DEVICE="auto"
 USE_AMP="1"
+DONOR_LEN="100"
+ACCEPTOR_LEN="100"
 AMP_DTYPE="auto"
 INFER_BATCH_SIZE="256"
 INFER_USE_AMP="1"
@@ -98,6 +94,10 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "acceptor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
   "lr": {"type": "float", "min": 8e-6, "max": 8e-5, "scale": "log"},
+  "lr_schedule": {
+    "type": "categorical",
+    "values": ["cosine", "linear"]
+  },
   "batch_size": {
     "type": "categorical",
     "values": [48, 96, 128]
@@ -116,26 +116,9 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
     "max": 0.45,
     "scale": "linear"
   },
-  "readout_type": {
-    "type": "categorical",
-    "values": ["cnn", "linear", "mlp"]
-  },
-  "readout_cnn_kernel_size": {
-    "type": "categorical",
-    "values": [3, 5, 7]
-  },
-  "readout_mlp_hidden_dim": {
-    "type": "categorical",
-    "values": [128, 256, 384, 512]
-  },
-  "readout_mlp_layers": {"type": "int", "min": 1, "max": 3, "step": 1},
   "head_layer_norm": {
     "type": "categorical",
     "values": [0, 1]
-  },
-  "lr_schedule": {
-    "type": "categorical",
-    "values": ["cosine", "linear"]
   },
   "warmup_ratio": {"type": "float", "min": 0.005, "max": 0.02, "scale": "linear"},
   "weight_decay": {"type": "float", "min": 1e-5, "max": 6e-2, "scale": "log"},
@@ -374,28 +357,6 @@ if [[ "${HEAD_LAYER_NORM}" != "0" && "${HEAD_LAYER_NORM}" != "1" ]]; then
 	echo "[tune_dnabert_pair_time.sh] HEAD_LAYER_NORM must be 0 or 1." >&2
 	exit 1
 fi
-if [[ "${READOUT_TYPE}" != "cnn" \
-	&& "${READOUT_TYPE}" != "linear" \
-	&& "${READOUT_TYPE}" != "mlp" ]]; then
-	echo "[tune_dnabert_pair_time.sh] READOUT_TYPE must be cnn|linear|mlp." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_CNN_KERNEL_SIZE}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_CNN_KERNEL_SIZE}" -le 0 ]] \
-	|| (( READOUT_CNN_KERNEL_SIZE % 2 == 0 )); then
-	echo "[tune_dnabert_pair_time.sh] READOUT_CNN_KERNEL_SIZE must be a positive odd integer." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_MLP_HIDDEN_DIM}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_MLP_HIDDEN_DIM}" -le 0 ]]; then
-	echo "[tune_dnabert_pair_time.sh] READOUT_MLP_HIDDEN_DIM must be a positive integer." >&2
-	exit 1
-fi
-if ! [[ "${READOUT_MLP_LAYERS}" =~ ^[0-9]+$ ]] \
-	|| [[ "${READOUT_MLP_LAYERS}" -le 0 ]]; then
-	echo "[tune_dnabert_pair_time.sh] READOUT_MLP_LAYERS must be a positive integer." >&2
-	exit 1
-fi
 if [[ "${TRUNC_MODE}" == "on" ]]; then
 	trunc_bp="${DONOR_LEN}"
 	if (( ACCEPTOR_LEN > DONOR_LEN )); then
@@ -626,10 +587,6 @@ while true; do
     "adam_beta2": ${ADAM_BETA2},
     "adam_eps": ${ADAM_EPS},
     "head_layer_norm": ${HEAD_LAYER_NORM},
-    "readout_type": "${READOUT_TYPE}",
-    "readout_cnn_kernel_size": ${READOUT_CNN_KERNEL_SIZE},
-    "readout_mlp_hidden_dim": ${READOUT_MLP_HIDDEN_DIM},
-    "readout_mlp_layers": ${READOUT_MLP_LAYERS},
     "pretrained_model_name": "${PRETRAINED_MODEL_NAME_RESOLVED}",
     "pretrained_revision": "${PRETRAINED_REVISION}",
     "trust_remote_code": ${TRUST_REMOTE_CODE},

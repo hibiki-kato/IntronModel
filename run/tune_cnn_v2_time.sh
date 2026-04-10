@@ -82,7 +82,7 @@ TARGET_ORDER=(
 DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 {
   "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "acceptor_len": {"type": "int", "min": 100, "max": 100, "step": 1},
+  "acceptor_len": {"type": "int", "min": 60, "max": 100, "step": 1},
   "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
 	"batch_size": {
 		"type": "categorical",
