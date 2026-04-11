@@ -60,6 +60,7 @@ _MODEL_TO_MODULE: dict[str, str] = {
     "dnaberts_pair": "models.dnabert",
     "reservoir": "models.reservoir",
     "cnn_resdil": "models.cnn_resdil",
+    "spliceformer_sc": "models.spliceformer_sc",
 }
 
 

@@ -746,6 +746,32 @@ def _add_cnn_pair_fallback_infer_args(parser: argparse.ArgumentParser) -> None:
     _add_cnn_fallback_infer_args(parser)
 
 
+def _add_spliceformer_sc_fallback_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add spliceformer_sc train args without importing torch-dependent modules."""
+    _add_cnn_fallback_train_args(parser)
+    parser.add_argument(
+        "--species_list",
+        type=str,
+        default=None,
+        help="Comma-separated species for multi-species training.",
+    )
+    parser.add_argument("--d_model", type=int, default=32)
+    parser.add_argument("--cnn_dilations", type=str, default="1,2,4,8")
+    parser.add_argument("--cnn_kernel_size", type=int, default=11)
+    parser.add_argument("--nhead", type=int, default=4)
+    parser.add_argument("--num_transformer_layers", type=int, default=8)
+    parser.add_argument("--dim_feedforward", type=int, default=512)
+    parser.add_argument("--species_embed_dim", type=int, default=256)
+    parser.add_argument("--use_film", type=int, default=0, choices=[0, 1])
+    parser.add_argument("--k_donor", type=int, default=256)
+    parser.add_argument("--k_acceptor", type=int, default=256)
+    parser.add_argument(
+        "--spliceformer_mode",
+        choices=["binary", "multiclass"],
+        default="binary",
+    )
+
+
 def _build_parser(
     selected_model: str,
     skip_model_import_error: bool = False,
@@ -788,6 +814,9 @@ def _build_parser(
         _add_cnn_pair_fallback_infer_args(parser)
     elif selected_model == "cnn_v3_meta":
         _add_cnn_v3_meta_fallback_train_args(parser)
+        _add_cnn_pair_fallback_infer_args(parser)
+    elif selected_model == "spliceformer_sc":
+        _add_spliceformer_sc_fallback_train_args(parser)
         _add_cnn_pair_fallback_infer_args(parser)
 
     return parser
