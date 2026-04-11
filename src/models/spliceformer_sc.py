@@ -44,6 +44,7 @@ import math
 import os
 import random
 import time
+import warnings
 from typing import ContextManager, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -778,6 +779,13 @@ def _score_with_species(
     for start in range(0, len(sequences), batch_size):
         seqs = sequences[start : start + batch_size]
         sps = species_idxs[start : start + batch_size]
+        real_n = len(seqs)
+        # Pad the last (partial) batch to batch_size so compiled static-shape
+        # CUDA graphs are not invalidated by a smaller final batch.
+        if real_n < batch_size:
+            pad = batch_size - real_n
+            seqs = seqs + [seqs[0]] * pad
+            sps = sps + [sps[0]] * pad
         x = torch.from_numpy(
             np.stack([one_hot_encode_dna_5ch(s, window_len) for s in seqs]).astype(np.float32)
         ).to(device)
@@ -789,7 +797,7 @@ def _score_with_species(
         )
         with amp_ctx:
             logits = model.forward_binary(x, sp, task=task)
-        out.append(torch.sigmoid(logits).cpu().numpy())
+        out.append(torch.sigmoid(logits.float()).cpu().numpy()[:real_n])
     return np.concatenate(out) if out else np.array([], dtype=np.float32)
 
 
@@ -883,6 +891,14 @@ def train_spliceformer(
     """
     t0 = time.time()
     set_seed(seed)
+
+    # Flash Attention's backward is non-deterministic by design; suppress the
+    # one-time UserWarning that fires on first backward when determinism is off.
+    warnings.filterwarnings(
+        "ignore",
+        message="Flash Attention defaults to a non-deterministic algorithm",
+        category=UserWarning,
+    )
 
     # AMP / hardware flags
     if _bool_from_flag(allow_tf32) and device.startswith("cuda"):
