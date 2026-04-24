@@ -74,6 +74,12 @@ Active tuning wrappers:
 - `run/tune_cnn_v2_time.sh`
 - `run/tune_cnn_pair_v2_time.sh`
 
+`run/tune_cnn_v2_time.sh` now uses processed symmetric site ERR files named
+`site_flank100.coding.err` / `site_flank100.neg.err` when present, and its
+default search space is limited to `donor_upstream`, `donor_downstream`,
+`acceptor_upstream`, and `acceptor_downstream`. Other CNN-v2 parameters are
+kept fixed through `base_args` or explicit config overrides.
+
 Archived tuning wrappers:
 
 - `archive/run/bert/tune_bert.sh`
@@ -114,11 +120,9 @@ CNN-family tuning search-space conventions:
   with mismatched input lengths) are discarded and resampled before a trial is
   launched.
 - `run/tune_cnn_v2_time.sh` and `run/tune_cnn_pair_v2_time.sh` intentionally
-  omit `max_model_params` and rely on OOM backoff instead. Their search spaces
-  now expose a binary `mask=off|on` hparam, which the wrappers translate to
-  `sequence_transform=none|mask_outside_intron_n` during model execution.
-  They are also widened to include more batch sizes and architecture
-  candidates.
+  omit `max_model_params` and rely on OOM backoff instead. `tune_cnn_v2_time`
+  is reserved for flank-length tuning, while `tune_cnn_pair_v2_time` keeps the
+  broader pair-model architecture search.
 - `run/run_cnn_pair_v2.sh` and `run/tune_cnn_pair_v2_time.sh` use a single
   active tuning namespace: `cnn_pair_v2`. The legacy
   `cnn_pair_v2_synth` subtree is retired and no longer participates in active

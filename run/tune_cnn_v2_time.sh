@@ -12,10 +12,10 @@ fi
 # --------------------------
 # Frequently edited knobs are intentionally placed first in this block.
 # Advanced fallback defaults are kept below.
-TIME_BUDGET_MINUTES="30"
+TIME_BUDGET_MINUTES="300"
 TIMEOUT_GRACE_SECONDS="30"
 
-INTRONMODEL_AUTO_TMUX="on"
+INTRONMODEL_AUTO_TMUX="off"
 # Validation / objective controls.
 VAL_FRAC="0.2"
 OBJECTIVE_METRIC="max_f1"
@@ -26,6 +26,12 @@ TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+DONOR_UPSTREAM="100"
+DONOR_DOWNSTREAM="100"
+ACCEPTOR_UPSTREAM="100"
+ACCEPTOR_DOWNSTREAM="100"
+PROCESSED_SITE_POS_NAME="site_flank100.coding.err"
+PROCESSED_SITE_NEG_NAME="site_flank100.neg.err"
 
 QUICK_TRIALS="16"
 QUICK_EPOCHS="2"
@@ -43,6 +49,7 @@ MAX_PARALLEL_TRIALS="auto"
 DEVICE="auto"
 USE_AMP="1"
 AMP_DTYPE="auto"
+BATCH_SIZE="512"
 ALLOW_TF32="1"
 CUDNN_BENCHMARK="1"
 DETERMINISTIC="0"
@@ -76,58 +83,16 @@ JOB_ORDER=(
 
 # Tune site tasks independently.
 TARGET_ORDER=(
+	"donor"
 	"acceptor"
 )
 
 DEFAULT_SEARCH_SPACE_JSON_SITE="$(cat <<'JSON'
 {
-  "donor_len": {"type": "int", "min": 40, "max": 100, "step": 10},
-  "acceptor_len": {"type": "int", "min": 60, "max": 100, "step": 1},
-  "lr": {"type": "float", "min": 8e-5, "max": 3e-3, "scale": "log"},
-	"batch_size": {
-		"type": "categorical",
-		"values": [64, 128, 256, 512, 1024, 2048, 4096]
-	},
-  "dropout": {"type": "float", "min": 0.0, "max": 0.55, "scale": "linear"},
-  "weight_decay": {"type": "float", "min": 1e-8, "max": 2e-2, "scale": "log"},
-	"input_mode": {
-		"type": "categorical",
-		"values": ["onehot", "kmer3", "bpe"]
-	},
-	"conv_depth": {"type": "int", "min": 2, "max": 7, "step": 1},
-	"channel_candidates": {
-		"type": "categorical",
-		"values": [
-			"32,48,64,96,128,192,256,384",
-			"48,64,96,128,192,256,320,384,512",
-			"64,96,128,160,192,256,320,384,512,768",
-			"96,128,192,256,384,512,768,1024"
-		]
-	},
-	"kernel_candidates": {
-		"type": "categorical",
-		"values": [
-			"3,5,7,9,11,13,15",
-			"5,7,9,11,13,15,17,19",
-			"7,9,11,13,15,17,19,21"
-		]
-	},
-	"channel_order": {"type": "categorical", "values": ["nondecreasing"]},
-	"kernel_order": {"type": "categorical", "values": ["nonincreasing"]},
-	"max_pool_candidates": {
-		"type": "categorical",
-		"values": ["1,2,3,4"]
-	},
-	"conv_stride_candidates": {
-		"type": "categorical",
-		"values": ["1,2,3"]
-	},
-	"head_type": {"type": "categorical", "values": ["gap", "center"]},
-  "loss": {
-    "type": "categorical",
-    "values": ["weighted_bce", "focal", "asymmetric_focal", "f1", "weighted_bce_f1", "focal_f1"]
-  },
-  "f1_lambda": {"type": "float", "min": 0.02, "max": 0.5, "scale": "log"}
+  "donor_upstream": {"type": "int", "min": 10, "max": 100, "step": 10},
+  "donor_downstream": {"type": "int", "min": 10, "max": 100, "step": 10},
+  "acceptor_upstream": {"type": "int", "min": 10, "max": 100, "step": 10},
+  "acceptor_downstream": {"type": "int", "min": 10, "max": 100, "step": 10}
 }
 JSON
 )"
@@ -372,13 +337,24 @@ dispatch_cycle() {
 	local stdout_log="${output_dir}/cycle_stdout.log"
 	mkdir -p "${output_dir}"
 
+	local train_pos_path_arg="${TRAIN_POS_PATH}"
+	local train_neg_path_arg="${TRAIN_NEG_PATH}"
+	if [[ -z "${train_pos_path_arg}" \
+		&& -f "${DATA_ROOT}/${species}/processed/${PROCESSED_SITE_POS_NAME}" ]]; then
+		train_pos_path_arg="${DATA_ROOT}/${species}/processed/${PROCESSED_SITE_POS_NAME}"
+	fi
+	if [[ -z "${train_neg_path_arg}" \
+		&& -f "${DATA_ROOT}/${species}/processed/${PROCESSED_SITE_NEG_NAME}" ]]; then
+		train_neg_path_arg="${DATA_ROOT}/${species}/processed/${PROCESSED_SITE_NEG_NAME}"
+	fi
+
 	local resolved_train_paths
 	resolved_train_paths="$(
 		intronmodel_resolve_and_validate_train_paths \
 			"tune_cnn_v2_time.sh" \
 			"${species}" \
-			"${TRAIN_POS_PATH}" \
-			"${TRAIN_NEG_PATH}"
+			"${train_pos_path_arg}" \
+			"${train_neg_path_arg}"
 	)" || return 1
 	local TRAIN_POS_PATH_RESOLVED=""
 	local TRAIN_NEG_PATH_RESOLVED=""
@@ -477,12 +453,17 @@ dispatch_cycle() {
     "seed": ${base_seed},
     "donor_len": ${DONOR_LEN},
     "acceptor_len": ${ACCEPTOR_LEN},
+    "donor_upstream": ${DONOR_UPSTREAM},
+    "donor_downstream": ${DONOR_DOWNSTREAM},
+    "acceptor_upstream": ${ACCEPTOR_UPSTREAM},
+    "acceptor_downstream": ${ACCEPTOR_DOWNSTREAM},
     "val_frac": ${VAL_FRAC},
 	"input_mode": "onehot",
 	"pair_mode": "independent",
 	"embedding_dim": 32,
 	"bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
 	"bpe_trust_remote_code": 0,
+    "batch_size": ${BATCH_SIZE},
     "device": "${DEVICE}",
     "visualize": "${VISUALIZE}",
     "name_fields": "${NAME_FIELDS}",

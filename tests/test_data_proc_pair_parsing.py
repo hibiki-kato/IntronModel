@@ -6,6 +6,7 @@ import pytest
 
 from util.data_proc import (
     clear_training_example_caches,
+    parse_debug_training_record,
     read_examples_pair_task_with_metadata,
     read_examples_single_task,
     read_examples_single_task_with_metadata,
@@ -207,6 +208,51 @@ def test_read_examples_single_task_with_metadata_exposes_new_fields(
     assert donor_examples[1].intron_half_length == 31
     assert donor_examples[2].transcript_id is None
     assert donor_examples[2].intron_half_length is None
+
+
+def test_parse_debug_training_record_supports_symmetric_site_metadata() -> None:
+    parsed = parse_debug_training_record(
+        "DEBUG donor ACGTACGTAA - 790.5 NC_007119.7 9719283"
+    )
+
+    assert parsed is not None
+    assert parsed.record_type == "donor"
+    assert parsed.donor_seq == "ACGTACGTAA"
+    assert parsed.strand == "-"
+    assert parsed.intron_half_length == 790
+    assert parsed.chrom == "NC_007119.7"
+    assert parsed.pos == 9719283
+
+
+def test_read_examples_single_task_supports_four_flank_lengths(
+    tmp_path: Path,
+) -> None:
+    pos_path = tmp_path / "pos.err"
+    neg_path = tmp_path / "neg.err"
+    _write_text(pos_path, "DEBUG donor AAAACCCCGG +\n")
+    _write_text(neg_path, "DEBUG acceptor TTTTGGGGCC -\n")
+
+    donor_examples = read_examples_single_task(
+        str(pos_path),
+        str(neg_path),
+        "donor",
+        donor_len=None,
+        acceptor_len=None,
+        donor_upstream=2,
+        donor_downstream=3,
+    )
+    acceptor_examples = read_examples_single_task(
+        str(pos_path),
+        str(neg_path),
+        "acceptor",
+        donor_len=None,
+        acceptor_len=None,
+        acceptor_upstream=3,
+        acceptor_downstream=2,
+    )
+
+    assert donor_examples == [("ACCCC", 1)]
+    assert acceptor_examples == [("TTGGG", 0)]
 
 
 def test_read_examples_single_task_with_metadata_rejects_unknown_task(

@@ -104,6 +104,17 @@ SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
 )
 SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
 _SITE_WINDOW_LEN_KEYS: tuple[str, str] = ("donor_len", "acceptor_len")
+_SITE_WINDOW_FLANK_KEYS: tuple[str, str, str, str] = (
+    "donor_upstream",
+    "donor_downstream",
+    "acceptor_upstream",
+    "acceptor_downstream",
+)
+_DONOR_WINDOW_FLANK_KEYS: tuple[str, str] = ("donor_upstream", "donor_downstream")
+_ACCEPTOR_WINDOW_FLANK_KEYS: tuple[str, str] = (
+    "acceptor_upstream",
+    "acceptor_downstream",
+)
 _SITE_WINDOW_LEN_DEFAULT: int = 100
 _SITE_WINDOW_LEN_MIN: int = 40
 _SITE_WINDOW_LEN_MAX: int = 100
@@ -398,6 +409,8 @@ def _resolve_site_window_len_search_keys(
     base_args: dict[str, ArgValue],
 ) -> tuple[str, ...]:
     """Resolve which site-window length keys should be searched."""
+    if any(key in base_args for key in _SITE_WINDOW_FLANK_KEYS):
+        return ()
     model_name = str(base_args.get("model", "")).strip().lower()
     default_train_target = "donor" if model_name in {"cnn_v2", "cnn_v3"} else "both"
     raw_train_target = base_args.get("train_target", default_train_target)
@@ -415,10 +428,52 @@ def _inject_site_window_len_space(
 ) -> dict[str, dict[str, object]]:
     """Ensure donor_len and acceptor_len are always part of search space."""
     normalized = dict(search_space)
+    if any(key in normalized for key in _SITE_WINDOW_FLANK_KEYS):
+        return normalized
     for key in _resolve_site_window_len_search_keys(base_args):
         if key not in normalized:
             normalized[key] = _site_window_len_spec()
     return normalized
+
+
+def _resolve_length_from_flanks(
+    *,
+    sampled_params: Mapping[str, object],
+    base_args: Mapping[str, object],
+    upstream_key: str,
+    downstream_key: str,
+    legacy_key: str,
+) -> int | None:
+    """Resolve effective site input length from 4p or legacy length args."""
+    upstream_raw = sampled_params.get(upstream_key)
+    if upstream_raw is None:
+        upstream_raw = base_args.get(upstream_key)
+    downstream_raw = sampled_params.get(downstream_key)
+    if downstream_raw is None:
+        downstream_raw = base_args.get(downstream_key)
+    upstream = _to_positive_int(upstream_raw)
+    downstream = _to_positive_int(downstream_raw)
+    if upstream is not None or downstream is not None:
+        if upstream is None or downstream is None:
+            return None
+        return upstream + downstream
+
+    legacy_raw = sampled_params.get(legacy_key)
+    if legacy_raw is None:
+        legacy_raw = base_args.get(legacy_key)
+    return _to_positive_int(legacy_raw)
+
+
+def _resolve_window_flanks(
+    merged_args: Mapping[str, object],
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """Resolve optional donor/acceptor upstream/downstream args."""
+    return (
+        _to_optional_int(merged_args.get("donor_upstream")),
+        _to_optional_int(merged_args.get("donor_downstream")),
+        _to_optional_int(merged_args.get("acceptor_upstream")),
+        _to_optional_int(merged_args.get("acceptor_downstream")),
+    )
 
 
 def load_config(path: Path) -> SearchConfig:
@@ -513,8 +568,9 @@ def load_config(path: Path) -> SearchConfig:
         str(key): value for key, value in base_args.items()
     }
     normalized_base_args["model"] = model_name.strip()
-    normalized_base_args.setdefault("donor_len", _SITE_WINDOW_LEN_DEFAULT)
-    normalized_base_args.setdefault("acceptor_len", _SITE_WINDOW_LEN_DEFAULT)
+    if not any(key in normalized_base_args for key in _SITE_WINDOW_FLANK_KEYS):
+        normalized_base_args.setdefault("donor_len", _SITE_WINDOW_LEN_DEFAULT)
+        normalized_base_args.setdefault("acceptor_len", _SITE_WINDOW_LEN_DEFAULT)
     normalized_model_name = normalized_base_args["model"].strip().lower()
     if normalized_model_name in {"cnn_v2", "cnn_v3"}:
         pair_mode_raw = normalized_base_args.get("pair_mode", "independent")
@@ -1260,6 +1316,12 @@ def _compute_test_pr_auc_objective(
 
     donor_len = _to_optional_int(merged_args.get("donor_len"))
     acceptor_len = _to_optional_int(merged_args.get("acceptor_len"))
+    (
+        donor_upstream,
+        donor_downstream,
+        acceptor_upstream,
+        acceptor_downstream,
+    ) = _resolve_window_flanks(merged_args)
     sequence_transform = str(merged_args.get("sequence_transform", "none")).strip()
     if sequence_transform == "":
         sequence_transform = "none"
@@ -1285,6 +1347,10 @@ def _compute_test_pr_auc_objective(
             str(test_tsv),
             donor_len,
             acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
         )
         if not pair_rows:
             return None
@@ -1301,6 +1367,10 @@ def _compute_test_pr_auc_objective(
             str(test_tsv),
             donor_len,
             acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
         )
         tasks_to_score: tuple[str, ...]
         if train_target in {"donor", "acceptor"}:
@@ -1644,8 +1714,12 @@ def _normalize_independent_site_sampled_params(
     )
     if train_target == "donor":
         normalized.pop("acceptor_len", None)
+        for key in _ACCEPTOR_WINDOW_FLANK_KEYS:
+            normalized.pop(key, None)
     elif train_target == "acceptor":
         normalized.pop("donor_len", None)
+        for key in _DONOR_WINDOW_FLANK_KEYS:
+            normalized.pop(key, None)
     normalized.pop("mask", None)
     normalized.pop("sequence_transform", None)
     return normalized
@@ -4021,15 +4095,20 @@ def _is_valid_cnn_architecture(
     if conv_stride <= 0:
         return False
 
-    donor_len_raw = sampled_params.get("donor_len")
-    if donor_len_raw is None:
-        donor_len_raw = base_args.get("donor_len")
-    acceptor_len_raw = sampled_params.get("acceptor_len")
-    if acceptor_len_raw is None:
-        acceptor_len_raw = base_args.get("acceptor_len")
-
-    donor_len = _to_positive_int(donor_len_raw)
-    acceptor_len = _to_positive_int(acceptor_len_raw)
+    donor_len = _resolve_length_from_flanks(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        upstream_key="donor_upstream",
+        downstream_key="donor_downstream",
+        legacy_key="donor_len",
+    )
+    acceptor_len = _resolve_length_from_flanks(
+        sampled_params=sampled_params,
+        base_args=base_args,
+        upstream_key="acceptor_upstream",
+        downstream_key="acceptor_downstream",
+        legacy_key="acceptor_len",
+    )
     input_mode_raw = sampled_params.get("input_mode")
     if input_mode_raw is None:
         input_mode_raw = base_args.get("input_mode", "onehot")
@@ -4637,14 +4716,20 @@ def _materialize_cnn_architecture_params(
             if train_target not in {"donor", "acceptor"}:
                 return
 
-        donor_len_raw = out.get("donor_len")
-        if donor_len_raw is None:
-            donor_len_raw = base_args.get("donor_len")
-        acceptor_len_raw = out.get("acceptor_len")
-        if acceptor_len_raw is None:
-            acceptor_len_raw = base_args.get("acceptor_len")
-        donor_len = _to_positive_int(donor_len_raw)
-        acceptor_len = _to_positive_int(acceptor_len_raw)
+        donor_len = _resolve_length_from_flanks(
+            sampled_params=out,
+            base_args=base_args,
+            upstream_key="donor_upstream",
+            downstream_key="donor_downstream",
+            legacy_key="donor_len",
+        )
+        acceptor_len = _resolve_length_from_flanks(
+            sampled_params=out,
+            base_args=base_args,
+            upstream_key="acceptor_upstream",
+            downstream_key="acceptor_downstream",
+            legacy_key="acceptor_len",
+        )
 
         lengths_to_check: list[int] = []
         if train_target in {"both", "donor"} and donor_len is not None:

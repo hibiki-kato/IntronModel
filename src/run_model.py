@@ -174,6 +174,10 @@ TUNED_IDENTITY_IGNORED_SAMPLED_PARAMS: frozenset[str] = frozenset(
         "train_target",
         "donor_len",
         "acceptor_len",
+        "donor_upstream",
+        "donor_downstream",
+        "acceptor_upstream",
+        "acceptor_downstream",
         "input_mode",
         "pair_mode",
         "sequence_transform",
@@ -202,6 +206,10 @@ def _add_shared_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--species", default="Dmel")
     parser.add_argument("--donor_len", type=int, default=None)
     parser.add_argument("--acceptor_len", type=int, default=None)
+    parser.add_argument("--donor_upstream", type=int, default=None)
+    parser.add_argument("--donor_downstream", type=int, default=None)
+    parser.add_argument("--acceptor_upstream", type=int, default=None)
+    parser.add_argument("--acceptor_downstream", type=int, default=None)
     parser.add_argument(
         "--device",
         default="auto",

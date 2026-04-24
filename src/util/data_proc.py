@@ -24,6 +24,10 @@ NAME_FIELD_CHOICES: tuple[str, ...] = (
     "bp_window",
     "donor_len",
     "acceptor_len",
+    "donor_upstream",
+    "donor_downstream",
+    "acceptor_upstream",
+    "acceptor_downstream",
     "epochs",
     "batch_size",
     "lr",
@@ -57,6 +61,10 @@ NAME_FIELD_CHOICES: tuple[str, ...] = (
 NAME_FIELD_LABELS: dict[str, str] = {
     "donor_len": "dlen",
     "acceptor_len": "alen",
+    "donor_upstream": "dup",
+    "donor_downstream": "ddn",
+    "acceptor_upstream": "aup",
+    "acceptor_downstream": "adn",
     "epochs": "ep",
     "batch_size": "bs",
     "lr": "lr",
@@ -120,6 +128,8 @@ class ParsedTrainingRecord:
     strand: str | None
     transcript_id: str | None
     intron_half_length: int | None
+    chrom: str | None
+    pos: int | None
 
 
 @dataclass(frozen=True)
@@ -547,6 +557,31 @@ def validate_window_args(
             raise ValueError("--acceptor_len must be > 0")
 
 
+def validate_window_args_4p(
+    donor_upstream: Optional[int],
+    donor_downstream: Optional[int],
+    acceptor_upstream: Optional[int],
+    acceptor_downstream: Optional[int],
+) -> None:
+    """Validate the four independent splice-site window parameters."""
+    for name, val in [
+        ("--donor_upstream", donor_upstream),
+        ("--donor_downstream", donor_downstream),
+        ("--acceptor_upstream", acceptor_upstream),
+        ("--acceptor_downstream", acceptor_downstream),
+    ]:
+        if val is not None and val <= 0:
+            raise ValueError(f"{name} must be > 0")
+    if (donor_upstream is None) != (donor_downstream is None):
+        raise ValueError(
+            "--donor_upstream and --donor_downstream must be set together"
+        )
+    if (acceptor_upstream is None) != (acceptor_downstream is None):
+        raise ValueError(
+            "--acceptor_upstream and --acceptor_downstream must be set together"
+        )
+
+
 def detect_raw_reference_files(raw_dir: str) -> Dict[str, Optional[str]]:
     """Detect single reference files in raw dir by extension family."""
     out: Dict[str, Optional[str]] = {"fna": None, "gff": None, "gtf": None}
@@ -718,11 +753,67 @@ def reshape_site_sequence(
     return None
 
 
+# Position (0-indexed) of the splice-site dinucleotide (GT/AG) in the 102bp
+# sequences from *.coding.pwm.err and *.neg.pwm.err raw files.
+SPLICE_SITE_OFFSET: int = 50
+
+
+def _infer_splice_site_offset(seq_len: int) -> int:
+    """Infer splice-site offset for supported raw/processed site windows."""
+    if seq_len == 102:
+        return SPLICE_SITE_OFFSET
+    return seq_len // 2
+
+
+def reshape_site_sequence_4p(
+    seq: str,
+    site_type: str,
+    upstream: Optional[int],
+    downstream: Optional[int],
+    splice_site_offset: Optional[int] = None,
+) -> Optional[str]:
+    """Slice a splice-site sequence using independent upstream/downstream windows.
+
+    Parameters
+    ----------
+    seq:
+        Raw nucleotide sequence (any length).
+    site_type:
+        ``"donor"`` or ``"acceptor"``.
+    upstream:
+        Bases to include before *splice_site_offset*. ``None`` = from start.
+    downstream:
+        Bases to include from *splice_site_offset* onwards. ``None`` = to end.
+    splice_site_offset:
+        0-indexed position of the first dinucleotide base (GT for donor,
+        AG for acceptor) within *seq*.
+
+    Returns
+    -------
+    str | None
+        Sliced sequence, or ``None`` when requested window exceeds *seq*.
+    """
+    if site_type not in {"donor", "acceptor"}:
+        return None
+    seq = seq.upper()
+    if splice_site_offset is None:
+        splice_site_offset = _infer_splice_site_offset(len(seq))
+    start = splice_site_offset - upstream if upstream is not None else 0
+    end = splice_site_offset + downstream if downstream is not None else len(seq)
+    if start < 0 or end > len(seq) or start >= end:
+        return None
+    return seq[start:end]
+
+
 def _reshape_or_pad_test_site_sequence(
     seq: str,
     site_type: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Optional[str]:
     """Reshape one inference-time site sequence to fixed length.
 
@@ -748,17 +839,32 @@ def _reshape_or_pad_test_site_sequence(
         Fixed-length sequence ready for inference, or ``None`` for unsupported
         site types.
     """
-    reshaped = reshape_site_sequence(
-        seq=seq,
-        site_type=site_type,
-        donor_len=donor_len,
-        acceptor_len=acceptor_len,
-    )
+    upstream = donor_upstream if site_type == "donor" else acceptor_upstream
+    downstream = donor_downstream if site_type == "donor" else acceptor_downstream
+    use_4p = upstream is not None or downstream is not None
+    if use_4p:
+        reshaped = reshape_site_sequence_4p(
+            seq=seq,
+            site_type=site_type,
+            upstream=upstream,
+            downstream=downstream,
+        )
+    else:
+        reshaped = reshape_site_sequence(
+            seq=seq,
+            site_type=site_type,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+        )
     if reshaped is not None:
         return reshaped
 
     seq_upper = seq.upper()
     if site_type == "donor":
+        if use_4p:
+            if donor_upstream is None or donor_downstream is None:
+                return seq_upper
+            donor_len = donor_upstream + donor_downstream
         if donor_len is None:
             return seq_upper
         if len(seq_upper) > donor_len:
@@ -766,6 +872,10 @@ def _reshape_or_pad_test_site_sequence(
         return seq_upper + ("N" * (donor_len - len(seq_upper)))
 
     if site_type == "acceptor":
+        if use_4p:
+            if acceptor_upstream is None or acceptor_downstream is None:
+                return seq_upper
+            acceptor_len = acceptor_upstream + acceptor_downstream
         if acceptor_len is None:
             return seq_upper
         if len(seq_upper) > acceptor_len:
@@ -804,6 +914,14 @@ def _parse_required_int(token: str) -> int | None:
         return None
 
 
+def _parse_required_number(token: str) -> int | None:
+    """Parse required numeric token (int or float) as int."""
+    try:
+        return int(float(token))
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
     """Parse one training line from old/new ``DEBUG`` formats.
 
@@ -831,13 +949,14 @@ def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
         strand, index = _parse_optional_strand(tokens, index)
         intron_half_length: int | None = None
         if index < len(tokens):
-            parsed = _parse_required_int(tokens[index])
+            parsed = _parse_required_number(tokens[index])
             if parsed is None:
                 return None
             intron_half_length = parsed
             index += 1
-        if index != len(tokens):
-            return None
+        # Accept optional trailing chrom/pos fields from new format; skip them.
+        while index < len(tokens):
+            index += 1
         return ParsedTrainingRecord(
             record_type="pair",
             donor_seq=donor_seq,
@@ -845,6 +964,8 @@ def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
             strand=strand,
             transcript_id=None,
             intron_half_length=intron_half_length,
+            chrom=None,
+            pos=None,
         )
 
     if record_type == "donor":
@@ -859,7 +980,7 @@ def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
                 if index + 1 >= len(tokens):
                     return None
                 transcript_id = tokens[index]
-                parsed = _parse_required_int(tokens[index + 1])
+                parsed = _parse_required_number(tokens[index + 1])
                 if parsed is None:
                     return None
                 intron_half_length = parsed
@@ -873,9 +994,29 @@ def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
                 strand=strand,
                 transcript_id=transcript_id,
                 intron_half_length=intron_half_length,
+                chrom=None,
+                pos=None,
             )
 
         strand, index = _parse_optional_strand(tokens, 3)
+        # Accept optional trailing: <intron_half_len> <chrom> <pos>
+        intron_half_length = None
+        chrom: str | None = None
+        pos: int | None = None
+        if index < len(tokens):
+            parsed = _parse_required_number(tokens[index])
+            if parsed is None:
+                return None
+            intron_half_length = parsed
+            index += 1
+            if index < len(tokens):
+                chrom = tokens[index]
+                index += 1
+                if index < len(tokens):
+                    pos = _parse_required_int(tokens[index])
+                    if pos is None:
+                        return None
+                    index += 1
         if index != len(tokens):
             return None
         return ParsedTrainingRecord(
@@ -884,12 +1025,32 @@ def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
             acceptor_seq=None,
             strand=strand,
             transcript_id=None,
-            intron_half_length=None,
+            intron_half_length=intron_half_length,
+            chrom=chrom,
+            pos=pos,
         )
 
     if record_type == "acceptor":
         acceptor_seq = tokens[2].upper()
         strand, index = _parse_optional_strand(tokens, 3)
+        # Accept optional trailing: <intron_half_len> <chrom> <pos>
+        intron_half_length = None
+        chrom = None
+        pos = None
+        if index < len(tokens):
+            parsed = _parse_required_number(tokens[index])
+            if parsed is None:
+                return None
+            intron_half_length = parsed
+            index += 1
+            if index < len(tokens):
+                chrom = tokens[index]
+                index += 1
+                if index < len(tokens):
+                    pos = _parse_required_int(tokens[index])
+                    if pos is None:
+                        return None
+                    index += 1
         if index != len(tokens):
             return None
         return ParsedTrainingRecord(
@@ -898,7 +1059,9 @@ def parse_debug_training_record(line: str) -> ParsedTrainingRecord | None:
             acceptor_seq=acceptor_seq,
             strand=strand,
             transcript_id=None,
-            intron_half_length=None,
+            intron_half_length=intron_half_length,
+            chrom=chrom,
+            pos=pos,
         )
 
     return None
@@ -961,6 +1124,10 @@ def _read_examples_single_task_with_metadata_uncached(
     task: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Tuple[SiteTrainingExample, ...]:
     """Read one-task examples from disk without cache lookup."""
     if task not in {"donor", "acceptor"}:
@@ -993,12 +1160,17 @@ def _read_examples_single_task_with_metadata_uncached(
                 if raw_seq is None:
                     continue
 
-                reshaped = reshape_site_sequence(
-                    raw_seq,
-                    task,
-                    donor_len=donor_len,
-                    acceptor_len=acceptor_len,
-                )
+                up = donor_upstream if task == "donor" else acceptor_upstream
+                dn = donor_downstream if task == "donor" else acceptor_downstream
+                if up is not None or dn is not None:
+                    reshaped = reshape_site_sequence_4p(raw_seq, task, up, dn)
+                else:
+                    reshaped = reshape_site_sequence(
+                        raw_seq,
+                        task,
+                        donor_len=donor_len,
+                        acceptor_len=acceptor_len,
+                    )
                 if reshaped is None:
                     continue
                 examples.append(
@@ -1024,6 +1196,10 @@ def _read_examples_single_task_with_metadata_cached(
     task: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Tuple[SiteTrainingExample, ...]:
     """Read one-task examples with cache keyed by file signatures."""
     return _read_examples_single_task_with_metadata_uncached(
@@ -1032,6 +1208,10 @@ def _read_examples_single_task_with_metadata_cached(
         task=task,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
 
 
@@ -1041,6 +1221,10 @@ def read_examples_single_task_with_metadata(
     task: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> List[SiteTrainingExample]:
     """Read one-task training examples with parsed line metadata.
 
@@ -1075,6 +1259,10 @@ def read_examples_single_task_with_metadata(
         task,
         donor_len,
         acceptor_len,
+        donor_upstream,
+        donor_downstream,
+        acceptor_upstream,
+        acceptor_downstream,
     )
     return list(cached_examples)
 
@@ -1085,6 +1273,10 @@ def read_examples_single_task(
     task: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> List[Tuple[str, int]]:
     """Read one-task training examples as ``(sequence, label)`` pairs.
 
@@ -1096,6 +1288,10 @@ def read_examples_single_task(
         task=task,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
     return [(item.sequence, item.label) for item in examples_with_metadata]
 
@@ -1105,6 +1301,10 @@ def read_examples_pair_task_with_metadata(
     neg_path: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
     *,
     negative_pair_only: bool = True,
 ) -> List[PairTrainingExample]:
@@ -1149,6 +1349,10 @@ def read_examples_pair_task_with_metadata(
         extra_negative_signatures,
         donor_len,
         acceptor_len,
+        donor_upstream,
+        donor_downstream,
+        acceptor_upstream,
+        acceptor_downstream,
         negative_pair_only,
     )
     return list(cached_examples)
@@ -1161,7 +1365,11 @@ def _read_examples_pair_task_with_metadata_uncached(
     extra_neg_paths: Sequence[str],
     donor_len: Optional[int],
     acceptor_len: Optional[int],
-    negative_pair_only: bool,
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
+    negative_pair_only: bool = True,
 ) -> Tuple[PairTrainingExample, ...]:
     """Read pair-task examples from disk without cache lookup."""
     examples: List[PairTrainingExample] = []
@@ -1184,18 +1392,34 @@ def _read_examples_pair_task_with_metadata_uncached(
                 if parsed.donor_seq is None or parsed.acceptor_seq is None:
                     continue
 
-                donor_seq = reshape_site_sequence(
-                    parsed.donor_seq,
-                    "donor",
-                    donor_len=donor_len,
-                    acceptor_len=acceptor_len,
-                )
-                acceptor_seq = reshape_site_sequence(
-                    parsed.acceptor_seq,
-                    "acceptor",
-                    donor_len=donor_len,
-                    acceptor_len=acceptor_len,
-                )
+                if donor_upstream is not None or donor_downstream is not None:
+                    donor_seq = reshape_site_sequence_4p(
+                        parsed.donor_seq,
+                        "donor",
+                        donor_upstream,
+                        donor_downstream,
+                    )
+                else:
+                    donor_seq = reshape_site_sequence(
+                        parsed.donor_seq,
+                        "donor",
+                        donor_len=donor_len,
+                        acceptor_len=acceptor_len,
+                    )
+                if acceptor_upstream is not None or acceptor_downstream is not None:
+                    acceptor_seq = reshape_site_sequence_4p(
+                        parsed.acceptor_seq,
+                        "acceptor",
+                        acceptor_upstream,
+                        acceptor_downstream,
+                    )
+                else:
+                    acceptor_seq = reshape_site_sequence(
+                        parsed.acceptor_seq,
+                        "acceptor",
+                        donor_len=donor_len,
+                        acceptor_len=acceptor_len,
+                    )
                 if donor_seq is None or acceptor_seq is None:
                     continue
 
@@ -1225,7 +1449,11 @@ def _read_examples_pair_task_with_metadata_cached(
     extra_neg_signatures: tuple[TrainingFileSignature, ...],
     donor_len: Optional[int],
     acceptor_len: Optional[int],
-    negative_pair_only: bool,
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
+    negative_pair_only: bool = True,
 ) -> Tuple[PairTrainingExample, ...]:
     """Read pair-task examples with cache keyed by file signatures."""
     return _read_examples_pair_task_with_metadata_uncached(
@@ -1234,6 +1462,10 @@ def _read_examples_pair_task_with_metadata_cached(
         extra_neg_paths=tuple(signature[0] for signature in extra_neg_signatures),
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
         negative_pair_only=negative_pair_only,
     )
 
@@ -1390,6 +1622,10 @@ def read_test_site_rows(
     test_tsv: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Tuple[List[Dict[str, object]], int]:
     """Read inference-time site rows from one transcript TSV.
 
@@ -1433,6 +1669,10 @@ def read_test_site_rows(
                 site_type=site_type,
                 donor_len=donor_len,
                 acceptor_len=acceptor_len,
+                donor_upstream=donor_upstream,
+                donor_downstream=donor_downstream,
+                acceptor_upstream=acceptor_upstream,
+                acceptor_downstream=acceptor_downstream,
             )
             if not reshaped:
                 skipped_short += 1
@@ -1470,6 +1710,10 @@ def read_test_pair_rows(
     test_tsv: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Tuple[List[Dict[str, object]], int, int]:
     """Read and pair donor/acceptor test rows into pair-task records.
 
@@ -1516,6 +1760,10 @@ def read_test_pair_rows(
                 site_type=site_type,
                 donor_len=donor_len,
                 acceptor_len=acceptor_len,
+                donor_upstream=donor_upstream,
+                donor_downstream=donor_downstream,
+                acceptor_upstream=acceptor_upstream,
+                acceptor_downstream=acceptor_downstream,
             )
             if reshaped is None:
                 skipped_short += 1

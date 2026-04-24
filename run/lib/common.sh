@@ -266,6 +266,11 @@ intronmodel_format_elapsed() {
 }
 
 
+format_elapsed() {
+	intronmodel_format_elapsed "$@"
+}
+
+
 intronmodel_format_eta_epoch() {
 	local epoch_seconds="$1"
 

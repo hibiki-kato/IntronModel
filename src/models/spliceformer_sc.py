@@ -54,6 +54,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from models import cnn
+from models.cnn_common import _resolve_loader_batch_size_and_drop_last
 from util.data_proc import (
     infer_default_train_paths,
     read_test_site_rows,
@@ -68,6 +69,7 @@ from util.model_runtime import (
     compile_model_with_fallback as _compile_model_with_fallback,
     empty_device_cache as _empty_device_cache,
     export_model_state_dict as _export_model_state_dict,
+    is_compile_runtime_error as _is_compile_runtime_error,
     is_cuda_oom_error as _is_cuda_oom_error,
     is_mps_oom_error as _is_mps_oom_error,
     normalize_checkpoint_state_dict as _normalize_checkpoint_state_dict,
@@ -75,13 +77,14 @@ from util.model_runtime import (
     resolve_amp_dtype as _resolve_amp_dtype,
     resolve_compile_enabled as _resolve_compile_enabled,
     resolve_num_workers as _resolve_num_workers,
+    record_compile_runtime_failure as _record_compile_runtime_failure,
     seed_worker as _seed_worker,
     set_seed,
     warm_start_model as _warm_start_model,
 )
 from util.model_task_paths import resolve_required_checkpoint_paths
 from util.training_control import resolve_training_schedule
-from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_LOG10
+from util.transcript_eval import SCORE_SPACE_FIELD, SCORE_SPACE_PROBABILITY
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +761,39 @@ def _config_from_dict(d: dict) -> SpliceformerConfig:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint mirroring — multi-species shared checkpoint
+# ---------------------------------------------------------------------------
+
+def _mirror_checkpoint_to_species(
+    donor_path: str,
+    acceptor_path: str,
+    species_list: List[str],
+) -> None:
+    """Symlink the shared checkpoint into each non-training species' model dir.
+
+    The pipeline resolves checkpoints via a per-species directory; training
+    only saves to the first species' dir.  Creating symlinks lets all other
+    species find the shared model via the pipeline's fallback resolver.
+    """
+    for task_path in (donor_path, acceptor_path):
+        if not os.path.exists(task_path):
+            continue
+        task_dir = os.path.dirname(task_path)       # .../model/Athal/donor
+        species_dir = os.path.dirname(task_dir)     # .../model/Athal
+        model_root_dir = os.path.dirname(species_dir)  # .../model
+        task_name = os.path.basename(task_dir)      # donor / acceptor
+        filename = os.path.basename(task_path)
+        for sp in species_list:
+            target_dir = os.path.join(model_root_dir, sp, task_name)
+            target_path = os.path.join(target_dir, filename)
+            if os.path.exists(target_path) or os.path.islink(target_path):
+                continue
+            os.makedirs(target_dir, exist_ok=True)
+            os.symlink(os.path.abspath(task_path), target_path)
+            print(f"[spliceformer_sc] mirrored checkpoint → {target_path}")
+
+
+# ---------------------------------------------------------------------------
 # Scoring utilities
 # ---------------------------------------------------------------------------
 
@@ -938,40 +974,15 @@ def train_spliceformer(
     val_frac = float(getattr(model_args, "val_frac", 0.1))
     train_ex, val_ex = _stratified_split_examples(all_examples, val_frac, seed)
 
-    train_ds = SpliceformerDataset(train_ex, window_len, species_to_idx)
-    val_ds = SpliceformerDataset(val_ex, window_len, species_to_idx)
-
-    # DataLoaders
     batch_size = int(getattr(model_args, "batch_size", 512))
     resolved_workers = _resolve_num_workers(num_workers, device)
     use_persist = _bool_from_flag(persistent_workers) and resolved_workers > 0
     use_pin = _bool_from_flag(pin_memory) and device.startswith("cuda")
-
-    train_kw: dict = {
-        "dataset": train_ds,
-        "batch_size": batch_size,
-        "shuffle": True,
-        "num_workers": resolved_workers,
-        "pin_memory": use_pin,
-        "drop_last": False,
-        "worker_init_fn": _seed_worker,
-    }
-    if resolved_workers > 0:
-        train_kw["prefetch_factor"] = prefetch_factor
-        train_kw["persistent_workers"] = use_persist
-    train_loader = DataLoader(**train_kw)
-
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=resolved_workers,
-        pin_memory=use_pin,
-    )
-    print(
-        f"[spliceformer_sc] train_batches={len(train_loader)} "
-        f"val_batches={len(val_loader)} batch_size={batch_size}"
-    )
+    use_non_blocking = device.startswith("cuda")
+    effective_batch_size = batch_size
+    preencode_dataset = _bool_from_flag(getattr(model_args, "preencode_dataset", 0))
+    if preencode_dataset:
+        print("[spliceformer_sc] dataset pre-encoding enabled.")
 
     # Optimiser + scheduler
     lr = float(getattr(model_args, "lr", 1e-3))
@@ -995,174 +1006,288 @@ def train_spliceformer(
     # AMP
     resolved_amp_dtype = _resolve_amp_dtype(amp_dtype, device)
     use_amp_bool = _bool_from_flag(use_amp) and device.startswith("cuda")
-    scaler: Optional[torch.cuda.amp.GradScaler] = (
-        torch.cuda.amp.GradScaler()
-        if use_amp_bool and resolved_amp_dtype == torch.float16
-        else None
-    )
-
-    # torch.compile
     compile_enabled = _resolve_compile_enabled(compile_mode, compile_model, False, device, epochs)
-    if compile_enabled:
-        model, _, _, _ = _compile_model_with_fallback(model, compile_mode=compile_mode)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler_factory = lambda enabled: torch.amp.GradScaler("cuda", enabled=enabled)
+    else:
+        scaler_factory = lambda enabled: torch.cuda.amp.GradScaler(enabled=enabled)
 
-    # Training state
-    bce = nn.BCEWithLogitsLoss()
-    best_metric = float("-inf")
-    best_epoch = 0
-    epochs_since = 0
-    stopped_early = False
-    epoch_history: List[Dict] = []
+    val_donor_examples = [ex for ex in val_ex if ex.task == "donor"]
+    val_acceptor_examples = [ex for ex in val_ex if ex.task == "acceptor"]
+    val_seqs_d = [ex.sequence for ex in val_donor_examples]
+    val_labs_d = np.array([ex.label for ex in val_donor_examples], dtype=np.float32)
+    val_sps_d = [species_to_idx[ex.species] for ex in val_donor_examples]
+    val_seqs_a = [ex.sequence for ex in val_acceptor_examples]
+    val_labs_a = np.array([ex.label for ex in val_acceptor_examples], dtype=np.float32)
+    val_sps_a = [species_to_idx[ex.species] for ex in val_acceptor_examples]
 
-    for epoch in range(1, epochs + 1):
-        model.train()
-        total_loss = 0.0
-        n_batches = 0
+    def _safe_pr_auc(labels_arr: np.ndarray, scores_arr: np.ndarray) -> float:
+        if len(np.unique(labels_arr)) < 2:
+            return float("nan")
+        from sklearn.metrics import average_precision_score
+        return float(average_precision_score(labels_arr, scores_arr))
 
-        for x, labels, sp_idx, task_idx in train_loader:
-            x = x.to(device)
-            labels = labels.to(device)
-            sp_idx = sp_idx.to(device)
-            task_idx = task_idx.to(device)
+    def _safe_roc_auc(labels_arr: np.ndarray, scores_arr: np.ndarray) -> float:
+        if len(np.unique(labels_arr)) < 2:
+            return float("nan")
+        from sklearn.metrics import roc_auc_score
+        return float(roc_auc_score(labels_arr, scores_arr))
 
-            amp_ctx: ContextManager = (
-                torch.autocast(device_type=device.split(":")[0], dtype=resolved_amp_dtype)
-                if use_amp_bool and resolved_amp_dtype is not None
-                else nullcontext()
-            )
-            with amp_ctx:
-                logits, positions = model(x, sp_idx)  # (B, K, 2), (B, K)
-
-                # Find center-position index for each sample
-                center = x.shape[-1] // 2
-                best_k = (positions - center).abs().argmin(dim=-1)  # (B,)
-                B = x.shape[0]
-                arange = torch.arange(B, device=device)
-
-                donor_mask = (task_idx == 0)
-                acceptor_mask = (task_idx == 1)
-
-                d_logits = logits[arange, best_k, 0]  # (B,)  donor logits
-                a_logits = logits[arange, best_k, 1]  # (B,)  acceptor logits
-
-                loss = torch.zeros(1, device=device)
-                if donor_mask.any():
-                    loss = loss + bce(d_logits[donor_mask], labels[donor_mask])
-                if acceptor_mask.any():
-                    loss = loss + bce(a_logits[acceptor_mask], labels[acceptor_mask])
-
-            optimizer.zero_grad()
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                if grad_clip > 0:
-                    scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                if grad_clip > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                optimizer.step()
-
-            total_loss += loss.item()
-            n_batches += 1
-
-        scheduler.step()
-        avg_loss = total_loss / max(n_batches, 1)
-
-        # Validation: score val set per task using forward_binary
-        model.eval()
-        val_seqs_d = [ex.sequence for ex in val_ex if ex.task == "donor"]
-        val_labs_d = np.array([ex.label for ex in val_ex if ex.task == "donor"], dtype=np.float32)
-        val_sps_d = [species_to_idx[ex.species] for ex in val_ex if ex.task == "donor"]
-
-        val_seqs_a = [ex.sequence for ex in val_ex if ex.task == "acceptor"]
-        val_labs_a = np.array([ex.label for ex in val_ex if ex.task == "acceptor"], dtype=np.float32)
-        val_sps_a = [species_to_idx[ex.species] for ex in val_ex if ex.task == "acceptor"]
-
-        with torch.no_grad():
-            scores_d = _score_with_species(
-                model, val_seqs_d, val_sps_d, window_len, "donor",
-                device, batch_size, use_amp_bool, resolved_amp_dtype,
-            )
-            scores_a = _score_with_species(
-                model, val_seqs_a, val_sps_a, window_len, "acceptor",
-                device, batch_size, use_amp_bool, resolved_amp_dtype,
-            )
-
-        all_scores = np.concatenate([scores_d, scores_a])
-        all_labels = np.concatenate([val_labs_d, val_labs_a])
-
-        def _safe_pr_auc(labels_arr: np.ndarray, scores_arr: np.ndarray) -> float:
-            if len(np.unique(labels_arr)) < 2:
-                return float("nan")
-            from sklearn.metrics import average_precision_score
-            return float(average_precision_score(labels_arr, scores_arr))
-
-        def _safe_roc_auc(labels_arr: np.ndarray, scores_arr: np.ndarray) -> float:
-            if len(np.unique(labels_arr)) < 2:
-                return float("nan")
-            from sklearn.metrics import roc_auc_score
-            return float(roc_auc_score(labels_arr, scores_arr))
-
-        val_pr_auc = _safe_pr_auc(all_labels, all_scores)
-        val_roc_auc = _safe_roc_auc(all_labels, all_scores)
-        val_metric = {"pr_auc": val_pr_auc, "roc_auc": val_roc_auc}.get(
-            validation_metric, val_pr_auc
+    oom_retries = 0
+    while True:
+        saw_training_batch = False
+        compile_enabled_attempt = compile_enabled and hasattr(torch, "compile")
+        compile_selected_mode: Optional[str] = None
+        fixed_shape_loader = compile_enabled_attempt
+        train_ds = SpliceformerDataset(
+            train_ex,
+            window_len,
+            species_to_idx,
+            preencode=preencode_dataset,
         )
-
-        elapsed = time.time() - t0
+        train_loader_batch_size, train_loader_drop_last = (
+            _resolve_loader_batch_size_and_drop_last(
+                requested_batch_size=effective_batch_size,
+                dataset_size=len(train_ds),
+                fixed_shape=fixed_shape_loader,
+            )
+        )
+        train_kw: dict = {
+            "dataset": train_ds,
+            "batch_size": train_loader_batch_size,
+            "shuffle": True,
+            "num_workers": resolved_workers,
+            "pin_memory": use_pin,
+            "drop_last": train_loader_drop_last,
+            "worker_init_fn": _seed_worker if resolved_workers > 0 else None,
+        }
+        if resolved_workers > 0:
+            train_kw["prefetch_factor"] = prefetch_factor
+            train_kw["persistent_workers"] = use_persist
+        train_loader = DataLoader(**train_kw)
         print(
-            f"[spliceformer_sc] epoch={epoch}/{epochs} "
-            f"loss={avg_loss:.4f} val_pr_auc={val_pr_auc:.4f} "
-            f"val_roc_auc={val_roc_auc:.4f} elapsed={elapsed:.0f}s"
+            f"[spliceformer_sc] train_batches={len(train_loader)} "
+            f"batch_size={effective_batch_size} workers={resolved_workers} "
+            f"fixed_shape={'on' if fixed_shape_loader else 'off'}"
         )
 
-        epoch_history.append({
-            "epoch": epoch,
-            "train_loss": avg_loss,
-            "val_pr_auc": val_pr_auc,
-            "val_roc_auc": val_roc_auc,
-        })
+        try:
+            model = _build_model(cfg).to(device)
 
-        if not math.isnan(val_metric) and val_metric > best_metric + early_stop_min_delta:
-            best_metric = val_metric
-            best_epoch = epoch
-            epochs_since = 0
-            # Save checkpoint at both donor and acceptor paths for pipeline compat
-            ckpt = {
-                "task": "multi",
-                "window_len": window_len,
-                "model_config": _config_to_dict(cfg),
-                "model_state": _export_model_state_dict(model),
-                "species_to_idx": species_to_idx,
-            }
-            for ckpt_path in (donor_checkpoint_path, acceptor_checkpoint_path):
-                os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-                torch.save(ckpt, ckpt_path)
-        else:
-            epochs_since += 1
-            if early_stop_patience > 0 and epochs_since >= early_stop_patience:
-                stopped_early = True
-                print(
-                    f"[spliceformer_sc] early stop at epoch {epoch} "
-                    f"(best={best_epoch} {validation_metric}={best_metric:.4f})"
+            if init_checkpoint_path and os.path.exists(init_checkpoint_path):
+                _warm_start_model(model, init_checkpoint_path, device)
+                print(f"[spliceformer_sc] warm-started from {init_checkpoint_path}")
+
+            if compile_enabled_attempt:
+                (
+                    model,
+                    compile_enabled_attempt,
+                    compile_selected_mode,
+                    compile_setup_error,
+                ) = _compile_model_with_fallback(model, compile_mode=compile_mode)
+                compile_enabled = compile_enabled_attempt
+                if (not compile_enabled_attempt) and compile_setup_error is not None:
+                    print(
+                        "[spliceformer_sc] torch.compile setup failed "
+                        f"({compile_setup_error.__class__.__name__}). "
+                        "Continue without compile."
+                    )
+
+            try:
+                optimizer = torch.optim.AdamW(
+                    model.parameters(), lr=lr, weight_decay=weight_decay,
+                    fused=device.startswith("cuda"),
                 )
-                break
+            except TypeError:
+                optimizer = torch.optim.AdamW(
+                    model.parameters(), lr=lr, weight_decay=weight_decay,
+                )
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs, eta_min=lr * eta_min_ratio
+            )
+            scaler_enabled = use_amp_bool and resolved_amp_dtype == torch.float16
+            scaler = scaler_factory(scaler_enabled)
 
-    return {
-        "model": "spliceformer_sc",
-        "species_list": species_list,
-        "window_len": window_len,
-        "best_epoch": best_epoch,
-        f"best_{validation_metric}": best_metric,
-        "validation_metric": validation_metric,
-        "stopped_early": stopped_early,
-        "epoch_history": epoch_history,
-        "donor_checkpoint_path": donor_checkpoint_path,
-        "acceptor_checkpoint_path": acceptor_checkpoint_path,
-    }
+            bce = nn.BCEWithLogitsLoss()
+            best_metric = float("-inf")
+            best_epoch = 0
+            epochs_since = 0
+            stopped_early = False
+            epoch_history: List[Dict] = []
+
+            for epoch in range(1, epochs + 1):
+                model.train()
+                total_loss = 0.0
+                n_batches = 0
+
+                for x, labels, sp_idx, task_idx in train_loader:
+                    saw_training_batch = True
+                    x = x.to(device, non_blocking=use_non_blocking)
+                    labels = labels.to(device, non_blocking=use_non_blocking)
+                    sp_idx = sp_idx.to(device, non_blocking=use_non_blocking)
+                    task_idx = task_idx.to(device, non_blocking=use_non_blocking)
+
+                    amp_ctx: ContextManager = (
+                        torch.autocast(device_type=device.split(":")[0], dtype=resolved_amp_dtype)
+                        if use_amp_bool and resolved_amp_dtype is not None
+                        else nullcontext()
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    with amp_ctx:
+                        logits, positions = model(x, sp_idx)  # (B, K, 2), (B, K)
+
+                        center = x.shape[-1] // 2
+                        best_k = (positions - center).abs().argmin(dim=-1)  # (B,)
+                        batch_arange = torch.arange(x.shape[0], device=device)
+
+                        donor_mask = (task_idx == 0)
+                        acceptor_mask = (task_idx == 1)
+
+                        d_logits = logits[batch_arange, best_k, 0]  # (B,)
+                        a_logits = logits[batch_arange, best_k, 1]  # (B,)
+
+                        loss = torch.zeros(1, device=device)
+                        if donor_mask.any():
+                            loss = loss + bce(d_logits[donor_mask], labels[donor_mask])
+                        if acceptor_mask.any():
+                            loss = loss + bce(a_logits[acceptor_mask], labels[acceptor_mask])
+
+                    if scaler_enabled:
+                        scaler.scale(loss).backward()
+                        if grad_clip > 0:
+                            scaler.unscale_(optimizer)
+                            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        if grad_clip > 0:
+                            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        optimizer.step()
+
+                    total_loss += float(loss.detach().item())
+                    n_batches += 1
+
+                scheduler.step()
+                avg_loss = total_loss / max(n_batches, 1)
+
+                model.eval()
+                with torch.no_grad():
+                    scores_d = _score_with_species(
+                        model, val_seqs_d, val_sps_d, window_len, "donor",
+                        device, effective_batch_size, use_amp_bool, resolved_amp_dtype,
+                    )
+                    scores_a = _score_with_species(
+                        model, val_seqs_a, val_sps_a, window_len, "acceptor",
+                        device, effective_batch_size, use_amp_bool, resolved_amp_dtype,
+                    )
+
+                all_scores = np.concatenate([scores_d, scores_a])
+                all_labels = np.concatenate([val_labs_d, val_labs_a])
+                val_pr_auc = _safe_pr_auc(all_labels, all_scores)
+                val_roc_auc = _safe_roc_auc(all_labels, all_scores)
+                val_metric = {"pr_auc": val_pr_auc, "roc_auc": val_roc_auc}.get(
+                    validation_metric, val_pr_auc
+                )
+
+                elapsed = time.time() - t0
+                print(
+                    f"[spliceformer_sc] epoch={epoch}/{epochs} "
+                    f"loss={avg_loss:.4f} val_pr_auc={val_pr_auc:.4f} "
+                    f"val_roc_auc={val_roc_auc:.4f} elapsed={elapsed:.0f}s"
+                )
+
+                epoch_history.append({
+                    "epoch": epoch,
+                    "train_loss": avg_loss,
+                    "val_pr_auc": val_pr_auc,
+                    "val_roc_auc": val_roc_auc,
+                })
+
+                if not math.isnan(val_metric) and val_metric > best_metric + early_stop_min_delta:
+                    best_metric = val_metric
+                    best_epoch = epoch
+                    epochs_since = 0
+                    ckpt = {
+                        "task": "multi",
+                        "window_len": window_len,
+                        "model_config": _config_to_dict(cfg),
+                        "model_state": _export_model_state_dict(model),
+                        "species_to_idx": species_to_idx,
+                    }
+                    for ckpt_path in (donor_checkpoint_path, acceptor_checkpoint_path):
+                        os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+                        torch.save(ckpt, ckpt_path)
+                else:
+                    epochs_since += 1
+                    if early_stop_patience > 0 and epochs_since >= early_stop_patience:
+                        stopped_early = True
+                        print(
+                            f"[spliceformer_sc] early stop at epoch {epoch} "
+                            f"(best={best_epoch} {validation_metric}={best_metric:.4f})"
+                        )
+                        break
+
+            # Mirror checkpoint to all species dirs for per-species inference
+            _mirror_checkpoint_to_species(
+                donor_checkpoint_path, acceptor_checkpoint_path, species_list
+            )
+
+            return {
+                "model": "spliceformer_sc",
+                "species_list": species_list,
+                "window_len": window_len,
+                "best_epoch": best_epoch,
+                f"best_{validation_metric}": best_metric,
+                "validation_metric": validation_metric,
+                "stopped_early": stopped_early,
+                "epoch_history": epoch_history,
+                "donor_checkpoint_path": donor_checkpoint_path,
+                "acceptor_checkpoint_path": acceptor_checkpoint_path,
+                "effective_batch_size": effective_batch_size,
+                "oom_retries": oom_retries,
+                "compile_enabled": compile_enabled_attempt,
+            }
+        except RuntimeError as exc:
+            is_compile_failure = compile_enabled_attempt and _is_compile_runtime_error(exc)
+            if is_compile_failure:
+                compile_enabled = False
+                _record_compile_runtime_failure(compile_selected_mode)
+                print(
+                    "[spliceformer_sc] torch.compile runtime failed "
+                    f"({exc.__class__.__name__}). Retry without compile."
+                )
+                _empty_device_cache(device)
+                continue
+
+            is_device_oom = False
+            if device.startswith("cuda"):
+                is_device_oom = _is_cuda_oom_error(exc)
+            elif device == "mps":
+                is_device_oom = _is_mps_oom_error(exc)
+            if is_device_oom and not saw_training_batch:
+                raise RuntimeError(
+                    "NON_RETRYABLE_OOM: OOM occurred before first training batch. "
+                    "Model config is likely too large for the device."
+                ) from exc
+            should_retry = (
+                is_device_oom
+                and oom_retries < max_oom_retries
+                and effective_batch_size > min_batch_size
+            )
+            if not should_retry:
+                raise
+            next_batch_size = max(min_batch_size, effective_batch_size // 2)
+            if next_batch_size >= effective_batch_size:
+                raise
+            oom_retries += 1
+            print(
+                f"[spliceformer_sc] {device.upper()} OOM detected. "
+                f"Retry with smaller batch size: {effective_batch_size} -> "
+                f"{next_batch_size} (retry {oom_retries}/{max_oom_retries})"
+            )
+            effective_batch_size = next_batch_size
+            _empty_device_cache(device)
 
 
 # ---------------------------------------------------------------------------
@@ -1228,7 +1353,7 @@ def infer_site_scores(
         for row, score in zip(rows, scores):
             out = dict(row)
             out["score"] = float(score)
-            out[SCORE_SPACE_FIELD] = SCORE_SPACE_LOG10
+            out[SCORE_SPACE_FIELD] = SCORE_SPACE_PROBABILITY
             result.append(out)
         return result
 
@@ -1275,6 +1400,13 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         choices=["binary", "multiclass"],
         default="binary",
         help="Output mode: binary (two BCE heads) or multiclass (3-class CE).",
+    )
+    parser.add_argument(
+        "--preencode_dataset",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Pre-encode training sequences once on CPU to reduce loader overhead.",
     )
 
 

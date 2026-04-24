@@ -344,9 +344,11 @@ def test_add_train_args_registers_params():
         "--k_donor", "128",
         "--k_acceptor", "128",
         "--spliceformer_mode", "binary",
+        "--preencode_dataset", "1",
         "--species_list", "Athal,Hsap",
     ])
     assert args.d_model == 64
     assert args.use_film == 1
+    assert args.preencode_dataset == 1
     assert args.species_list == "Athal,Hsap"
     assert args.spliceformer_mode == "binary"

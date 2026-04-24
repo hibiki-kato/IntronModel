@@ -45,6 +45,7 @@ from util.data_proc import (
     resolve_train_paths,
     species_data_dirs,
     validate_window_args,
+    validate_window_args_4p,
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
@@ -1119,6 +1120,10 @@ def train_pair_model(
     validation_metric: str = "pr_auc",
     report_train_metrics: Union[bool, int] = 1,
     gpu_id: Optional[int] = None,
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Dict[str, object]:
     """Train the pair CNN model."""
     if train_params.embedding_dim <= 0:
@@ -1207,6 +1212,10 @@ def train_pair_model(
         neg_path=neg_path,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
         negative_pair_only=True,
     )
     resolved_sequence_transform = sequence_transform
@@ -2444,10 +2453,28 @@ def train(
         acceptor_len=common_args.acceptor_len,
         inferred_train_len=inferred_train_len,
     )
+    donor_upstream = getattr(common_args, "donor_upstream", None)
+    donor_downstream = getattr(common_args, "donor_downstream", None)
+    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
+    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
     validate_window_args(donor_len=donor_len, acceptor_len=acceptor_len)
+    validate_window_args_4p(
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
+    )
 
-    donor_window_len = donor_len if donor_len is not None else 50
-    acceptor_window_len = acceptor_len if acceptor_len is not None else 50
+    donor_window_len = (
+        donor_upstream + donor_downstream
+        if donor_upstream is not None and donor_downstream is not None
+        else (donor_len if donor_len is not None else 50)
+    )
+    acceptor_window_len = (
+        acceptor_upstream + acceptor_downstream
+        if acceptor_upstream is not None and acceptor_downstream is not None
+        else (acceptor_len if acceptor_len is not None else 50)
+    )
 
     task_checkpoint_paths = resolve_required_checkpoint_paths(
         common_args,
@@ -2481,6 +2508,10 @@ def train(
         acceptor_window_len=acceptor_window_len,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
         model_args=model_args,
         train_params=train_params,
         epochs=schedule.resolved_epochs,
@@ -2526,6 +2557,10 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
+        "donor_upstream": donor_upstream,
+        "donor_downstream": donor_downstream,
+        "acceptor_upstream": acceptor_upstream,
+        "acceptor_downstream": acceptor_downstream,
         "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
         "epochs_auto": schedule.epochs_auto,
@@ -2658,7 +2693,17 @@ def infer_site(
         acceptor_len=common_args.acceptor_len,
         inferred_train_len=inferred_train_len,
     )
+    donor_upstream = getattr(common_args, "donor_upstream", None)
+    donor_downstream = getattr(common_args, "donor_downstream", None)
+    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
+    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
     validate_window_args(donor_len=donor_len, acceptor_len=acceptor_len)
+    validate_window_args_4p(
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
+    )
 
     test_tsv = resolve_test_tsv(common_args.species, common_args.test_tsv)
     task_checkpoint_paths = resolve_required_checkpoint_paths(
@@ -2697,6 +2742,10 @@ def infer_site(
         test_tsv=test_tsv,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
     print(f"Loaded test pairs: {len(pair_rows)}")
     if skipped_short:

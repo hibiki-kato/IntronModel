@@ -33,9 +33,16 @@ Direct CLI run (train + infer + transcript aggregation + evaluation):
 python src/run_model.py \
   --model cnn \
   --species Dmel \
-  --donor_len 100 \
-  --acceptor_len 100
+  --donor_upstream 100 \
+  --donor_downstream 100 \
+  --acceptor_upstream 100 \
+  --acceptor_downstream 100
 ```
+
+Legacy `--donor_len` / `--acceptor_len` still work for older fixed-width
+training files. New symmetric PWM ERR data should be prepared with
+`src/util/make_site_data_from_pwm_err.py` and sliced with the four flank
+arguments above.
 
 Wrapper run (config-only; edit `run/run_cnn_v2.sh` CONFIG first):
 

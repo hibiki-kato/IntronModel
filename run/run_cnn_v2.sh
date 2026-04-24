@@ -19,6 +19,10 @@ GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
 DONOR_LEN="100"
 ACCEPTOR_LEN="100"
+DONOR_UPSTREAM=""
+DONOR_DOWNSTREAM=""
+ACCEPTOR_UPSTREAM=""
+ACCEPTOR_DOWNSTREAM=""
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TEST_TSV_PATH=""
@@ -153,7 +157,9 @@ tuned_key_scope() {
 		|bpe_trust_remote_code)
 			printf '%s\n' "ignore"
 			;;
-		donor_len | acceptor_len)
+		donor_len | acceptor_len \
+		|donor_upstream | donor_downstream \
+		|acceptor_upstream | acceptor_downstream)
 			printf '%s\n' "shared"
 			;;
 		*)
@@ -310,6 +316,18 @@ run_species_once() {
 		--infer_compile "${INFER_COMPILE}"
 		--infer_compile_mode "${INFER_COMPILE_MODE}"
 	)
+	if [[ -n "${DONOR_UPSTREAM}" ]]; then
+		args+=(--donor_upstream "${DONOR_UPSTREAM}")
+	fi
+	if [[ -n "${DONOR_DOWNSTREAM}" ]]; then
+		args+=(--donor_downstream "${DONOR_DOWNSTREAM}")
+	fi
+	if [[ -n "${ACCEPTOR_UPSTREAM}" ]]; then
+		args+=(--acceptor_upstream "${ACCEPTOR_UPSTREAM}")
+	fi
+	if [[ -n "${ACCEPTOR_DOWNSTREAM}" ]]; then
+		args+=(--acceptor_downstream "${ACCEPTOR_DOWNSTREAM}")
+	fi
 	append_flag_if_truthy "skip_train" "${SKIP_TRAINING}"
 	append_flag_if_truthy "continue_train" "${CONTINUE_TRAINING}"
 	append_flag_if_truthy "train_only" "${TRAIN_ONLY}"

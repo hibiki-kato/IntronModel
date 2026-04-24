@@ -371,12 +371,16 @@ def test_tune_cnn_v2_time_omits_max_model_params_and_adds_input_mode() -> None:
     assert 'ENABLE_PHASE_OVERLAP="1"' in content
     assert '"trial_stream_mode": "${TRIAL_STREAM_MODE}"' in content
     assert '"enable_phase_overlap": ${ENABLE_PHASE_OVERLAP_JSON}' in content
-    assert '"gpu_release_events_path": "${gpu_release_events_path}"' in content
+    assert '"gpu_release_events_path": "${gpu_release_events_path_rel}"' in content
     assert "cycle_stdout.log" in content
     assert "MAX_MODEL_PARAMS" not in content
     assert "CROSS_SPECIES_BEST_MODE" not in content
     assert "resolve_cross_species_best_seed" not in content
-    assert '"input_mode": {' in content
+    assert '"donor_upstream": {' in content
+    assert '"donor_downstream": {' in content
+    assert '"acceptor_upstream": {' in content
+    assert '"acceptor_downstream": {' in content
+    assert '"input_mode": "onehot"' in content
     assert '"mask": {' not in content
     assert '"sequence_transform": {' not in content
     assert "MASK_MODE" not in content

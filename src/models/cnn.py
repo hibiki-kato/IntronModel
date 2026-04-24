@@ -53,6 +53,7 @@ from util.data_proc import (
     resolve_train_paths,
     species_data_dirs,
     validate_window_args,
+    validate_window_args_4p,
 )
 from util.losses import LOSS_NAME_CHOICES, build_binary_classification_loss
 from util.model_task_paths import (
@@ -526,7 +527,11 @@ def _load_task_examples_with_transform(
     task: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
-    sequence_transform: str,
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
+    sequence_transform: str = "none",
 ) -> List[Tuple[str, int]]:
     """Load one-task examples and apply configured sequence transform."""
     if sequence_transform == "none":
@@ -536,6 +541,10 @@ def _load_task_examples_with_transform(
             task=task,
             donor_len=donor_len,
             acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
         )
 
     transformed: List[Tuple[str, int]] = []
@@ -545,6 +554,10 @@ def _load_task_examples_with_transform(
         task=task,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
     for item in examples:
         seq = apply_site_sequence_transform(
@@ -566,6 +579,10 @@ def train_task_model(
     window_len: int,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
     epochs: int = 20,
     early_stop_patience: int = 0,
     early_stop_min_delta: float = 0.0,
@@ -804,6 +821,10 @@ def train_task_model(
         task=task,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
         sequence_transform=sequence_transform,
     )
 
@@ -2171,13 +2192,31 @@ def train(
         acceptor_len=common_args.acceptor_len,
         inferred_train_len=inferred_train_len,
     )
+    donor_upstream = getattr(common_args, "donor_upstream", None)
+    donor_downstream = getattr(common_args, "donor_downstream", None)
+    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
+    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
     validate_window_args(
         donor_len=donor_len,
         acceptor_len=acceptor_len,
     )
+    validate_window_args_4p(
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
+    )
 
-    donor_window_len = donor_len if donor_len is not None else 50
-    acceptor_window_len = acceptor_len if acceptor_len is not None else 50
+    donor_window_len = (
+        donor_upstream + donor_downstream
+        if donor_upstream is not None and donor_downstream is not None
+        else (donor_len if donor_len is not None else 50)
+    )
+    acceptor_window_len = (
+        acceptor_upstream + acceptor_downstream
+        if acceptor_upstream is not None and acceptor_downstream is not None
+        else (acceptor_len if acceptor_len is not None else 50)
+    )
 
     task_checkpoint_paths = resolve_required_checkpoint_paths(
         common_args,
@@ -2224,6 +2263,10 @@ def train(
             window_len=task_window_len[task],
             donor_len=donor_len,
             acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
             epochs=schedule.resolved_epochs,
             early_stop_patience=schedule.effective_early_stop_patience,
             early_stop_min_delta=schedule.early_stop_min_delta,
@@ -2322,6 +2365,10 @@ def train(
         "train_neg_path": train_neg_path,
         "donor_len": donor_len,
         "acceptor_len": acceptor_len,
+        "donor_upstream": donor_upstream,
+        "donor_downstream": donor_downstream,
+        "acceptor_upstream": acceptor_upstream,
+        "acceptor_downstream": acceptor_downstream,
         "epochs": schedule.resolved_epochs,
         "epochs_config": str(model_args.epochs),
         "epochs_auto": schedule.epochs_auto,
@@ -2422,6 +2469,16 @@ def infer_site(
         donor_len=donor_len,
         acceptor_len=acceptor_len,
     )
+    donor_upstream = getattr(common_args, "donor_upstream", None)
+    donor_downstream = getattr(common_args, "donor_downstream", None)
+    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
+    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
+    validate_window_args_4p(
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
+    )
 
     test_tsv = resolve_test_tsv(common_args.species, common_args.test_tsv)
     task_checkpoint_paths = resolve_required_checkpoint_paths(
@@ -2460,6 +2517,10 @@ def infer_site(
         test_tsv=test_tsv,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
     print(f"Loaded test sites: {len(site_rows)}")
     if skipped_short:
