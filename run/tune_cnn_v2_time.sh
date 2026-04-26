@@ -24,12 +24,10 @@ BASE_SEED="1337"
 PROCESS_TITLE="ETA"
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-DONOR_UPSTREAM="100"
-DONOR_DOWNSTREAM="100"
-ACCEPTOR_UPSTREAM="100"
-ACCEPTOR_DOWNSTREAM="100"
+DONOR_UPSTREAM="5"
+DONOR_DOWNSTREAM="95"
+ACCEPTOR_UPSTREAM="95"
+ACCEPTOR_DOWNSTREAM="5"
 PROCESSED_SITE_POS_NAME="site_flank100.coding.err"
 PROCESSED_SITE_NEG_NAME="site_flank100.neg.err"
 
@@ -451,8 +449,6 @@ dispatch_cycle() {
     "species": "${species}",
 	"train_target": "${target_name}",
     "seed": ${base_seed},
-    "donor_len": ${DONOR_LEN},
-    "acceptor_len": ${ACCEPTOR_LEN},
     "donor_upstream": ${DONOR_UPSTREAM},
     "donor_downstream": ${DONOR_DOWNSTREAM},
     "acceptor_upstream": ${ACCEPTOR_UPSTREAM},

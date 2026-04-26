@@ -138,7 +138,7 @@ def test_load_tuned_overrides_disables_mask_for_independent_cnn_v2(
 def test_load_tuned_overrides_drops_irrelevant_site_length_for_donor_task(
     tmp_path: Path,
 ) -> None:
-    """Independent donor configs should not emit acceptor_len overrides."""
+    """Independent donor configs should normalize legacy lengths to flanks."""
 
     config_path = tmp_path / "best_config.json"
     config_path.write_text(
@@ -168,7 +168,83 @@ def test_load_tuned_overrides_drops_irrelevant_site_length_for_donor_task(
         "train_target\tdonor",
         "sequence_transform\tnone",
         "batch_size\t256",
-        "donor_len\t50",
+        "donor_downstream\t45",
+        "donor_upstream\t5",
+    ]
+
+
+def test_load_tuned_overrides_prefers_sampled_active_flanks_over_fixed_defaults(
+    tmp_path: Path,
+) -> None:
+    """Independent donor configs should emit the effective donor flank values."""
+
+    config_path = tmp_path / "best_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "hparam_context": {
+                    "fixed_run_args": {
+                        "model": "cnn_v2",
+                        "pair_mode": "independent",
+                        "train_target": "donor",
+                        "donor_upstream": 5,
+                        "donor_downstream": 95,
+                        "acceptor_upstream": 95,
+                        "acceptor_downstream": 5,
+                    }
+                },
+                "sampled_params": {
+                    "donor_upstream": 20,
+                    "donor_downstream": 100,
+                    "acceptor_upstream": 80,
+                    "acceptor_downstream": 40,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run_tuned_config_helper(config_path) == [
+        "model\tcnn_v2",
+        "pair_mode\tindependent",
+        "train_target\tdonor",
+        "sequence_transform\tnone",
+        "donor_downstream\t100",
+        "donor_upstream\t20",
+    ]
+
+
+def test_load_tuned_overrides_keeps_legacy_lengths_for_non_cnn_v2_models(
+    tmp_path: Path,
+) -> None:
+    """Length-based wrappers should still receive legacy donor/acceptor lengths."""
+
+    config_path = tmp_path / "best_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "hparam_context": {
+                    "fixed_run_args": {
+                        "model": "cnn_v3",
+                        "train_target": "pair",
+                    }
+                },
+                "sampled_params": {
+                    "donor_len": 90,
+                    "acceptor_len": 70,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _run_tuned_config_helper(config_path) == [
+        "model\tcnn_v3",
+        "train_target\tpair",
+        "acceptor_len\t70",
+        "donor_len\t90",
     ]
 
 

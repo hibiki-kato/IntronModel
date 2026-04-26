@@ -15,16 +15,17 @@ SPECIES="Athal, Dmel, Hsap, Mmus"
 
 # "donor", "acceptor", or "both"
 TARGET="both"
-INTRONMODEL_AUTO_TMUX="${INTRONMODEL_AUTO_TMUX:-on}"
+INTRONMODEL_AUTO_TMUX="${INTRONMODEL_AUTO_TMUX:-off}"
 # GPU IDs to use (comma-separated), or "auto"
-GPU_IDS="4,5,6,7"
-FULL_EPOCHS="20"
+GPU_IDS="0, 1, 2, 3"
+FULL_EPOCHS="15"
 BASE_SEED="1337"
 BATCH_SIZE="512"
 VAL_FRAC="0.2"
 COMPILE_MODE="quick"
 INFER_COMPILE="1"
 INFER_COMPILE_MODE="quick"
+GRID_VALUES="10"
 
 # Output directory for figures and results JSON.
 # Defaults to data/<SPECIES>/grid_search/cnn_v2 if left empty.

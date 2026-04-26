@@ -821,6 +821,157 @@ def test_extract_sampled_params_from_best_config_falls_back_to_fixed_run_args(
     }
 
 
+def test_extract_sampled_params_from_best_config_preserves_irrelevant_nulls(
+) -> None:
+    params = hparam_search._extract_sampled_params_from_best_config(
+        raw={
+            "sampled_params": {
+                "batch_size": 128,
+                "donor_upstream": 40,
+                "donor_downstream": 60,
+            },
+            "hparam_context": {
+                "fixed_run_args": {
+                    "model": "cnn_v2",
+                    "pair_mode": "independent",
+                    "train_target": "donor",
+                }
+            },
+        },
+        search_space={
+            "batch_size": {
+                "type": "categorical",
+                "values": [128],
+            },
+            "donor_upstream": {
+                "type": "categorical",
+                "values": [40],
+            },
+            "donor_downstream": {
+                "type": "categorical",
+                "values": [60],
+            },
+            "acceptor_upstream": {
+                "type": "categorical",
+                "values": [40],
+            },
+            "acceptor_downstream": {
+                "type": "categorical",
+                "values": [60],
+            },
+            "mask": {
+                "type": "categorical",
+                "values": ["off", "on"],
+            },
+        },
+        base_args={},
+    )
+
+    assert params == {
+        "batch_size": 128,
+        "donor_upstream": 40,
+        "donor_downstream": 60,
+        "acceptor_upstream": None,
+        "acceptor_downstream": None,
+        "mask": None,
+    }
+
+
+def test_extract_sampled_params_from_best_config_prefers_flanks_over_legacy_lengths(
+) -> None:
+    params = hparam_search._extract_sampled_params_from_best_config(
+        raw={
+            "sampled_params": {
+                "donor_len": 50,
+                "donor_upstream": 20,
+                "donor_downstream": 100,
+                "acceptor_len": 70,
+            },
+            "hparam_context": {
+                "fixed_run_args": {
+                    "model": "cnn_v2",
+                    "pair_mode": "independent",
+                    "train_target": "donor",
+                    "donor_len": 100,
+                    "donor_upstream": 5,
+                    "donor_downstream": 95,
+                }
+            },
+        },
+        search_space={
+            "donor_upstream": {
+                "type": "categorical",
+                "values": [20],
+            },
+            "donor_downstream": {
+                "type": "categorical",
+                "values": [100],
+            },
+            "acceptor_upstream": {
+                "type": "categorical",
+                "values": [65],
+            },
+            "acceptor_downstream": {
+                "type": "categorical",
+                "values": [5],
+            },
+        },
+        base_args={},
+    )
+
+    assert params == {
+        "donor_upstream": 20,
+        "donor_downstream": 100,
+        "acceptor_upstream": None,
+        "acceptor_downstream": None,
+    }
+
+
+def test_extract_sampled_params_from_best_config_converts_legacy_lengths_to_flanks(
+) -> None:
+    params = hparam_search._extract_sampled_params_from_best_config(
+        raw={
+            "sampled_params": {
+                "donor_len": 50,
+                "acceptor_len": 70,
+            },
+            "hparam_context": {
+                "fixed_run_args": {
+                    "model": "cnn_v2",
+                    "pair_mode": "independent",
+                    "train_target": "donor",
+                }
+            },
+        },
+        search_space={
+            "donor_upstream": {
+                "type": "categorical",
+                "values": [5],
+            },
+            "donor_downstream": {
+                "type": "categorical",
+                "values": [45],
+            },
+            "acceptor_upstream": {
+                "type": "categorical",
+                "values": [65],
+            },
+            "acceptor_downstream": {
+                "type": "categorical",
+                "values": [5],
+            },
+        },
+        base_args={},
+    )
+
+    assert params == {
+        "donor_upstream": 5,
+        "donor_downstream": 45,
+        "acceptor_upstream": None,
+        "acceptor_downstream": None,
+    }
+
+
 def test_run_trial_translates_mask_to_sequence_transform(
     tmp_path: Path,
 ) -> None:
@@ -965,7 +1116,7 @@ def test_run_trial_drops_mask_for_independent_cnn_v2(
     )
 
     assert result.status == "success"
-    assert "mask" not in result.sampled_params
+    assert result.sampled_params["mask"] is None
     assert result.sampled_params["batch_size"] == 128
     assert "--mask" not in captured_cmd["cmd"]
     assert "--sequence_transform" in captured_cmd["cmd"]
@@ -2126,6 +2277,54 @@ def test_load_global_best_params_keeps_sampled_params_for_missing_keys(
     assert "kernel_size" not in loaded
 
 
+def test_load_global_best_params_preserves_irrelevant_nulls(
+    tmp_path: Path,
+) -> None:
+    search_space = hparam_search._validate_search_space(
+        {
+            "donor_upstream": {"type": "categorical", "values": [40]},
+            "donor_downstream": {"type": "categorical", "values": [60]},
+            "acceptor_upstream": {"type": "categorical", "values": [40]},
+            "acceptor_downstream": {"type": "categorical", "values": [60]},
+            "mask": {"type": "categorical", "values": ["off", "on"]},
+        }
+    )
+    path = tmp_path / "best_config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sampled_params": {
+                    "donor_upstream": 40,
+                    "donor_downstream": 60,
+                },
+                "hparam_context": {
+                    "fixed_run_args": {
+                        "model": "cnn_v2",
+                        "pair_mode": "independent",
+                        "train_target": "donor",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = hparam_search.load_global_best_params(
+        path=path,
+        search_space=search_space,
+        base_args={},
+    )
+
+    assert loaded == {
+        "donor_upstream": 40,
+        "donor_downstream": 60,
+        "acceptor_upstream": None,
+        "acceptor_downstream": None,
+        "mask": None,
+    }
+
+
 def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
     output_path = tmp_path / "best_config.json"
     donor_ckpt = tmp_path / "donor.pt"
@@ -2240,6 +2439,67 @@ def test_write_best_config_includes_hparam_context_and_objective_best_epoch(
     assert payload["objective_eval_set"] == "val"
     assert payload["objective_target"] == "donor"
     assert payload["objective_metric_name"] == "pr_auc"
+
+
+def test_write_best_config_normalizes_cnn_v2_legacy_lengths_to_flanks(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "best_config.json"
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps({"donor": {"best_pr_auc": 0.81}}),
+        encoding="utf-8",
+    )
+    row = hparam_search.TrialResult(
+        phase="full",
+        trial_id=1,
+        status="success",
+        gpu_id="0",
+        sampled_params={"donor_len": 50, "acceptor_len": 70},
+        effective_batch_size=512,
+        oom_retries=0,
+        donor_pr_auc=0.81,
+        acceptor_pr_auc=None,
+        mean_pr_auc=None,
+        objective_metric="donor_pr_auc",
+        objective_score=0.81,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json=str(metrics_path),
+        log_file="trial.log",
+    )
+    hparam_context = {
+        "version": 2,
+        "fixed_run_args": {
+            "model": "cnn_v2",
+            "donor_len": 100,
+            "acceptor_len": 100,
+        },
+    }
+
+    hparam_search.write_best_config(
+        output_path,
+        row,
+        top_rows=[row],
+        top_k=1,
+        hparam_context=hparam_context,
+    )
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert "donor_len" not in payload["sampled_params"]
+    assert payload["sampled_params"]["donor_upstream"] == 5
+    assert payload["sampled_params"]["donor_downstream"] == 45
+    assert payload["sampled_params"]["acceptor_upstream"] == 65
+    assert payload["sampled_params"]["acceptor_downstream"] == 5
+    fixed_run_args = payload["hparam_context"]["fixed_run_args"]
+    assert "donor_len" not in fixed_run_args
+    assert fixed_run_args["donor_upstream"] == 5
+    assert fixed_run_args["donor_downstream"] == 95
+    top_trial_params = payload["top_trials"][0]["sampled_params"]
+    assert "acceptor_len" not in top_trial_params
+    assert top_trial_params["acceptor_upstream"] == 65
+    assert top_trial_params["acceptor_downstream"] == 5
 
 
 def test_maybe_update_global_best_logs_score_delta(
@@ -2368,6 +2628,77 @@ def test_maybe_update_global_best_skips_same_sampled_params_recheck(
         status="success",
         gpu_id=None,
         sampled_params={"batch_size": 512},
+        effective_batch_size=512,
+        oom_retries=0,
+        donor_pr_auc=0.95,
+        acceptor_pr_auc=None,
+        mean_pr_auc=0.95,
+        objective_metric="mean_pr_auc",
+        objective_score=0.95,
+        error_message=None,
+        return_code=0,
+        duration_sec=1.0,
+        metrics_json=str(tmp_path / "metrics.json"),
+        log_file="trial.log",
+    )
+    write_calls: list[object] = []
+    publish_calls: list[object] = []
+
+    monkeypatch.setattr(
+        hparam_search,
+        "write_best_config",
+        lambda *args, **kwargs: write_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        hparam_search,
+        "publish_latest_best_version",
+        lambda *args, **kwargs: publish_calls.append((args, kwargs)),
+    )
+
+    hparam_search.maybe_update_global_best(
+        global_best_path=output_path,
+        best_row=row,
+    )
+
+    captured = capsys.readouterr()
+    assert "skip global best update/version publish" in captured.out
+    assert write_calls == []
+    assert publish_calls == []
+
+
+def test_maybe_update_global_best_skips_same_sampled_params_recheck_with_nulls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "best_config.json"
+    output_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "objective_metric": "mean_pr_auc",
+                "objective_score": 0.94,
+                "sampled_params": {
+                    "batch_size": 512,
+                    "acceptor_upstream": None,
+                    "acceptor_downstream": None,
+                    "mask": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = hparam_search.TrialResult(
+        phase="full",
+        trial_id=1,
+        status="success",
+        gpu_id=None,
+        sampled_params={
+            "batch_size": 512,
+            "acceptor_upstream": None,
+            "acceptor_downstream": None,
+            "mask": None,
+        },
         effective_batch_size=512,
         oom_retries=0,
         donor_pr_auc=0.95,

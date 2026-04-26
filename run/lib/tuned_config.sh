@@ -120,6 +120,43 @@ def _mask_to_sequence_transform(value: object) -> str:
     raise ValueError("mask must be on or off.")
 
 
+def _site_length_to_flanks(site_type: str, length_value: object) -> tuple[int, int] | None:
+    if not isinstance(length_value, int):
+        return None
+    if length_value <= 0:
+        raise ValueError(f"{site_type}_len must be positive.")
+    edge_span = 5 if length_value > 5 else max(1, length_value - 1)
+    if site_type == "donor":
+        return edge_span, length_value - edge_span
+    return length_value - edge_span, edge_span
+
+
+def _normalize_site_window_args(
+    raw: object,
+    *,
+    prefer_flanks: bool,
+) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized = dict(raw)
+    if not prefer_flanks:
+        return normalized
+    donor_flanks = _site_length_to_flanks("donor", normalized.get("donor_len"))
+    if donor_flanks is not None:
+        normalized.setdefault("donor_upstream", donor_flanks[0])
+        normalized.setdefault("donor_downstream", donor_flanks[1])
+    acceptor_flanks = _site_length_to_flanks(
+        "acceptor",
+        normalized.get("acceptor_len"),
+    )
+    if acceptor_flanks is not None:
+        normalized.setdefault("acceptor_upstream", acceptor_flanks[0])
+        normalized.setdefault("acceptor_downstream", acceptor_flanks[1])
+    normalized.pop("donor_len", None)
+    normalized.pop("acceptor_len", None)
+    return normalized
+
+
 config_path = Path(sys.argv[1]).resolve()
 payload = json.loads(config_path.read_text(encoding="utf-8"))
 if not isinstance(payload, dict):
@@ -132,7 +169,21 @@ context = payload.get("hparam_context")
 fixed_run_args = None
 if isinstance(context, dict):
     fixed_run_args = context.get("fixed_run_args")
+model_name_value = ""
+if isinstance(fixed_run_args, dict):
+    raw_model_name = fixed_run_args.get("model")
+    if isinstance(raw_model_name, str):
+        model_name_value = raw_model_name.strip().lower()
 sampled_params = payload.get("sampled_params")
+prefer_flanks = model_name_value == "cnn_v2"
+fixed_run_args = _normalize_site_window_args(
+    fixed_run_args,
+    prefer_flanks=prefer_flanks,
+)
+sampled_params = _normalize_site_window_args(
+    sampled_params,
+    prefer_flanks=prefer_flanks,
+)
 if not isinstance(sampled_params, dict):
     raise ValueError("sampled_params is missing or invalid.")
 pair_mode_value = None
@@ -154,9 +205,31 @@ train_target = (
     if isinstance(train_target_value, str)
     else ""
 )
+suppressed_fixed_keys = set(sampled_params)
+if "mask" in sampled_params or "sequence_transform" in sampled_params:
+    suppressed_fixed_keys.update({"mask", "sequence_transform"})
+if independent_mode:
+    if train_target == "donor":
+        for key in (
+            "acceptor_len",
+            "acceptor_upstream",
+            "acceptor_downstream",
+        ):
+            fixed_run_args.pop(key, None)
+            sampled_params.pop(key, None)
+    elif train_target == "acceptor":
+        for key in (
+            "donor_len",
+            "donor_upstream",
+            "donor_downstream",
+        ):
+            fixed_run_args.pop(key, None)
+            sampled_params.pop(key, None)
 if isinstance(fixed_run_args, dict):
     for key in sorted(fixed_run_args):
         if key == "script_name":
+            continue
+        if key in suppressed_fixed_keys:
             continue
         if independent_mode and key in {"mask", "sequence_transform"}:
             continue
@@ -167,10 +240,6 @@ if isinstance(fixed_run_args, dict):
 sequence_transform_value = sampled_params.pop("sequence_transform", None)
 mask_value = sampled_params.pop("mask", None)
 if independent_mode:
-    if train_target == "donor":
-        sampled_params.pop("acceptor_len", None)
-    elif train_target == "acceptor":
-        sampled_params.pop("donor_len", None)
     print("sequence_transform\tnone")
 elif mask_value is not None:
     print(f"sequence_transform\t{_mask_to_sequence_transform(mask_value)}")

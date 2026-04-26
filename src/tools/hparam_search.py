@@ -158,6 +158,7 @@ _SITE_WINDOW_LEN_DEFAULT: int = 100
 _SITE_WINDOW_LEN_MIN: int = 40
 _SITE_WINDOW_LEN_MAX: int = 100
 _SITE_WINDOW_LEN_STEP: int = 10
+_LEGACY_SITE_EDGE_SPAN: int = 5
 _DNABERT_MODEL_PREFIX: str = "dnabert"
 _MASK_HPARAM_VALUES: frozenset[str] = frozenset({"off", "on"})
 _MASK_SEQUENCE_TRANSFORM_OFF: str = "none"
@@ -306,7 +307,7 @@ class SearchConfig:
 class SeedBestConfig:
     """Validated seed-best payload for optional injection into full trials."""
 
-    sampled_params: dict[str, Scalar]
+    sampled_params: dict[str, Scalar | None]
     objective_score: Optional[float]
     objective_metric: Optional[str]
     objective_best_epoch: Optional[int]
@@ -562,6 +563,98 @@ def _resolve_window_flanks(
         _to_optional_int(merged_args.get("acceptor_upstream")),
         _to_optional_int(merged_args.get("acceptor_downstream")),
     )
+
+
+def _legacy_site_length_to_flanks(
+    *,
+    site_type: str,
+    length: object,
+) -> tuple[int, int] | None:
+    resolved_length = _to_positive_int(length)
+    if resolved_length is None:
+        return None
+    edge_span = (
+        _LEGACY_SITE_EDGE_SPAN
+        if resolved_length > _LEGACY_SITE_EDGE_SPAN
+        else max(1, resolved_length - 1)
+    )
+    if site_type == "donor":
+        return edge_span, resolved_length - edge_span
+    return resolved_length - edge_span, edge_span
+
+
+def _normalize_site_window_args_for_export(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    normalized = dict(values)
+    donor_flanks = _legacy_site_length_to_flanks(
+        site_type="donor",
+        length=normalized.get("donor_len"),
+    )
+    if donor_flanks is not None:
+        normalized.setdefault("donor_upstream", donor_flanks[0])
+        normalized.setdefault("donor_downstream", donor_flanks[1])
+    acceptor_flanks = _legacy_site_length_to_flanks(
+        site_type="acceptor",
+        length=normalized.get("acceptor_len"),
+    )
+    if acceptor_flanks is not None:
+        normalized.setdefault("acceptor_upstream", acceptor_flanks[0])
+        normalized.setdefault("acceptor_downstream", acceptor_flanks[1])
+    normalized.pop("donor_len", None)
+    normalized.pop("acceptor_len", None)
+    return normalized
+
+
+def _search_space_uses_site_flanks(
+    search_space: Mapping[str, object],
+) -> bool:
+    return any(key in search_space for key in _SITE_WINDOW_FLANK_KEYS)
+
+
+def _normalize_flank_only_best_config_payload(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    normalized = dict(payload)
+    context = normalized.get("hparam_context")
+    model_name = ""
+    if isinstance(context, dict):
+        fixed_run_args = context.get("fixed_run_args")
+        if isinstance(fixed_run_args, dict):
+            raw_model_name = fixed_run_args.get("model")
+            if isinstance(raw_model_name, str):
+                model_name = raw_model_name.strip().lower()
+    if model_name != "cnn_v2":
+        return normalized
+    sampled_params = normalized.get("sampled_params")
+    if isinstance(sampled_params, dict):
+        normalized["sampled_params"] = _normalize_site_window_args_for_export(
+            sampled_params
+        )
+    top_trials = normalized.get("top_trials")
+    if isinstance(top_trials, list):
+        normalized_top_trials: list[dict[str, object]] = []
+        for item in top_trials:
+            if not isinstance(item, dict):
+                normalized_top_trials.append(item)
+                continue
+            item_copy = dict(item)
+            item_sampled_params = item_copy.get("sampled_params")
+            if isinstance(item_sampled_params, dict):
+                item_copy["sampled_params"] = _normalize_site_window_args_for_export(
+                    item_sampled_params
+                )
+            normalized_top_trials.append(item_copy)
+        normalized["top_trials"] = normalized_top_trials
+    if isinstance(context, dict):
+        context_copy = dict(context)
+        fixed_run_args = context_copy.get("fixed_run_args")
+        if isinstance(fixed_run_args, dict):
+            context_copy["fixed_run_args"] = _normalize_site_window_args_for_export(
+                fixed_run_args
+            )
+        normalized["hparam_context"] = context_copy
+    return normalized
 
 
 def load_config(path: Path) -> SearchConfig:
@@ -976,7 +1069,7 @@ def _extract_sampled_params_from_best_config(
     raw: dict[str, object],
     search_space: dict[str, dict[str, object]],
     base_args: dict[str, ArgValue],
-) -> dict[str, Scalar]:
+) -> dict[str, Scalar | None]:
     """Validate and normalize sampled params loaded from best_config.json.
 
     The loader accepts both the current split format and older payloads that
@@ -996,12 +1089,19 @@ def _extract_sampled_params_from_best_config(
                     "Global best hparam_context.fixed_run_args must be an object."
                 )
             fixed_run_args = fixed_run_args_raw
+    if _search_space_uses_site_flanks(search_space):
+        sampled = _normalize_site_window_args_for_export(sampled)
+        if fixed_run_args:
+            fixed_run_args = _normalize_site_window_args_for_export(fixed_run_args)
 
-    normalized: dict[str, Scalar] = {}
+    normalized: dict[str, Scalar | None] = {}
     for key, value in sampled.items():
         if value is None:
-            # Null means this param was irrelevant for the stored trial — treat
-            # as missing and let the fallback chain supply a value below.
+            # Null means this param was irrelevant for the stored trial. Keep
+            # the explicit null for sampled-param identity checks, while still
+            # allowing non-search metadata fields to drop out.
+            if key in search_space:
+                normalized[key] = None
             continue
         if not isinstance(value, (int, float, str, bool)):
             raise ValueError(
@@ -1047,7 +1147,28 @@ def _extract_sampled_params_from_best_config(
         model_name=model_name,
         pair_mode=pair_mode,
     ):
-        normalized.pop("mask", None)
+        target = (
+            fixed_run_args.get("train_target", base_args.get("train_target", ""))
+            if isinstance(
+                fixed_run_args.get("train_target", base_args.get("train_target", "")),
+                str,
+            )
+            else ""
+        )
+        if str(target).strip().lower() == "donor":
+            if "acceptor_len" in search_space:
+                normalized["acceptor_len"] = None
+            for key in _ACCEPTOR_WINDOW_FLANK_KEYS:
+                if key in search_space:
+                    normalized[key] = None
+        elif str(target).strip().lower() == "acceptor":
+            if "donor_len" in search_space:
+                normalized["donor_len"] = None
+            for key in _DONOR_WINDOW_FLANK_KEYS:
+                if key in search_space:
+                    normalized[key] = None
+        if "mask" in search_space:
+            normalized["mask"] = None
         normalized.pop("sequence_transform", None)
         return normalized
     if "mask" in search_space:
@@ -1072,7 +1193,7 @@ def load_global_best_params(
     path: Optional[Path],
     search_space: dict[str, dict[str, object]],
     base_args: dict[str, ArgValue],
-) -> Optional[dict[str, Scalar]]:
+) -> Optional[dict[str, Scalar | None]]:
     """Load and validate previous best sampled params for forced inclusion."""
     if path is None or not path.exists():
         return None
@@ -1709,7 +1830,9 @@ def _read_best_objective_score(
     return None
 
 
-def _read_best_sampled_params(path: Optional[Path]) -> Optional[dict[str, Scalar]]:
+def _read_best_sampled_params(
+    path: Optional[Path],
+) -> Optional[dict[str, Scalar | None]]:
     """Read sampled params from one best-config payload when available."""
     if path is None:
         return None
@@ -1719,21 +1842,24 @@ def _read_best_sampled_params(path: Optional[Path]) -> Optional[dict[str, Scalar
     sampled = raw.get("sampled_params")
     if not isinstance(sampled, dict):
         return None
-    normalized: dict[str, Scalar] = {}
+    normalized: dict[str, Scalar | None] = {}
     for key, value in sampled.items():
+        if value is None:
+            normalized[str(key)] = None
+            continue
         if isinstance(value, (str, int, float, bool)):
             normalized[str(key)] = value
     return normalized
 
 
-def _sampled_params_key(sampled_params: dict[str, Scalar]) -> str:
+def _sampled_params_key(sampled_params: dict[str, Scalar | None]) -> str:
     """Return a deterministic key for one sampled-parameter dictionary."""
     return json.dumps(sampled_params, sort_keys=True, separators=(",", ":"))
 
 
 def _sampled_params_match(
-    left: dict[str, Scalar],
-    right: dict[str, Scalar],
+    left: dict[str, Scalar | None],
+    right: dict[str, Scalar | None],
 ) -> bool:
     """Return whether two sampled-parameter dictionaries are identical."""
     return _sampled_params_key(left) == _sampled_params_key(right)
@@ -1936,17 +2062,21 @@ def _normalize_independent_site_sampled_params(
         return normalized
     target = str(train_target).strip().lower() if isinstance(train_target, str) else ""
     if target == "donor":
-        normalized.pop("acceptor_len", None)
+        if "acceptor_len" in normalized:
+            normalized["acceptor_len"] = None
         for key in _ACCEPTOR_WINDOW_FLANK_KEYS:
             if key in normalized:
                 normalized[key] = None
     elif target == "acceptor":
-        normalized.pop("donor_len", None)
+        if "donor_len" in normalized:
+            normalized["donor_len"] = None
         for key in _DONOR_WINDOW_FLANK_KEYS:
             if key in normalized:
                 normalized[key] = None
-    normalized.pop("mask", None)
-    normalized.pop("sequence_transform", None)
+    if "mask" in normalized:
+        normalized["mask"] = None
+    if "sequence_transform" in normalized:
+        normalized["sequence_transform"] = None
     return normalized
 
 
@@ -7363,6 +7493,7 @@ def write_best_config(
     if top_rows is not None and top_k is not None and top_k > 0:
         payload["top_trials"] = _serialize_top_trials(top_rows, top_k)
     payload.update(_extract_checkpoint_paths_from_metrics(row.metrics_json))
+    payload = _normalize_flank_only_best_config_payload(payload)
     normalized_payload = relativize_path_fields(payload)
     path.write_text(
         json.dumps(normalized_payload, indent=2) + "\n",

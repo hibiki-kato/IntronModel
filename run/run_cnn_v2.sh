@@ -12,17 +12,15 @@ fi
 # --------------------------
 set -a
 MODEL="cnn_v2"
-SPECIES="Dmel, Hsap, Mmus, Athal"
+SPECIES="Athal, Dmel, Hsap, Mmus"
 INTRONMODEL_AUTO_TMUX="off"
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
-DONOR_UPSTREAM=""
-DONOR_DOWNSTREAM=""
-ACCEPTOR_UPSTREAM=""
-ACCEPTOR_DOWNSTREAM=""
+DONOR_UPSTREAM="5"
+DONOR_DOWNSTREAM="95"
+ACCEPTOR_UPSTREAM="95"
+ACCEPTOR_DOWNSTREAM="5"
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TEST_TSV_PATH=""
@@ -157,7 +155,7 @@ tuned_key_scope() {
 		|bpe_trust_remote_code)
 			printf '%s\n' "ignore"
 			;;
-		donor_len | acceptor_len \
+		train_pos_path | train_neg_path \
 		|donor_upstream | donor_downstream \
 		|acceptor_upstream | acceptor_downstream)
 			printf '%s\n' "shared"
@@ -227,10 +225,16 @@ append_tuned_args_for_task() {
 				;;
 			shared)
 				case "${task_name}:${tuned_key}" in
-					donor:donor_len | donor:donor_upstream | donor:donor_downstream)
+					donor:train_pos_path | donor:train_neg_path)
 						use_shared_key="1"
 						;;
-					acceptor:acceptor_len | acceptor:acceptor_upstream | acceptor:acceptor_downstream)
+					acceptor:train_pos_path | acceptor:train_neg_path)
+						use_shared_key="1"
+						;;
+					donor:donor_upstream | donor:donor_downstream)
+						use_shared_key="1"
+						;;
+					acceptor:acceptor_upstream | acceptor:acceptor_downstream)
 						use_shared_key="1"
 						;;
 					*)
@@ -296,8 +300,6 @@ run_species_once() {
 	args=(
 		--model "${MODEL}"
 		--species "${species}"
-		--donor_len "${DONOR_LEN}"
-		--acceptor_len "${ACCEPTOR_LEN}"
 		--device "${DEVICE}"
 		--seed "${SEED}"
 		--name_fields "${NAME_FIELDS}"

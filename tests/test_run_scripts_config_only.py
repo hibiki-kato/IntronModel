@@ -117,20 +117,22 @@ def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     assert 'GPU_IDS="auto"' in content
     assert 'MAX_PARALLEL_TRIALS="auto"' in content
     assert 'MODEL="cnn_v2"' in content
-    assert 'DONOR_LEN="100"' in content
-    assert 'ACCEPTOR_LEN="100"' in content
+    assert 'DONOR_UPSTREAM="5"' in content
+    assert 'DONOR_DOWNSTREAM="95"' in content
+    assert 'ACCEPTOR_UPSTREAM="95"' in content
+    assert 'ACCEPTOR_DOWNSTREAM="5"' in content
     assert 'VAL_FRAC="0.2"' in content
     assert 'VALIDATION_METRIC="max_f1"' in content
     assert 'SEED="1337"' in content
     assert 'INTRON_SCORE_OP="+"' in content
     assert 'VISUALIZE="true"' in content
     assert 'SKIP_TRAINING="0"' in content
-    assert 'CONTINUE_TRAINING="0"' in content
+    assert 'CONTINUE_TRAINING="1"' in content
     assert 'TRAIN_ONLY="0"' in content
     assert 'CHECKPOINT_TOP_K="3"' in content
     assert 'CHECKPOINT_PRUNE_DRY_RUN="0"' in content
     assert 'INFER_COMPILE="0"' in content
-    assert 'INFER_COMPILE_MODE="auto"' in content
+    assert 'INFER_COMPILE_MODE="off"' in content
     assert "intronmodel_enable_auto_tmux" in content
     assert 'source "${SCRIPT_DIR}/lib/tuned_config.sh"' in content
     assert "--sequence_transform" not in content
@@ -140,6 +142,8 @@ def test_run_cnn_v2_sh_trains_both_tasks_before_inference() -> None:
     assert "--validation_metric" in content
     assert "--seed" in content
     assert "--checkpoint_top_k" in content
+    assert "--donor_len" not in content
+    assert "--acceptor_len" not in content
     assert (
         'append_arg_if_set "donor_tuned_config_path" "${donor_tuned_config_path}"'
         in content
@@ -156,14 +160,9 @@ def test_run_cnn_v2_sh_ignores_cnn_v2_only_tuned_keys() -> None:
     assert "run_model.py forces cnn_v2 into pair_mode=independent" in content
     assert "|input_mode | pair_mode | sequence_transform | embedding_dim \\" in content
     assert "|bpe_pretrained_model_name | bpe_pretrained_revision \\" in content
-    assert (
-        "printf '%s\\n' \"shared\""
-        not in content[
-            content.index(
-                "|input_mode | pair_mode | sequence_transform | embedding_dim \\"
-            ) :
-        ]
-    )
+    assert "donor_len | acceptor_len" not in content
+    assert "donor:donor_len" not in content
+    assert "acceptor:acceptor_len" not in content
     assert (
         "printf '%s\\n' \"ignore\""
         in content[
@@ -173,6 +172,13 @@ def test_run_cnn_v2_sh_ignores_cnn_v2_only_tuned_keys() -> None:
         ]
     )
     assert "mode=independent tasks=donor,acceptor" in content
+
+
+def test_run_cnn_v2_sh_uses_tuned_train_paths_as_shared_keys() -> None:
+    content = (_project_root() / "run" / "run_cnn_v2.sh").read_text(encoding="utf-8")
+    assert "train_pos_path | train_neg_path \\" in content
+    shared_section = content[content.index("train_pos_path | train_neg_path \\") :]
+    assert "printf '%s\\n' \"shared\"" in shared_section
 
 
 def test_run_cnn_pair_v2_sh_rejects_cli_arguments() -> None:

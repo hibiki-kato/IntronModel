@@ -630,6 +630,10 @@ def infer_default_train_paths(
     train_dir: str,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Tuple[str, str, int]:
     available = list_available_train_lengths(train_dir)
     if not available:
@@ -639,6 +643,10 @@ def infer_default_train_paths(
         )
 
     requested = [x for x in [donor_len, acceptor_len] if x is not None]
+    if donor_upstream is not None and donor_downstream is not None:
+        requested.append(donor_upstream + donor_downstream)
+    if acceptor_upstream is not None and acceptor_downstream is not None:
+        requested.append(acceptor_upstream + acceptor_downstream)
     if requested:
         required_len = max(requested)
         candidates = [x for x in available if x >= required_len]
@@ -663,6 +671,10 @@ def resolve_train_paths(
     train_neg_path: Optional[str],
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
 ) -> Tuple[str, str, Optional[int]]:
     dirs = species_data_dirs(species)
     inferred_train_len: Optional[int] = None
@@ -671,7 +683,13 @@ def resolve_train_paths(
 
     if train_pos_path is None or train_neg_path is None:
         default_pos, default_neg, inferred_train_len = infer_default_train_paths(
-            train_dir=dirs["raw"], donor_len=donor_len, acceptor_len=acceptor_len
+            train_dir=dirs["raw"],
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
         )
 
     pos_path = train_pos_path or default_pos

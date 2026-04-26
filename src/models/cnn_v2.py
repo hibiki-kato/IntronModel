@@ -2445,12 +2445,20 @@ def train(
         summary["delegated_backend"] = "cnn_pair"
         return summary
 
+    donor_upstream = getattr(common_args, "donor_upstream", None)
+    donor_downstream = getattr(common_args, "donor_downstream", None)
+    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
+    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
     train_pos_path, train_neg_path, inferred_train_len = resolve_train_paths(
         species=common_args.species,
         train_pos_path=common_args.train_pos_path,
         train_neg_path=common_args.train_neg_path,
         donor_len=common_args.donor_len,
         acceptor_len=common_args.acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
 
     donor_len, acceptor_len = resolve_effective_window_lengths(
@@ -2458,10 +2466,6 @@ def train(
         acceptor_len=common_args.acceptor_len,
         inferred_train_len=inferred_train_len,
     )
-    donor_upstream = getattr(common_args, "donor_upstream", None)
-    donor_downstream = getattr(common_args, "donor_downstream", None)
-    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
-    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
     validate_window_args(donor_len=donor_len, acceptor_len=acceptor_len)
     validate_window_args_4p(
         donor_upstream=donor_upstream,
@@ -2689,6 +2693,10 @@ def infer_site(
                 train_dir=dirs["raw"],
                 donor_len=None,
                 acceptor_len=None,
+                donor_upstream=getattr(common_args, "donor_upstream", None),
+                donor_downstream=getattr(common_args, "donor_downstream", None),
+                acceptor_upstream=getattr(common_args, "acceptor_upstream", None),
+                acceptor_downstream=getattr(common_args, "acceptor_downstream", None),
             )
         except ValueError:
             inferred_train_len = None

@@ -186,8 +186,6 @@ def _run_grid_target(
         "model": model,
         "species": species,
         "train_target": target,
-        "donor_len": 100,
-        "acceptor_len": 100,
         "seed": seed,
         "batch_size": batch_size,
         "val_frac": val_frac,
@@ -587,7 +585,11 @@ def _compute_grid_test_metrics(
     )
     from tools import hparam_search
     from util.transcript_eval import aggregate_transcript_scores, write_transcript_scores
-    from util.versioned_artifacts import resolve_latest_published_run_assets
+    from util.versioned_artifacts import (
+        normalize_published_run_checkpoints,
+        resolve_latest_published_name,
+        resolve_latest_published_run_assets,
+    )
 
     payload = _load_metrics_payload(metrics_json)
     if not payload:
@@ -604,11 +606,35 @@ def _compute_grid_test_metrics(
     site_max_f1: Optional[float] = None
     partner_published_name: Optional[str] = None
     partner_task = "acceptor" if target == "donor" else "donor"
-    published_assets = resolve_latest_published_run_assets(
-        project_root=_project_root(),
-        species=species,
-        model_name=model_name,
-    )
+    project_root = _project_root()
+    try:
+        published_assets = resolve_latest_published_run_assets(
+            project_root=project_root,
+            species=species,
+            model_name=model_name,
+        )
+    except FileNotFoundError:
+        published_assets = None
+        latest_published_name = resolve_latest_published_name(
+            project_root / "data",
+            species,
+            model_name,
+        )
+        if latest_published_name is not None:
+            try:
+                normalize_published_run_checkpoints(
+                    project_root=project_root,
+                    species=species,
+                    model_name=model_name,
+                    published_name=latest_published_name,
+                )
+                published_assets = resolve_latest_published_run_assets(
+                    project_root=project_root,
+                    species=species,
+                    model_name=model_name,
+                )
+            except (FileNotFoundError, ValueError):
+                published_assets = None
     if published_assets is not None:
         partner_published_name = published_assets.get("published_name")
         partner_checkpoint_raw = published_assets.get(f"{partner_task}_checkpoint_path")
@@ -1163,6 +1189,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     model_name=args.model,
                     has_test=has_test,
                 ):
+                    if current is None or current.status != "done":
+                        cached_done += 1
                     existing_target[key] = cell
                     existing[key] = cell
             if recovered_target_cells:
@@ -1171,8 +1199,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     f"trial metrics for target={target}.",
                     flush=True,
                 )
+        target_cells: list[CellResult] = list(existing_target.values())
+        target_error: Optional[Exception] = None
         if args.figures_only:
-            target_cells = list(existing_target.values())
+            pass
         else:
 
             def _handle_trial_complete(
@@ -1182,46 +1212,58 @@ def main(argv: Optional[list[str]] = None) -> int:
                 live_completed += 1
                 _emit_eta_progress(target_name=target_name, result=result)
 
-            target_cells = _run_grid_target(
-                species=args.species,
-                target=target,
-                gpu_ids=gpu_list,
-                max_parallel=len(gpu_list) if gpu_list else 0,
-                epochs=args.epochs,
-                seed=args.seed,
-                batch_size=args.batch_size,
-                val_frac=args.val_frac,
-                output_dir=output_dir,
-                results_path=results_path,
-                existing=existing_target,
-                model=args.model,
-                compile_mode=args.compile_mode,
-                infer_compile=args.infer_compile,
-                infer_compile_mode=args.infer_compile_mode,
-                pretrained_model_name=args.pretrained_model_name,
-                pretrained_revision=args.pretrained_revision,
-                trust_remote_code=args.trust_remote_code,
-                max_tokens=args.max_tokens,
-                head_layer_norm=args.head_layer_norm,
-                on_trial_complete=_handle_trial_complete,
-                persist_prefix_cells=_merge_unique_cells(
-                    [
-                        *all_cells,
-                        *[v for v in existing.values() if v.target != target],
-                    ]
-                ),
-            )
+            try:
+                target_cells = _run_grid_target(
+                    species=args.species,
+                    target=target,
+                    gpu_ids=gpu_list,
+                    max_parallel=len(gpu_list) if gpu_list else 0,
+                    epochs=args.epochs,
+                    seed=args.seed,
+                    batch_size=args.batch_size,
+                    val_frac=args.val_frac,
+                    output_dir=output_dir,
+                    results_path=results_path,
+                    existing=existing_target,
+                    model=args.model,
+                    compile_mode=args.compile_mode,
+                    infer_compile=args.infer_compile,
+                    infer_compile_mode=args.infer_compile_mode,
+                    pretrained_model_name=args.pretrained_model_name,
+                    pretrained_revision=args.pretrained_revision,
+                    trust_remote_code=args.trust_remote_code,
+                    max_tokens=args.max_tokens,
+                    head_layer_norm=args.head_layer_norm,
+                    on_trial_complete=_handle_trial_complete,
+                    persist_prefix_cells=_merge_unique_cells(
+                        [
+                            *all_cells,
+                            *[v for v in existing.values() if v.target != target],
+                        ]
+                    ),
+                )
+            except Exception as exc:
+                target_error = exc
+                target_cells = _load_cells_from_trial_metrics(
+                    output_dir=output_dir,
+                    target=target,
+                    has_test=has_test,
+                    model_name=args.model,
+                )
         all_cells.extend(target_cells)
 
-        fig_path = output_dir / f"grid_{target}_{args.species}.png"
-        plot_grid(
-            cells=target_cells,
-            target=target,
-            species=args.species,
-            model_name=args.model,
-            output_path=fig_path,
-            has_test=has_test,
-        )
+        if target_cells:
+            fig_path = output_dir / f"grid_{target}_{args.species}.png"
+            plot_grid(
+                cells=target_cells,
+                target=target,
+                species=args.species,
+                model_name=args.model,
+                output_path=fig_path,
+                has_test=has_test,
+            )
+        if target_error is not None:
+            raise target_error
 
     preserved_non_targets = [v for v in existing.values() if v.target not in targets]
     _save_results(

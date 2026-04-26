@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tools import grid_search_flank as grid_search_window
+from util import versioned_artifacts
 
 
 def test_delete_trial_checkpoints_removes_referenced_files(tmp_path: Path) -> None:
@@ -567,3 +569,123 @@ def test_load_cells_from_trial_metrics_recovers_target_cells(
     assert cells[0].test_site_max_f1 == pytest.approx(0.86)
     assert cells[0].test_transcript_max_f1 == pytest.approx(0.88)
     assert cells[0].test_max_f1 == pytest.approx(0.88)
+
+
+def test_main_eta_counts_recovered_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(grid_search_window, "TARGETS", ["donor"])
+    monkeypatch.setattr(grid_search_window, "CELLS_PER_TARGET", 2)
+    monkeypatch.setattr(grid_search_window, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        grid_search_window, "_has_transcript_test_tsv", lambda *_args: False
+    )
+    monkeypatch.setattr(grid_search_window, "_load_results", lambda _path: {})
+    monkeypatch.setattr(
+        grid_search_window,
+        "_load_cells_from_trial_metrics",
+        lambda **_kwargs: [
+            grid_search_window.CellResult(
+                upstream=10,
+                downstream=10,
+                target="donor",
+                val_max_f1=0.8,
+                status="done",
+            )
+        ],
+    )
+    monkeypatch.setattr(grid_search_window, "plot_grid", lambda **_kwargs: None)
+
+    def _fake_run_grid_target(**kwargs: object) -> list[grid_search_window.CellResult]:
+        callback = kwargs["on_trial_complete"]
+        callback(
+            SimpleNamespace(
+                sampled_params={"donor_upstream": 20, "donor_downstream": 20},
+                status="success",
+                duration_sec=1.0,
+            )
+        )
+        return [
+            grid_search_window.CellResult(
+                upstream=10,
+                downstream=10,
+                target="donor",
+                val_max_f1=0.8,
+                status="done",
+            ),
+            grid_search_window.CellResult(
+                upstream=20,
+                downstream=20,
+                target="donor",
+                val_max_f1=0.81,
+                status="done",
+            ),
+        ]
+
+    monkeypatch.setattr(grid_search_window, "_run_grid_target", _fake_run_grid_target)
+
+    exit_code = grid_search_window.main(
+        [
+            "--species",
+            "Athal",
+            "--target",
+            "donor",
+            "--gpus",
+            "0",
+            "--epochs",
+            "1",
+            "--output_dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cached=1 live=1" in out
+    assert "global=2/2" in out
+
+
+def test_compute_grid_test_metrics_tolerates_missing_latest_published_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import hparam_search
+
+    metrics_path = tmp_path / "full_trial_0000.metrics.json"
+    metrics_path.write_text(json.dumps({"batch_size": 512}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        hparam_search,
+        "_extract_checkpoint_paths_from_metrics",
+        lambda _path: {"donor_checkpoint_path": str(tmp_path / "trial.pt")},
+    )
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_latest_published_run_assets",
+        lambda **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_latest_published_name",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = grid_search_window._compute_grid_test_metrics(
+        species="Athal",
+        model_name="cnn_v2",
+        target="donor",
+        metrics_json=str(metrics_path),
+    )
+
+    assert result == {
+        "test_site_max_f1": None,
+        "test_transcript_max_f1": None,
+    }
+    saved = json.loads(
+        (tmp_path / "full_trial_0000.metrics.grid_eval.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert saved == result
