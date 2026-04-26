@@ -1,4 +1,4 @@
-"""Grid search over model upstream/downstream window lengths.
+"""Grid search over model upstream/downstream flank lengths.
 
 Enumerates all 10×10 (upstream × downstream) combinations for donor and
 acceptor targets, runs full training for each cell, and writes two figures:
@@ -15,7 +15,7 @@ skip already-completed cells.
 
 Usage
 -----
-  python src/tools/grid_search_window.py \\
+  python src/tools/grid_search_flank.py \\
       --species Mmus \\
       --gpus 1,2,3,4 \\
       --epochs 15 \\
@@ -469,6 +469,57 @@ def _resolve_class_file(species: str) -> str:
     return processed_class_file if os.path.isfile(processed_class_file) else raw_class_file
 
 
+def _infer_site_rows_for_grid(
+    *,
+    species: str,
+    model_name: str,
+    donor_checkpoint_path: Path,
+    acceptor_checkpoint_path: Path,
+    window_config: dict[str, Optional[int]],
+    batch_size: int,
+    infer_compile: int,
+    infer_compile_mode: str,
+    sequence_transform: str,
+    input_mode: str,
+    pair_mode: str,
+) -> list[dict[str, object]]:
+    """Run one model's shared ``infer_site`` entrypoint for grid evaluation."""
+    from models.registry import load_model_module
+
+    model_module = load_model_module(model_name)
+    common_args = argparse.Namespace(
+        model=model_name,
+        species=species,
+        donor_len=window_config["donor_len"],
+        acceptor_len=window_config["acceptor_len"],
+        donor_upstream=window_config["donor_upstream"],
+        donor_downstream=window_config["donor_downstream"],
+        acceptor_upstream=window_config["acceptor_upstream"],
+        acceptor_downstream=window_config["acceptor_downstream"],
+        test_tsv=None,
+        device="auto",
+        donor_checkpoint_path=str(donor_checkpoint_path),
+        acceptor_checkpoint_path=str(acceptor_checkpoint_path),
+        pair_checkpoint_path="",
+    )
+    model_args = argparse.Namespace(
+        batch_size=batch_size,
+        infer_batch_size=batch_size,
+        use_amp=1,
+        infer_use_amp=1,
+        amp_dtype="auto",
+        infer_amp_dtype="auto",
+        compile=0,
+        compile_mode="off",
+        infer_compile=infer_compile,
+        infer_compile_mode=infer_compile_mode,
+        sequence_transform=sequence_transform,
+        input_mode=input_mode,
+        pair_mode=pair_mode,
+    )
+    return model_module.infer_site(common_args, model_args)
+
+
 def _extract_max_f1_from_eval_lines(lines: list[str]) -> Optional[float]:
     """Extract maximum F1 from ``evaluate_score_file`` output lines."""
     best_f1: Optional[float] = None
@@ -535,7 +586,6 @@ def _compute_grid_test_metrics(
         _resolve_ref_gff_file,
     )
     from tools import hparam_search
-    from util.data_proc import read_test_site_rows, resolve_test_tsv
     from util.transcript_eval import aggregate_transcript_scores, write_transcript_scores
     from util.versioned_artifacts import resolve_latest_published_run_assets
 
@@ -544,38 +594,14 @@ def _compute_grid_test_metrics(
         return {}
 
     window_config = _resolve_window_config(payload)
-    test_tsv = resolve_test_tsv(species, None)
-    labels = _load_optional_intron_labels(species)
     checkpoint_paths = hparam_search._extract_checkpoint_paths_from_metrics(metrics_json)
     checkpoint_key = f"{target}_checkpoint_path"
     checkpoint_raw = checkpoint_paths.get(checkpoint_key)
     if checkpoint_raw is None or checkpoint_raw.strip() == "":
         return {}
 
-    current_site_rows, _skipped_short = read_test_site_rows(
-        str(test_tsv),
-        window_config["donor_len"],
-        window_config["acceptor_len"],
-        donor_upstream=window_config["donor_upstream"],
-        donor_downstream=window_config["donor_downstream"],
-        acceptor_upstream=window_config["acceptor_upstream"],
-        acceptor_downstream=window_config["acceptor_downstream"],
-    )
-    scored_target_rows = hparam_search._score_site_rows_single_task_model(
-        model_name=model_name,
-        task=target,
-        checkpoint_path=Path(checkpoint_raw),
-        site_rows=current_site_rows,
-        device="auto",
-        batch_size=512,
-        sequence_transform="none",
-    )
-    site_max_f1 = _compute_site_max_f1_from_rows(
-        rows=scored_target_rows,
-        labels=labels,
-    )
-
     transcript_max_f1: Optional[float] = None
+    site_max_f1: Optional[float] = None
     partner_published_name: Optional[str] = None
     partner_task = "acceptor" if target == "donor" else "donor"
     published_assets = resolve_latest_published_run_assets(
@@ -603,28 +629,41 @@ def _compute_grid_test_metrics(
                 f"{partner_task}_downstream",
             ):
                 merged_window[key] = partner_window.get(key)
-            transcript_site_rows, _skipped_short = read_test_site_rows(
-                str(test_tsv),
-                merged_window["donor_len"],
-                merged_window["acceptor_len"],
-                donor_upstream=merged_window["donor_upstream"],
-                donor_downstream=merged_window["donor_downstream"],
-                acceptor_upstream=merged_window["acceptor_upstream"],
-                acceptor_downstream=merged_window["acceptor_downstream"],
+            donor_checkpoint_path = (
+                Path(checkpoint_raw)
+                if target == "donor"
+                else Path(partner_checkpoint_raw)
             )
-            scored_partner_rows = hparam_search._score_site_rows_single_task_model(
+            acceptor_checkpoint_path = (
+                Path(partner_checkpoint_raw)
+                if target == "donor"
+                else Path(checkpoint_raw)
+            )
+            scored_site_rows = _infer_site_rows_for_grid(
+                species=species,
                 model_name=model_name,
-                task=partner_task,
-                checkpoint_path=Path(partner_checkpoint_raw),
-                site_rows=transcript_site_rows,
-                device="auto",
-                batch_size=512,
-                sequence_transform="none",
+                donor_checkpoint_path=donor_checkpoint_path,
+                acceptor_checkpoint_path=acceptor_checkpoint_path,
+                window_config=merged_window,
+                batch_size=_to_optional_int(payload.get("batch_size")) or 512,
+                infer_compile=_to_optional_int(payload.get("infer_compile")) or 0,
+                infer_compile_mode=str(payload.get("infer_compile_mode", "off")) or "off",
+                sequence_transform=str(payload.get("sequence_transform", "none")) or "none",
+                input_mode=str(payload.get("input_mode", "onehot")) or "onehot",
+                pair_mode=str(payload.get("pair_mode", "independent")) or "independent",
             )
-            if scored_target_rows and scored_partner_rows:
+            site_max_f1 = _compute_site_max_f1_from_rows(
+                rows=[
+                    row
+                    for row in scored_site_rows
+                    if str(row.get("site_type", "")).strip().lower() == target
+                ],
+                labels=_load_optional_intron_labels(species),
+            )
+            if scored_site_rows:
                 unique_map = _load_required_unique_intron_map(species=species)
                 mapped_site_rows = _expand_unique_site_rows(
-                    site_score_rows=[*scored_target_rows, *scored_partner_rows],
+                    site_score_rows=scored_site_rows,
                     unique_map=unique_map,
                 )
                 transcript_rows = aggregate_transcript_scores(
@@ -1107,21 +1146,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         _emit_eta_progress()
 
     for target in targets:
-        if args.figures_only:
-            target_cells = [c for c in existing.values() if c.target == target]
-            if not target_cells:
-                target_cells = _load_cells_from_trial_metrics(
-                    output_dir=output_dir,
-                    target=target,
-                    has_test=has_test,
+        existing_target = {k: v for k, v in existing.items() if v.target == target}
+        recovered_target_cells: list[CellResult] = []
+        if len(existing_target) < CELLS_PER_TARGET:
+            recovered_target_cells = _load_cells_from_trial_metrics(
+                output_dir=output_dir,
+                target=target,
+                has_test=has_test,
+                model_name=args.model,
+            )
+            for cell in recovered_target_cells:
+                key = f"{cell.target}_{cell.upstream}_{cell.downstream}"
+                current = existing_target.get(key)
+                if current is None or not _cell_has_required_metrics(
+                    current,
                     model_name=args.model,
+                    has_test=has_test,
+                ):
+                    existing_target[key] = cell
+                    existing[key] = cell
+            if recovered_target_cells:
+                print(
+                    f"[grid] recovered {len(recovered_target_cells)} cells from "
+                    f"trial metrics for target={target}.",
+                    flush=True,
                 )
-                if target_cells:
-                    print(
-                        f"[grid] recovered {len(target_cells)} cells from "
-                        f"trial metrics for target={target}.",
-                        flush=True,
-                    )
+        if args.figures_only:
+            target_cells = list(existing_target.values())
         else:
 
             def _handle_trial_complete(
@@ -1142,7 +1193,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 val_frac=args.val_frac,
                 output_dir=output_dir,
                 results_path=results_path,
-                existing={k: v for k, v in existing.items() if v.target == target},
+                existing=existing_target,
                 model=args.model,
                 compile_mode=args.compile_mode,
                 infer_compile=args.infer_compile,

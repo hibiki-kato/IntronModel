@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -gt 0 ]]; then
-	echo "[grid_search_cnn_v2_window.sh] This script is config-only." \
+	echo "[grid_search_cnn_v2_flank.sh] This script is config-only." \
 		"Edit top CONFIG and run without args." >&2
 	exit 1
 fi
@@ -46,7 +46,7 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 resolve_python_bin() {
-	intronmodel_resolve_python_bin "grid_search_cnn_v2_window.sh"
+	intronmodel_resolve_python_bin "grid_search_cnn_v2_flank.sh"
 }
 
 PYTHON_BIN="$(resolve_python_bin)"
@@ -119,12 +119,12 @@ for idx in "${!FILTERED_SPECIES[@]}"; do
 		ARGS+=("--output_dir" "${OUTPUT_DIR}/${sp}")
 	fi
 
-	echo "[grid_search_cnn_v2_window.sh] species=${sp} target=${TARGET}" \
+	echo "[grid_search_cnn_v2_flank.sh] species=${sp} target=${TARGET}" \
 		"gpus=${GPU_IDS} epochs=${FULL_EPOCHS}" \
 		"compile=${COMPILE_MODE}/${INFER_COMPILE_MODE}" \
 		"global_trials=$((GLOBAL_TRIAL_OFFSET + 1))-${TOTAL_GLOBAL_TRIALS}"
 
 	"${PYTHON_BIN}" \
-		"${PROJECT_ROOT}/src/tools/grid_search_window.py" \
+		"${PROJECT_ROOT}/src/tools/grid_search_flank.py" \
 		"${ARGS[@]}"
 done

@@ -651,8 +651,8 @@ def test_dnabert_pair_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_grid_search_dnabert2_window_sh_rejects_cli_arguments() -> None:
-    script_path = _project_root() / "run" / "grid_search_dnabert2_window.sh"
+def test_grid_search_dnabert2_flank_sh_rejects_cli_arguments() -> None:
+    script_path = _project_root() / "run" / "grid_search_dnabert2_flank.sh"
     run = subprocess.run(
         ["bash", str(script_path), "--dummy"],
         capture_output=True,
@@ -663,17 +663,16 @@ def test_grid_search_dnabert2_window_sh_rejects_cli_arguments() -> None:
     assert "config-only" in run.stderr
 
 
-def test_grid_search_dnabert2_window_sh_uses_tmux_species_fanout_defaults() -> None:
-    content = (_project_root() / "run" / "grid_search_dnabert2_window.sh").read_text(
+def test_grid_search_dnabert2_flank_sh_uses_expected_defaults() -> None:
+    content = (_project_root() / "run" / "grid_search_dnabert2_flank.sh").read_text(
         encoding="utf-8"
     )
-    assert 'SPECIES="Dmel, Hsap, Mmus"' in content
+    assert 'SPECIES="Athal, Dmel, Hsap, Mmus"' in content
     assert 'DNABERT_VARIANT="2"' in content
     assert 'COMPILE_MODE="off"' in content
     assert 'INFER_COMPILE="0"' in content
     assert 'INFER_COMPILE_MODE="off"' in content
-    assert 'TMUX_FANOUT_BY_SPECIES="${TMUX_FANOUT_BY_SPECIES:-1}"' in content
-    assert 'TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-grid_dnabert2_window}"' in content
+    assert "grid_search_dnabert2_flank.sh" in content
     assert "intronmodel_resolve_dnabert_pretrained_name" in content
     assert '"--model" "${MODEL_NAME}"' in content
 

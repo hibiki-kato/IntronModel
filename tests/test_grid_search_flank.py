@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import grid_search_window
+from tools import grid_search_flank as grid_search_window
 
 
 def test_delete_trial_checkpoints_removes_referenced_files(tmp_path: Path) -> None:

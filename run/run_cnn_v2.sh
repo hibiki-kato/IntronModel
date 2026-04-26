@@ -209,6 +209,7 @@ append_tuned_args_for_task() {
 
 	local loaded_count=0
 	local line tuned_key tuned_value key_scope prefixed_key existing_value
+	local use_shared_key="0"
 	while IFS= read -r line; do
 		if [[ -z "${line}" ]]; then
 			continue
@@ -225,6 +226,20 @@ append_tuned_args_for_task() {
 				loaded_count=$((loaded_count + 1))
 				;;
 			shared)
+				case "${task_name}:${tuned_key}" in
+					donor:donor_len | donor:donor_upstream | donor:donor_downstream)
+						use_shared_key="1"
+						;;
+					acceptor:acceptor_len | acceptor:acceptor_upstream | acceptor:acceptor_downstream)
+						use_shared_key="1"
+						;;
+					*)
+						use_shared_key="0"
+						;;
+				esac
+				if [[ "${use_shared_key}" != "1" ]]; then
+					continue
+				fi
 				existing_value="${shared_value_ref[${tuned_key}]:-}"
 				if [[ -n "${existing_value}" && "${existing_value}" != "${tuned_value}" ]]; then
 					echo "[cnn_v2.sh] conflicting shared tuned parameter ${tuned_key}: "\
