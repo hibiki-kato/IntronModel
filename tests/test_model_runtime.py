@@ -204,15 +204,17 @@ def test_resolve_compile_enabled_full_forces_compile_on_cuda() -> None:
 def test_compile_model_with_fallback_uses_reduce_overhead_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mode_calls: list[tuple[str | None, bool | None]] = []
+    mode_calls: list[tuple[str | None, bool | None, object]] = []
     model = torch.nn.Linear(4, 2)
+    monkeypatch.setattr(model_runtime, "_supports_torch_compile_option", lambda _: True)
 
     def _fake_compile(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        mode_calls.append((mode, dynamic))
+        mode_calls.append((mode, dynamic, options))
         return module
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
@@ -221,21 +223,29 @@ def test_compile_model_with_fallback_uses_reduce_overhead_strategy(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("reduce-overhead", False)]
+    assert mode_calls == [
+        (
+            "reduce-overhead",
+            False,
+            None,
+        )
+    ]
 
 
 def test_compile_model_with_fallback_quick_alias_uses_reduce_overhead_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mode_calls: list[tuple[str | None, bool | None]] = []
+    mode_calls: list[tuple[str | None, bool | None, object]] = []
     model = torch.nn.Linear(4, 2)
+    monkeypatch.setattr(model_runtime, "_supports_torch_compile_option", lambda _: True)
 
     def _fake_compile(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        mode_calls.append((mode, dynamic))
+        mode_calls.append((mode, dynamic, options))
         return module
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
@@ -247,7 +257,13 @@ def test_compile_model_with_fallback_quick_alias_uses_reduce_overhead_strategy(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("reduce-overhead", False)]
+    assert mode_calls == [
+        (
+            "reduce-overhead",
+            False,
+            None,
+        )
+    ]
 
 
 def test_extract_checkpoint_model_state_normalizes_compiled_prefixes() -> None:
@@ -286,15 +302,17 @@ def test_warm_start_model_loads_matching_state_dict(tmp_path: Path) -> None:
 def test_compile_model_with_fallback_full_alias_uses_reduce_overhead_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mode_calls: list[tuple[str | None, bool | None]] = []
+    mode_calls: list[tuple[str | None, bool | None, object]] = []
     model = torch.nn.Linear(4, 2)
+    monkeypatch.setattr(model_runtime, "_supports_torch_compile_option", lambda _: True)
 
     def _fake_compile(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        mode_calls.append((mode, dynamic))
+        mode_calls.append((mode, dynamic, options))
         return module
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
@@ -306,7 +324,13 @@ def test_compile_model_with_fallback_full_alias_uses_reduce_overhead_strategy(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("reduce-overhead", False)]
+    assert mode_calls == [
+        (
+            "reduce-overhead",
+            False,
+            None,
+        )
+    ]
 
 
 def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> None:
@@ -339,12 +363,21 @@ def test_configure_torch_compile_runtime_enables_dynamic_cudagraph_skip() -> Non
 
 def test_configure_torch_compile_runtime_installs_warning_filter() -> None:
     logger = logging.getLogger("torch._inductor.utils")
+    perf_hint_logger = logging.getLogger("torch._inductor.utils.__perf_hints")
     logger.filters = [
         existing_filter
         for existing_filter in logger.filters
         if not isinstance(
             existing_filter,
             model_runtime._SuppressInactiveMaxAutotuneWarnings,
+        )
+    ]
+    perf_hint_logger.filters = [
+        existing_filter
+        for existing_filter in perf_hint_logger.filters
+        if not isinstance(
+            existing_filter,
+            model_runtime._SuppressCudagraphDynamicShapeWarnings,
         )
     ]
 
@@ -358,7 +391,16 @@ def test_configure_torch_compile_runtime_installs_warning_filter() -> None:
             model_runtime._SuppressInactiveMaxAutotuneWarnings,
         )
     ]
+    installed_perf_hint = [
+        existing_filter
+        for existing_filter in perf_hint_logger.filters
+        if isinstance(
+            existing_filter,
+            model_runtime._SuppressCudagraphDynamicShapeWarnings,
+        )
+    ]
     assert len(installed) == 1
+    assert len(installed_perf_hint) == 1
 
     record = logging.LogRecord(
         name="torch._inductor.utils",
@@ -370,6 +412,17 @@ def test_configure_torch_compile_runtime_installs_warning_filter() -> None:
         exc_info=None,
     )
     assert installed[0].filter(record) is False
+
+    perf_hint_record = logging.LogRecord(
+        name="torch._inductor.utils.__perf_hints",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="cudagraph partition due to dynamic shape ops. Found from : test",
+        args=(),
+        exc_info=None,
+    )
+    assert installed_perf_hint[0].filter(perf_hint_record) is False
 
 
 def test_compile_model_with_fallback_applies_runtime_config(
@@ -388,8 +441,9 @@ def test_compile_model_with_fallback_applies_runtime_config(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        del mode, dynamic
+        del mode, dynamic, options
         return module
 
     monkeypatch.setattr(
@@ -413,15 +467,17 @@ def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
     class _Props:
         multi_processor_count = 20
 
-    mode_calls: list[tuple[str | None, bool | None]] = []
+    mode_calls: list[tuple[str | None, bool | None, object]] = []
     model = torch.nn.Linear(3, 1)
+    monkeypatch.setattr(model_runtime, "_supports_torch_compile_option", lambda _: True)
 
     def _fake_compile(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        mode_calls.append((mode, dynamic))
+        mode_calls.append((mode, dynamic, options))
         return module
 
     monkeypatch.setenv(
@@ -437,21 +493,29 @@ def test_compile_model_with_fallback_max_then_default_skips_small_gpu(
     assert enabled is True
     assert selected_mode == "reduce-overhead"
     assert setup_error is None
-    assert mode_calls == [("reduce-overhead", False)]
+    assert mode_calls == [
+        (
+            "reduce-overhead",
+            False,
+            None,
+        )
+    ]
 
 
 def test_compile_model_with_fallback_on_ignores_max_autotune_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mode_calls: list[tuple[str | None, bool | None]] = []
+    mode_calls: list[tuple[str | None, bool | None, object]] = []
     model = torch.nn.Linear(2, 1)
+    monkeypatch.setattr(model_runtime, "_supports_torch_compile_option", lambda _: True)
 
     def _fake_compile(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        mode_calls.append((mode, dynamic))
+        mode_calls.append((mode, dynamic, options))
         if dynamic is not False:
             raise AssertionError("compile should force dynamic=False")
         return module
@@ -472,15 +536,23 @@ def test_compile_model_with_fallback_on_ignores_max_autotune_strategy(
     assert second[2] == "reduce-overhead"
     assert second[3] is None
     assert mode_calls == [
-        ("reduce-overhead", False),
-        ("reduce-overhead", False),
+        (
+            "reduce-overhead",
+            False,
+            None,
+        ),
+        (
+            "reduce-overhead",
+            False,
+            None,
+        ),
     ]
 
 
 def test_compile_model_with_fallback_uses_default_backend_mode_for_eval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mode_calls: list[tuple[str | None, bool | None]] = []
+    mode_calls: list[tuple[str | None, bool | None, object]] = []
     model = torch.nn.Linear(4, 2)
     model.eval()
 
@@ -488,13 +560,14 @@ def test_compile_model_with_fallback_uses_default_backend_mode_for_eval(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        mode_calls.append((mode, dynamic))
+        mode_calls.append((mode, dynamic, options))
         return module
 
     monkeypatch.setattr(torch, "compile", _fake_compile)
     _ = compile_model_with_fallback(model)
-    assert mode_calls == [("reduce-overhead", False)]
+    assert mode_calls == [("reduce-overhead", False, None)]
 
 
 def test_compile_model_with_fallback_disables_max_autotune_for_default_mode(
@@ -516,8 +589,9 @@ def test_compile_model_with_fallback_disables_max_autotune_for_default_mode(
         module: torch.nn.Module,
         mode: str | None = None,
         dynamic: bool | None = None,
+        options: object = None,
     ) -> torch.nn.Module:
-        del mode, dynamic
+        del mode, dynamic, options
         observed_env.append(os.environ.get("TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"))
         if config_obj is not None:
             max_autotune = getattr(config_obj, "max_autotune", None)

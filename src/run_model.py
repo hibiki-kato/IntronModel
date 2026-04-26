@@ -1979,7 +1979,7 @@ def _infer_compile_requested(args: argparse.Namespace) -> bool:
         if infer_mode_raw is None
         else _normalize_high_level_compile_mode(str(infer_mode_raw))
     )
-    return infer_compile_flag and infer_mode == "on"
+    return infer_compile_flag and infer_mode != "off"
 
 
 def _disable_infer_compile_flags(args: argparse.Namespace) -> None:

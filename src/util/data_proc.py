@@ -756,6 +756,7 @@ def reshape_site_sequence(
 # Position (0-indexed) of the splice-site dinucleotide (GT/AG) in the 102bp
 # sequences from *.coding.pwm.err and *.neg.pwm.err raw files.
 SPLICE_SITE_OFFSET: int = 50
+LEGACY_TEST_EXON_BP: int = 5
 
 
 def _infer_splice_site_offset(seq_len: int) -> int:
@@ -805,6 +806,67 @@ def reshape_site_sequence_4p(
     return seq[start:end]
 
 
+def _resolve_explicit_test_request_context(
+    *,
+    site_type: str,
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    donor_upstream: Optional[int],
+    donor_downstream: Optional[int],
+    acceptor_upstream: Optional[int],
+    acceptor_downstream: Optional[int],
+) -> tuple[Optional[int], Optional[int]]:
+    """Resolve requested upstream/downstream context for explicit-window TSV rows."""
+    if site_type == "donor":
+        if donor_upstream is not None or donor_downstream is not None:
+            return donor_upstream, donor_downstream
+        if donor_len is None:
+            return None, None
+        upstream = min(LEGACY_TEST_EXON_BP, donor_len)
+        return upstream, donor_len - upstream
+
+    if site_type == "acceptor":
+        if acceptor_upstream is not None or acceptor_downstream is not None:
+            return acceptor_upstream, acceptor_downstream
+        if acceptor_len is None:
+            return None, None
+        downstream = min(LEGACY_TEST_EXON_BP, acceptor_len)
+        return acceptor_len - downstream, downstream
+
+    return None, None
+
+
+def _reshape_explicit_test_site_sequence(
+    *,
+    seq: str,
+    source_upstream: int,
+    source_downstream: int,
+    requested_upstream: Optional[int],
+    requested_downstream: Optional[int],
+) -> Optional[str]:
+    """Slice or pad one explicit-context site sequence."""
+    seq_upper = seq.upper()
+    expected_len = source_upstream + source_downstream
+    if expected_len < 0:
+        return None
+
+    start = source_upstream - requested_upstream if requested_upstream is not None else 0
+    end = (
+        source_upstream + requested_downstream
+        if requested_downstream is not None
+        else len(seq_upper)
+    )
+    if start >= end:
+        return None
+
+    left_pad = max(0, -start)
+    right_pad = max(0, end - len(seq_upper))
+    bounded_start = max(0, start)
+    bounded_end = min(len(seq_upper), end)
+    middle = seq_upper[bounded_start:bounded_end]
+    return ("N" * left_pad) + middle + ("N" * right_pad)
+
+
 def _reshape_or_pad_test_site_sequence(
     seq: str,
     site_type: str,
@@ -814,6 +876,8 @@ def _reshape_or_pad_test_site_sequence(
     donor_downstream: Optional[int] = None,
     acceptor_upstream: Optional[int] = None,
     acceptor_downstream: Optional[int] = None,
+    source_upstream: Optional[int] = None,
+    source_downstream: Optional[int] = None,
 ) -> Optional[str]:
     """Reshape one inference-time site sequence to fixed length.
 
@@ -839,6 +903,24 @@ def _reshape_or_pad_test_site_sequence(
         Fixed-length sequence ready for inference, or ``None`` for unsupported
         site types.
     """
+    if source_upstream is not None and source_downstream is not None:
+        requested_upstream, requested_downstream = _resolve_explicit_test_request_context(
+            site_type=site_type,
+            donor_len=donor_len,
+            acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
+        )
+        return _reshape_explicit_test_site_sequence(
+            seq=seq,
+            source_upstream=source_upstream,
+            source_downstream=source_downstream,
+            requested_upstream=requested_upstream,
+            requested_downstream=requested_downstream,
+        )
+
     upstream = donor_upstream if site_type == "donor" else acceptor_upstream
     downstream = donor_downstream if site_type == "donor" else acceptor_downstream
     use_4p = upstream is not None or downstream is not None
@@ -1613,6 +1695,10 @@ def _parse_test_header_indices(header_line: str) -> Dict[str, int]:
         "intron_index": index_by_name["intron_index"],
         "seq": index_by_name["seq"],
     }
+    if "upstream_bp" in index_by_name:
+        out["upstream_bp"] = index_by_name["upstream_bp"]
+    if "downstream_bp" in index_by_name:
+        out["downstream_bp"] = index_by_name["downstream_bp"]
     if "intron_half_length" in index_by_name:
         out["intron_half_length"] = index_by_name["intron_half_length"]
     return out
@@ -1664,6 +1750,21 @@ def read_test_site_rows(
                 continue
 
             site_type = parts[idx["site_type"]]
+            source_upstream: Optional[int] = None
+            source_downstream: Optional[int] = None
+            source_upstream_idx = idx.get("upstream_bp")
+            source_downstream_idx = idx.get("downstream_bp")
+            if source_upstream_idx is not None and source_downstream_idx is not None:
+                raw_upstream = parts[source_upstream_idx].strip()
+                raw_downstream = parts[source_downstream_idx].strip()
+                if raw_upstream != "" and raw_downstream != "":
+                    source_upstream = _parse_required_int(raw_upstream)
+                    source_downstream = _parse_required_int(raw_downstream)
+                    if source_upstream is None or source_downstream is None:
+                        raise ValueError(
+                            "Invalid upstream_bp/downstream_bp in test TSV: "
+                            f"{raw_upstream}, {raw_downstream}"
+                        )
             reshaped = _reshape_or_pad_test_site_sequence(
                 seq=parts[idx["seq"]],
                 site_type=site_type,
@@ -1673,6 +1774,8 @@ def read_test_site_rows(
                 donor_downstream=donor_downstream,
                 acceptor_upstream=acceptor_upstream,
                 acceptor_downstream=acceptor_downstream,
+                source_upstream=source_upstream,
+                source_downstream=source_downstream,
             )
             if not reshaped:
                 skipped_short += 1
@@ -1755,6 +1858,21 @@ def read_test_pair_rows(
             site_type = parts[idx["site_type"]]
             if site_type not in {"donor", "acceptor"}:
                 continue
+            source_upstream: Optional[int] = None
+            source_downstream: Optional[int] = None
+            source_upstream_idx = idx.get("upstream_bp")
+            source_downstream_idx = idx.get("downstream_bp")
+            if source_upstream_idx is not None and source_downstream_idx is not None:
+                raw_upstream = parts[source_upstream_idx].strip()
+                raw_downstream = parts[source_downstream_idx].strip()
+                if raw_upstream != "" and raw_downstream != "":
+                    source_upstream = _parse_required_int(raw_upstream)
+                    source_downstream = _parse_required_int(raw_downstream)
+                    if source_upstream is None or source_downstream is None:
+                        raise ValueError(
+                            "Invalid upstream_bp/downstream_bp in test TSV: "
+                            f"{raw_upstream}, {raw_downstream}"
+                        )
             reshaped = _reshape_or_pad_test_site_sequence(
                 seq=parts[idx["seq"]],
                 site_type=site_type,
@@ -1764,6 +1882,8 @@ def read_test_pair_rows(
                 donor_downstream=donor_downstream,
                 acceptor_upstream=acceptor_upstream,
                 acceptor_downstream=acceptor_downstream,
+                source_upstream=source_upstream,
+                source_downstream=source_downstream,
             )
             if reshaped is None:
                 skipped_short += 1

@@ -28,23 +28,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Miniconda
-        uses: conda-incubator/setup-miniconda@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          auto-update-conda: true
           python-version: "3.12"
-          miniconda-version: latest
-          activate-environment: intronmodel
-          environment-file: environment.yml
-          channels: conda-forge
-          channel-priority: strict
+
+      - name: Install docs dependencies
+        run: pip install sphinx myst-parser
 
       - name: Generate documentation figures
-        shell: bash -l {0}
         run: python src/tools/generate_doc_figures.py
 
       - name: Build HTML docs
-        shell: bash -l {0}
         run: python -m sphinx -b html docs docs/_build/html
 
       - name: Configure GitHub Pages

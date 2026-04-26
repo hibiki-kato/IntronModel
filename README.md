@@ -100,16 +100,17 @@ bash run/eval_intron_pr_auc.sh --species Dmel
 Registered in `src/models/registry.py`:
 
 - `cnn`
-- `cnn_pair_v2`
-- `cnn_pair` (legacy implementation kept for compatibility)
+- `cnn_v2` / `cnn_pair_v2` / `cnn_pair` (alias for cnn_v2)
+- `cnn_v3` / `cnn_pair_v3` / `cnn_v3_meta`
 - `cnn_resdil`
 - `tcn`
 - `bert`
-- `dnabert`
-- `dnabert2`
-- `dnabert6`
+- `dnabert` / `dnabert2` / `dnabert6` / `dnaberts`
+- `dnabert_pair` / `dnabert2_pair` / `dnabert6_pair` / `dnaberts_pair`
+- `bilstm_pair`
+- `markov_xgboost`
 - `reservoir`
-- `reservoir_legacy` (previous implementation kept for compatibility)
+- `spliceformer_sc`
 
 ## Wrapper Scripts
 
@@ -117,6 +118,7 @@ Config-only training/inference wrappers:
 
 - `run/run_cnn_v2.sh`
 - `run/run_cnn_pair_v2.sh`
+- `run/run_spliceformer_sc.sh`
 - `archive/run_isolated_mmus_rna60_pipeline.sh`
 - `run/tune_cnn_v2_time.sh`
 - `run/tune_cnn_pair_v2_time.sh`
@@ -184,6 +186,7 @@ Data utility wrappers:
 - `run/make_trimmed_pair_data.sh`
 - `run/make_labeled_intron_eval_data.sh`
 - `run/eval_intron_pr_auc.sh`
+- `run/scan_score_test_suite_integrated.sh`
 
 `archive/run/dnabert/run_dnabert.sh` variant switch:
 

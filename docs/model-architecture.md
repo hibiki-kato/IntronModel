@@ -10,6 +10,7 @@ This page documents the current implementation in:
 - `src/models/bert.py`
 - `src/models/dnabert.py`
 - `src/models/reservoir.py`
+- `src/models/spliceformer_sc.py`
 - `src/util/sequence_transform.py`
 - `src/util/losses.py`
 - `src/util/transcript_eval.py`
@@ -467,3 +468,73 @@ For all models, `--continue_train` is invalid with `--skip_train`.
 - `reservoir`: recurrent update is $O(T \cdot D_{res}^2)$ in dense form.
 - `reservoir`: state memory is $O(N \cdot T \cdot D_{res})$.
 - Transcript aggregation and eval sweep are linear after sorting.
+
+## 15. SpliceFormer-SC (`src/models/spliceformer_sc.py`)
+
+A species-conditioned splice-site classifier that combines a dilated CNN
+encoder with a Transformer head.
+
+### 15.1 Input Representation
+
+Five-channel one-hot encoding, adding an explicit unknown-base channel:
+
+$$
+X \in \{0,1\}^{B \times 5 \times L}
+$$
+
+Channel order: `A, C, G, T, N`.
+
+### 15.2 Architecture
+
+```
+Input (B, 5, L)
+  └─ SpliceAIEncoder  (dilated CNN, no pooling)    → (B, d_model, L)
+      └─ optional FiLM per block
+  └─ CandidateSelector (top-K by learned score)    → (B, d_model, K)
+      · bypassed when L ≤ k_donor + k_acceptor
+  └─ GenomicPositionalEncoding (sinusoidal)
+  └─ SpliceTransformerEncoder (pre-norm, GELU)     → (B, K, d_model)
+      └─ optional FiLM per layer
+  └─ donor_head / acceptor_head                    → (B, K, 2)
+      · forward_binary() extracts center logit     → (B,)
+```
+
+**SpliceAIEncoder** stacks `DilatedResidualBlock` layers with exponentially
+growing dilation ($d = 1, 2, 4, \dots$) and no pooling, preserving sequence
+length throughout.
+
+**SpliceTransformerEncoder** uses pre-LayerNorm blocks (GELU activations)
+that attend over the $K$ candidate positions selected by `CandidateSelector`.
+
+### 15.3 Species Conditioning (FiLM)
+
+`SpeciesEmbedding` maps a species index to a dense vector:
+
+$$
+e_s = \mathrm{Embed}(s) \in \mathbb{R}^{d_{species}}
+$$
+
+When `use_film=True`, each `DilatedResidualBlock` and
+`SpliceTransformerLayer` applies Feature-wise Linear Modulation:
+
+$$
+x \leftarrow x \cdot (1 + \gamma) + \beta
+$$
+
+where $\gamma, \beta$ are linear projections of $e_s$, zero-initialized so
+FiLM starts as an identity transform.
+
+### 15.4 Multi-Species Training
+
+Set `--species_list "Athal,Dmel,Hsap,Mmus"` (or edit `SPECIES_LIST` in
+`run/run_spliceformer_sc.sh`) to pool training data across species. The model
+trains one shared checkpoint. Inference runs one species at a time via
+`--species`.
+
+### 15.5 Output Mode
+
+Default `--spliceformer_mode binary`: donor and acceptor heads share one
+encoder, each producing a per-position 2-class logit. `forward_binary()`
+extracts the center-position logit and returns a single score per sequence,
+keeping the model compatible with the standard `score_sequences` / `infer_site`
+interface.

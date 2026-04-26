@@ -15,8 +15,9 @@ from typing import Optional
 
 from Bio import SeqIO
 
-DONOR_EXON_BP = 3
-ACCEPTOR_EXON_BP = 3
+DEFAULT_SITE_UPSTREAM_BP = 100
+DEFAULT_SITE_DOWNSTREAM_BP = 100
+LEGACY_MODEL_EXON_BP = 5
 
 
 # ----------------------------
@@ -154,6 +155,67 @@ def _resolve_intronic_context_lengths(
     )
 
 
+def _resolve_site_window_context(
+    args: argparse.Namespace,
+) -> tuple[int, int, int, int]:
+    """Resolve donor/acceptor upstream/downstream context from CLI args."""
+    explicit_values = (
+        args.donor_upstream_bp,
+        args.donor_downstream_bp,
+        args.acceptor_upstream_bp,
+        args.acceptor_downstream_bp,
+    )
+    if any(value is not None for value in explicit_values):
+        if any(value is None for value in explicit_values):
+            raise ValueError(
+                "Explicit transcript context requires all four values: "
+                "--donor_upstream_bp, --donor_downstream_bp, "
+                "--acceptor_upstream_bp, --acceptor_downstream_bp."
+            )
+        donor_upstream = int(args.donor_upstream_bp)
+        donor_downstream = int(args.donor_downstream_bp)
+        acceptor_upstream = int(args.acceptor_upstream_bp)
+        acceptor_downstream = int(args.acceptor_downstream_bp)
+        if min(
+            donor_upstream,
+            donor_downstream,
+            acceptor_upstream,
+            acceptor_downstream,
+        ) < 0:
+            raise ValueError("Explicit upstream/downstream context must be >= 0.")
+        return (
+            donor_upstream,
+            donor_downstream,
+            acceptor_upstream,
+            acceptor_downstream,
+        )
+
+    if args.donor_len is not None or args.acceptor_len is not None:
+        if args.donor_len is None or args.acceptor_len is None:
+            raise ValueError(
+                "Legacy --donor_len and --acceptor_len must be provided together."
+            )
+        if args.donor_len < 0 or args.acceptor_len < 0:
+            raise ValueError("Legacy donor/acceptor lengths must be >= 0.")
+        donor_upstream = min(LEGACY_MODEL_EXON_BP, int(args.donor_len))
+        donor_downstream = int(args.donor_len) - donor_upstream
+        acceptor_downstream = min(LEGACY_MODEL_EXON_BP, int(args.acceptor_len))
+        acceptor_upstream = int(args.acceptor_len) - acceptor_downstream
+        return (
+            donor_upstream,
+            donor_downstream,
+            acceptor_upstream,
+            acceptor_downstream,
+        )
+
+    return (
+        DEFAULT_SITE_UPSTREAM_BP,
+        DEFAULT_SITE_DOWNSTREAM_BP,
+        DEFAULT_SITE_UPSTREAM_BP,
+        DEFAULT_SITE_DOWNSTREAM_BP,
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     ap = argparse.ArgumentParser()
@@ -161,11 +223,48 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--gtf", required=True, help="Annotations GTF")
     ap.add_argument("--out_tsv", required=True, help="Output TSV for model scoring")
 
-    # Defaults match training data layout:
-    # donor boundary offset: left=3
-    # acceptor boundary offset: right=3
-    ap.add_argument("--donor_len", type=int, default=15)
-    ap.add_argument("--acceptor_len", type=int, default=30)
+    ap.add_argument(
+        "--donor_len",
+        type=int,
+        default=None,
+        help=(
+            "Legacy donor total length. Interpreted as 5bp exon + remaining intron "
+            "when explicit upstream/downstream args are omitted."
+        ),
+    )
+    ap.add_argument(
+        "--acceptor_len",
+        type=int,
+        default=None,
+        help=(
+            "Legacy acceptor total length. Interpreted as remaining intron + 5bp exon "
+            "when explicit upstream/downstream args are omitted."
+        ),
+    )
+    ap.add_argument(
+        "--donor_upstream_bp",
+        type=int,
+        default=None,
+        help="Explicit donor upstream context in transcript orientation.",
+    )
+    ap.add_argument(
+        "--donor_downstream_bp",
+        type=int,
+        default=None,
+        help="Explicit donor downstream context in transcript orientation.",
+    )
+    ap.add_argument(
+        "--acceptor_upstream_bp",
+        type=int,
+        default=None,
+        help="Explicit acceptor upstream context in transcript orientation.",
+    )
+    ap.add_argument(
+        "--acceptor_downstream_bp",
+        type=int,
+        default=None,
+        help="Explicit acceptor downstream context in transcript orientation.",
+    )
     ap.add_argument(
         "--clip-short-intron",
         action="store_true",
@@ -200,17 +299,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap = _build_arg_parser()
     args = ap.parse_args(argv)
 
-    # Derived
-    donor_boundary_offset = DONOR_EXON_BP
-    acceptor_boundary_offset = ACCEPTOR_EXON_BP
-    if args.donor_len < donor_boundary_offset:
-        raise ValueError("--donor_len must be >= 3 for fixed donor boundary offset.")
-    if args.acceptor_len < acceptor_boundary_offset:
-        raise ValueError(
-            "--acceptor_len must be >= 3 for fixed acceptor boundary offset."
-        )
-    donor_intronic_len = args.donor_len - donor_boundary_offset
-    acceptor_intronic_len = args.acceptor_len - acceptor_boundary_offset
+    (
+        donor_upstream_bp,
+        donor_downstream_bp,
+        acceptor_upstream_bp,
+        acceptor_downstream_bp,
+    ) = _resolve_site_window_context(args)
 
     # Index FASTA for random access (creates an index file alongside FASTA)
     genome = SeqIO.index(str(Path(args.fasta)), "fasta")
@@ -262,7 +356,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Write output
     # TSV columns chosen to be convenient later:
-    # transcript_id, gene_id, site_type, intron_index, chrom, strand, boundary_pos, seq
+    # transcript_id, gene_id, site_type, intron_index, chrom, strand,
+    # boundary_pos, upstream_bp, downstream_bp, seq
     out = open(args.out_tsv, "w", encoding="utf-8")
     print(
         "\t".join(
@@ -274,6 +369,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "chrom",
                 "strand",
                 "boundary_pos",
+                "upstream_bp",
+                "downstream_bp",
                 "seq",
             ]
         ),
@@ -319,20 +416,26 @@ def main(argv: Optional[list[str]] = None) -> None:
                 # first exonic base of downstream exon
                 exon_start = dn.start
 
-                donor_right, acceptor_left = _resolve_intronic_context_lengths(
+                donor_effective_downstream, acceptor_effective_upstream = (
+                    _resolve_intronic_context_lengths(
                     intron_length=intron_length,
-                    donor_intronic_len=donor_intronic_len,
-                    acceptor_intronic_len=acceptor_intronic_len,
+                    donor_intronic_len=donor_downstream_bp,
+                    acceptor_intronic_len=acceptor_upstream_bp,
                     clip_short_intron=args.clip_short_intron,
+                )
                 )
 
                 # donor window around intron_start
                 d_start, d_end = donor_coords_plus(
-                    intron_start, donor_boundary_offset, donor_right
+                    intron_start,
+                    donor_upstream_bp,
+                    donor_effective_downstream,
                 )
                 # acceptor window around exon_start
                 a_start, a_end = acceptor_coords_plus(
-                    exon_start, acceptor_left, acceptor_boundary_offset
+                    exon_start,
+                    acceptor_effective_upstream,
+                    acceptor_downstream_bp,
                 )
 
                 # bounds check
@@ -358,18 +461,24 @@ def main(argv: Optional[list[str]] = None) -> None:
                 # starts the exon at dn.end.
                 exon_start = dn.end
 
-                donor_right, acceptor_left = _resolve_intronic_context_lengths(
+                donor_effective_downstream, acceptor_effective_upstream = (
+                    _resolve_intronic_context_lengths(
                     intron_length=intron_length,
-                    donor_intronic_len=donor_intronic_len,
-                    acceptor_intronic_len=acceptor_intronic_len,
+                    donor_intronic_len=donor_downstream_bp,
+                    acceptor_intronic_len=acceptor_upstream_bp,
                     clip_short_intron=args.clip_short_intron,
+                )
                 )
 
                 d_start, d_end = coords_minus(
-                    intron_start, donor_boundary_offset, donor_right
+                    intron_start,
+                    donor_upstream_bp,
+                    donor_effective_downstream,
                 )
                 a_start, a_end = coords_minus(
-                    exon_start, acceptor_left, acceptor_boundary_offset
+                    exon_start,
+                    acceptor_effective_upstream,
+                    acceptor_downstream_bp,
                 )
 
                 chr_len = len(genome[chrom].seq)
@@ -393,6 +502,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                         chrom,
                         strand,
                         str(intron_start),
+                        str(donor_upstream_bp),
+                        str(donor_effective_downstream),
                         donor_seq,
                     ]
                 ),
@@ -413,6 +524,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                         chrom,
                         strand,
                         str(exon_start),
+                        str(acceptor_effective_upstream),
+                        str(acceptor_downstream_bp),
                         acceptor_seq,
                     ]
                 ),

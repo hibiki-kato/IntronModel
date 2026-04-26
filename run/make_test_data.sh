@@ -7,8 +7,12 @@ Usage: bash run/make_test_data.sh [options]
 
 Options:
   --species <name>        Species folder under data/ (default: Dmel)
-  --donor-len <int>       Donor window length (default: 100)
-  --acceptor-len <int>    Acceptor window length (default: 100)
+  --donor-upstream-bp <int>     Donor upstream context (default: 100)
+  --donor-downstream-bp <int>   Donor downstream context (default: 100)
+  --acceptor-upstream-bp <int>  Acceptor upstream context (default: 100)
+  --acceptor-downstream-bp <int> Acceptor downstream context (default: 100)
+  --donor-len <int>       Legacy donor total length override
+  --acceptor-len <int>    Legacy acceptor total length override
   --clip-short-intron     Keep intronic context within intron length
   --fasta <path>          Override FASTA path (.fna)
   --gtf <path>            Override GTF path
@@ -29,8 +33,12 @@ EOT
 # --------------------------
 CONDA_ENV="intronmodel"
 SPECIES="Dmel"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
+DONOR_UPSTREAM_BP="100"
+DONOR_DOWNSTREAM_BP="100"
+ACCEPTOR_UPSTREAM_BP="100"
+ACCEPTOR_DOWNSTREAM_BP="100"
+DONOR_LEN=""
+ACCEPTOR_LEN=""
 FASTA_PATH=""
 GTF_PATH=""
 OUT_TSV=""
@@ -62,8 +70,24 @@ while [[ $# -gt 0 ]]; do
 		DONOR_LEN="$2"
 		shift 2
 		;;
+	--donor-upstream-bp)
+		DONOR_UPSTREAM_BP="$2"
+		shift 2
+		;;
+	--donor-downstream-bp)
+		DONOR_DOWNSTREAM_BP="$2"
+		shift 2
+		;;
 	--acceptor-len)
 		ACCEPTOR_LEN="$2"
+		shift 2
+		;;
+	--acceptor-upstream-bp)
+		ACCEPTOR_UPSTREAM_BP="$2"
+		shift 2
+		;;
+	--acceptor-downstream-bp)
+		ACCEPTOR_DOWNSTREAM_BP="$2"
 		shift 2
 		;;
 	--fasta)
@@ -156,16 +180,38 @@ echo "[make_test_data.sh] fasta=${FASTA_PATH}"
 echo "[make_test_data.sh] gtf=${GTF_PATH}"
 echo "[make_test_data.sh] out_tsv=${OUT_TSV}"
 echo "[make_test_data.sh] clip_short_intron=${CLIP_SHORT_INTRON}"
+if [[ -n "${DONOR_LEN}" || -n "${ACCEPTOR_LEN}" ]]; then
+	echo "[make_test_data.sh] legacy donor_len=${DONOR_LEN} acceptor_len=${ACCEPTOR_LEN}"
+else
+	echo "[make_test_data.sh] donor_upstream_bp=${DONOR_UPSTREAM_BP} donor_downstream_bp=${DONOR_DOWNSTREAM_BP}"
+	echo "[make_test_data.sh] acceptor_upstream_bp=${ACCEPTOR_UPSTREAM_BP} acceptor_downstream_bp=${ACCEPTOR_DOWNSTREAM_BP}"
+fi
 
 args=(
 	--fasta "${FASTA_PATH}"
 	--gtf "${GTF_PATH}"
 	--out_tsv "${OUT_TSV}"
-	--donor_len "${DONOR_LEN}"
-	--acceptor_len "${ACCEPTOR_LEN}"
 	--feature "${FEATURE}"
 	--limit "${LIMIT}"
 )
+
+if [[ -n "${DONOR_LEN}" || -n "${ACCEPTOR_LEN}" ]]; then
+	if [[ -z "${DONOR_LEN}" || -z "${ACCEPTOR_LEN}" ]]; then
+		echo "Both --donor-len and --acceptor-len are required in legacy mode." >&2
+		exit 5
+	fi
+	args+=(
+		--donor_len "${DONOR_LEN}"
+		--acceptor_len "${ACCEPTOR_LEN}"
+	)
+else
+	args+=(
+		--donor_upstream_bp "${DONOR_UPSTREAM_BP}"
+		--donor_downstream_bp "${DONOR_DOWNSTREAM_BP}"
+		--acceptor_upstream_bp "${ACCEPTOR_UPSTREAM_BP}"
+		--acceptor_downstream_bp "${ACCEPTOR_DOWNSTREAM_BP}"
+	)
+fi
 
 if [[ "${CLIP_SHORT_INTRON}" == "1" ]]; then
 	args+=(--clip-short-intron)

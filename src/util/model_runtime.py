@@ -53,12 +53,18 @@ _COMPILE_DISABLED_MODES_CACHE: set[str] = set()
 
 _AUTO_NUM_WORKERS_MIN_PER_GPU: int = 4
 _AUTO_NUM_WORKERS_MAX_PER_GPU: int = 8
-_INDUCTOR_UTILS_LOGGER_NAME: str = "torch._inductor.utils"
+_INDUCTOR_LOGGER_NAMES: tuple[str, ...] = (
+    "torch._inductor.utils",
+    "torch._inductor.utils.__perf_hints",
+)
 _INACTIVE_MAX_AUTOTUNE_WARNING_MESSAGES: frozenset[str] = frozenset(
     {
         "Not enough SMs to use max_autotune_gemm mode",
         "GPU arch does not support max_autotune_gemm mode usage",
     }
+)
+_CUDAGRAPH_DYNAMIC_SHAPE_WARNING_PREFIX: str = (
+    "cudagraph partition due to dynamic shape ops"
 )
 
 
@@ -74,7 +80,9 @@ class _SuppressInactiveMaxAutotuneWarnings(logging.Filter):
         if max_autotune_env == "0" and max_autotune_gemm_env == "0":
             return False
         inductor_module = getattr(torch, "_inductor", None)
-        config_obj = getattr(inductor_module, "config", None) if inductor_module else None
+        config_obj = (
+            getattr(inductor_module, "config", None) if inductor_module else None
+        )
         if config_obj is None:
             return True
         max_autotune = getattr(config_obj, "max_autotune", None)
@@ -86,13 +94,47 @@ class _SuppressInactiveMaxAutotuneWarnings(logging.Filter):
 
 def _install_inactive_max_autotune_warning_filter() -> None:
     """Install one logger filter that hides inactive autotune warnings."""
-    logger = logging.getLogger(_INDUCTOR_UTILS_LOGGER_NAME)
+    for logger_name in _INDUCTOR_LOGGER_NAMES:
+        logger = logging.getLogger(logger_name)
+        if any(
+            isinstance(existing_filter, _SuppressInactiveMaxAutotuneWarnings)
+            for existing_filter in logger.filters
+        ):
+            continue
+        logger.addFilter(_SuppressInactiveMaxAutotuneWarnings())
+
+
+class _SuppressCudagraphDynamicShapeWarnings(logging.Filter):
+    """Suppress expected cudagraph partition warnings on compile-safe train runs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if not message.startswith(_CUDAGRAPH_DYNAMIC_SHAPE_WARNING_PREFIX):
+            return True
+        inductor_module = getattr(torch, "_inductor", None)
+        config_obj = (
+            getattr(inductor_module, "config", None) if inductor_module else None
+        )
+        triton_config_obj = getattr(config_obj, "triton", None) if config_obj else None
+        if triton_config_obj is None:
+            return True
+        skip_dynamic_graphs = getattr(
+            triton_config_obj,
+            "cudagraph_skip_dynamic_graphs",
+            None,
+        )
+        return skip_dynamic_graphs is not True
+
+
+def _install_cudagraph_dynamic_shape_warning_filter() -> None:
+    """Install one logger filter for known cudagraph partition perf hints."""
+    logger = logging.getLogger("torch._inductor.utils.__perf_hints")
     if any(
-        isinstance(existing_filter, _SuppressInactiveMaxAutotuneWarnings)
+        isinstance(existing_filter, _SuppressCudagraphDynamicShapeWarnings)
         for existing_filter in logger.filters
     ):
         return
-    logger.addFilter(_SuppressInactiveMaxAutotuneWarnings())
+    logger.addFilter(_SuppressCudagraphDynamicShapeWarnings())
 
 
 @dataclass(frozen=True)
@@ -102,6 +144,21 @@ class WarmStartLoadResult:
     initialized_from_checkpoint: bool
     init_checkpoint_path: str | None
     error_detail: str | None = None
+
+
+def _supports_torch_compile_option(option_name: str) -> bool:
+    """Return whether current torch build advertises one compile option."""
+    inductor_module = getattr(torch, "_inductor", None)
+    if inductor_module is None:
+        return False
+    list_options = getattr(inductor_module, "list_options", None)
+    if not callable(list_options):
+        return False
+    try:
+        available_options = list_options()
+    except Exception:
+        return False
+    return option_name in available_options
 
 
 def binary_clf_curve(
@@ -582,7 +639,14 @@ def _compile_model_once_with_mode(model: nn.Module, mode: str) -> nn.Module:
         # The training/inference entry points that enable compile already keep
         # loaders and padded inference batches shape-stable. Asking Inductor to
         # avoid dynamic shape graphs lets cudagraph capture remain intact.
-        return compile_fn(model, mode=mode, dynamic=False)
+        try:
+            return compile_fn(
+                model,
+                mode=mode,
+                dynamic=False,
+            )
+        except TypeError:
+            raise
 
 
 def compile_model_with_fallback(
@@ -859,6 +923,7 @@ def configure_triton_tool_paths() -> None:
 def configure_torch_compile_runtime() -> None:
     """Apply conservative ``torch.compile`` runtime settings for stability."""
     _install_inactive_max_autotune_warning_filter()
+    _install_cudagraph_dynamic_shape_warning_filter()
     dynamo_module = getattr(torch, "_dynamo", None)
     if dynamo_module is None:
         return
@@ -888,6 +953,16 @@ def configure_torch_compile_runtime() -> None:
     triton_config_obj = getattr(inductor_config_obj, "triton", None)
     if triton_config_obj is None:
         return
+    triton_cudagraphs = getattr(triton_config_obj, "cudagraphs", None)
+    if isinstance(triton_cudagraphs, bool) and triton_cudagraphs:
+        setattr(triton_config_obj, "cudagraphs", False)
+    reorder_graph_partitions = getattr(
+        triton_config_obj,
+        "reorder_for_reducing_graph_partitions",
+        None,
+    )
+    if isinstance(reorder_graph_partitions, bool) and not reorder_graph_partitions:
+        setattr(triton_config_obj, "reorder_for_reducing_graph_partitions", True)
     skip_dynamic_graphs = getattr(
         triton_config_obj,
         "cudagraph_skip_dynamic_graphs",

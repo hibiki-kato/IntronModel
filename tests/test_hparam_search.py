@@ -190,6 +190,25 @@ def test_load_config_accepts_supported_objective_metrics(
     assert loaded.objective_metric == objective_metric
 
 
+def test_load_config_accepts_structured_objective_fields(
+    tmp_path: Path,
+) -> None:
+    config = _base_config_dict(tmp_path)
+    del config["objective_metric"]
+    config["objective_eval_set"] = "test"
+    config["objective_target"] = "transcript"
+    config["objective_metric_name"] = "max_f1"
+    config_path = tmp_path / "structured_objective.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = hparam_search.load_config(config_path)
+
+    assert loaded.objective_metric == "test_max_f1"
+    assert loaded.objective_eval_set == "test"
+    assert loaded.objective_target == "transcript"
+    assert loaded.objective_metric_name == "max_f1"
+
+
 def test_load_config_rejects_invalid_search_algo(tmp_path: Path) -> None:
     config = _base_config_dict(tmp_path)
     config["search_algo"] = "surrogate"
@@ -1889,7 +1908,9 @@ def test_run_trial_succeeds_with_test_pr_auc_objective(
         trial_artifact_base: Path,
     ) -> Optional[float]:
         del config, metrics_json, trial_artifact_base
-        assert merged_args["train_only"] is True
+        assert merged_args["train_only"] is False
+        assert str(merged_args["site_output_tsv"]).endswith(".site.tsv")
+        assert str(merged_args["transcript_output_tsv"]).endswith(".transcript.tsv")
         return 0.731
 
     monkeypatch.setattr(
@@ -1917,7 +1938,7 @@ def test_run_trial_succeeds_with_test_pr_auc_objective(
     assert result.status == "success"
     assert result.objective_metric == "test_pr_auc"
     assert result.objective_score == pytest.approx(0.731)
-    assert captured_train_only == [True]
+    assert captured_train_only == [False]
 
 
 def test_run_trial_ignores_architecture_helper_keys_in_base_args(
@@ -2159,6 +2180,9 @@ def test_write_best_config_includes_validation_metadata(tmp_path: Path) -> None:
     assert float(payload["selection_score"]) == pytest.approx(0.815)
     assert payload["hparam_context"] is None
     assert payload["objective_best_epoch"] is None
+    assert payload["objective_eval_set"] == "val"
+    assert payload["objective_target"] == "mean"
+    assert payload["objective_metric_name"] == "pr_auc"
     assert payload["donor_checkpoint_path"].endswith("donor.pt")
     assert payload["acceptor_checkpoint_path"].endswith("acceptor.pt")
 
@@ -2213,6 +2237,9 @@ def test_write_best_config_includes_hparam_context_and_objective_best_epoch(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["hparam_context"] == hparam_context
     assert payload["objective_best_epoch"] == 6
+    assert payload["objective_eval_set"] == "val"
+    assert payload["objective_target"] == "donor"
+    assert payload["objective_metric_name"] == "pr_auc"
 
 
 def test_maybe_update_global_best_logs_score_delta(
@@ -2495,6 +2522,48 @@ def test_print_trial_result_includes_failure_reason(
         captured.out
     )
     assert "log=trial.log" in captured.out
+
+
+def test_print_trial_result_includes_external_overall_eta(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INTRONMODEL_PROGRESS_TOTAL", "12")
+    monkeypatch.setenv("INTRONMODEL_PROGRESS_OFFSET", "4")
+    monkeypatch.setenv("INTRONMODEL_PROGRESS_LABEL", "grid")
+    hparam_search._EXTERNAL_PROGRESS_STATE_KEY = None
+    hparam_search._EXTERNAL_PROGRESS_DURATION_SEC = 0.0
+    hparam_search._EXTERNAL_PROGRESS_COMPLETED = 0
+    result = hparam_search.TrialResult(
+        phase="full",
+        trial_id=3,
+        status="success",
+        gpu_id="0",
+        sampled_params={"batch_size": 512},
+        effective_batch_size=512,
+        oom_retries=0,
+        donor_pr_auc=0.9,
+        acceptor_pr_auc=0.9,
+        mean_pr_auc=0.9,
+        objective_metric="test_pr_auc",
+        objective_score=0.9,
+        error_message=None,
+        return_code=0,
+        duration_sec=30.0,
+        metrics_json="metrics.json",
+        log_file="trial.log",
+    )
+
+    hparam_search._print_trial_result(
+        phase="full",
+        trial_count=8,
+        completed_count=2,
+        result=result,
+    )
+
+    captured = capsys.readouterr()
+    assert "overall grid=6/12" in captured.out
+    assert "eta=3m00s" in captured.out
 
 
 def test_summarize_failure_output_prefers_final_error_line() -> None:

@@ -86,6 +86,12 @@ _ACTIVE_LOG_PREFIX: ContextVar[str] = ContextVar(
 )
 _DEFAULT_PHASE_EXECUTION_MODE: str = "subprocess"
 _PERSISTENT_PHASE_EXECUTION_MODE: str = "persistent"
+_EXTERNAL_PROGRESS_TOTAL_ENV: str = "INTRONMODEL_PROGRESS_TOTAL"
+_EXTERNAL_PROGRESS_OFFSET_ENV: str = "INTRONMODEL_PROGRESS_OFFSET"
+_EXTERNAL_PROGRESS_LABEL_ENV: str = "INTRONMODEL_PROGRESS_LABEL"
+_EXTERNAL_PROGRESS_STATE_KEY: tuple[str, int] | None = None
+_EXTERNAL_PROGRESS_DURATION_SEC: float = 0.0
+_EXTERNAL_PROGRESS_COMPLETED: int = 0
 SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "mean_pr_auc",
     "donor_pr_auc",
@@ -103,6 +109,39 @@ SUPPORTED_OBJECTIVE_METRIC_NAMES: tuple[str, ...] = (
     "test_max_f1",
 )
 SUPPORTED_OBJECTIVE_METRICS: set[str] = set(SUPPORTED_OBJECTIVE_METRIC_NAMES)
+SUPPORTED_OBJECTIVE_EVAL_SETS: tuple[str, ...] = ("val", "test")
+SUPPORTED_OBJECTIVE_TARGETS: tuple[str, ...] = (
+    "mean",
+    "donor",
+    "acceptor",
+    "pair",
+    "intron",
+    "transcript",
+)
+SUPPORTED_OBJECTIVE_METRIC_COMPONENT_NAMES: tuple[str, ...] = (
+    "pr_auc",
+    "roc_auc",
+    "max_f1",
+)
+_LEGACY_OBJECTIVE_SPECS: dict[str, tuple[str, str, str]] = {
+    "mean_pr_auc": ("val", "mean", "pr_auc"),
+    "donor_pr_auc": ("val", "donor", "pr_auc"),
+    "acceptor_pr_auc": ("val", "acceptor", "pr_auc"),
+    "pair_pr_auc": ("val", "pair", "pr_auc"),
+    "mean_roc_auc": ("val", "mean", "roc_auc"),
+    "donor_roc_auc": ("val", "donor", "roc_auc"),
+    "acceptor_roc_auc": ("val", "acceptor", "roc_auc"),
+    "pair_roc_auc": ("val", "pair", "roc_auc"),
+    "mean_max_f1": ("val", "mean", "max_f1"),
+    "donor_max_f1": ("val", "donor", "max_f1"),
+    "acceptor_max_f1": ("val", "acceptor", "max_f1"),
+    "pair_max_f1": ("val", "pair", "max_f1"),
+    "test_pr_auc": ("test", "intron", "pr_auc"),
+    "test_max_f1": ("test", "transcript", "max_f1"),
+}
+_OBJECTIVE_SPEC_TO_LEGACY: dict[tuple[str, str, str], str] = {
+    spec: legacy_name for legacy_name, spec in _LEGACY_OBJECTIVE_SPECS.items()
+}
 _SITE_WINDOW_LEN_KEYS: tuple[str, str] = ("donor_len", "acceptor_len")
 _SITE_WINDOW_FLANK_KEYS: tuple[str, str, str, str] = (
     "donor_upstream",
@@ -149,6 +188,23 @@ _CONTEXT_ARG_IGNORE_KEYS: set[str] = {
 
 
 @dataclass(frozen=True)
+class ObjectiveSpec:
+    """Structured objective identity."""
+
+    eval_set: str
+    target: str
+    metric_name: str
+
+    @property
+    def legacy_name(self) -> str:
+        return _objective_spec_to_legacy_name(
+            eval_set=self.eval_set,
+            target=self.target,
+            metric_name=self.metric_name,
+        )
+
+
+@dataclass(frozen=True)
 class TrialResult:
     """Result record for one trial."""
 
@@ -156,7 +212,7 @@ class TrialResult:
     trial_id: int
     status: str
     gpu_id: Optional[str]
-    sampled_params: dict[str, Scalar]
+    sampled_params: dict[str, Scalar | None]
     effective_batch_size: int
     oom_retries: int
     donor_pr_auc: Optional[float]
@@ -172,6 +228,22 @@ class TrialResult:
     validation_signature: str = LEGACY_VALIDATION_SIGNATURE
     validation_protocol: Optional[dict[str, object]] = None
     selection_score: Optional[float] = None
+
+    @property
+    def objective_spec(self) -> ObjectiveSpec:
+        return _resolve_objective_spec(objective_metric=self.objective_metric)
+
+    @property
+    def objective_eval_set(self) -> str:
+        return self.objective_spec.eval_set
+
+    @property
+    def objective_target(self) -> str:
+        return self.objective_spec.target
+
+    @property
+    def objective_metric_name(self) -> str:
+        return self.objective_spec.metric_name
 
 
 @dataclass(frozen=True)
@@ -212,6 +284,22 @@ class SearchConfig:
     enable_visualization: bool = True
     enable_phase_overlap: bool = False
     gpu_release_events_path: Optional[Path] = None
+
+    @property
+    def objective_spec(self) -> ObjectiveSpec:
+        return _resolve_objective_spec(objective_metric=self.objective_metric)
+
+    @property
+    def objective_eval_set(self) -> str:
+        return self.objective_spec.eval_set
+
+    @property
+    def objective_target(self) -> str:
+        return self.objective_spec.target
+
+    @property
+    def objective_metric_name(self) -> str:
+        return self.objective_spec.metric_name
 
 
 @dataclass(frozen=True)
@@ -558,12 +646,13 @@ def load_config(path: Path) -> SearchConfig:
         raw.get("trial_process_mode", "subprocess"),
         "trial_process_mode",
     )
-    objective_metric = str(raw.get("objective_metric", "mean_pr_auc"))
-    if objective_metric not in SUPPORTED_OBJECTIVE_METRICS:
-        raise ValueError(
-            "objective_metric must be one of: "
-            f"{', '.join(SUPPORTED_OBJECTIVE_METRIC_NAMES)}."
-        )
+    objective_metric = _resolve_objective_spec(
+        objective_metric=raw.get("objective_metric"),
+        objective_eval_set=raw.get("objective_eval_set"),
+        objective_target=raw.get("objective_target"),
+        objective_metric_name=raw.get("objective_metric_name"),
+        default_legacy_name="mean_pr_auc",
+    ).legacy_name
     normalized_base_args: dict[str, ArgValue] = {
         str(key): value for key, value in base_args.items()
     }
@@ -910,6 +999,10 @@ def _extract_sampled_params_from_best_config(
 
     normalized: dict[str, Scalar] = {}
     for key, value in sampled.items():
+        if value is None:
+            # Null means this param was irrelevant for the stored trial — treat
+            # as missing and let the fallback chain supply a value below.
+            continue
         if not isinstance(value, (int, float, str, bool)):
             raise ValueError(
                 f"Global best sampled_params.{key} must be a scalar value."
@@ -1016,12 +1109,13 @@ def load_seed_best_config(
         search_space=search_space,
         base_args=base_args,
     )
-    objective_metric = raw.get("objective_metric")
-    metric_name: Optional[str]
-    if isinstance(objective_metric, str) and objective_metric.strip():
-        metric_name = objective_metric.strip()
-    else:
-        metric_name = default_objective_metric
+    metric_name = _resolve_objective_spec(
+        objective_metric=raw.get("objective_metric"),
+        objective_eval_set=raw.get("objective_eval_set"),
+        objective_target=raw.get("objective_target"),
+        objective_metric_name=raw.get("objective_metric_name"),
+        default_legacy_name=default_objective_metric,
+    ).legacy_name
 
     objective_score: Optional[float] = None
     score_raw = raw.get("objective_score")
@@ -1051,18 +1145,122 @@ def load_seed_best_config(
     )
 
 
+def _normalize_objective_token(value: object, field_name: str) -> Optional[str]:
+    """Normalize one objective token or return ``None`` when omitted."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string.")
+    normalized = value.strip().lower()
+    if normalized == "":
+        raise ValueError(f"{field_name} must be a non-empty string.")
+    return normalized
+
+
+def _objective_spec_to_legacy_name(
+    *,
+    eval_set: str,
+    target: str,
+    metric_name: str,
+) -> str:
+    """Map one structured objective spec to the legacy flat objective name."""
+    legacy_name = _OBJECTIVE_SPEC_TO_LEGACY.get((eval_set, target, metric_name))
+    if legacy_name is None:
+        raise ValueError(
+            "Unsupported objective spec: "
+            f"eval_set={eval_set}, target={target}, metric={metric_name}."
+        )
+    return legacy_name
+
+
+def _resolve_objective_spec(
+    *,
+    objective_metric: object = None,
+    objective_eval_set: object = None,
+    objective_target: object = None,
+    objective_metric_name: object = None,
+    default_legacy_name: Optional[str] = None,
+) -> ObjectiveSpec:
+    """Resolve one structured objective spec from legacy and/or structured inputs."""
+    legacy_name = _normalize_objective_token(objective_metric, "objective_metric")
+    eval_set = _normalize_objective_token(objective_eval_set, "objective_eval_set")
+    target = _normalize_objective_token(objective_target, "objective_target")
+    metric_name = _normalize_objective_token(
+        objective_metric_name,
+        "objective_metric_name",
+    )
+
+    component_values = (eval_set, target, metric_name)
+    has_any_component = any(value is not None for value in component_values)
+    has_all_components = all(value is not None for value in component_values)
+    if has_any_component and not has_all_components:
+        raise ValueError(
+            "objective_eval_set, objective_target, and objective_metric_name "
+            "must be provided together."
+        )
+
+    if legacy_name is None and not has_any_component and default_legacy_name is not None:
+        legacy_name = _normalize_objective_token(
+            default_legacy_name,
+            "objective_metric",
+        )
+
+    spec_from_legacy: Optional[ObjectiveSpec] = None
+    if legacy_name is not None:
+        spec_tuple = _LEGACY_OBJECTIVE_SPECS.get(legacy_name)
+        if spec_tuple is None:
+            raise ValueError(
+                "objective_metric must be one of: "
+                f"{', '.join(SUPPORTED_OBJECTIVE_METRIC_NAMES)}."
+            )
+        spec_from_legacy = ObjectiveSpec(*spec_tuple)
+
+    if has_all_components:
+        spec_from_components = ObjectiveSpec(
+            eval_set=eval_set or "",
+            target=target or "",
+            metric_name=metric_name or "",
+        )
+        _ = spec_from_components.legacy_name
+        if spec_from_legacy is not None and spec_from_components != spec_from_legacy:
+            raise ValueError(
+                "objective_metric does not match objective_eval_set/"
+                "objective_target/objective_metric_name."
+            )
+        return spec_from_components
+
+    if spec_from_legacy is None:
+        raise ValueError(
+            "Objective selection requires objective_metric or structured "
+            "objective_eval_set/objective_target/objective_metric_name."
+        )
+    return spec_from_legacy
+
+
+def _objective_fields_payload(spec: ObjectiveSpec) -> dict[str, str]:
+    """Serialize structured objective fields for JSON payloads."""
+    return {
+        "objective_eval_set": spec.eval_set,
+        "objective_target": spec.target,
+        "objective_metric_name": spec.metric_name,
+    }
+
+
+def _format_objective_label(spec: ObjectiveSpec) -> str:
+    """Format one structured objective for human-facing text."""
+    return f"{spec.eval_set} / {spec.target} / {spec.metric_name}"
+
+
 def _parse_objective_metric_name(objective_metric: str) -> tuple[str, str]:
-    """Split one objective metric into scope and metric name."""
-    if objective_metric not in SUPPORTED_OBJECTIVE_METRICS:
-        raise ValueError(f"Unsupported objective metric: {objective_metric}")
-    scope, metric_name = objective_metric.split("_", maxsplit=1)
-    return scope, metric_name
+    """Split one objective metric into target and metric name."""
+    spec = _resolve_objective_spec(objective_metric=objective_metric)
+    return spec.target, spec.metric_name
 
 
 def _is_test_objective_metric(objective_metric: str) -> bool:
     """Return whether objective selection uses held-out test evaluation."""
-    scope, _ = _parse_objective_metric_name(objective_metric)
-    return scope == "test"
+    spec = _resolve_objective_spec(objective_metric=objective_metric)
+    return spec.eval_set == "test"
 
 
 def _extract_max_f1_from_eval_output(path: Path) -> Optional[float]:
@@ -1097,7 +1295,12 @@ def _extract_test_objective_score(
     eval_output_path: Path,
 ) -> Optional[float]:
     """Extract one held-out test objective score from evaluation artifacts."""
-    if objective_metric == "test_max_f1":
+    spec = _resolve_objective_spec(objective_metric=objective_metric)
+    if (
+        spec.eval_set == "test"
+        and spec.target == "transcript"
+        and spec.metric_name == "max_f1"
+    ):
         return _extract_max_f1_from_eval_output(eval_output_path)
     return None
 
@@ -1336,71 +1539,80 @@ def _compute_test_pr_auc_objective(
     )
     test_tsv = Path(resolve_test_tsv(species, test_tsv_arg))
 
-    checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
-    scored_rows: list[dict[str, object]] = []
-    use_pair_model_scoring = model_name in {"cnn_pair", "cnn_pair_v2", "cnn_pair_v3"}
-    if use_pair_model_scoring:
-        pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
-        if pair_checkpoint_raw is None:
-            return None
-        pair_rows, _skipped_short, _skipped_unpaired = read_test_pair_rows(
-            str(test_tsv),
-            donor_len,
-            acceptor_len,
-            donor_upstream=donor_upstream,
-            donor_downstream=donor_downstream,
-            acceptor_upstream=acceptor_upstream,
-            acceptor_downstream=acceptor_downstream,
-        )
-        if not pair_rows:
-            return None
-        scored_rows = _score_site_rows_pair_model(
-            model_name=model_name,
-            checkpoint_path=Path(pair_checkpoint_raw),
-            pair_rows=pair_rows,
-            device=device,
-            batch_size=batch_size,
-            sequence_transform=sequence_transform,
-        )
+    site_output_raw = merged_args.get("site_output_tsv")
+    if isinstance(site_output_raw, (str, Path)) and str(site_output_raw).strip():
+        site_score_tsv = Path(str(site_output_raw))
     else:
-        site_rows, _skipped_short = read_test_site_rows(
-            str(test_tsv),
-            donor_len,
-            acceptor_len,
-            donor_upstream=donor_upstream,
-            donor_downstream=donor_downstream,
-            acceptor_upstream=acceptor_upstream,
-            acceptor_downstream=acceptor_downstream,
-        )
-        tasks_to_score: tuple[str, ...]
-        if train_target in {"donor", "acceptor"}:
-            tasks_to_score = (train_target,)
-        elif train_target == "both":
-            tasks_to_score = ("donor", "acceptor")
-        else:
-            return None
+        site_score_tsv = Path(str(trial_artifact_base) + ".site.tsv")
 
-        for task in tasks_to_score:
-            checkpoint_key = f"{task}_checkpoint_path"
-            checkpoint_raw = checkpoint_paths.get(checkpoint_key)
-            if checkpoint_raw is None:
+    if not site_score_tsv.exists():
+        checkpoint_paths = _extract_checkpoint_paths_from_metrics(str(metrics_json))
+        scored_rows: list[dict[str, object]] = []
+        use_pair_model_scoring = model_name in {
+            "cnn_pair",
+            "cnn_pair_v2",
+            "cnn_pair_v3",
+        }
+        if use_pair_model_scoring:
+            pair_checkpoint_raw = checkpoint_paths.get("pair_checkpoint_path")
+            if pair_checkpoint_raw is None:
                 return None
-            task_rows = _score_site_rows_single_task_model(
+            pair_rows, _skipped_short, _skipped_unpaired = read_test_pair_rows(
+                str(test_tsv),
+                donor_len,
+                acceptor_len,
+                donor_upstream=donor_upstream,
+                donor_downstream=donor_downstream,
+                acceptor_upstream=acceptor_upstream,
+                acceptor_downstream=acceptor_downstream,
+            )
+            if not pair_rows:
+                return None
+            scored_rows = _score_site_rows_pair_model(
                 model_name=model_name,
-                task=task,
-                checkpoint_path=Path(checkpoint_raw),
-                site_rows=site_rows,
+                checkpoint_path=Path(pair_checkpoint_raw),
+                pair_rows=pair_rows,
                 device=device,
                 batch_size=batch_size,
                 sequence_transform=sequence_transform,
             )
-            scored_rows.extend(task_rows)
+        else:
+            site_rows, _skipped_short = read_test_site_rows(
+                str(test_tsv),
+                donor_len,
+                acceptor_len,
+                donor_upstream=donor_upstream,
+                donor_downstream=donor_downstream,
+                acceptor_upstream=acceptor_upstream,
+                acceptor_downstream=acceptor_downstream,
+            )
+            tasks_to_score: tuple[str, ...]
+            if train_target in {"donor", "acceptor"}:
+                tasks_to_score = (train_target,)
+            elif train_target == "both":
+                tasks_to_score = ("donor", "acceptor")
+            else:
+                return None
 
-    if not scored_rows:
-        return None
+            for task in tasks_to_score:
+                checkpoint_key = f"{task}_checkpoint_path"
+                checkpoint_raw = checkpoint_paths.get(checkpoint_key)
+                if checkpoint_raw is None:
+                    return None
+                task_rows = _score_site_rows_single_task_model(
+                    model_name=model_name,
+                    task=task,
+                    checkpoint_path=Path(checkpoint_raw),
+                    site_rows=site_rows,
+                    device=device,
+                    batch_size=batch_size,
+                    sequence_transform=sequence_transform,
+                )
+                scored_rows.extend(task_rows)
 
-    site_score_tsv = Path(str(trial_artifact_base) + ".site.tsv")
-    write_site_scores(str(site_score_tsv), scored_rows)
+        if not scored_rows:
+            return None
+        write_site_scores(str(site_score_tsv), scored_rows)
 
     labeled_intron_raw = merged_args.get("labeled_intron_tsv")
     if isinstance(labeled_intron_raw, (str, Path)) and str(labeled_intron_raw).strip():
@@ -1478,10 +1690,20 @@ def _read_best_objective_score(
         existing_context = _extract_hparam_context(raw)
         if not _contexts_match(existing_context, expected_hparam_context):
             return None
+    try:
+        stored_objective_metric = _resolve_objective_spec(
+            objective_metric=raw.get("objective_metric"),
+            objective_eval_set=raw.get("objective_eval_set"),
+            objective_target=raw.get("objective_target"),
+            objective_metric_name=raw.get("objective_metric_name"),
+            default_legacy_name=objective_metric,
+        ).legacy_name
+    except ValueError:
+        stored_objective_metric = objective_metric
     value = raw.get("objective_score")
     if isinstance(value, (int, float)):
         return float(value)
-    value = raw.get(objective_metric)
+    value = raw.get(stored_objective_metric)
     if isinstance(value, (int, float)):
         return float(value)
     return None
@@ -1698,28 +1920,31 @@ def _normalize_independent_site_sampled_params(
     *,
     model_name: object,
     pair_mode: object,
-) -> dict[str, Scalar]:
-    """Drop irrelevant keys from sampled params for independent site models."""
-    normalized = dict(sampled_params)
+    train_target: object = "",
+) -> dict[str, Scalar | None]:
+    """Null-out irrelevant keys from sampled params for independent site models.
+
+    Keys that do not affect the trained model are set to None so that stored
+    trial records and history-guided search correctly treat them as unused,
+    rather than carrying misleading concrete values.
+    """
+    normalized: dict[str, Scalar | None] = dict(sampled_params)
     if not _is_independent_site_mode(
         model_name=model_name,
         pair_mode=pair_mode,
     ):
         return normalized
-    train_target_raw = normalized.get("train_target")
-    train_target = (
-        str(train_target_raw).strip().lower()
-        if isinstance(train_target_raw, str)
-        else ""
-    )
-    if train_target == "donor":
+    target = str(train_target).strip().lower() if isinstance(train_target, str) else ""
+    if target == "donor":
         normalized.pop("acceptor_len", None)
         for key in _ACCEPTOR_WINDOW_FLANK_KEYS:
-            normalized.pop(key, None)
-    elif train_target == "acceptor":
+            if key in normalized:
+                normalized[key] = None
+    elif target == "acceptor":
         normalized.pop("donor_len", None)
         for key in _DONOR_WINDOW_FLANK_KEYS:
-            normalized.pop(key, None)
+            if key in normalized:
+                normalized[key] = None
     normalized.pop("mask", None)
     normalized.pop("sequence_transform", None)
     return normalized
@@ -1877,8 +2102,14 @@ def load_historical_trials(
                         valid = True
                         for key in sorted(search_space):
                             spec = search_space[key]
+                            raw_cell = row.get(key, "")
+                            if raw_cell.strip() == "null":
+                                # Explicitly marked irrelevant for this trial.
+                                # Omit from anchor so history-guided sampling
+                                # treats the dimension as unconstrained.
+                                continue
                             parsed = _parse_history_param_value(
-                                raw_value=row.get(key, ""),
+                                raw_value=raw_cell,
                                 spec=spec,
                             )
                             if parsed is None and key == "mask":
@@ -1962,7 +2193,11 @@ def sample_trial_params_history_guided(
     sampled = dict(history_trials[anchor_index][1])
 
     for key in sorted(search_space):
-        if rng.random() < mutation_rate:
+        if key not in sampled:
+            # Dimension was irrelevant (null) for this history anchor — sample
+            # fresh so we don't inherit a stale or default value.
+            sampled[key] = _sample_value(search_space[key], rng)
+        elif rng.random() < mutation_rate:
             sampled[key] = _sample_value(search_space[key], rng)
     return sampled
 
@@ -2603,6 +2838,7 @@ def _serialize_top_trials(
                 "phase": row.phase,
                 "trial_id": row.trial_id,
                 "objective_metric": row.objective_metric,
+                **_objective_fields_payload(row.objective_spec),
                 "objective_score": row.objective_score,
                 "donor_pr_auc": row.donor_pr_auc,
                 "acceptor_pr_auc": row.acceptor_pr_auc,
@@ -2640,6 +2876,7 @@ def _write_tuning_leaderboard(
         "model": model_name,
         "target": target,
         "objective_metric": config.objective_metric,
+        **_objective_fields_payload(config.objective_spec),
         "top_k": config.top_k,
         "entries": top_entries,
         "best_checkpoint_paths": best_checkpoint_paths,
@@ -2706,14 +2943,18 @@ def _read_objective_best_epoch_from_metrics(
     if not isinstance(raw, dict):
         return None
 
-    scope, metric_name = _parse_objective_metric_name(objective_metric)
-    if scope == "donor":
+    spec = _resolve_objective_spec(objective_metric=objective_metric)
+    if spec.eval_set != "val":
+        return None
+    target = spec.target
+    metric_name = spec.metric_name
+    if target == "donor":
         return _extract_best_epoch_for_metric(raw, "donor", metric_name)
-    if scope == "acceptor":
+    if target == "acceptor":
         return _extract_best_epoch_for_metric(raw, "acceptor", metric_name)
-    if scope == "pair":
+    if target == "pair":
         return _extract_best_epoch_for_metric(raw, "pair", metric_name)
-    if scope != "mean":
+    if target != "mean":
         return None
     donor_epoch = _extract_best_epoch_for_metric(raw, "donor", metric_name)
     acceptor_epoch = _extract_best_epoch_for_metric(raw, "acceptor", metric_name)
@@ -3104,6 +3345,7 @@ def _run_trial_with_command_runner(
         sampled_params,
         model_name=base_model_name,
         pair_mode=base_pair_mode_obj,
+        train_target=config.base_args.get("train_target", ""),
     )
     merged_args: dict[str, ArgValue] = dict(config.base_args)
     for key, value in sampled_params.items():
@@ -3130,10 +3372,19 @@ def _run_trial_with_command_runner(
         merged_args["report_train_metrics"] = 0
     merged_args["species"] = config.species
     trial_artifact_base = metrics_json.parent / metrics_json.stem
-    is_test_max_f1_objective = config.objective_metric == "test_max_f1"
-    is_test_pr_auc_objective = config.objective_metric == "test_pr_auc"
+    objective_spec = config.objective_spec
+    is_test_max_f1_objective = (
+        objective_spec.eval_set == "test"
+        and objective_spec.target == "transcript"
+        and objective_spec.metric_name == "max_f1"
+    )
+    is_test_pr_auc_objective = (
+        objective_spec.eval_set == "test"
+        and objective_spec.target == "intron"
+        and objective_spec.metric_name == "pr_auc"
+    )
     eval_output_path: Optional[Path] = None
-    if is_test_max_f1_objective:
+    if is_test_max_f1_objective or is_test_pr_auc_objective:
         merged_args["train_only"] = False
         merged_args["site_output_tsv"] = str(trial_artifact_base) + ".site.tsv"
         merged_args["intron_output_tsv"] = str(trial_artifact_base) + ".intron.tsv"
@@ -5980,7 +6231,8 @@ def write_trials_tsv(path: Path, rows: list[TrialResult]) -> None:
             "" if row.error_message is None else row.error_message,
         ]
         param_values = [
-            str(row.sampled_params.get(name, "")) for name in all_param_names
+            "null" if (v := row.sampled_params.get(name)) is None else str(v)
+            for name in all_param_names
         ]
         lines.append("\t".join(fixed_values + param_values))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -5999,11 +6251,13 @@ def write_summary_markdown(
     """Write human-readable run summary."""
     quick_success = len([row for row in quick_rows if row.status == "success"])
     full_success = len([row for row in full_rows if row.status == "success"])
+    objective_label = _format_objective_label(config.objective_spec)
     lines = [
         "# Hyperparameter Search Summary",
         "",
         f"- Species: `{config.species}`",
-        f"- Objective: `{config.objective_metric}`",
+        f"- Objective: `{objective_label}`",
+        f"- Objective Legacy Name: `{config.objective_metric}`",
         f"- GPU slots: `{', '.join(gpu_ids) if gpu_ids else 'cpu-fallback'}`",
         (f"- Quick phase: {config.quick_trials} trials, {quick_success} successful"),
         f"- Full phase: {len(full_rows)} trials, {full_success} successful",
@@ -6016,7 +6270,7 @@ def write_summary_markdown(
                 "",
                 (
                     "- Previous global best "
-                    f"({config.objective_metric}): "
+                    f"({objective_label}): "
                     f"`{previous_global_best_score:.6f}`"
                 ),
                 "",
@@ -6060,7 +6314,7 @@ def write_summary_markdown(
                 f"- Phase: `{best_row.phase}`",
                 f"- Trial ID: `{best_row.trial_id}`",
                 (
-                    f"- Objective ({best_row.objective_metric}): "
+                    f"- Objective ({_format_objective_label(best_row.objective_spec)}): "
                     f"`{best_row.objective_score:.6f}`"
                 ),
                 f"- Effective batch size: `{best_row.effective_batch_size}`",
@@ -6096,6 +6350,65 @@ def _print_trial_start(
     )
 
 
+def _format_eta_seconds_compact(duration_sec: float) -> str:
+    """Format one ETA duration into compact human-readable text."""
+    total_seconds = max(0, int(round(duration_sec)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _format_external_progress_suffix(
+    *,
+    completed_count: int,
+    duration_sec: float,
+) -> str:
+    """Return one optional overall ETA suffix from external progress env vars."""
+    global _EXTERNAL_PROGRESS_STATE_KEY
+    global _EXTERNAL_PROGRESS_DURATION_SEC
+    global _EXTERNAL_PROGRESS_COMPLETED
+
+    total_raw = os.environ.get(_EXTERNAL_PROGRESS_TOTAL_ENV, "").strip()
+    if total_raw == "":
+        return ""
+    try:
+        total = int(total_raw)
+    except ValueError:
+        return ""
+    if total <= 0:
+        return ""
+
+    offset_raw = os.environ.get(_EXTERNAL_PROGRESS_OFFSET_ENV, "").strip()
+    try:
+        offset = int(offset_raw) if offset_raw else 0
+    except ValueError:
+        offset = 0
+
+    label = os.environ.get(_EXTERNAL_PROGRESS_LABEL_ENV, "").strip()
+    state_key = (label, total)
+    if _EXTERNAL_PROGRESS_STATE_KEY != state_key:
+        _EXTERNAL_PROGRESS_STATE_KEY = state_key
+        _EXTERNAL_PROGRESS_DURATION_SEC = 0.0
+        _EXTERNAL_PROGRESS_COMPLETED = 0
+
+    _EXTERNAL_PROGRESS_DURATION_SEC += max(float(duration_sec), 0.0)
+    _EXTERNAL_PROGRESS_COMPLETED += 1
+
+    overall_completed = min(total, max(0, offset + completed_count))
+    remaining = max(total - overall_completed, 0)
+    average_duration = _EXTERNAL_PROGRESS_DURATION_SEC / max(
+        _EXTERNAL_PROGRESS_COMPLETED,
+        1,
+    )
+    eta_text = _format_eta_seconds_compact(average_duration * remaining)
+    label_suffix = f" {label}" if label else ""
+    return f" overall{label_suffix}={overall_completed}/{total} eta={eta_text}"
+
+
 def _print_trial_result(
     *,
     phase: str,
@@ -6113,11 +6426,15 @@ def _print_trial_result(
         if len(error_text) > 120:
             error_text = error_text[:117] + "..."
         error_suffix = f" reason={error_text} log={result.log_file}"
+    progress_suffix = _format_external_progress_suffix(
+        completed_count=completed_count,
+        duration_sec=result.duration_sec,
+    )
     print(
         _compose_prefixed_log_line(
             f"[hparam_search] {phase} trial {result.trial_id:04d} "
             f"{result.status} ({completed_count}/{trial_count}) "
-            f"{result.objective_metric}={metric_text}.{error_suffix}"
+            f"{result.objective_metric}={metric_text}.{progress_suffix}{error_suffix}"
         ),
         flush=True,
     )
@@ -6133,6 +6450,7 @@ def _run_phase_subprocess(
     slots: list[Optional[str]],
     out_dir: Path,
     trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
+    on_trial_complete: Optional[Callable[[TrialResult, int, int], None]] = None,
 ) -> list[TrialResult]:
     """Run one phase using subprocess-backed trials."""
     stream_mode = _ACTIVE_TRIAL_STREAM_MODE
@@ -6176,6 +6494,8 @@ def _run_phase_subprocess(
                 slots.append(assigned_gpu)
                 result = future.result()
                 collected.append(result)
+                if on_trial_complete is not None:
+                    on_trial_complete(result, len(collected), trial_count)
                 if _should_print_trial_result_line(stream_mode):
                     _print_trial_result(
                         phase=phase,
@@ -6326,6 +6646,7 @@ def _run_phase_persistent(
     max_parallel_trials: int,
     stream_mode: str,
     trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
+    on_trial_complete: Optional[Callable[[TrialResult, int, int], None]] = None,
 ) -> list[TrialResult]:
     """Run one phase using persistent in-process trial workers."""
     stream_mode = _ACTIVE_TRIAL_STREAM_MODE
@@ -6405,6 +6726,8 @@ def _run_phase_persistent(
             slot_busy[slot_index] = False
             slot_active_trial[slot_index] = None
             collected.append(outcome.result)
+            if on_trial_complete is not None:
+                on_trial_complete(outcome.result, len(collected), trial_count)
             if _should_print_trial_result_line(stream_mode):
                 _print_trial_result(
                     phase=phase,
@@ -6435,6 +6758,7 @@ def run_phase(
     out_dir: Path,
     execution_mode: str = "subprocess",
     trial_overrides: Optional[list[dict[str, ArgValue]]] = None,
+    on_trial_complete: Optional[Callable[[TrialResult, int, int], None]] = None,
 ) -> list[TrialResult]:
     """Run one phase with slot-based scheduling and selectable execution mode."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -6459,6 +6783,7 @@ def run_phase(
                 trial_overrides=trial_overrides,
                 slots=slots,
                 out_dir=out_dir,
+                on_trial_complete=on_trial_complete,
             )
         if execution_mode == _PERSISTENT_PHASE_EXECUTION_MODE:
             return _run_phase_persistent(
@@ -6472,6 +6797,7 @@ def run_phase(
                 out_dir=out_dir,
                 max_parallel_trials=max_parallel_trials,
                 stream_mode=resolved_stream_mode,
+                on_trial_complete=on_trial_complete,
             )
         raise ValueError(
             "execution_mode must be one of: "
@@ -7023,6 +7349,7 @@ def write_best_config(
         "acceptor_pr_auc": row.acceptor_pr_auc,
         "mean_pr_auc": row.mean_pr_auc,
         "objective_metric": row.objective_metric,
+        **_objective_fields_payload(row.objective_spec),
         "objective_score": row.objective_score,
         "effective_batch_size": row.effective_batch_size,
         "oom_retries": row.oom_retries,

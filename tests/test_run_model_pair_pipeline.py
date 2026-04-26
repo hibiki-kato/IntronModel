@@ -751,7 +751,7 @@ def test_run_pipeline_pair_model_retries_infer_without_compile_on_failure(
             "--infer_compile",
             "1",
             "--infer_compile_mode",
-            "on",
+            "quick",
             "--metrics_json",
             str(metrics_json),
             "--test_tsv",
@@ -816,7 +816,7 @@ def test_run_pipeline_pair_model_retries_infer_without_compile_on_failure(
     captured = capsys.readouterr()
 
     assert "Retry once with infer_compile=0" in captured.out
-    assert retry_module.infer_calls == [(1, "on"), (0, "off")]
+    assert retry_module.infer_calls == [(1, "quick"), (0, "off")]
 
 
 def test_run_pipeline_skip_train_uses_published_version_outputs(
@@ -1798,23 +1798,29 @@ def test_run_pipeline_site_score_tsv_reaggregates_log10_scores_for_dnabert(
     assert fields[0] == "tx1"
     assert fields[1] == "2"
     assert float(fields[2]) == pytest.approx(1.0e-4, rel=1e-6)
-    assert float(fields[3]) == pytest.approx(10.0 ** -0.01, rel=1e-6)
-    assert float(fields[4]) == pytest.approx((10.0 ** -4.0) * (10.0 ** -0.01))
+    assert float(fields[3]) == pytest.approx(10.0**-0.01, rel=1e-6)
+    assert float(fields[4]) == pytest.approx((10.0**-4.0) * (10.0**-0.01))
 
     intron_lines = intron_output_tsv.read_text(encoding="utf-8").splitlines()
-    assert intron_lines[1].split("\t")[0:2] == ["uintron_00000001", "8.26707732953027e-01"]
-    assert intron_lines[2].split("\t")[0:2] == ["uintron_00000002", "9.77237220955811e-05"]
+    assert intron_lines[1].split("\t")[0:2] == [
+        "uintron_00000001",
+        "8.26707732953027e-01",
+    ]
+    assert intron_lines[2].split("\t")[0:2] == [
+        "uintron_00000002",
+        "9.77237220955811e-05",
+    ]
 
     normalized_site_lines = site_output_tsv.read_text(encoding="utf-8").splitlines()
     assert normalized_site_lines[0].endswith("_score_space")
     first_site_fields = normalized_site_lines[1].split("\t")
     assert first_site_fields[0:2] == ["uintron_00000001", "1"]
-    assert float(first_site_fields[2]) == pytest.approx(10.0 ** -0.00229, rel=1e-12)
-    assert float(first_site_fields[3]) == pytest.approx(10.0 ** -0.080358, rel=1e-12)
+    assert float(first_site_fields[2]) == pytest.approx(10.0**-0.00229, rel=1e-12)
+    assert float(first_site_fields[3]) == pytest.approx(10.0**-0.080358, rel=1e-12)
     assert first_site_fields[5] == "probability"
 
     second_site_fields = normalized_site_lines[2].split("\t")
     assert second_site_fields[0:2] == ["uintron_00000002", "1"]
     assert float(second_site_fields[2]) == pytest.approx(1.0e-4, rel=1e-12)
-    assert float(second_site_fields[3]) == pytest.approx(10.0 ** -0.01, rel=1e-12)
+    assert float(second_site_fields[3]) == pytest.approx(10.0**-0.01, rel=1e-12)
     assert second_site_fields[5] == "probability"

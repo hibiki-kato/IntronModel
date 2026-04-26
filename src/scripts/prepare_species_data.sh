@@ -103,8 +103,10 @@ fi
 
 make_test_args=(
 	--species "${SPECIES}"
-	--donor-len "${DONOR_LEN}"
-	--acceptor-len "${ACCEPTOR_LEN}"
+	--donor-upstream-bp "100"
+	--donor-downstream-bp "100"
+	--acceptor-upstream-bp "100"
+	--acceptor-downstream-bp "100"
 	--out-tsv "${SPECIES_DIR}/processed/transcripts.tsv"
 )
 if [[ "${CLIP_SHORT_INTRON}" == "1" ]]; then

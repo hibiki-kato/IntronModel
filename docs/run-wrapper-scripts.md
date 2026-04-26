@@ -30,6 +30,7 @@ Active training/inference wrappers (edit CONFIG block, run without CLI args):
 
 - `run/run_cnn_v2.sh`
 - `run/run_cnn_pair_v2.sh`
+- `run/run_spliceformer_sc.sh`
 - `archive/run_isolated_mmus_rna60_pipeline.sh`
 
 Archived training/inference wrappers:
@@ -52,6 +53,7 @@ Utility wrappers:
 - `run/eval_intron_pr_auc.sh`
 - `run/eval_trans_score.sh`
 - `run/plot_eval.sh`
+- `run/scan_score_test_suite_integrated.sh`
 
 Utility wrappers keep editable defaults near the top as `CONFIG` or
 `USER DEFAULTS` blocks.
@@ -79,6 +81,17 @@ Active tuning wrappers:
 default search space is limited to `donor_upstream`, `donor_downstream`,
 `acceptor_upstream`, and `acceptor_downstream`. Other CNN-v2 parameters are
 kept fixed through `base_args` or explicit config overrides.
+
+`run/run_spliceformer_sc.sh` supports multi-species pooled training via
+`SPECIES_LIST` (comma-separated) and single-species inference via `SPECIES`.
+Set `USE_FILM=1` to enable species-conditioned FiLM layers. A single shared
+checkpoint is written for the pooled model.
+
+`run/scan_score_test_suite_integrated.sh` runs an integrated scan-and-score
+pass over the test suite, optionally using a pair model for re-ranking, and
+writes per-candidate scores and final evaluation output. Control keys:
+`MODEL`, `PAIR_MODEL`, `SPECIES`, `SITE_KEEP_THRESHOLD`, `RUN_EVAL`.
+
 
 Archived tuning wrappers:
 

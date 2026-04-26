@@ -82,6 +82,12 @@ def test_short_intron_default_keeps_requested_window_length(tmp_path: Path) -> N
     assert len(rows) == 2
     assert len(rows[0]["seq"]) == 100
     assert len(rows[1]["seq"]) == 100
+    donor_row = next(row for row in rows if row["site_type"] == "donor")
+    acceptor_row = next(row for row in rows if row["site_type"] == "acceptor")
+    assert donor_row["upstream_bp"] == "5"
+    assert donor_row["downstream_bp"] == "95"
+    assert acceptor_row["upstream_bp"] == "95"
+    assert acceptor_row["downstream_bp"] == "5"
 
 
 def test_short_intron_clip_short_intron_writes_variable_length(tmp_path: Path) -> None:
@@ -123,12 +129,16 @@ def test_short_intron_clip_short_intron_writes_variable_length(tmp_path: Path) -
     donor_row = next(row for row in rows if row["site_type"] == "donor")
     acceptor_row = next(row for row in rows if row["site_type"] == "acceptor")
 
-    # intron length is 10 bp, so kept length is 3 + 10.
-    assert len(donor_row["seq"]) == 13
-    assert len(acceptor_row["seq"]) == 13
+    # intron length is 10 bp, so legacy 5bp exon context becomes 5 + 10.
+    assert len(donor_row["seq"]) == 15
+    assert len(acceptor_row["seq"]) == 15
+    assert donor_row["upstream_bp"] == "5"
+    assert donor_row["downstream_bp"] == "10"
+    assert acceptor_row["upstream_bp"] == "10"
+    assert acceptor_row["downstream_bp"] == "5"
 
-    expected_donor = _fetch(seq, 197, 209)
-    expected_acceptor = _fetch(seq, 200, 212)
+    expected_donor = _fetch(seq, 195, 209)
+    expected_acceptor = _fetch(seq, 200, 214)
     assert donor_row["seq"] == expected_donor
     assert acceptor_row["seq"] == expected_acceptor
 
@@ -174,11 +184,55 @@ def test_clip_short_intron_minus_strand_keeps_transcript_orientation(
     donor_row = next(row for row in rows if row["site_type"] == "donor")
     acceptor_row = next(row for row in rows if row["site_type"] == "acceptor")
 
-    # intron length is 39 bp, so kept length is 3 + 39.
-    assert len(donor_row["seq"]) == 42
-    assert len(acceptor_row["seq"]) == 42
+    # intron length is 39 bp, so legacy 5bp exon context becomes 5 + 39.
+    assert len(donor_row["seq"]) == 44
+    assert len(acceptor_row["seq"]) == 44
+    assert donor_row["upstream_bp"] == "5"
+    assert donor_row["downstream_bp"] == "39"
+    assert acceptor_row["upstream_bp"] == "39"
+    assert acceptor_row["downstream_bp"] == "5"
 
-    donor_expected = revcomp(_fetch(seq, 221, 262))
-    acceptor_expected = revcomp(_fetch(seq, 218, 259))
+    donor_expected = revcomp(_fetch(seq, 261, 304))
+    acceptor_expected = revcomp(_fetch(seq, 216, 259))
     assert donor_row["seq"] == donor_expected
     assert acceptor_row["seq"] == acceptor_expected
+
+
+def test_default_context_writes_canonical_100_100_windows(tmp_path: Path) -> None:
+    seq = _repeat_sequence(1600)
+    fasta_path, gtf_path, out_tsv = _prepare_inputs(
+        tmp_path=tmp_path,
+        seq=seq,
+        gtf_lines=[
+            (
+                'chr1\ttest\texon\t100\t299\t.\t+\t.\t'
+                'transcript_id "TX1"; gene_id "G1";'
+            ),
+            (
+                'chr1\ttest\texon\t500\t699\t.\t+\t.\t'
+                'transcript_id "TX1"; gene_id "G1";'
+            ),
+        ],
+    )
+
+    make_test_data_main(
+        [
+            "--fasta",
+            str(fasta_path),
+            "--gtf",
+            str(gtf_path),
+            "--out_tsv",
+            str(out_tsv),
+        ]
+    )
+
+    rows = _read_rows(out_tsv)
+    donor_row = next(row for row in rows if row["site_type"] == "donor")
+    acceptor_row = next(row for row in rows if row["site_type"] == "acceptor")
+
+    assert len(donor_row["seq"]) == 200
+    assert len(acceptor_row["seq"]) == 200
+    assert donor_row["upstream_bp"] == "100"
+    assert donor_row["downstream_bp"] == "100"
+    assert acceptor_row["upstream_bp"] == "100"
+    assert acceptor_row["downstream_bp"] == "100"

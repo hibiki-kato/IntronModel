@@ -38,13 +38,15 @@ def test_build_unique_intron_assets_merges_duplicate_coordinates(
             "chrom",
             "strand",
             "boundary_pos",
+            "upstream_bp",
+            "downstream_bp",
             "seq",
         ],
         [
-            ["tx1", "g1", "donor", "1", "chr1", "+", "100", donor_seq],
-            ["tx1", "g1", "acceptor", "1", "chr1", "+", "161", acceptor_seq],
-            ["tx2", "g2", "donor", "7", "chr1", "+", "100", donor_seq],
-            ["tx2", "g2", "acceptor", "7", "chr1", "+", "161", acceptor_seq],
+            ["tx1", "g1", "donor", "1", "chr1", "+", "100", "100", "100", donor_seq],
+            ["tx1", "g1", "acceptor", "1", "chr1", "+", "161", "100", "100", acceptor_seq],
+            ["tx2", "g2", "donor", "7", "chr1", "+", "100", "100", "100", donor_seq],
+            ["tx2", "g2", "acceptor", "7", "chr1", "+", "161", "100", "100", acceptor_seq],
         ],
     )
     _write_tsv(
@@ -102,6 +104,8 @@ def test_build_unique_intron_assets_merges_duplicate_coordinates(
     assert {row["site_type"] for row in rows} == {"donor", "acceptor"}
     assert {row["transcript_id"] for row in rows} == {"uintron_00000001"}
     assert {row["intron_index"] for row in rows} == {"1"}
+    assert {row["upstream_bp"] for row in rows} == {"100"}
+    assert {row["downstream_bp"] for row in rows} == {"100"}
 
     with map_tsv.open("r", encoding="utf-8", newline="") as handle:
         map_rows = list(csv.DictReader(handle, delimiter="\t"))
@@ -148,11 +152,13 @@ def test_build_unique_intron_assets_normalizes_minus_strand_coordinates(
             "chrom",
             "strand",
             "boundary_pos",
+            "upstream_bp",
+            "downstream_bp",
             "seq",
         ],
         [
-            ["txm", "gm", "donor", "3", "chrM", "-", "300", donor_seq],
-            ["txm", "gm", "acceptor", "3", "chrM", "-", "250", acceptor_seq],
+            ["txm", "gm", "donor", "3", "chrM", "-", "300", "100", "100", donor_seq],
+            ["txm", "gm", "acceptor", "3", "chrM", "-", "250", "100", "100", acceptor_seq],
         ],
     )
     _write_tsv(

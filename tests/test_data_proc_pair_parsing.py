@@ -617,3 +617,49 @@ def test_read_test_pair_rows_backfills_half_length_from_unique_map(
     ]
     assert skipped_short == 0
     assert skipped_unpaired == 0
+
+
+def test_read_test_site_rows_maps_explicit_context_to_legacy_model_windows(
+    tmp_path: Path,
+) -> None:
+    """Map canonical 100/100 rows onto legacy donor/acceptor model windows."""
+    tsv_path = tmp_path / "transcripts.unique.tsv"
+    _write_text(
+        tsv_path,
+        "\n".join(
+            [
+                "transcript_id\tsite_type\tintron_index\tupstream_bp\tdownstream_bp\tseq",
+                "tx1\tdonor\t1\t100\t100\t"
+                + ("A" * 100)
+                + ("C" * 100),
+                "tx1\tacceptor\t1\t100\t100\t"
+                + ("G" * 100)
+                + ("T" * 100),
+                "",
+            ]
+        ),
+    )
+
+    rows, skipped_short = read_test_site_rows(
+        test_tsv=str(tsv_path),
+        donor_len=30,
+        acceptor_len=30,
+    )
+
+    assert rows == [
+        {
+            "transcript_id": "tx1",
+            "site_type": "donor",
+            "intron_index": 1,
+            "seq": ("A" * 5) + ("C" * 25),
+            "intron_half_length": None,
+        },
+        {
+            "transcript_id": "tx1",
+            "site_type": "acceptor",
+            "intron_index": 1,
+            "seq": ("G" * 25) + ("T" * 5),
+            "intron_half_length": None,
+        },
+    ]
+    assert skipped_short == 0

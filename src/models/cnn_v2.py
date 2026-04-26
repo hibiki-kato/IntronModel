@@ -55,6 +55,7 @@ from util.model_task_paths import (
     resolve_train_target,
 )
 from util.model_runtime import (
+    HIGH_LEVEL_COMPILE_MODE_CHOICES,
     bool_from_flag as _bool_from_flag,
     compile_model_with_fallback as _compile_model_with_fallback,
     configure_torch_compile_runtime as _configure_torch_compile_runtime,
@@ -2277,7 +2278,11 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--donor_grad_clip", type=float, default=None)
     parser.add_argument("--acceptor_grad_clip", type=float, default=None)
     parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--compile_mode", choices=["off", "on", "auto"], default="auto")
+    parser.add_argument(
+        "--compile_mode",
+        choices=list(HIGH_LEVEL_COMPILE_MODE_CHOICES),
+        default="auto",
+    )
     parser.add_argument("--use_amp", type=int, choices=[0, 1], default=1)
     parser.add_argument("--amp_dtype", choices=["auto", "bf16", "fp16"], default="auto")
     parser.add_argument("--allow_tf32", type=int, choices=[0, 1], default=1)
@@ -2366,7 +2371,7 @@ def add_infer_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--infer_compile_mode",
-        choices=["off", "on", "auto"],
+        choices=list(HIGH_LEVEL_COMPILE_MODE_CHOICES),
         default=None,
         help=("Inference-only compile mode override. Default follows --compile_mode."),
     )

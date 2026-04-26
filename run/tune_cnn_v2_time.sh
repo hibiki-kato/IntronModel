@@ -42,7 +42,7 @@ FULL_COMPILE_MODE="on"
 TRIAL_STREAM_MODE="errors"
 ENABLE_PHASE_OVERLAP="1"
 
-GPU_IDS="auto"
+GPU_IDS="1,2,3,4"	
 # auto: use one concurrent trial per configured GPU_IDS entry.
 MAX_PARALLEL_TRIALS="auto"
 
@@ -737,6 +737,7 @@ else
 	declare -A pid_to_release_file=()
 	declare -A pid_to_cursor_file=()
 	declare -A pid_to_stdout_log=()
+	declare -A pid_in_quick_phase=()
 	running_pids=()
 	available_gpu_ids=("${selected_gpu_ids[@]}")
 	stop_submitting=0
@@ -765,6 +766,7 @@ else
 				continue
 			fi
 			append_unique_gpu_ids available_gpu_ids "${released_gpu_ids[@]}"
+			unset "pid_in_quick_phase[${pid}]"
 			for released_gpu_id in "${released_gpu_ids[@]}"; do
 				pid_to_owned_gpu_csv["${pid}"]="$(remove_gpu_from_csv \
 					"${pid_to_owned_gpu_csv[$pid]:-}" \
@@ -779,6 +781,16 @@ else
 		fi
 
 		while [[ ${stop_submitting} -eq 0 && ${#available_gpu_ids[@]} -gt 0 ]]; do
+			_any_in_quick=0
+			for _chk_pid in "${running_pids[@]}"; do
+				if [[ -n "${pid_in_quick_phase[${_chk_pid}]+x}" ]]; then
+					_any_in_quick=1
+					break
+				fi
+			done
+			if [[ "${_any_in_quick}" -eq 1 ]]; then
+				break
+			fi
 			assigned_parallel_slots="$(
 				intronmodel_resolve_parallel_slots \
 					"tune_cnn_v2_time.sh" \
@@ -803,6 +815,7 @@ else
 			fi
 			pid="${LAST_DISPATCH_PID}"
 			running_pids+=("${pid}")
+			pid_in_quick_phase["${pid}"]="1"
 			pid_to_cycle["${pid}"]="${job_index}"
 			pid_to_start_seconds["${pid}"]="${SECONDS}"
 			pid_to_owned_gpu_csv["${pid}"]="${LAST_DISPATCH_GPU_CSV}"
@@ -866,6 +879,7 @@ else
 			unset "pid_to_release_file[${pid}]"
 			unset "pid_to_cursor_file[${pid}]"
 			unset "pid_to_stdout_log[${pid}]"
+			unset "pid_in_quick_phase[${pid}]"
 			progress=1
 		done
 		running_pids=("${next_running_pids[@]}")

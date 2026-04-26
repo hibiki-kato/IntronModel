@@ -40,6 +40,8 @@ class TranscriptSiteRow:
     strand: str
     boundary_pos: int
     seq: str
+    upstream_bp: int | None
+    downstream_bp: int | None
     intron_half_length: int | None
 
 
@@ -56,6 +58,10 @@ class TranscriptIntronRecord:
     intron_end: int
     donor_seq: str
     acceptor_seq: str
+    donor_upstream_bp: int | None
+    donor_downstream_bp: int | None
+    acceptor_upstream_bp: int | None
+    acceptor_downstream_bp: int | None
     donor_boundary_pos: int
     acceptor_boundary_pos: int
     intron_half_length: int | None
@@ -84,6 +90,10 @@ class UniqueIntronRecord:
     gene_id: str
     donor_seq: str
     acceptor_seq: str
+    donor_upstream_bp: int | None
+    donor_downstream_bp: int | None
+    acceptor_upstream_bp: int | None
+    acceptor_downstream_bp: int | None
     intron_half_length: int | None
     label: int
     donor_label: int | None
@@ -198,6 +208,12 @@ def _read_transcript_site_rows(path: Path) -> list[TranscriptSiteRow]:
                     strand=strand,
                     boundary_pos=boundary_pos,
                     seq=str(raw_row["seq"]).strip().upper(),
+                    upstream_bp=_parse_optional_int(
+                        str(raw_row.get("upstream_bp", "")).strip()
+                    ),
+                    downstream_bp=_parse_optional_int(
+                        str(raw_row.get("downstream_bp", "")).strip()
+                    ),
                     intron_half_length=_parse_optional_int(
                         str(raw_row.get("intron_half_length", "")).strip()
                     ),
@@ -279,6 +295,10 @@ def _assemble_transcript_introns(
             intron_end=intron_end,
             donor_seq=donor_row.seq,
             acceptor_seq=acceptor_row.seq,
+            donor_upstream_bp=donor_row.upstream_bp,
+            donor_downstream_bp=donor_row.downstream_bp,
+            acceptor_upstream_bp=acceptor_row.upstream_bp,
+            acceptor_downstream_bp=acceptor_row.downstream_bp,
             donor_boundary_pos=donor_row.boundary_pos,
             acceptor_boundary_pos=acceptor_row.boundary_pos,
             intron_half_length=intron_half_length,
@@ -461,6 +481,10 @@ def _build_unique_introns(
         representative = members[0]
         donor_seq = representative.donor_seq.upper()
         acceptor_seq = representative.acceptor_seq.upper()
+        donor_upstream_bp = representative.donor_upstream_bp
+        donor_downstream_bp = representative.donor_downstream_bp
+        acceptor_upstream_bp = representative.acceptor_upstream_bp
+        acceptor_downstream_bp = representative.acceptor_downstream_bp
         intron_half_length = representative.intron_half_length
         for member in members[1:]:
             if member.donor_seq.upper() != donor_seq:
@@ -471,6 +495,26 @@ def _build_unique_introns(
             if member.acceptor_seq.upper() != acceptor_seq:
                 raise ValueError(
                     "Conflicting acceptor_seq among duplicated intron coordinates: "
+                    f"{coord_key}"
+                )
+            if member.donor_upstream_bp != donor_upstream_bp:
+                raise ValueError(
+                    "Conflicting donor_upstream_bp among duplicated intron coordinates: "
+                    f"{coord_key}"
+                )
+            if member.donor_downstream_bp != donor_downstream_bp:
+                raise ValueError(
+                    "Conflicting donor_downstream_bp among duplicated intron coordinates: "
+                    f"{coord_key}"
+                )
+            if member.acceptor_upstream_bp != acceptor_upstream_bp:
+                raise ValueError(
+                    "Conflicting acceptor_upstream_bp among duplicated intron coordinates: "
+                    f"{coord_key}"
+                )
+            if member.acceptor_downstream_bp != acceptor_downstream_bp:
+                raise ValueError(
+                    "Conflicting acceptor_downstream_bp among duplicated intron coordinates: "
                     f"{coord_key}"
                 )
             if member.intron_half_length != intron_half_length:
@@ -501,6 +545,10 @@ def _build_unique_introns(
                 gene_id=representative.gene_id,
                 donor_seq=donor_seq,
                 acceptor_seq=acceptor_seq,
+                donor_upstream_bp=donor_upstream_bp,
+                donor_downstream_bp=donor_downstream_bp,
+                acceptor_upstream_bp=acceptor_upstream_bp,
+                acceptor_downstream_bp=acceptor_downstream_bp,
                 intron_half_length=intron_half_length,
                 label=label_record.label,
                 donor_label=label_record.donor_label,
@@ -525,6 +573,8 @@ def _write_transcripts_unique_tsv(path: Path, rows: Iterable[UniqueIntronRecord]
         "chrom",
         "strand",
         "boundary_pos",
+        "upstream_bp",
+        "downstream_bp",
         "seq",
         "intron_half_length",
     ]
@@ -550,6 +600,16 @@ def _write_transcripts_unique_tsv(path: Path, rows: Iterable[UniqueIntronRecord]
                     "chrom": row.chrom,
                     "strand": row.strand,
                     "boundary_pos": donor_boundary,
+                    "upstream_bp": (
+                        ""
+                        if row.donor_upstream_bp is None
+                        else str(row.donor_upstream_bp)
+                    ),
+                    "downstream_bp": (
+                        ""
+                        if row.donor_downstream_bp is None
+                        else str(row.donor_downstream_bp)
+                    ),
                     "seq": row.donor_seq,
                     "intron_half_length": intron_half_length_text,
                 }
@@ -563,6 +623,16 @@ def _write_transcripts_unique_tsv(path: Path, rows: Iterable[UniqueIntronRecord]
                     "chrom": row.chrom,
                     "strand": row.strand,
                     "boundary_pos": acceptor_boundary,
+                    "upstream_bp": (
+                        ""
+                        if row.acceptor_upstream_bp is None
+                        else str(row.acceptor_upstream_bp)
+                    ),
+                    "downstream_bp": (
+                        ""
+                        if row.acceptor_downstream_bp is None
+                        else str(row.acceptor_downstream_bp)
+                    ),
                     "seq": row.acceptor_seq,
                     "intron_half_length": intron_half_length_text,
                 }

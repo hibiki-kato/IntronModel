@@ -175,6 +175,19 @@ def test_add_train_args_accepts_validation_metric() -> None:
     assert args.validation_metric == "max_f1"
 
 
+def test_add_train_and_infer_args_accept_high_level_compile_modes() -> None:
+    train_parser = argparse.ArgumentParser()
+    cnn_v2.add_train_args(train_parser)
+    train_args = train_parser.parse_args(["--compile_mode", "quick"])
+
+    infer_parser = argparse.ArgumentParser()
+    cnn_v2.add_infer_args(infer_parser)
+    infer_args = infer_parser.parse_args(["--infer_compile_mode", "full"])
+
+    assert train_args.compile_mode == "quick"
+    assert infer_args.infer_compile_mode == "full"
+
+
 def test_train_pair_model_forwards_model_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -239,6 +252,7 @@ def test_train_pair_model_forwards_model_args(
             pos_path="pos.tsv",
             neg_path="neg.tsv",
             checkpoint_path="pair.pt",
+            init_checkpoint_path=None,
             donor_window_len=100,
             acceptor_window_len=100,
             donor_len=100,
@@ -316,6 +330,7 @@ def test_train_pair_model_rejects_invalid_validation_metric() -> None:
             pos_path="pos.tsv",
             neg_path="neg.tsv",
             checkpoint_path="pair.pt",
+            init_checkpoint_path=None,
             donor_window_len=100,
             acceptor_window_len=100,
             donor_len=100,
