@@ -643,102 +643,120 @@ def _compute_grid_test_metrics(
             labels=_load_optional_intron_labels(species),
         )
 
-    # --- Transcript: needs the published partner checkpoint ---
-    try:
-        published_assets = resolve_latest_published_run_assets(
-            project_root=project_root,
-            species=species,
-            model_name=model_name,
-        )
-    except FileNotFoundError:
-        published_assets = None
-        latest_published_name = resolve_latest_published_name(
-            project_root / "data",
-            species,
-            model_name,
-        )
-        if latest_published_name is not None:
-            try:
-                normalize_published_run_checkpoints(
-                    project_root=project_root,
-                    species=species,
-                    model_name=model_name,
-                    published_name=latest_published_name,
-                )
-                published_assets = resolve_latest_published_run_assets(
-                    project_root=project_root,
-                    species=species,
-                    model_name=model_name,
-                )
-            except (FileNotFoundError, ValueError):
-                published_assets = None
-    if published_assets is not None:
-        partner_published_name = published_assets.get("published_name")
-        partner_checkpoint_raw = published_assets.get(f"{partner_task}_checkpoint_path")
-        partner_metrics_json = published_assets.get("metrics_json")
-        if (
-            isinstance(partner_checkpoint_raw, str)
-            and partner_checkpoint_raw.strip() != ""
-            and isinstance(partner_metrics_json, str)
-            and partner_metrics_json.strip() != ""
-            and Path(partner_checkpoint_raw).is_file()
-        ):
-            partner_payload = _load_metrics_payload(partner_metrics_json)
-            partner_window = _resolve_window_config(partner_payload)
-            merged_window = dict(window_config)
-            for key in (
-                f"{partner_task}_len",
-                f"{partner_task}_upstream",
-                f"{partner_task}_downstream",
+    # --- Transcript: partner site rows scored once from published checkpoint ---
+    # Cache lives next to the target's trial directory so all 100 trials share it.
+    partner_cache_path = Path(metrics_json).parent.parent / f"partner_{partner_task}_site_rows.json"
+    partner_site_rows: Optional[list] = None
+
+    if partner_cache_path.exists():
+        try:
+            partner_site_rows = json.loads(
+                partner_cache_path.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError):
+            partner_site_rows = None
+
+    if partner_site_rows is None:
+        try:
+            published_assets = resolve_latest_published_run_assets(
+                project_root=project_root,
+                species=species,
+                model_name=model_name,
+            )
+        except FileNotFoundError:
+            published_assets = None
+            latest_published_name = resolve_latest_published_name(
+                project_root / "data",
+                species,
+                model_name,
+            )
+            if latest_published_name is not None:
+                try:
+                    normalize_published_run_checkpoints(
+                        project_root=project_root,
+                        species=species,
+                        model_name=model_name,
+                        published_name=latest_published_name,
+                    )
+                    published_assets = resolve_latest_published_run_assets(
+                        project_root=project_root,
+                        species=species,
+                        model_name=model_name,
+                    )
+                except (FileNotFoundError, ValueError):
+                    published_assets = None
+        if published_assets is not None:
+            partner_published_name = published_assets.get("published_name")
+            partner_checkpoint_raw = published_assets.get(f"{partner_task}_checkpoint_path")
+            partner_metrics_json_path = published_assets.get("metrics_json")
+            if (
+                isinstance(partner_checkpoint_raw, str)
+                and partner_checkpoint_raw.strip() != ""
+                and isinstance(partner_metrics_json_path, str)
+                and partner_metrics_json_path.strip() != ""
+                and Path(partner_checkpoint_raw).is_file()
             ):
-                merged_window[key] = partner_window.get(key)
-            donor_checkpoint_path = (
-                Path(checkpoint_raw)
-                if target == "donor"
-                else Path(partner_checkpoint_raw)
-            )
-            acceptor_checkpoint_path = (
-                Path(partner_checkpoint_raw)
-                if target == "donor"
-                else Path(checkpoint_raw)
-            )
-            scored_site_rows = _infer_site_rows_for_grid(
-                donor_checkpoint_path=donor_checkpoint_path,
-                acceptor_checkpoint_path=acceptor_checkpoint_path,
-                window_config=merged_window,
-                **_common_infer_kwargs,
-            )
-            if scored_site_rows:
-                unique_map = _load_required_unique_intron_map(species=species)
-                mapped_site_rows = _expand_unique_site_rows(
-                    site_score_rows=scored_site_rows,
-                    unique_map=unique_map,
+                partner_payload = _load_metrics_payload(partner_metrics_json_path)
+                partner_window = _resolve_window_config(partner_payload)
+                # Mirror partner's own dims to both slots so the model can load.
+                partner_slot_window = dict(partner_window)
+                partner_slot_window[f"{target}_len"] = partner_window.get(f"{partner_task}_len")
+                partner_slot_window[f"{target}_upstream"] = partner_window.get(f"{partner_task}_upstream")
+                partner_slot_window[f"{target}_downstream"] = partner_window.get(f"{partner_task}_downstream")
+                partner_checkpoint = Path(partner_checkpoint_raw)
+                all_partner_rows = _infer_site_rows_for_grid(
+                    donor_checkpoint_path=partner_checkpoint,
+                    acceptor_checkpoint_path=partner_checkpoint,
+                    window_config=partner_slot_window,
+                    **_common_infer_kwargs,
                 )
-                transcript_rows = aggregate_transcript_scores(
-                    site_score_rows=mapped_site_rows,
-                    intron_score_op="+",
-                    transcript_score_agg="min",
-                    softmin_tau=1.0,
-                )
-                if transcript_rows:
-                    transcript_score_tsv = Path(
-                        str(_trial_artifact_base(metrics_json)) + ".test_transcript.tsv"
+                partner_site_rows = [
+                    row for row in all_partner_rows
+                    if str(row.get("site_type", "")).strip().lower() == partner_task
+                ]
+                try:
+                    partner_cache_path.write_text(
+                        json.dumps(partner_site_rows) + "\n", encoding="utf-8"
                     )
-                    write_transcript_scores(str(transcript_score_tsv), transcript_rows)
-                    output_lines = evaluate_score_file(
-                        class_file=_resolve_class_file(species),
-                        score_file=transcript_score_tsv,
-                        ref_gff=_resolve_ref_gff_file(species, None),
-                    )
-                    eval_output_path = Path(
-                        str(_trial_artifact_base(metrics_json))
-                        + ".test_transcript.eval.txt"
-                    )
-                    eval_output_path.write_text(
-                        ("\n".join(output_lines) + "\n") if output_lines else "",
-                        encoding="utf-8",
-                    )
-                    transcript_max_f1 = _extract_max_f1_from_eval_lines(output_lines)
+                except OSError:
+                    pass
+
+    if partner_site_rows:
+        current_target_rows = [
+            row for row in site_rows
+            if str(row.get("site_type", "")).strip().lower() == target
+        ]
+        all_rows_for_transcript = current_target_rows + partner_site_rows
+        unique_map = _load_required_unique_intron_map(species=species)
+        mapped_site_rows = _expand_unique_site_rows(
+            site_score_rows=all_rows_for_transcript,
+            unique_map=unique_map,
+        )
+        transcript_rows = aggregate_transcript_scores(
+            site_score_rows=mapped_site_rows,
+            intron_score_op="+",
+            transcript_score_agg="min",
+            softmin_tau=1.0,
+        )
+        if transcript_rows:
+            transcript_score_tsv = Path(
+                str(_trial_artifact_base(metrics_json)) + ".test_transcript.tsv"
+            )
+            write_transcript_scores(str(transcript_score_tsv), transcript_rows)
+            output_lines = evaluate_score_file(
+                class_file=_resolve_class_file(species),
+                score_file=transcript_score_tsv,
+                ref_gff=_resolve_ref_gff_file(species, None),
+            )
+            eval_output_path = Path(
+                str(_trial_artifact_base(metrics_json))
+                + ".test_transcript.eval.txt"
+            )
+            eval_output_path.write_text(
+                ("\n".join(output_lines) + "\n") if output_lines else "",
+                encoding="utf-8",
+            )
+            transcript_max_f1 = _extract_max_f1_from_eval_lines(output_lines)
 
     out: dict[str, object] = {
         "test_site_max_f1": site_max_f1,
@@ -1108,6 +1126,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     sys.path.insert(0, str(_project_root() / "src"))
     from util.process_title import apply_process_title, format_eta_process_title
 
+    # Subprocesses (training trials) inherit this env var, disabling their
+    # per-trial ETA process title so only the global ETA is visible.
+    os.environ.setdefault("INTRONMODEL_DISABLE_ETA_PROCESS_TITLE", "1")
+
     root = _project_root()
     output_dir = (
         Path(args.output_dir)
@@ -1159,7 +1181,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif live_completed > 0 and elapsed_sec > 0.0:
             remaining_secs = (elapsed_sec / live_completed) * remaining_total
             eta_text = _format_duration(remaining_secs)
-            apply_process_title(format_eta_process_title(remaining_secs))
+            apply_process_title(f"grid {args.species} {format_eta_process_title(remaining_secs)}")
 
         detail = ""
         if target_name is not None and result is not None:
