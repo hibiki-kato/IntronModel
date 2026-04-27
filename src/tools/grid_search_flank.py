@@ -607,6 +607,43 @@ def _compute_grid_test_metrics(
     partner_published_name: Optional[str] = None
     partner_task = "acceptor" if target == "donor" else "donor"
     project_root = _project_root()
+
+    _common_infer_kwargs: dict = dict(
+        species=species,
+        model_name=model_name,
+        batch_size=_to_optional_int(payload.get("batch_size")) or 512,
+        infer_compile=_to_optional_int(payload.get("infer_compile")) or 0,
+        infer_compile_mode=str(payload.get("infer_compile_mode", "off")) or "off",
+        sequence_transform=str(payload.get("sequence_transform", "none")) or "none",
+        input_mode=str(payload.get("input_mode", "onehot")) or "onehot",
+        pair_mode=str(payload.get("pair_mode", "independent")) or "independent",
+    )
+
+    # --- Site-wise: only needs the current target's checkpoint ---
+    # Mirror the current target's window dims to the partner slot so the model
+    # can load (architecture is determined by upstream/downstream values).
+    if Path(checkpoint_raw).is_file():
+        site_window = dict(window_config)
+        site_window[f"{partner_task}_len"] = window_config.get(f"{target}_len")
+        site_window[f"{partner_task}_upstream"] = window_config.get(f"{target}_upstream")
+        site_window[f"{partner_task}_downstream"] = window_config.get(f"{target}_downstream")
+        current_checkpoint = Path(checkpoint_raw)
+        site_rows = _infer_site_rows_for_grid(
+            donor_checkpoint_path=current_checkpoint,
+            acceptor_checkpoint_path=current_checkpoint,
+            window_config=site_window,
+            **_common_infer_kwargs,
+        )
+        site_max_f1 = _compute_site_max_f1_from_rows(
+            rows=[
+                row
+                for row in site_rows
+                if str(row.get("site_type", "")).strip().lower() == target
+            ],
+            labels=_load_optional_intron_labels(species),
+        )
+
+    # --- Transcript: needs the published partner checkpoint ---
     try:
         published_assets = resolve_latest_published_run_assets(
             project_root=project_root,
@@ -666,25 +703,10 @@ def _compute_grid_test_metrics(
                 else Path(checkpoint_raw)
             )
             scored_site_rows = _infer_site_rows_for_grid(
-                species=species,
-                model_name=model_name,
                 donor_checkpoint_path=donor_checkpoint_path,
                 acceptor_checkpoint_path=acceptor_checkpoint_path,
                 window_config=merged_window,
-                batch_size=_to_optional_int(payload.get("batch_size")) or 512,
-                infer_compile=_to_optional_int(payload.get("infer_compile")) or 0,
-                infer_compile_mode=str(payload.get("infer_compile_mode", "off")) or "off",
-                sequence_transform=str(payload.get("sequence_transform", "none")) or "none",
-                input_mode=str(payload.get("input_mode", "onehot")) or "onehot",
-                pair_mode=str(payload.get("pair_mode", "independent")) or "independent",
-            )
-            site_max_f1 = _compute_site_max_f1_from_rows(
-                rows=[
-                    row
-                    for row in scored_site_rows
-                    if str(row.get("site_type", "")).strip().lower() == target
-                ],
-                labels=_load_optional_intron_labels(species),
+                **_common_infer_kwargs,
             )
             if scored_site_rows:
                 unique_map = _load_required_unique_intron_map(species=species)
@@ -1083,6 +1105,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
 
+    sys.path.insert(0, str(_project_root() / "src"))
+    from util.process_title import apply_process_title, format_eta_process_title
+
     root = _project_root()
     output_dir = (
         Path(args.output_dir)
@@ -1132,9 +1157,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if remaining_total == 0:
             eta_text = "00:00:00"
         elif live_completed > 0 and elapsed_sec > 0.0:
-            eta_text = _format_duration(
-                (elapsed_sec / live_completed) * remaining_total
-            )
+            remaining_secs = (elapsed_sec / live_completed) * remaining_total
+            eta_text = _format_duration(remaining_secs)
+            apply_process_title(format_eta_process_title(remaining_secs))
 
         detail = ""
         if target_name is not None and result is not None:
