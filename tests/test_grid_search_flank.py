@@ -647,13 +647,267 @@ def test_main_eta_counts_recovered_cells(
     assert "global=2/2" in out
 
 
+def test_main_figures_only_recovers_stale_right_panel_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_cell = grid_search_window.CellResult(
+        upstream=10,
+        downstream=10,
+        target="acceptor",
+        val_max_f1=0.8,
+        test_site_max_f1=0.87,
+        test_transcript_max_f1=None,
+        status="done",
+    )
+    recovered_cell = grid_search_window.CellResult(
+        upstream=10,
+        downstream=10,
+        target="acceptor",
+        val_max_f1=0.8,
+        test_site_max_f1=0.87,
+        test_transcript_max_f1=0.9,
+        status="done",
+    )
+    plotted_cells: list[grid_search_window.CellResult] = []
+
+    monkeypatch.setattr(grid_search_window, "TARGETS", ["acceptor"])
+    monkeypatch.setattr(grid_search_window, "CELLS_PER_TARGET", 1)
+    monkeypatch.setattr(grid_search_window, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        grid_search_window, "_has_transcript_test_tsv", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_load_results",
+        lambda _path: {"acceptor_10_10": stale_cell},
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_load_cells_from_trial_metrics",
+        lambda **_kwargs: [recovered_cell],
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_save_results",
+        lambda _cells, _path: None,
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "plot_grid",
+        lambda **kwargs: plotted_cells.extend(kwargs["cells"]),
+    )
+
+    exit_code = grid_search_window.main(
+        [
+            "--species",
+            "Athal",
+            "--target",
+            "acceptor",
+            "--gpus",
+            "0",
+            "--epochs",
+            "1",
+            "--figures_only",
+            "--output_dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(plotted_cells) == 1
+    assert plotted_cells[0].test_transcript_max_f1 == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize(
+    ("target", "published_metrics_side", "expected_upstream", "expected_downstream"),
+    [
+        ("donor", "donor", 23, 24),
+        ("acceptor", "acceptor", 11, 12),
+    ],
+)
+def test_compute_grid_test_metrics_uses_partner_side_snapshot_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    published_metrics_side: str,
+    expected_upstream: int,
+    expected_downstream: int,
+) -> None:
+    import evaluate_scores
+    import run_model
+    from tools import hparam_search
+    from util import transcript_eval
+
+    trial_dir = tmp_path / target
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = trial_dir / "full_trial_0000.metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "batch_size": 512,
+                "donor_upstream": 31,
+                "donor_downstream": 32,
+                "acceptor_upstream": 41,
+                "acceptor_downstream": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    trial_checkpoint = tmp_path / "trial.pt"
+    trial_checkpoint.write_bytes(b"trial")
+    partner_checkpoint = tmp_path / "partner.pt"
+    partner_checkpoint.write_bytes(b"partner")
+    donor_metrics_path = tmp_path / "donor.metrics.json"
+    donor_metrics_path.write_text(
+        json.dumps(
+            {
+                "donor_upstream": 11,
+                "donor_downstream": 12,
+                "acceptor_upstream": 13,
+                "acceptor_downstream": 14,
+            }
+        ),
+        encoding="utf-8",
+    )
+    acceptor_metrics_path = tmp_path / "acceptor.metrics.json"
+    acceptor_metrics_path.write_text(
+        json.dumps(
+            {
+                "donor_upstream": 21,
+                "donor_downstream": 22,
+                "acceptor_upstream": 23,
+                "acceptor_downstream": 24,
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot_path = (
+        tmp_path / "data" / "Athal" / "tuning" / "cnn_v2" / "versions" / "cnn_v2.12.json"
+    )
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "best_configs": {
+                    "donor": {"metrics_json": str(donor_metrics_path)},
+                    "acceptor": {"metrics_json": str(acceptor_metrics_path)},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(grid_search_window, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        hparam_search,
+        "_extract_checkpoint_paths_from_metrics",
+        lambda _path: {f"{target}_checkpoint_path": str(trial_checkpoint)},
+    )
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_published_run_assets",
+        lambda **_kwargs: {
+            "published_name": "cnn_v2.12",
+            "donor_checkpoint_path": str(partner_checkpoint),
+            "acceptor_checkpoint_path": str(partner_checkpoint),
+            "metrics_json": str(
+                donor_metrics_path
+                if published_metrics_side == "donor"
+                else acceptor_metrics_path
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_optional_intron_labels",
+        lambda _species: {},
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_expand_unique_site_rows",
+        lambda site_score_rows, unique_map: site_score_rows,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_resolve_ref_gff_file",
+        lambda _species, _version: str(tmp_path / "ref.gff"),
+    )
+    monkeypatch.setattr(
+        transcript_eval,
+        "aggregate_transcript_scores",
+        lambda **_kwargs: [{"transcript_id": "tx1", "score": 0.5}],
+    )
+    monkeypatch.setattr(
+        transcript_eval,
+        "write_transcript_scores",
+        lambda path, rows: Path(path).write_text("ok\n", encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_kwargs: ["max_f1=0.88"],
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_extract_max_f1_from_eval_lines",
+        lambda _lines: 0.88,
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_compute_site_max_f1_from_rows",
+        lambda **_kwargs: 0.91,
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_resolve_class_file",
+        lambda _species: str(tmp_path / "class.txt"),
+    )
+
+    captured_windows: list[dict[str, int | None]] = []
+
+    def _fake_infer_site_rows_for_grid(**kwargs: object) -> list[dict[str, object]]:
+        captured_windows.append(dict(kwargs["window_config"]))
+        return [
+            {"site_type": "donor"},
+            {"site_type": "acceptor"},
+        ]
+
+    monkeypatch.setattr(
+        grid_search_window,
+        "_infer_site_rows_for_grid",
+        _fake_infer_site_rows_for_grid,
+    )
+
+    result = grid_search_window._compute_grid_test_metrics(
+        species="Athal",
+        model_name="cnn_v2",
+        target=target,
+        metrics_json=str(metrics_path),
+    )
+
+    assert result["test_site_max_f1"] == pytest.approx(0.91)
+    assert result["test_transcript_max_f1"] == pytest.approx(0.88)
+    assert len(captured_windows) == 2
+    partner_window = captured_windows[1]
+    assert partner_window[f"{target}_upstream"] == expected_upstream
+    assert partner_window[f"{target}_downstream"] == expected_downstream
+
+
 def test_compute_grid_test_metrics_tolerates_missing_latest_published_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tools import hparam_search
 
-    metrics_path = tmp_path / "full_trial_0000.metrics.json"
+    trial_dir = tmp_path / "donor"
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = trial_dir / "full_trial_0000.metrics.json"
     metrics_path.write_text(json.dumps({"batch_size": 512}), encoding="utf-8")
 
     monkeypatch.setattr(
@@ -663,13 +917,8 @@ def test_compute_grid_test_metrics_tolerates_missing_latest_published_checkpoint
     )
     monkeypatch.setattr(
         versioned_artifacts,
-        "resolve_latest_published_run_assets",
+        "resolve_published_run_assets",
         lambda **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
-    )
-    monkeypatch.setattr(
-        versioned_artifacts,
-        "resolve_latest_published_name",
-        lambda *_args, **_kwargs: None,
     )
 
     result = grid_search_window._compute_grid_test_metrics(
@@ -684,7 +933,7 @@ def test_compute_grid_test_metrics_tolerates_missing_latest_published_checkpoint
         "test_transcript_max_f1": None,
     }
     saved = json.loads(
-        (tmp_path / "full_trial_0000.metrics.grid_eval.json").read_text(
+        (trial_dir / "full_trial_0000.metrics.grid_eval.json").read_text(
             encoding="utf-8"
         )
     )

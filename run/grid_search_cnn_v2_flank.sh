@@ -11,13 +11,13 @@ fi
 # CONFIG (edit here)
 # --------------------------
 
-SPECIES="Athal, Dmel, Hsap, Mmus"
+SPECIES="Hsap, Mmus"
 
 # "donor", "acceptor", or "both"
-TARGET="both"
+TARGET="donor"
 INTRONMODEL_AUTO_TMUX="on"
 # GPU IDs to use (comma-separated), or "auto"
-GPU_IDS="0,2,5,7"
+GPU_IDS="4,5,6,7"
 FULL_EPOCHS="15"
 BASE_SEED="1337"
 BATCH_SIZE="512"
@@ -33,6 +33,9 @@ OUTPUT_DIR=""
 
 # Set to "1" to skip training and only regenerate figures from cached JSON.
 FIGURES_ONLY="0"
+
+# Set to "1" to skip training/plotting and only delete cached trial checkpoints.
+CLEANUP_ONLY="0"
 
 export INTRONMODEL_AUTO_TMUX
 
@@ -67,6 +70,21 @@ if [[ -n "${INTRONMODEL_GRID_SPECIES_OVERRIDE:-}" ]]; then
 	SPECIES="${INTRONMODEL_GRID_SPECIES_OVERRIDE}"
 fi
 
+if [[ "${FIGURES_ONLY}" == "1" && "${CLEANUP_ONLY}" == "1" ]]; then
+	echo "[grid_search_cnn_v2_flank.sh] FIGURES_ONLY=1 and CLEANUP_ONLY=1 cannot be combined." >&2
+	exit 1
+fi
+
+RUN_MODE="train"
+MODE_ARGS=()
+if [[ "${FIGURES_ONLY}" == "1" ]]; then
+	RUN_MODE="figures_only"
+	MODE_ARGS+=("--figures_only")
+elif [[ "${CLEANUP_ONLY}" == "1" ]]; then
+	RUN_MODE="cleanup_only"
+	MODE_ARGS+=("--cleanup_only")
+fi
+
 # --------------------------
 # Build base argument list (species-independent)
 # --------------------------
@@ -81,11 +99,8 @@ BASE_ARGS=(
 	"--compile_mode" "${COMPILE_MODE}"
 	"--infer_compile" "${INFER_COMPILE}"
 	"--infer_compile_mode" "${INFER_COMPILE_MODE}"
+	"${MODE_ARGS[@]}"
 )
-
-if [[ "${FIGURES_ONLY}" == "1" ]]; then
-	BASE_ARGS+=("--figures_only")
-fi
 
 # --------------------------
 # Loop over species
@@ -121,6 +136,7 @@ for idx in "${!FILTERED_SPECIES[@]}"; do
 	fi
 
 	echo "[grid_search_cnn_v2_flank.sh] species=${sp} target=${TARGET}" \
+		"mode=${RUN_MODE}" \
 		"gpus=${GPU_IDS} epochs=${FULL_EPOCHS}" \
 		"compile=${COMPILE_MODE}/${INFER_COMPILE_MODE}" \
 		"global_trials=$((GLOBAL_TRIAL_OFFSET + 1))-${TOTAL_GLOBAL_TRIALS}"

@@ -105,7 +105,13 @@ def _cell_has_required_metrics(
     del model_name
     if cell.val_max_f1 is None:
         return False
-    if has_test and cell.test_site_max_f1 is None:
+    if has_test:
+        if cell.test_site_max_f1 is None:
+            return False
+        if cell.test_transcript_max_f1 is None:
+            return False
+        return True
+    if cell.val_pr_auc is None:
         return False
     return True
 
@@ -367,13 +373,6 @@ def _run_grid_target(
         else:
             cell.status = "failed"
             cell.error = tr.error_message
-        deleted_checkpoints = _delete_trial_checkpoints(tr.metrics_json)
-        if deleted_checkpoints > 0:
-            print(
-                f"[grid] {target} trial={tr.trial_id:04d} "
-                f"deleted_checkpoints={deleted_checkpoints}",
-                flush=True,
-            )
         cells.append(cell)
 
         # Persist after each cell so partial results survive interruption.
@@ -409,6 +408,38 @@ def _load_metrics_payload(metrics_json: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         return {}
     return payload
+
+
+def _resolve_published_task_metrics_json(
+    *,
+    species: str,
+    model_name: str,
+    published_name: str,
+    task: str,
+    fallback_metrics_json: object,
+) -> Optional[str]:
+    """Resolve one published task's own metrics JSON from version snapshot."""
+    from util.versioned_artifacts import resolve_versions_dir
+
+    snapshot_name = published_name.strip()
+    if snapshot_name != "":
+        snapshot_path = (
+            resolve_versions_dir(_project_root() / "data", species, model_name)
+            / f"{snapshot_name}.json"
+        )
+        snapshot_payload = _load_metrics_payload(str(snapshot_path))
+        best_configs = snapshot_payload.get("best_configs")
+        if isinstance(best_configs, dict):
+            task_payload = best_configs.get(task)
+            if isinstance(task_payload, dict):
+                metrics_json = str(task_payload.get("metrics_json", "")).strip()
+                if metrics_json != "":
+                    return metrics_json
+    if isinstance(fallback_metrics_json, str):
+        metrics_json = fallback_metrics_json.strip()
+        if metrics_json != "":
+            return metrics_json
+    return None
 
 
 def _trial_artifact_base(metrics_json: str) -> Path:
@@ -585,11 +616,7 @@ def _compute_grid_test_metrics(
     )
     from tools import hparam_search
     from util.transcript_eval import aggregate_transcript_scores, write_transcript_scores
-    from util.versioned_artifacts import (
-        normalize_published_run_checkpoints,
-        resolve_latest_published_name,
-        resolve_latest_published_run_assets,
-    )
+    from util.versioned_artifacts import resolve_published_run_assets
 
     payload = _load_metrics_payload(metrics_json)
     if not payload:
@@ -658,37 +685,29 @@ def _compute_grid_test_metrics(
 
     if partner_site_rows is None:
         try:
-            published_assets = resolve_latest_published_run_assets(
+            published_assets = resolve_published_run_assets(
                 project_root=project_root,
                 species=species,
                 model_name=model_name,
+                published_name=None,
+                allow_missing_checkpoints=True,
             )
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             published_assets = None
-            latest_published_name = resolve_latest_published_name(
-                project_root / "data",
-                species,
-                model_name,
-            )
-            if latest_published_name is not None:
-                try:
-                    normalize_published_run_checkpoints(
-                        project_root=project_root,
-                        species=species,
-                        model_name=model_name,
-                        published_name=latest_published_name,
-                    )
-                    published_assets = resolve_latest_published_run_assets(
-                        project_root=project_root,
-                        species=species,
-                        model_name=model_name,
-                    )
-                except (FileNotFoundError, ValueError):
-                    published_assets = None
         if published_assets is not None:
             partner_published_name = published_assets.get("published_name")
             partner_checkpoint_raw = published_assets.get(f"{partner_task}_checkpoint_path")
-            partner_metrics_json_path = published_assets.get("metrics_json")
+            partner_metrics_json_path = _resolve_published_task_metrics_json(
+                species=species,
+                model_name=model_name,
+                published_name=(
+                    partner_published_name
+                    if isinstance(partner_published_name, str)
+                    else ""
+                ),
+                task=partner_task,
+                fallback_metrics_json=published_assets.get("metrics_json"),
+            )
             if (
                 isinstance(partner_checkpoint_raw, str)
                 and partner_checkpoint_raw.strip() != ""
@@ -793,6 +812,32 @@ def _delete_trial_checkpoints(metrics_json: str) -> int:
         except FileNotFoundError:
             continue
         deleted_count += 1
+    return deleted_count
+
+
+def _cleanup_grid_target_checkpoints(target_dir: Path) -> int:
+    """Delete all trial checkpoints referenced under one target directory."""
+    if not target_dir.exists():
+        return 0
+
+    deleted_count = 0
+    for metrics_path in sorted(target_dir.glob("full_trial_*.metrics.json")):
+        if _TRIAL_METRICS_PATTERN.search(metrics_path.name) is None:
+            continue
+        deleted_count += _delete_trial_checkpoints(str(metrics_path))
+    return deleted_count
+
+
+def _cleanup_grid_checkpoints(output_dir: Path, targets: list[str]) -> int:
+    """Delete cached trial checkpoints for selected targets in one grid run."""
+    deleted_count = 0
+    for target in targets:
+        target_deleted = _cleanup_grid_target_checkpoints(output_dir / target)
+        print(
+            f"[grid] cleanup target={target} deleted_checkpoints={target_deleted}",
+            flush=True,
+        )
+        deleted_count += target_deleted
     return deleted_count
 
 
@@ -1115,9 +1160,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip training; regenerate figures from cached results JSON only.",
     )
+    p.add_argument(
+        "--cleanup_only",
+        action="store_true",
+        help="Skip training/plotting; delete cached trial checkpoints only.",
+    )
     p.add_argument("--global_trial_offset", type=int, default=0)
     p.add_argument("--global_trial_total", type=int, default=0)
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.figures_only and args.cleanup_only:
+        p.error("--figures_only and --cleanup_only cannot be combined.")
+    return args
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1138,9 +1191,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    has_test = _has_transcript_test_tsv(root, args.species)
-
     targets = TARGETS if args.target == "both" else [args.target]
+    if args.cleanup_only:
+        deleted_count = _cleanup_grid_checkpoints(output_dir, targets)
+        print(
+            f"[grid] cleanup species={args.species} deleted_checkpoints={deleted_count}",
+            flush=True,
+        )
+        return 0
+
+    has_test = _has_transcript_test_tsv(root, args.species)
 
     # GPU list
     gpu_list: list[str]
@@ -1178,10 +1238,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         eta_text = "unknown"
         if remaining_total == 0:
             eta_text = "00:00:00"
+            apply_process_title(f"grid {args.species} done")
         elif live_completed > 0 and elapsed_sec > 0.0:
             remaining_secs = (elapsed_sec / live_completed) * remaining_total
             eta_text = _format_duration(remaining_secs)
             apply_process_title(f"grid {args.species} {format_eta_process_title(remaining_secs)}")
+        else:
+            apply_process_title(f"grid {args.species} ETA:--/-- --:--")
 
         detail = ""
         if target_name is not None and result is not None:
@@ -1221,7 +1284,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     for target in targets:
         existing_target = {k: v for k, v in existing.items() if v.target == target}
         recovered_target_cells: list[CellResult] = []
-        if len(existing_target) < CELLS_PER_TARGET:
+        needs_recovery = len(existing_target) < CELLS_PER_TARGET or any(
+            not _cell_has_required_metrics(
+                cell,
+                model_name=args.model,
+                has_test=has_test,
+            )
+            for cell in existing_target.values()
+        )
+        if needs_recovery:
             recovered_target_cells = _load_cells_from_trial_metrics(
                 output_dir=output_dir,
                 target=target,
