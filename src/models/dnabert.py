@@ -1503,6 +1503,10 @@ def train_task_model(
     window_len: int,
     donor_len: Optional[int],
     acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
     pretrained_model_name: str = DEFAULT_PRETRAINED_MODEL_NAME,
     pretrained_revision: str = "",
     trust_remote_code: Union[bool, int] = 1,
@@ -1750,6 +1754,10 @@ def train_task_model(
             neg_path,
             donor_len=donor_len,
             acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
             negative_pair_only=True,
         )
     else:
@@ -1759,6 +1767,10 @@ def train_task_model(
             task,
             donor_len=donor_len,
             acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
         )
 
     n_pos = sum(label for _, label in examples)
@@ -3183,12 +3195,20 @@ def train(
     model_args: argparse.Namespace,
 ) -> Dict[str, object]:
     """Train DNABERT donor/acceptor or pair models via one unified interface."""
+    donor_upstream = getattr(common_args, "donor_upstream", None)
+    donor_downstream = getattr(common_args, "donor_downstream", None)
+    acceptor_upstream = getattr(common_args, "acceptor_upstream", None)
+    acceptor_downstream = getattr(common_args, "acceptor_downstream", None)
     train_pos_path, train_neg_path, inferred_train_len = resolve_train_paths(
         species=common_args.species,
         train_pos_path=common_args.train_pos_path,
         train_neg_path=common_args.train_neg_path,
         donor_len=common_args.donor_len,
         acceptor_len=common_args.acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
     )
 
     donor_len, acceptor_len = resolve_effective_window_lengths(
@@ -3201,8 +3221,16 @@ def train(
         acceptor_len=acceptor_len,
     )
 
-    donor_window_len = donor_len if donor_len is not None else 50
-    acceptor_window_len = acceptor_len if acceptor_len is not None else 50
+    donor_window_len = (
+        donor_upstream + donor_downstream
+        if donor_upstream is not None and donor_downstream is not None
+        else (donor_len if donor_len is not None else 50)
+    )
+    acceptor_window_len = (
+        acceptor_upstream + acceptor_downstream
+        if acceptor_upstream is not None and acceptor_downstream is not None
+        else (acceptor_len if acceptor_len is not None else 50)
+    )
     pair_window_len = donor_window_len + acceptor_window_len + 1
     model_name = str(getattr(common_args, "model", "dnabert"))
     model_tasks = checkpoint_tasks_for_model(model_name)
@@ -3254,6 +3282,10 @@ def train(
             window_len=task_window_len[task],
             donor_len=donor_len,
             acceptor_len=acceptor_len,
+            donor_upstream=donor_upstream,
+            donor_downstream=donor_downstream,
+            acceptor_upstream=acceptor_upstream,
+            acceptor_downstream=acceptor_downstream,
             pretrained_model_name=model_args.pretrained_model_name,
             pretrained_revision=model_args.pretrained_revision,
             trust_remote_code=model_args.trust_remote_code,
@@ -3504,6 +3536,10 @@ def infer_site(
         test_tsv=test_tsv,
         donor_len=donor_len,
         acceptor_len=acceptor_len,
+        donor_upstream=getattr(common_args, "donor_upstream", None),
+        donor_downstream=getattr(common_args, "donor_downstream", None),
+        acceptor_upstream=getattr(common_args, "acceptor_upstream", None),
+        acceptor_downstream=getattr(common_args, "acceptor_downstream", None),
     )
     print(f"Loaded test sites: {len(site_rows)}")
     if skipped_short:

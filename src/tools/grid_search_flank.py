@@ -114,7 +114,9 @@ def _format_duration(seconds: float) -> str:
 
 def _has_transcript_test_tsv(root: Path, species: str) -> bool:
     """Return whether canonical transcript test TSV exists for species."""
-    return (root / "data" / species / "processed" / "transcripts.unique.tsv").exists()
+    del root
+    from util.data_proc import data_root as _data_root
+    return (Path(_data_root()) / species / "processed" / "transcripts.unique.tsv").exists()
 
 
 def _cell_has_required_metrics(
@@ -185,8 +187,10 @@ def _run_grid_target(
     )
 
     root = _project_root()
-    pos_path = f"data/{species}/processed/site_flank100.coding.err"
-    neg_path = f"data/{species}/processed/site_flank100.neg.err"
+    from util.data_proc import data_root as _data_root
+    _dr = Path(_data_root())
+    pos_path = str(_dr / species / "processed" / "site_flank100.coding.err")
+    neg_path = str(_dr / species / "processed" / "site_flank100.neg.err")
 
     # The objective metric controls whether test PR-AUC is computed.
     # If the test TSV exists we use test_pr_auc (includes val metrics too);

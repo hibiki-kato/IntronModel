@@ -962,6 +962,24 @@ def _build_checkpoint_paths(
     return paths
 
 
+def _fill_window_len_from_4p(args: argparse.Namespace) -> None:
+    """Back-fill donor_len/acceptor_len from 4-param window args.
+
+    Models that predate the 4-parameter upstream/downstream system use
+    donor_len and acceptor_len for window sizing.  When only the 4-parameter
+    values are supplied (as in the grid search), compute the equivalent total
+    lengths so those models work correctly.
+    """
+    donor_up = getattr(args, "donor_upstream", None)
+    donor_dn = getattr(args, "donor_downstream", None)
+    acceptor_up = getattr(args, "acceptor_upstream", None)
+    acceptor_dn = getattr(args, "acceptor_downstream", None)
+    if donor_up is not None and donor_dn is not None and getattr(args, "donor_len", None) is None:
+        args.donor_len = donor_up + donor_dn
+    if acceptor_up is not None and acceptor_dn is not None and getattr(args, "acceptor_len", None) is None:
+        args.acceptor_len = acceptor_up + acceptor_dn
+
+
 def _assert_checkpoint_paths_exist(
     paths: dict[str, str],
     required_tasks: Optional[Sequence[str]] = None,
@@ -2127,6 +2145,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                     "[pipeline] Continue training (--continue_train): "
                     "use existing checkpoints as initialization."
                 )
+        _fill_window_len_from_4p(args)
         summary = model_module.train(common_args=args, model_args=args)
         _attach_validation_metadata(summary=summary, args=args)
         metrics_json = args.metrics_json
@@ -2227,6 +2246,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         for task in model_tasks:
             setattr(args, f"{task}_checkpoint_path", checkpoint_paths[task])
         _assert_checkpoint_paths_exist(checkpoint_paths, required_tasks=model_tasks)
+        _fill_window_len_from_4p(args)
         try:
             site_rows = model_module.infer_site(common_args=args, model_args=args)
         except Exception as exc:
