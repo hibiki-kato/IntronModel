@@ -11,13 +11,13 @@ fi
 # CONFIG (edit here)
 # --------------------------
 
-SPECIES="Hsap, Mmus"
+SPECIES="Athal, Dmel, Hsap, Mmus"
 
 # "donor", "acceptor", or "both"
-TARGET="donor"
-INTRONMODEL_AUTO_TMUX="on"
+TARGET="acceptor"
+INTRONMODEL_AUTO_TMUX="off"
 # GPU IDs to use (comma-separated), or "auto"
-GPU_IDS="4,5,6,7"
+GPU_IDS="0"
 FULL_EPOCHS="15"
 BASE_SEED="1337"
 BATCH_SIZE="512"
@@ -32,7 +32,7 @@ GRID_VALUES="10"
 OUTPUT_DIR=""
 
 # Set to "1" to skip training and only regenerate figures from cached JSON.
-FIGURES_ONLY="0"
+FIGURES_ONLY="1"
 
 # Set to "1" to skip training/plotting and only delete cached trial checkpoints.
 CLEANUP_ONLY="0"
@@ -118,6 +118,7 @@ else
 	TRIALS_PER_SPECIES="${TRIALS_PER_TARGET}"
 fi
 TOTAL_GLOBAL_TRIALS="$(( ${#FILTERED_SPECIES[@]} * TRIALS_PER_SPECIES ))"
+
 
 for idx in "${!FILTERED_SPECIES[@]}"; do
 	sp="${FILTERED_SPECIES[$idx]}"

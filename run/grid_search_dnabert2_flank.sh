@@ -11,14 +11,17 @@ fi
 # CONFIG (edit here)
 # --------------------------
 
-SPECIES="Athal, Dmel, Hsap, Mmus"
+SPECIES="Dmel, Hsap, Mmus"
 
 # "donor", "acceptor", or "both"
 TARGET="both"
 INTRONMODEL_AUTO_TMUX="${INTRONMODEL_AUTO_TMUX:-off}"
+# Set to a single value to run a 1x1 grid for quick test draws.
+INTRONMODEL_GRID_UPSTREAM_VALS="20, 40, 60, 80, 100"
+INTRONMODEL_GRID_DOWNSTREAM_VALS="20, 40, 60, 80, 100"
 # GPU IDs to use (comma-separated), or "auto"
-GPU_IDS="0"
-FULL_EPOCHS="6"
+GPU_IDS="4,5,6,7"
+FULL_EPOCHS="3"
 BASE_SEED="1337"
 BATCH_SIZE="64"
 VAL_FRAC="0.2"
@@ -33,7 +36,7 @@ TRUST_REMOTE_CODE="1"
 MAX_TOKENS="auto"
 HEAD_LAYER_NORM="1"
 
-COMPILE_MODE="off"
+COMPILE_MODE="on"
 INFER_COMPILE="0"
 INFER_COMPILE_MODE="off"
 
@@ -45,6 +48,8 @@ OUTPUT_DIR=""
 FIGURES_ONLY="0"
 
 export INTRONMODEL_AUTO_TMUX
+export INTRONMODEL_GRID_UPSTREAM_VALS
+export INTRONMODEL_GRID_DOWNSTREAM_VALS
 
 # --------------------------
 # Runtime implementation
@@ -139,13 +144,28 @@ while IFS= read -r sp; do
 	FILTERED_SPECIES+=("${sp}")
 done < <(build_species_list "${SPECIES}")
 
-TRIALS_PER_TARGET="100"
+# Compute trials per target from explicit grid env vars if provided,
+# otherwise fall back to 10x10 default.
+if [[ -n "${INTRONMODEL_GRID_UPSTREAM_VALS:-}" ]]; then
+	IFS=',' read -ra _UP_ARR <<< "${INTRONMODEL_GRID_UPSTREAM_VALS}"
+	UP_COUNT=${#_UP_ARR[@]}
+else
+	UP_COUNT=10
+fi
+if [[ -n "${INTRONMODEL_GRID_DOWNSTREAM_VALS:-}" ]]; then
+	IFS=',' read -ra _DN_ARR <<< "${INTRONMODEL_GRID_DOWNSTREAM_VALS}"
+	DN_COUNT=${#_DN_ARR[@]}
+else
+	DN_COUNT=10
+fi
+TRIALS_PER_TARGET="$(( UP_COUNT * DN_COUNT ))"
 if [[ "${TARGET}" == "both" ]]; then
 	TRIALS_PER_SPECIES="$((TRIALS_PER_TARGET * 2))"
 else
 	TRIALS_PER_SPECIES="${TRIALS_PER_TARGET}"
 fi
 TOTAL_GLOBAL_TRIALS="$(( ${#FILTERED_SPECIES[@]} * TRIALS_PER_SPECIES ))"
+
 
 for idx in "${!FILTERED_SPECIES[@]}"; do
 	sp="${FILTERED_SPECIES[$idx]}"

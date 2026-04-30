@@ -41,9 +41,7 @@ def _extract_site_window(
     if strand not in {"+", "-"}:
         raise ValueError("strand must be + or -")
 
-    if (site_type == "donor" and strand == "+") or (
-        site_type == "acceptor" and strand == "-"
-    ):
+    if strand == "+":
         start = pos - upstream_bp + 1
         end = pos + downstream_bp
     else:

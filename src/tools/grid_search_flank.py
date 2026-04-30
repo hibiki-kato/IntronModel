@@ -43,8 +43,30 @@ import numpy as np
 # Grid definition
 # ---------------------------------------------------------------------------
 
-UPSTREAM_VALS: list[int] = list(range(10, 101, 10))
-DOWNSTREAM_VALS: list[int] = list(range(10, 101, 10))
+
+def _parse_grid_axis_values(env_name: str, default_values: list[int]) -> list[int]:
+    raw_value = os.environ.get(env_name, "").strip()
+    if not raw_value:
+        return default_values
+    parsed_values: list[int] = []
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parsed_values.append(int(item))
+    if not parsed_values:
+        raise ValueError(f"{env_name} must contain at least one integer")
+    return parsed_values
+
+
+UPSTREAM_VALS: list[int] = _parse_grid_axis_values(
+    "INTRONMODEL_GRID_UPSTREAM_VALS",
+    list(range(10, 101, 10)),
+)
+DOWNSTREAM_VALS: list[int] = _parse_grid_axis_values(
+    "INTRONMODEL_GRID_DOWNSTREAM_VALS",
+    list(range(10, 101, 10)),
+)
 
 TARGETS: list[str] = ["donor", "acceptor"]
 CELLS_PER_TARGET: int = len(UPSTREAM_VALS) * len(DOWNSTREAM_VALS)
@@ -495,7 +517,9 @@ def _resolve_class_file(species: str) -> str:
     dirs = species_data_dirs(species)
     processed_class_file = os.path.join(dirs["processed"], "transcript_class.txt")
     raw_class_file = os.path.join(dirs["raw"], "transcript_class.txt")
-    return processed_class_file if os.path.isfile(processed_class_file) else raw_class_file
+    return (
+        processed_class_file if os.path.isfile(processed_class_file) else raw_class_file
+    )
 
 
 def _infer_site_rows_for_grid(
@@ -615,7 +639,10 @@ def _compute_grid_test_metrics(
         _resolve_ref_gff_file,
     )
     from tools import hparam_search
-    from util.transcript_eval import aggregate_transcript_scores, write_transcript_scores
+    from util.transcript_eval import (
+        aggregate_transcript_scores,
+        write_transcript_scores,
+    )
     from util.versioned_artifacts import resolve_published_run_assets
 
     payload = _load_metrics_payload(metrics_json)
@@ -623,7 +650,9 @@ def _compute_grid_test_metrics(
         return {}
 
     window_config = _resolve_window_config(payload)
-    checkpoint_paths = hparam_search._extract_checkpoint_paths_from_metrics(metrics_json)
+    checkpoint_paths = hparam_search._extract_checkpoint_paths_from_metrics(
+        metrics_json
+    )
     checkpoint_key = f"{target}_checkpoint_path"
     checkpoint_raw = checkpoint_paths.get(checkpoint_key)
     if checkpoint_raw is None or checkpoint_raw.strip() == "":
@@ -652,8 +681,12 @@ def _compute_grid_test_metrics(
     if Path(checkpoint_raw).is_file():
         site_window = dict(window_config)
         site_window[f"{partner_task}_len"] = window_config.get(f"{target}_len")
-        site_window[f"{partner_task}_upstream"] = window_config.get(f"{target}_upstream")
-        site_window[f"{partner_task}_downstream"] = window_config.get(f"{target}_downstream")
+        site_window[f"{partner_task}_upstream"] = window_config.get(
+            f"{target}_upstream"
+        )
+        site_window[f"{partner_task}_downstream"] = window_config.get(
+            f"{target}_downstream"
+        )
         current_checkpoint = Path(checkpoint_raw)
         site_rows = _infer_site_rows_for_grid(
             donor_checkpoint_path=current_checkpoint,
@@ -672,7 +705,9 @@ def _compute_grid_test_metrics(
 
     # --- Transcript: partner site rows scored once from published checkpoint ---
     # Cache lives next to the target's trial directory so all 100 trials share it.
-    partner_cache_path = Path(metrics_json).parent.parent / f"partner_{partner_task}_site_rows.json"
+    partner_cache_path = (
+        Path(metrics_json).parent.parent / f"partner_{partner_task}_site_rows.json"
+    )
     partner_site_rows: Optional[list] = None
 
     if partner_cache_path.exists():
@@ -696,7 +731,9 @@ def _compute_grid_test_metrics(
             published_assets = None
         if published_assets is not None:
             partner_published_name = published_assets.get("published_name")
-            partner_checkpoint_raw = published_assets.get(f"{partner_task}_checkpoint_path")
+            partner_checkpoint_raw = published_assets.get(
+                f"{partner_task}_checkpoint_path"
+            )
             partner_metrics_json_path = _resolve_published_task_metrics_json(
                 species=species,
                 model_name=model_name,
@@ -719,9 +756,15 @@ def _compute_grid_test_metrics(
                 partner_window = _resolve_window_config(partner_payload)
                 # Mirror partner's own dims to both slots so the model can load.
                 partner_slot_window = dict(partner_window)
-                partner_slot_window[f"{target}_len"] = partner_window.get(f"{partner_task}_len")
-                partner_slot_window[f"{target}_upstream"] = partner_window.get(f"{partner_task}_upstream")
-                partner_slot_window[f"{target}_downstream"] = partner_window.get(f"{partner_task}_downstream")
+                partner_slot_window[f"{target}_len"] = partner_window.get(
+                    f"{partner_task}_len"
+                )
+                partner_slot_window[f"{target}_upstream"] = partner_window.get(
+                    f"{partner_task}_upstream"
+                )
+                partner_slot_window[f"{target}_downstream"] = partner_window.get(
+                    f"{partner_task}_downstream"
+                )
                 partner_checkpoint = Path(partner_checkpoint_raw)
                 all_partner_rows = _infer_site_rows_for_grid(
                     donor_checkpoint_path=partner_checkpoint,
@@ -730,7 +773,8 @@ def _compute_grid_test_metrics(
                     **_common_infer_kwargs,
                 )
                 partner_site_rows = [
-                    row for row in all_partner_rows
+                    row
+                    for row in all_partner_rows
                     if str(row.get("site_type", "")).strip().lower() == partner_task
                 ]
                 try:
@@ -742,7 +786,8 @@ def _compute_grid_test_metrics(
 
     if partner_site_rows:
         current_target_rows = [
-            row for row in site_rows
+            row
+            for row in site_rows
             if str(row.get("site_type", "")).strip().lower() == target
         ]
         all_rows_for_transcript = current_target_rows + partner_site_rows
@@ -768,8 +813,7 @@ def _compute_grid_test_metrics(
                 ref_gff=_resolve_ref_gff_file(species, None),
             )
             eval_output_path = Path(
-                str(_trial_artifact_base(metrics_json))
-                + ".test_transcript.eval.txt"
+                str(_trial_artifact_base(metrics_json)) + ".test_transcript.eval.txt"
             )
             eval_output_path.write_text(
                 ("\n".join(output_lines) + "\n") if output_lines else "",
@@ -922,7 +966,9 @@ def _load_cells_from_trial_metrics(
         test_site_max_f1: Optional[float] = None
         test_transcript_max_f1: Optional[float] = None
         if has_test:
-            eval_payload = _load_metrics_payload(str(_grid_eval_metrics_path(str(metrics_path))))
+            eval_payload = _load_metrics_payload(
+                str(_grid_eval_metrics_path(str(metrics_path)))
+            )
             test_site_max_f1 = _to_float_or_none(eval_payload.get("test_site_max_f1"))
             test_transcript_max_f1 = _to_float_or_none(
                 eval_payload.get("test_transcript_max_f1")
@@ -977,6 +1023,8 @@ def _plot_heatmap(
     cmap: str = "viridis",
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    xlabel: str = "Upstream flank length",
+    ylabel: str = "Downstream flank length",
 ) -> None:
     finite = grid[np.isfinite(grid)]
     if finite.size == 0:
@@ -1017,8 +1065,8 @@ def _plot_heatmap(
     ax.set_xticklabels(UPSTREAM_VALS, fontsize=8)
     ax.set_yticks(range(len(DOWNSTREAM_VALS)))
     ax.set_yticklabels(DOWNSTREAM_VALS, fontsize=8)
-    ax.set_xlabel("upstream (bp)", fontsize=9)
-    ax.set_ylabel("downstream (bp)", fontsize=9)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=9)
     ax.set_title(title, fontsize=10, pad=8)
 
     cbar = ax.figure.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
@@ -1177,7 +1225,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
 
     sys.path.insert(0, str(_project_root() / "src"))
-    from util.process_title import apply_process_title, format_eta_process_title
+    from util.process_title import (
+        apply_process_title,
+        apply_process_title_from_env,
+        format_eta_process_title,
+    )
+
+    apply_process_title_from_env() or apply_process_title("ETA:--/-- --:--")
 
     # Subprocesses (training trials) inherit this env var, disabling their
     # per-trial ETA process title so only the global ETA is visible.
@@ -1242,9 +1296,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif live_completed > 0 and elapsed_sec > 0.0:
             remaining_secs = (elapsed_sec / live_completed) * remaining_total
             eta_text = _format_duration(remaining_secs)
-            apply_process_title(f"grid {args.species} {format_eta_process_title(remaining_secs)}")
+            apply_process_title(
+                f"grid {args.species} {format_eta_process_title(remaining_secs)}"
+            )
         else:
-            apply_process_title(f"grid {args.species} ETA:--/-- --:--")
+            if not apply_process_title_from_env():
+                apply_process_title(f"grid {args.species} ETA:--/-- --:--")
 
         detail = ""
         if target_name is not None and result is not None:
