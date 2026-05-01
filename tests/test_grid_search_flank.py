@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools import grid_search_flank as grid_search_window
+from util import data_proc
 from util import versioned_artifacts
 
 
@@ -29,6 +30,58 @@ def test_delete_trial_checkpoints_removes_referenced_files(tmp_path: Path) -> No
 
     assert deleted_count == 1
     assert not checkpoint_path.exists()
+
+
+def test_validate_grid_test_prerequisites_requires_partner_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processed_dir = tmp_path / "processed"
+    raw_dir = tmp_path / "raw"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (processed_dir / "transcripts.unique.tsv").write_text("", encoding="utf-8")
+    (processed_dir / "transcripts.unique.map.tsv").write_text("", encoding="utf-8")
+    (processed_dir / "intron_eval_flank10.unique.tsv").write_text(
+        "",
+        encoding="utf-8",
+    )
+    class_file = processed_dir / "transcript_class.txt"
+    class_file.write_text("", encoding="utf-8")
+    ref_gff = raw_dir / "reference.gff3"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+    metrics_json = raw_dir / "published.train.json"
+    metrics_json.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        data_proc,
+        "species_data_dirs",
+        lambda _species: {
+            "base": str(tmp_path),
+            "processed": str(processed_dir),
+            "raw": str(raw_dir),
+        },
+    )
+    monkeypatch.setattr(grid_search_window, "_has_transcript_test_tsv", lambda *_: True)
+    monkeypatch.setattr(grid_search_window, "_resolve_class_file", lambda _species: str(class_file))
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_published_run_assets",
+        lambda **_kwargs: {
+            "published_name": "cnn_v2.99",
+            "metrics_json": str(metrics_json),
+            "donor_checkpoint_path": str(raw_dir / "missing_donor.pt"),
+            "acceptor_checkpoint_path": str(raw_dir / "acceptor.pt"),
+        },
+    )
+
+    with pytest.raises(FileNotFoundError, match="missing published donor checkpoint"):
+        grid_search_window._validate_grid_test_prerequisites(
+            root=tmp_path,
+            species="SpX",
+            model_name="cnn_v2",
+            targets=["acceptor"],
+        )
 
 
 def test_run_grid_target_passes_epochs_override(
@@ -717,6 +770,69 @@ def test_main_figures_only_recovers_stale_right_panel_metrics(
     assert exit_code == 0
     assert len(plotted_cells) == 1
     assert plotted_cells[0].test_transcript_max_f1 == pytest.approx(0.9)
+
+
+def test_main_figures_only_skips_grid_test_prereq_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plotted_cells: list[grid_search_window.CellResult] = []
+
+    monkeypatch.setattr(grid_search_window, "TARGETS", ["acceptor"])
+    monkeypatch.setattr(grid_search_window, "CELLS_PER_TARGET", 1)
+    monkeypatch.setattr(grid_search_window, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        grid_search_window, "_has_transcript_test_tsv", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_validate_grid_test_prerequisites",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_load_results",
+        lambda _path: {
+            "acceptor_10_10": grid_search_window.CellResult(
+                upstream=10,
+                downstream=10,
+                target="acceptor",
+                val_max_f1=0.8,
+                test_site_max_f1=0.87,
+                test_transcript_max_f1=0.9,
+                status="done",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_save_results",
+        lambda _cells, _path: None,
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "plot_grid",
+        lambda **kwargs: plotted_cells.extend(kwargs["cells"]),
+    )
+
+    exit_code = grid_search_window.main(
+        [
+            "--species",
+            "Athal",
+            "--target",
+            "acceptor",
+            "--gpus",
+            "0",
+            "--epochs",
+            "1",
+            "--figures_only",
+            "--output_dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(plotted_cells) == 1
 
 
 @pytest.mark.parametrize(

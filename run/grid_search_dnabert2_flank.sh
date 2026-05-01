@@ -11,7 +11,7 @@ fi
 # CONFIG (edit here)
 # --------------------------
 
-SPECIES="Dmel, Hsap, Mmus"
+SPECIES="Dmel,Hsap,Mmus"
 
 # "donor", "acceptor", or "both"
 TARGET="both"

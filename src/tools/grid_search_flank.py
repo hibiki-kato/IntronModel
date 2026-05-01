@@ -526,6 +526,102 @@ def _resolve_class_file(species: str) -> str:
     )
 
 
+def _validate_grid_test_prerequisites(
+    *,
+    root: Path,
+    species: str,
+    model_name: str,
+    targets: list[str],
+) -> None:
+    """Fail fast when held-out grid-test artifacts are unavailable."""
+    from run_model import _resolve_ref_gff_file
+    from util.data_proc import species_data_dirs
+    from util.unique_intron import UNIQUE_MAP_TSV_NAME
+    from util.versioned_artifacts import resolve_published_run_assets
+
+    if not _has_transcript_test_tsv(root, species):
+        return
+
+    species_dirs = species_data_dirs(species)
+    processed_dir = Path(species_dirs["processed"])
+    raw_dir = Path(species_dirs["raw"])
+    errors: list[str] = []
+
+    intron_labels_path = processed_dir / "intron_eval_flank10.unique.tsv"
+    if not intron_labels_path.is_file():
+        errors.append(f"missing site-label TSV: {intron_labels_path}")
+
+    unique_map_path = processed_dir / UNIQUE_MAP_TSV_NAME
+    if not unique_map_path.is_file():
+        errors.append(f"missing unique-intron map TSV: {unique_map_path}")
+
+    class_file = Path(_resolve_class_file(species))
+    if not class_file.is_file():
+        errors.append(f"missing transcript class file: {class_file}")
+
+    try:
+        ref_gff_path = Path(_resolve_ref_gff_file(species, None))
+    except FileNotFoundError as exc:
+        errors.append(str(exc))
+    else:
+        if not ref_gff_path.is_file():
+            errors.append(f"missing reference GFF: {ref_gff_path}")
+
+    try:
+        published_assets = resolve_published_run_assets(
+            project_root=root,
+            species=species,
+            model_name=model_name,
+            published_name=None,
+            allow_missing_checkpoints=True,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        published_assets = None
+        errors.append(str(exc))
+
+    if published_assets is None:
+        errors.append(
+            f"missing published assets for species={species} model={model_name}"
+        )
+    else:
+        published_name = str(published_assets.get("published_name", "")).strip()
+        fallback_metrics_json = published_assets.get("metrics_json")
+        for target in targets:
+            partner_task = "acceptor" if target == "donor" else "donor"
+            partner_checkpoint = Path(
+                str(published_assets.get(f"{partner_task}_checkpoint_path", "")).strip()
+            )
+            if not partner_checkpoint.is_file():
+                errors.append(
+                    f"missing published {partner_task} checkpoint for target={target}: "
+                    f"{partner_checkpoint}"
+                )
+            partner_metrics_json = _resolve_published_task_metrics_json(
+                species=species,
+                model_name=model_name,
+                published_name=published_name,
+                task=partner_task,
+                fallback_metrics_json=fallback_metrics_json,
+            )
+            if partner_metrics_json is None or partner_metrics_json.strip() == "":
+                errors.append(
+                    f"missing published {partner_task} metrics JSON for target={target}"
+                )
+            elif not Path(partner_metrics_json).is_file():
+                errors.append(
+                    f"missing published {partner_task} metrics file for target={target}: "
+                    f"{partner_metrics_json}"
+                )
+
+    if errors:
+        details = "\n".join(f"- {message}" for message in errors)
+        raise FileNotFoundError(
+            "Grid test prerequisites are incomplete:\n"
+            f"{details}\n"
+            f"raw_dir={raw_dir}\nprocessed_dir={processed_dir}"
+        )
+
+
 def _infer_site_rows_for_grid(
     *,
     species: str,
@@ -1259,6 +1355,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     has_test = _has_transcript_test_tsv(root, args.species)
+    if not args.figures_only:
+        _validate_grid_test_prerequisites(
+            root=root,
+            species=args.species,
+            model_name=args.model,
+            targets=targets,
+        )
 
     # GPU list
     gpu_list: list[str]
