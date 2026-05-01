@@ -32,6 +32,40 @@ def test_delete_trial_checkpoints_removes_referenced_files(tmp_path: Path) -> No
     assert not checkpoint_path.exists()
 
 
+def test_resolve_published_task_metrics_json_ignores_dot_placeholder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    versions_dir = tmp_path / "SpX" / "tuning" / "dnabert2" / "versions"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    (versions_dir / "dnabert2.01.json").write_text(
+        json.dumps(
+            {
+                "best_configs": {
+                    "donor": {"metrics_json": "."},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_versions_dir",
+        lambda _data_root, _species, _model_name: versions_dir,
+    )
+
+    resolved = grid_search_window._resolve_published_task_metrics_json(
+        species="SpX",
+        model_name="dnabert2",
+        published_name="dnabert2.01",
+        task="donor",
+        fallback_metrics_json=".",
+    )
+
+    assert resolved is None
+
+
 def test_validate_grid_test_prerequisites_requires_partner_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1054,3 +1088,112 @@ def test_compute_grid_test_metrics_tolerates_missing_latest_published_checkpoint
         )
     )
     assert saved == result
+
+
+def test_compute_grid_test_metrics_allows_missing_partner_metrics_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import evaluate_scores
+    import run_model
+    from tools import hparam_search
+    from util import transcript_eval
+
+    trial_dir = tmp_path / "donor"
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = trial_dir / "full_trial_0000.metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "batch_size": 512,
+                "donor_upstream": 31,
+                "donor_downstream": 32,
+            }
+        ),
+        encoding="utf-8",
+    )
+    trial_checkpoint = tmp_path / "trial.pt"
+    partner_checkpoint = tmp_path / "partner.pt"
+    trial_checkpoint.write_bytes(b"trial")
+    partner_checkpoint.write_bytes(b"partner")
+
+    monkeypatch.setattr(grid_search_window, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        hparam_search,
+        "_extract_checkpoint_paths_from_metrics",
+        lambda _path: {"donor_checkpoint_path": str(trial_checkpoint)},
+    )
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_published_run_assets",
+        lambda **_kwargs: {
+            "published_name": "dnabert2.01",
+            "donor_checkpoint_path": str(partner_checkpoint),
+            "acceptor_checkpoint_path": str(partner_checkpoint),
+            "metrics_json": ".",
+        },
+    )
+    monkeypatch.setattr(run_model, "_load_optional_intron_labels", lambda _species: {})
+    monkeypatch.setattr(
+        run_model,
+        "_load_required_unique_intron_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_expand_unique_site_rows",
+        lambda site_score_rows, unique_map: site_score_rows,
+    )
+    monkeypatch.setattr(
+        run_model,
+        "_resolve_ref_gff_file",
+        lambda _species, _version: str(tmp_path / "ref.gff"),
+    )
+    monkeypatch.setattr(
+        transcript_eval,
+        "aggregate_transcript_scores",
+        lambda **_kwargs: [{"transcript_id": "tx1", "score": 0.5}],
+    )
+    monkeypatch.setattr(
+        transcript_eval,
+        "write_transcript_scores",
+        lambda path, rows: Path(path).write_text("ok\n", encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        evaluate_scores,
+        "evaluate_score_file",
+        lambda **_kwargs: ["max_f1=0.77"],
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_extract_max_f1_from_eval_lines",
+        lambda _lines: 0.77,
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_compute_site_max_f1_from_rows",
+        lambda **_kwargs: 0.91,
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_resolve_class_file",
+        lambda _species: str(tmp_path / "class.txt"),
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_infer_site_rows_for_grid",
+        lambda **_kwargs: [
+            {"site_type": "donor"},
+            {"site_type": "acceptor"},
+        ],
+    )
+
+    result = grid_search_window._compute_grid_test_metrics(
+        species="Athal",
+        model_name="dnabert2",
+        target="donor",
+        metrics_json=str(metrics_path),
+    )
+
+    assert result["test_site_max_f1"] == pytest.approx(0.91)
+    assert result["test_transcript_max_f1"] == pytest.approx(0.77)

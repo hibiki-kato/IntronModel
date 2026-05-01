@@ -447,6 +447,14 @@ def _resolve_published_task_metrics_json(
     """Resolve one published task's own metrics JSON from version snapshot."""
     from util.versioned_artifacts import resolve_versions_dir
 
+    def _normalize_metrics_json_path(value: object) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        metrics_json = value.strip()
+        if metrics_json in {"", ".", "None", "null"}:
+            return None
+        return metrics_json
+
     snapshot_name = published_name.strip()
     if snapshot_name != "":
         snapshot_path = (
@@ -458,13 +466,14 @@ def _resolve_published_task_metrics_json(
         if isinstance(best_configs, dict):
             task_payload = best_configs.get(task)
             if isinstance(task_payload, dict):
-                metrics_json = str(task_payload.get("metrics_json", "")).strip()
-                if metrics_json != "":
+                metrics_json = _normalize_metrics_json_path(
+                    task_payload.get("metrics_json", "")
+                )
+                if metrics_json is not None:
                     return metrics_json
-    if isinstance(fallback_metrics_json, str):
-        metrics_json = fallback_metrics_json.strip()
-        if metrics_json != "":
-            return metrics_json
+    metrics_json = _normalize_metrics_json_path(fallback_metrics_json)
+    if metrics_json is not None:
+        return metrics_json
     return None
 
 
@@ -603,11 +612,11 @@ def _validate_grid_test_prerequisites(
                 task=partner_task,
                 fallback_metrics_json=fallback_metrics_json,
             )
-            if partner_metrics_json is None or partner_metrics_json.strip() == "":
-                errors.append(
-                    f"missing published {partner_task} metrics JSON for target={target}"
-                )
-            elif not Path(partner_metrics_json).is_file():
+            if (
+                partner_metrics_json is not None
+                and partner_metrics_json.strip() != ""
+                and not Path(partner_metrics_json).is_file()
+            ):
                 errors.append(
                     f"missing published {partner_task} metrics file for target={target}: "
                     f"{partner_metrics_json}"
@@ -848,11 +857,14 @@ def _compute_grid_test_metrics(
             if (
                 isinstance(partner_checkpoint_raw, str)
                 and partner_checkpoint_raw.strip() != ""
-                and isinstance(partner_metrics_json_path, str)
-                and partner_metrics_json_path.strip() != ""
                 and Path(partner_checkpoint_raw).is_file()
             ):
-                partner_payload = _load_metrics_payload(partner_metrics_json_path)
+                partner_payload: dict[str, object] = {}
+                if (
+                    isinstance(partner_metrics_json_path, str)
+                    and partner_metrics_json_path.strip() != ""
+                ):
+                    partner_payload = _load_metrics_payload(partner_metrics_json_path)
                 partner_window = _resolve_window_config(partner_payload)
                 # Mirror partner's own dims to both slots so the model can load.
                 partner_slot_window = dict(partner_window)
