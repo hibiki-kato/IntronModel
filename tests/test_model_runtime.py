@@ -640,6 +640,22 @@ def test_configure_triton_tool_paths_sets_cuda_env_for_conda_targets(
     assert os.environ["CPATH"] == str(cuda_header.parent.resolve())
 
 
+def test_model_runtime_find_cuda_header_requires_env_or_tool_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.delenv("TRITON_PTXAS_PATH", raising=False)
+    monkeypatch.delenv("TRITON_PTXAS_BLACKWELL_PATH", raising=False)
+    monkeypatch.delenv("CPATH", raising=False)
+    monkeypatch.delenv("C_INCLUDE_PATH", raising=False)
+    monkeypatch.delenv("CPLUS_INCLUDE_PATH", raising=False)
+    monkeypatch.setattr("util.model_runtime.shutil.which", lambda _name: None)
+
+    assert model_runtime._find_cuda_header() is None
+
+
 def test_configure_triton_tool_paths_finds_ptxas_without_path_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

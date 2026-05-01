@@ -25,7 +25,7 @@ Path root can be overridden by `INTRONMODEL_DATA_ROOT`.
 ```bash
 bash src/scripts/fetch_reference_data.sh \
   --species Dmel \
-  --source-root /path/to/external_data_root
+  --source-root relative/path/to/external_data_root
 ```
 
 2. Prepare species directories and generate `transcripts.tsv`:
@@ -35,7 +35,7 @@ bash src/scripts/prepare_species_data.sh \
   --species Dmel \
   --donor-len 100 \
   --acceptor-len 100 \
-  --source-root /path/to/external_data_root
+  --source-root relative/path/to/external_data_root
 ```
 
 3. Run pipeline or evaluation wrappers as needed.

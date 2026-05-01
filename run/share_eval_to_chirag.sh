@@ -12,9 +12,9 @@ No files are deleted.
 
 Options:
   --species <name>      Athal|Dmel|Hsap|Mmus|all (default: all)
-  --source-root <path>  Local data root (default: ./data)
+  --source-root <path>  Project-root-relative data root (default: data)
   --dest-root <path>    Plotting root base path
-                        (default: Google Drive Genomics_Plotting path)
+                        (default: external/Genomics_Plotting)
   -h, --help            Show this help
 
 Examples:
@@ -25,7 +25,7 @@ EOT
 
 SPECIES="all"
 SOURCE_ROOT="data"
-DEST_ROOT="/Users/hibiki/Library/CloudStorage/GoogleDrive-hibiki@umd.edu/.shortcut-targets-by-id/19OxNEr9a8VSRk55Q1BUL5UwPb873WbYe/Genomics_Plotting"
+DEST_ROOT="${INTRONMODEL_SHARE_EVAL_DEST_ROOT:-external/Genomics_Plotting}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -56,9 +56,22 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ "${SOURCE_ROOT}" != /* ]]; then
-	SOURCE_ROOT="${PROJECT_ROOT}/${SOURCE_ROOT}"
-fi
+resolve_project_relative_path() {
+	local option_name="$1"
+	local raw_path="$2"
+	if [[ -z "${raw_path}" ]]; then
+		echo "[share_eval_to_chirag.sh] ${option_name} must not be empty." >&2
+		exit 2
+	fi
+	if [[ "${raw_path}" == /* ]]; then
+		echo "[share_eval_to_chirag.sh] ${option_name} must be relative to project root: ${raw_path}" >&2
+		exit 2
+	fi
+	printf '%s\n' "${PROJECT_ROOT}/${raw_path}"
+}
+
+SOURCE_ROOT="$(resolve_project_relative_path "--source-root" "${SOURCE_ROOT}")"
+DEST_ROOT="$(resolve_project_relative_path "--dest-root" "${DEST_ROOT}")"
 
 sync_one_species() {
 	local species="$1"

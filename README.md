@@ -250,8 +250,8 @@ Default runtime roots are:
 You can override them with environment variables:
 
 ```bash
-export INTRONMODEL_DATA_ROOT=/path/to/data_root
-export INTRONMODEL_MODEL_ROOT=/path/to/model_root
+export INTRONMODEL_DATA_ROOT=relative/path/to/data_root
+export INTRONMODEL_MODEL_ROOT=relative/path/to/model_root
 ```
 
 These overrides affect:
@@ -281,4 +281,4 @@ Never hardcode absolute paths in scripts or source code.
 
 - Shell scripts: use `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"` and build paths from there.
 - Python: use `Path(__file__).resolve().parent` to derive paths from the file location.
-- Exception: conda init paths in `run/lib/common.sh` use `/export/${USER}/...` with `${USER}` substitution — intentional for the cluster environment.
+- External paths: pass them in as relative paths from the project root instead of hardcoding machine-specific locations.

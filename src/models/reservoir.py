@@ -1207,19 +1207,6 @@ def _detect_system_total_memory_bytes() -> Optional[int]:
         pass
 
     try:
-        with open("/proc/meminfo", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        kb = int(parts[1])
-                        if kb > 0:
-                            return kb * 1024
-                    break
-    except (OSError, ValueError):
-        pass
-
-    try:
         result = subprocess.run(
             ["sysctl", "-n", "hw.memsize"],
             check=True,

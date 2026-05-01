@@ -69,8 +69,20 @@ _intronmodel_prepare_conda_config() {
 		return 0
 	fi
 
+	local temp_root="${TMPDIR:-}"
+	if [[ -z "${temp_root}" ]]; then
+		temp_root="$(
+			python3 - <<'PY'
+from __future__ import annotations
+
+import tempfile
+
+print(tempfile.gettempdir())
+PY
+		)"
+	fi
 	local fallback_root
-	fallback_root="${TMPDIR:-/tmp}/intronmodel-conda-${USER:-$(id -un)}"
+	fallback_root="${temp_root}/intronmodel-conda-${USER:-$(id -un)}"
 	local fallback_condarc="${fallback_root}/.condarc"
 	mkdir -p "${fallback_root}"
 	if [[ ! -f "${fallback_condarc}" ]]; then
@@ -113,17 +125,6 @@ intronmodel_activate_conda() {
 			fallback_paths+=("${conda_base}/etc/profile.d/conda.sh")
 		fi
 	fi
-
-	fallback_paths+=(
-		"${HOME}/miniforge3/etc/profile.d/conda.sh"
-		"${HOME}/mambaforge/etc/profile.d/conda.sh"
-		"${HOME}/miniconda3/etc/profile.d/conda.sh"
-		"${HOME}/anaconda3/etc/profile.d/conda.sh"
-		"/export/${USER}/miniforge3/etc/profile.d/conda.sh"
-		"/export/${USER}/mambaforge/etc/profile.d/conda.sh"
-		"/export/${USER}/miniconda3/etc/profile.d/conda.sh"
-		"/export/${USER}/anaconda3/etc/profile.d/conda.sh"
-	)
 
 	for candidate in "${fallback_paths[@]}"; do
 		_intronmodel_source_conda_sh "${candidate}" || true

@@ -796,12 +796,17 @@ def _iter_cuda_root_candidates() -> list[Path]:
         if tool_path.parent.name == "bin":
             _append(tool_path.parent.parent)
 
-    common_roots = (
-        Path("/usr/local/cuda"),
-        Path("/opt/cuda"),
-    )
-    for root in common_roots:
-        _append(root)
+    include_env_vars = ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH")
+    for env_name in include_env_vars:
+        env_value = os.environ.get(env_name)
+        if env_value is None or not env_value.strip():
+            continue
+        for include_path_text in env_value.split(os.pathsep):
+            if not include_path_text.strip():
+                continue
+            include_dir = Path(include_path_text.strip()).expanduser().resolve()
+            if include_dir.name == "include":
+                _append(include_dir.parent)
     return roots
 
 
@@ -825,7 +830,15 @@ def _iter_cuda_header_candidates() -> list[Path]:
             for include_dir in targets_root.glob("*/include"):
                 _append(include_dir / "cuda.h")
 
-    _append(Path("/usr/include/cuda.h"))
+    include_env_vars = ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH")
+    for env_name in include_env_vars:
+        env_value = os.environ.get(env_name)
+        if env_value is None or not env_value.strip():
+            continue
+        for include_path_text in env_value.split(os.pathsep):
+            if not include_path_text.strip():
+                continue
+            _append(Path(include_path_text.strip()) / "cuda.h")
     return headers
 
 

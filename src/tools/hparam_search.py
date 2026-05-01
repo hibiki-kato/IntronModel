@@ -2578,13 +2578,15 @@ def _iter_cuda_header_candidates() -> Iterator[Path]:
                 for include_dir in targets_root.glob("*/include"):
                     yield from _add(include_dir / "cuda.h")
 
-    common_candidates = (
-        Path("/usr/local/cuda/include/cuda.h"),
-        Path("/usr/include/cuda.h"),
-        Path("/opt/cuda/include/cuda.h"),
-    )
-    for candidate in common_candidates:
-        yield from _add(candidate)
+    include_env_vars = ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH")
+    for env_name in include_env_vars:
+        env_value = os.environ.get(env_name)
+        if env_value is None or not env_value.strip():
+            continue
+        for include_path_text in env_value.split(os.pathsep):
+            if not include_path_text.strip():
+                continue
+            yield from _add(Path(include_path_text.strip()) / "cuda.h")
 
 
 def _find_cuda_header() -> Optional[Path]:

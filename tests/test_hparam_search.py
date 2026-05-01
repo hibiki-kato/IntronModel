@@ -1532,6 +1532,22 @@ def test_find_cuda_header_supports_conda_targets_layout(
     assert detected == cuda_header.resolve()
 
 
+def test_find_cuda_header_requires_env_or_tool_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.delenv("TRITON_PTXAS_PATH", raising=False)
+    monkeypatch.delenv("TRITON_PTXAS_BLACKWELL_PATH", raising=False)
+    monkeypatch.delenv("CPATH", raising=False)
+    monkeypatch.delenv("C_INCLUDE_PATH", raising=False)
+    monkeypatch.delenv("CPLUS_INCLUDE_PATH", raising=False)
+    monkeypatch.setattr("tools.hparam_search.shutil.which", lambda _name: None)
+
+    assert hparam_search._find_cuda_header() is None
+
+
 def test_run_trial_oom_backoff_then_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
