@@ -523,6 +523,41 @@ def _resolve_window_config(
     }
 
 
+def _resolve_grid_cell_window_dims(
+    payload: dict[str, object],
+    *,
+    target: str,
+) -> tuple[Optional[int], Optional[int]]:
+    """Resolve one grid cell's active upstream/downstream pair from metrics."""
+    upstream = _to_optional_int(payload.get(f"{target}_upstream"))
+    downstream = _to_optional_int(payload.get(f"{target}_downstream"))
+    if upstream is not None and downstream is not None:
+        return upstream, downstream
+
+    token_prefixes = (
+        ("dup", "ddn") if target == "donor" else ("aup", "adn")
+    )
+    checkpoint_name_sources = (
+        str(payload.get("checkpoint_name", "")).strip(),
+        Path(str(payload.get(f"{target}_checkpoint_path", "")).strip()).name,
+    )
+    for checkpoint_name in checkpoint_name_sources:
+        if checkpoint_name == "":
+            continue
+        upstream_match = re.search(
+            rf"(?:^|_){token_prefixes[0]}(\d+)(?:_|\.|$)",
+            checkpoint_name,
+        )
+        downstream_match = re.search(
+            rf"(?:^|_){token_prefixes[1]}(\d+)(?:_|\.|$)",
+            checkpoint_name,
+        )
+        if upstream_match is None or downstream_match is None:
+            continue
+        return int(upstream_match.group(1)), int(downstream_match.group(1))
+    return None, None
+
+
 def _resolve_class_file(species: str) -> str:
     """Resolve transcript class file path using runtime defaults."""
     from util.data_proc import species_data_dirs
@@ -533,6 +568,43 @@ def _resolve_class_file(species: str) -> str:
     return (
         processed_class_file if os.path.isfile(processed_class_file) else raw_class_file
     )
+
+
+def _validate_metrics_runtime_paths(
+    *,
+    model_name: str,
+    metrics_json: str,
+    task: str,
+) -> None:
+    """Fail fast when serialized runtime paths in metrics are unusable here."""
+    payload = _load_metrics_payload(metrics_json)
+    if not payload:
+        return
+    if not model_name.startswith("dnabert"):
+        return
+
+    from models import dnabert as dnabert_model
+
+    candidate_values: list[tuple[str, str]] = []
+    top_level_pretrained = str(payload.get("pretrained_model_name", "")).strip()
+    if top_level_pretrained != "":
+        candidate_values.append(("pretrained_model_name", top_level_pretrained))
+
+    task_payload = payload.get(task)
+    if isinstance(task_payload, dict):
+        task_pretrained = str(task_payload.get("pretrained_model_name", "")).strip()
+        if task_pretrained != "" and task_pretrained != top_level_pretrained:
+            candidate_values.append(
+                (f"{task}.pretrained_model_name", task_pretrained)
+            )
+
+    for field_name, raw_value in candidate_values:
+        try:
+            dnabert_model._resolve_pretrained_model_name(raw_value)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"invalid {field_name} in {metrics_json}: {exc}"
+            ) from exc
 
 
 def _validate_grid_test_prerequisites(
@@ -621,6 +693,22 @@ def _validate_grid_test_prerequisites(
                     f"missing published {partner_task} metrics file for target={target}: "
                     f"{partner_metrics_json}"
                 )
+            if (
+                partner_metrics_json is not None
+                and partner_metrics_json.strip() != ""
+                and Path(partner_metrics_json).is_file()
+            ):
+                try:
+                    _validate_metrics_runtime_paths(
+                        model_name=model_name,
+                        metrics_json=partner_metrics_json,
+                        task=partner_task,
+                    )
+                except FileNotFoundError as exc:
+                    errors.append(
+                        f"invalid published {partner_task} runtime config for "
+                        f"target={target}: {exc}"
+                    )
 
     if errors:
         details = "\n".join(f"- {message}" for message in errors)
@@ -1035,13 +1123,13 @@ def _to_float_or_none(value: object) -> Optional[float]:
 
 def _load_cells_from_trial_metrics(
     *,
+    species: str,
     output_dir: Path,
     target: str,
     has_test: bool,
     model_name: str,
 ) -> list[CellResult]:
     """Recover target cells from per-trial metrics when summary JSON is stale."""
-    del model_name
     target_dir = output_dir / target
     if not target_dir.exists():
         return []
@@ -1059,9 +1147,11 @@ def _load_cells_from_trial_metrics(
         if not isinstance(payload, dict):
             continue
 
-        upstream_raw = payload.get(f"{target}_upstream")
-        downstream_raw = payload.get(f"{target}_downstream")
-        if not isinstance(upstream_raw, int) or not isinstance(downstream_raw, int):
+        upstream_raw, downstream_raw = _resolve_grid_cell_window_dims(
+            payload,
+            target=target,
+        )
+        if upstream_raw is None or downstream_raw is None:
             continue
 
         task_payload = payload.get(target)
@@ -1078,9 +1168,28 @@ def _load_cells_from_trial_metrics(
         test_site_max_f1: Optional[float] = None
         test_transcript_max_f1: Optional[float] = None
         if has_test:
-            eval_payload = _load_metrics_payload(
-                str(_grid_eval_metrics_path(str(metrics_path)))
+            grid_eval_path = _grid_eval_metrics_path(str(metrics_path))
+            eval_payload = _load_metrics_payload(str(grid_eval_path))
+            eval_site_max_f1 = _to_float_or_none(eval_payload.get("test_site_max_f1"))
+            eval_transcript_max_f1 = _to_float_or_none(
+                eval_payload.get("test_transcript_max_f1")
             )
+            needs_eval_refresh = (
+                eval_site_max_f1 is None
+                or eval_transcript_max_f1 is None
+                or not grid_eval_path.exists()
+                or metrics_path.stat().st_mtime > grid_eval_path.stat().st_mtime
+            )
+            if needs_eval_refresh:
+                try:
+                    eval_payload = _compute_grid_test_metrics(
+                        species=species,
+                        model_name=model_name,
+                        target=target,
+                        metrics_json=str(metrics_path),
+                    )
+                except Exception:
+                    pass
             test_site_max_f1 = _to_float_or_none(eval_payload.get("test_site_max_f1"))
             test_transcript_max_f1 = _to_float_or_none(
                 eval_payload.get("test_transcript_max_f1")
@@ -1470,6 +1579,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         if needs_recovery:
             recovered_target_cells = _load_cells_from_trial_metrics(
+                species=args.species,
                 output_dir=output_dir,
                 target=target,
                 has_test=has_test,
@@ -1539,6 +1649,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             except Exception as exc:
                 target_error = exc
                 target_cells = _load_cells_from_trial_metrics(
+                    species=args.species,
                     output_dir=output_dir,
                     target=target,
                     has_test=has_test,

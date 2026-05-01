@@ -29,3 +29,18 @@ def test_resolve_pretrained_model_name_preserves_hf_repo_id() -> None:
     repo_id = "zhihan1996/DNABERT-2-117M"
     resolved = dnabert._resolve_pretrained_model_name(repo_id)
     assert resolved == repo_id
+
+
+def test_resolve_pretrained_model_name_remaps_stale_repo_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_dir = tmp_path / "model" / "pretrained" / "dnabert2-117m"
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.setattr(dnabert, "repository_root", lambda: tmp_path)
+
+    resolved = dnabert._resolve_pretrained_model_name(
+        "/export/hibiki/intronmodel/model/pretrained/dnabert2-117m"
+    )
+
+    assert resolved == str(checkpoint_dir)

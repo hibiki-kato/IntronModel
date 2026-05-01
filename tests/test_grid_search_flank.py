@@ -118,6 +118,80 @@ def test_validate_grid_test_prerequisites_requires_partner_checkpoint(
         )
 
 
+def test_validate_grid_test_prerequisites_rejects_invalid_partner_pretrained_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processed_dir = tmp_path / "processed"
+    raw_dir = tmp_path / "raw"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (processed_dir / "transcripts.unique.tsv").write_text("", encoding="utf-8")
+    (processed_dir / "transcripts.unique.map.tsv").write_text("", encoding="utf-8")
+    (processed_dir / "intron_eval_flank10.unique.tsv").write_text(
+        "",
+        encoding="utf-8",
+    )
+    class_file = processed_dir / "transcript_class.txt"
+    class_file.write_text("", encoding="utf-8")
+    ref_gff = raw_dir / "reference.gff3"
+    ref_gff.write_text("##gff-version 3\n", encoding="utf-8")
+    donor_checkpoint = raw_dir / "donor.pt"
+    donor_checkpoint.write_bytes(b"checkpoint")
+    acceptor_checkpoint = raw_dir / "acceptor.pt"
+    acceptor_checkpoint.write_bytes(b"checkpoint")
+    partner_metrics_json = raw_dir / "acceptor.train.json"
+    partner_metrics_json.write_text(
+        json.dumps(
+            {
+                "pretrained_model_name": "/missing/dnabert2",
+                "acceptor": {
+                    "pretrained_model_name": "/missing/dnabert2",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        data_proc,
+        "species_data_dirs",
+        lambda _species: {
+            "base": str(tmp_path),
+            "processed": str(processed_dir),
+            "raw": str(raw_dir),
+        },
+    )
+    monkeypatch.setattr(grid_search_window, "_has_transcript_test_tsv", lambda *_: True)
+    monkeypatch.setattr(grid_search_window, "_resolve_class_file", lambda _species: str(class_file))
+    monkeypatch.setattr(
+        versioned_artifacts,
+        "resolve_published_run_assets",
+        lambda **_kwargs: {
+            "published_name": "dnabert2.03",
+            "metrics_json": str(partner_metrics_json),
+            "donor_checkpoint_path": str(donor_checkpoint),
+            "acceptor_checkpoint_path": str(acceptor_checkpoint),
+        },
+    )
+    monkeypatch.setattr(
+        grid_search_window,
+        "_resolve_published_task_metrics_json",
+        lambda **_kwargs: str(partner_metrics_json),
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="invalid published acceptor runtime config",
+    ):
+        grid_search_window._validate_grid_test_prerequisites(
+            root=tmp_path,
+            species="SpX",
+            model_name="dnabert2",
+            targets=["donor"],
+        )
+
+
 def test_run_grid_target_passes_epochs_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -641,6 +715,7 @@ def test_load_cells_from_trial_metrics_recovers_target_cells(
     )
 
     cells = grid_search_window._load_cells_from_trial_metrics(
+        species="SpX",
         output_dir=tmp_path,
         target="acceptor",
         has_test=True,
@@ -656,6 +731,108 @@ def test_load_cells_from_trial_metrics_recovers_target_cells(
     assert cells[0].test_site_max_f1 == pytest.approx(0.86)
     assert cells[0].test_transcript_max_f1 == pytest.approx(0.88)
     assert cells[0].test_max_f1 == pytest.approx(0.88)
+
+
+def test_load_cells_from_trial_metrics_refreshes_stale_grid_eval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_dir = tmp_path / "donor"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = target_dir / "full_trial_0000.metrics.json"
+    grid_eval_path = target_dir / "full_trial_0000.metrics.grid_eval.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "donor_upstream": 20,
+                "donor_downstream": 100,
+                "donor": {
+                    "best_max_f1": 0.81,
+                    "best_pr_auc": 0.9,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    grid_eval_path.write_text(
+        json.dumps(
+            {
+                "test_site_max_f1": 0.7,
+                "test_transcript_max_f1": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    refresh_calls: list[tuple[str, str, str, str]] = []
+
+    def _fake_compute_grid_test_metrics(
+        *,
+        species: str,
+        model_name: str,
+        target: str,
+        metrics_json: str,
+    ) -> dict[str, object]:
+        refresh_calls.append((species, model_name, target, metrics_json))
+        payload = {
+            "test_site_max_f1": 0.91,
+            "test_transcript_max_f1": 0.93,
+        }
+        grid_eval_path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(
+        grid_search_window,
+        "_compute_grid_test_metrics",
+        _fake_compute_grid_test_metrics,
+    )
+
+    cells = grid_search_window._load_cells_from_trial_metrics(
+        species="Dmel",
+        output_dir=tmp_path,
+        target="donor",
+        has_test=True,
+        model_name="dnabert2",
+    )
+
+    assert refresh_calls == [
+        ("Dmel", "dnabert2", "donor", str(metrics_path))
+    ]
+    assert len(cells) == 1
+    assert cells[0].test_site_max_f1 == pytest.approx(0.91)
+    assert cells[0].test_transcript_max_f1 == pytest.approx(0.93)
+
+
+def test_load_cells_from_trial_metrics_recovers_dims_from_checkpoint_name(
+    tmp_path: Path,
+) -> None:
+    target_dir = tmp_path / "donor"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "full_trial_0000.metrics.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_name": "dnabert2_dlen40_alen100_ddn20_dup100_habcd.pt",
+                "donor_checkpoint_path": "model/Dmel/donor/dnabert2_dlen40_alen100_ddn20_dup100_habcd.pt",
+                "donor": {
+                    "best_max_f1": 0.81,
+                    "best_pr_auc": 0.9,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cells = grid_search_window._load_cells_from_trial_metrics(
+        species="Dmel",
+        output_dir=tmp_path,
+        target="donor",
+        has_test=False,
+        model_name="dnabert2",
+    )
+
+    assert len(cells) == 1
+    assert cells[0].upstream == 100
+    assert cells[0].downstream == 20
 
 
 def test_main_eta_counts_recovered_cells(

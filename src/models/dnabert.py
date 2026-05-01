@@ -89,6 +89,7 @@ from util.process_title import (
     apply_eta_process_title_from_epoch_progress,
     apply_eta_process_title_placeholder,
 )
+from util.path_format import repository_root
 from util.training_control import (
     resolve_training_schedule,
 )
@@ -725,12 +726,37 @@ def _resolve_pretrained_model_name(pretrained_model_name: str) -> str:
 
     expanded_path = Path(pretrained_model_name).expanduser()
     if not expanded_path.exists():
+        relocated_path = _resolve_relocated_repo_path(expanded_path)
+        if relocated_path is not None:
+            expanded_path = relocated_path
+    if not expanded_path.exists():
         cwd = Path.cwd()
         raise FileNotFoundError(
             "Explicit local --pretrained_model_name does not exist: "
             f"{expanded_path}. Current working directory: {cwd}."
         )
     return str(expanded_path)
+
+
+def _resolve_relocated_repo_path(raw_path: Path) -> Optional[Path]:
+    """Map one stale repo-absolute path onto the current repository root."""
+    parts = raw_path.parts
+    if not parts:
+        return None
+
+    root = repository_root().resolve()
+    repo_markers = {root.name.lower(), "intronmodel"}
+    lowered_parts = [part.lower() for part in parts]
+    for index, part in enumerate(lowered_parts):
+        if part not in repo_markers:
+            continue
+        suffix_parts = parts[index + 1 :]
+        if not suffix_parts:
+            continue
+        candidate = root.joinpath(*suffix_parts)
+        if candidate.exists():
+            return candidate
+    return None
 
 
 class DnaBertTokenDataset(Dataset):
