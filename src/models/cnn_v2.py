@@ -389,7 +389,6 @@ class PairModelArchParams:
     acceptor_conv_channels: list[int]
     donor_kernel_sizes: list[int]
     acceptor_kernel_sizes: list[int]
-    max_pool_size: int
     conv_stride: int
     head_type: str
     fusion_mode: str
@@ -490,10 +489,6 @@ def _resolve_pair_model_arch_params(
     if acceptor_kernel_sizes is None:
         acceptor_kernel_sizes = [scalar_kernel_size] * len(acceptor_conv_channels)
 
-    max_pool_size = _coerce_positive_int(
-        getattr(model_args, "max_pool_size", 2),
-        arg_name="--max_pool_size",
-    )
     conv_stride = _coerce_positive_int(
         getattr(model_args, "conv_stride", 1),
         arg_name="--conv_stride",
@@ -511,7 +506,6 @@ def _resolve_pair_model_arch_params(
         acceptor_conv_channels=acceptor_conv_channels,
         donor_kernel_sizes=donor_kernel_sizes,
         acceptor_kernel_sizes=acceptor_kernel_sizes,
-        max_pool_size=max_pool_size,
         conv_stride=conv_stride,
         head_type=head_type,
         fusion_mode=fusion_mode,
@@ -694,7 +688,6 @@ class PairSpliceCNN(nn.Module):
         kernel_size: int = 7,
         donor_kernel_sizes: Optional[Sequence[int]] = None,
         acceptor_kernel_sizes: Optional[Sequence[int]] = None,
-        max_pool_size: int = 2,
         conv_stride: int = 1,
         head_type: str = "gap",
         fusion_mode: str = "late",
@@ -756,7 +749,6 @@ class PairSpliceCNN(nn.Module):
             conv_channels=donor_channels,
             kernel_size=donor_kernel_spec,
             dropout=dropout,
-            max_pool_size=max_pool_size,
             conv_stride=conv_stride,
             head_type=self.head_type,
         )
@@ -765,7 +757,6 @@ class PairSpliceCNN(nn.Module):
             conv_channels=acceptor_channels,
             kernel_size=acceptor_kernel_spec,
             dropout=dropout,
-            max_pool_size=max_pool_size,
             conv_stride=conv_stride,
             head_type=self.head_type,
         )
@@ -798,8 +789,7 @@ class PairSpliceCNN(nn.Module):
                 conv_channels=donor_layout_channels,
                 kernel_size=donor_layout_kernels,
                 dropout=dropout,
-                max_pool_size=max_pool_size,
-                conv_stride=conv_stride,
+                    conv_stride=conv_stride,
                 head_type=self.head_type,
             )
             classifier_input_dim = self.fused_encoder.output_dim
@@ -824,8 +814,7 @@ class PairSpliceCNN(nn.Module):
                 conv_channels=prefix_channels,
                 kernel_size=prefix_kernels,
                 dropout=dropout,
-                max_pool_size=max_pool_size,
-                conv_stride=conv_stride,
+                    conv_stride=conv_stride,
                 head_type=self.head_type,
             ).conv_layers
             self.mid_acceptor_prefix = CnnGapEncoder(
@@ -833,8 +822,7 @@ class PairSpliceCNN(nn.Module):
                 conv_channels=prefix_channels,
                 kernel_size=prefix_kernels,
                 dropout=dropout,
-                max_pool_size=max_pool_size,
-                conv_stride=conv_stride,
+                    conv_stride=conv_stride,
                 head_type=self.head_type,
             ).conv_layers
             if suffix_channels:
@@ -843,8 +831,7 @@ class PairSpliceCNN(nn.Module):
                     conv_channels=suffix_channels,
                     kernel_size=suffix_kernels,
                     dropout=dropout,
-                    max_pool_size=max_pool_size,
-                    conv_stride=conv_stride,
+                            conv_stride=conv_stride,
                     head_type=self.head_type,
                 )
                 classifier_input_dim = self.mid_fused_tail.output_dim
@@ -1420,8 +1407,7 @@ def train_pair_model(
                 kernel_size=7,
                 donor_kernel_sizes=arch_params.donor_kernel_sizes,
                 acceptor_kernel_sizes=arch_params.acceptor_kernel_sizes,
-                max_pool_size=arch_params.max_pool_size,
-                conv_stride=arch_params.conv_stride,
+                    conv_stride=arch_params.conv_stride,
                 head_type=arch_params.head_type,
                 fusion_mode=arch_params.fusion_mode,
                 dropout=train_params.dropout,
@@ -1670,7 +1656,6 @@ def train_pair_model(
                                 "acceptor_kernel_sizes": (
                                     list(arch_params.acceptor_kernel_sizes)
                                 ),
-                                "max_pool_size": arch_params.max_pool_size,
                                 "conv_stride": arch_params.conv_stride,
                                 "head_type": arch_params.head_type,
                                 "dropout": train_params.dropout,
@@ -1797,7 +1782,6 @@ def train_pair_model(
                 ),
                 "donor_kernel_sizes": list(arch_params.donor_kernel_sizes),
                 "acceptor_kernel_sizes": list(arch_params.acceptor_kernel_sizes),
-                "max_pool_size": arch_params.max_pool_size,
                 "conv_stride": arch_params.conv_stride,
                 "head_type": arch_params.head_type,
                 "fc_hidden": arch_params.fc_hidden,
@@ -1911,7 +1895,6 @@ def load_pair_model(
         kernel_size=7,
         donor_kernel_sizes=arch_params.donor_kernel_sizes,
         acceptor_kernel_sizes=arch_params.acceptor_kernel_sizes,
-        max_pool_size=arch_params.max_pool_size,
         conv_stride=arch_params.conv_stride,
         head_type=arch_params.head_type,
         fusion_mode=arch_params.fusion_mode,
@@ -2221,12 +2204,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Acceptor-branch override for --kernel_sizes.",
     )
     parser.add_argument(
-        "--max_pool_size",
-        type=int,
-        default=2,
-        help="Max-pooling width after each conv block. Use 1 to disable pooling.",
-    )
-    parser.add_argument(
         "--conv_stride",
         type=int,
         default=1,
@@ -2261,8 +2238,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--acceptor_kernel_size", type=int, default=None)
     parser.add_argument("--donor_dropout", type=float, default=None)
     parser.add_argument("--acceptor_dropout", type=float, default=None)
-    parser.add_argument("--donor_max_pool_size", type=int, default=None)
-    parser.add_argument("--acceptor_max_pool_size", type=int, default=None)
     parser.add_argument("--donor_conv_stride", type=int, default=None)
     parser.add_argument("--acceptor_conv_stride", type=int, default=None)
     parser.add_argument("--donor_head_type", type=str, default=None)

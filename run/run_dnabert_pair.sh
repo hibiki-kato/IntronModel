@@ -118,23 +118,11 @@ resolve_dnabert_relative_path() {
 }
 
 append_arg_if_set() {
-	local flag="$1"
-	local value="$2"
-	if [[ -n "${value}" ]]; then
-		args+=("--${flag}" "${value}")
-	fi
+	intronmodel_append_arg_if_set args "$@"
 }
 
 append_flag_if_truthy() {
-	local flag="$1"
-	local value="$2"
-	local normalized
-	normalized="$(echo "${value}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	case "${normalized}" in
-		1 | true | on | yes)
-			args+=("--${flag}")
-			;;
-	esac
+	intronmodel_append_flag_if_truthy args "$@"
 }
 
 intronmodel_start_timer "dnabert_pair.sh"

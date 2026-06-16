@@ -140,3 +140,42 @@ When adding a model:
 - All source code, comments, and docstrings must be in English.
 - Follow the repository coding standards in `AGENTS.md`.
 - Keep implementations clear, explicit, typed, and testable.
+
+<claude-mem-context>
+# Memory Context
+
+# [IntronModel] recent context, 2026-05-19 9:47am EDT
+
+Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
+Format: ID TIME TYPE TITLE
+Fetch details: get_observations([IDs]) | Search: mem-search skill
+
+Stats: 23 obs (8,452t read) | 238,253t work | 96% savings
+
+### May 19, 2026
+116 1:18a 🔵 Gmail skill plugin cache missing at expected path
+117 " 🔵 DNA AI Annotation Overleaf project structure mapped
+118 " 🔵 DNA AI Annotation project purpose and file roles confirmed
+119 1:19a 🔵 DNA annotation project email threads: competing methods, splice site entropy, ISMB submission, Hsap training
+120 " 🔵 UniAnn preliminary results beat ANNEVO and Helixer on Drosophila chrX; AUGUSTUS still toughest competition
+121 " 🔵 Splice site mononucleotide entropy analysis: annotated sites have HIGHER entropy than random — explained by exon GC balance
+122 " 🔵 AlphaGenome splice-site score evaluation on Arabidopsis, Drosophila, Chicken — performance worse than Human/Chicken
+123 1:20a ✅ Added "Recent project notes" section to main.tex with May 2026 email findings
+124 " 🔵 latexmk compilation result unknown — zsh "read-only variable: status" prevented exit code capture
+125 " ✅ main.tex "Recent project notes" section verified in place and PDF up-to-date
+126 1:30a 🔵 CodonHunt DNA Annotation Project — RuleBook.tex structure mapped
+127 1:31a 🔵 CodonHunt project files — current state of main.tex changelog and RuleBook gaps
+128 " 🔵 DNA AI Annotation project — AGENTS.md file structure and bib coverage confirmed
+129 1:32a 🟣 RuleBook.tex — "Known Methods" stubs replaced with full "Current annotation landscape" section
+130 1:33a ✅ bib/hibiki.bib — four new annotation tool references added
+131 " 🔴 bib/hibiki.bib new entries failed to apply via apply_patch — context mismatch
+132 " 🔴 bib/hibiki.bib — four new entries successfully appended on retry with correct anchor
+133 1:34a 🔵 RuleBook.tex latexmk build — compiles to 15-page PDF with warnings only, no errors
+134 " 🔴 RuleBook.tex latexmk build fails — multiply defined label fig:placeholder
+135 " 🔴 RuleBook.tex — duplicate fig:placeholder labels renamed to unique IDs
+136 1:35a ✅ RuleBook.tex clean rebuild — 16-page PDF compiled successfully, no errors
+137 1:36a 🔵 latexmk output path confusion — lualatex writes to root dir instead of .output/
+138 " 🔵 RuleBook.tex content verified correct — all new bib entries confirmed in hibiki.bib, no LaTeX errors
+
+Access 238k tokens of past work via get_observations([IDs]) or mem-search skill.
+</claude-mem-context>

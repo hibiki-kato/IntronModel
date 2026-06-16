@@ -1,0 +1,49 @@
+# Model Integration Contract
+
+Any model connected to `src/run_model.py` must be registered in
+`src/models/registry.py` and must expose this API:
+
+- `add_train_args(parser: argparse.ArgumentParser) -> None`
+- `add_infer_args(parser: argparse.ArgumentParser) -> None`
+- `train(common_args: argparse.Namespace, model_args: argparse.Namespace) ->`
+  `dict[str, object]`
+- `infer_site(common_args: argparse.Namespace, model_args: argparse.Namespace) ->`
+  `list[dict[str, object]]`
+
+## Required `infer_site` Output Rows
+
+Each row must contain:
+
+- `transcript_id`: `str`
+- `intron_index`: `int`
+- `site_type`: `str` (`donor`, `acceptor`, or `pair`)
+- `score`: `float`
+
+## Recommended `train` Summary Keys
+
+For task-level tuning workflows, include task-level keys in
+`train(...)->dict[str, object]` summaries:
+
+- `best_pr_auc`: `float | None`
+- `best_roc_auc`: `float | None`
+- `best_acc_at_0_5`: `float | None`
+- `best_metric`: `str`
+- `best_score`: `float`
+
+Task keys should match the model checkpoint task names
+(for example `donor`/`acceptor` or `pair`).
+
+## Pipeline Compatibility Rules
+
+- Do not bypass checkpoint naming logic in `run_model.py`.
+- Keep model-specific arguments additive and explicit.
+- Avoid hardcoded absolute paths.
+- Keep device handling explicit (`auto|cuda|mps|cpu`).
+- Validate public inputs and fail early with clear exceptions.
+
+## Recommended Validation Before Registry Connection
+
+1. `python3 src/run_model.py --model <new_model> --help` works.
+2. Model module passes contract validation in `load_model_module`.
+3. `infer_site` rows aggregate correctly via `util.transcript_eval`.
+4. Wrapper scripts and README examples are updated if new options are exposed.

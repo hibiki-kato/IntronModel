@@ -67,7 +67,6 @@ HISTORY_TOP_N="512"
 GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 SEARCH_SPACE_FILE="auto"
-MAX_POOL_SIZE="2"
 CONV_STRIDE="1"
 HEAD_TYPE="gap"
 
@@ -142,83 +141,8 @@ resolve_search_space_file() {
 		"${DATA_ROOT}/${species}/tuning/cnn/search_space.json"
 }
 
-normalize_json_object_file() {
-	local python_bin="$1"
-	local json_path="$2"
 
-	"${python_bin}" - "${json_path}" <<'PY'
-from __future__ import annotations
 
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-payload = json.loads(path.read_text(encoding="utf-8"))
-if not isinstance(payload, dict):
-    raise ValueError("Search-space file must contain a JSON object.")
-print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
-PY
-}
-
-run_double_descent_plot() {
-	local python_bin="$1"
-	local project_root="$2"
-	local species_name="$3"
-	local target_name="$4"
-	local model_name="$5"
-
-	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
-		--project_root "${project_root}" \
-		--species "${species_name}" \
-		--target "${target_name}" \
-		--model "${model_name}" || true
-}
-
-append_unique_gpu_ids() {
-	local array_name="$1"
-	shift || true
-	local -n target_ref="${array_name}"
-	local candidate=""
-	local existing=""
-	local found=0
-
-	for candidate in "$@"; do
-		if [[ -z "${candidate}" ]]; then
-			continue
-		fi
-		found=0
-		for existing in "${target_ref[@]}"; do
-			if [[ "${existing}" == "${candidate}" ]]; then
-				found=1
-				break
-			fi
-		done
-		if [[ "${found}" -eq 0 ]]; then
-			target_ref+=("${candidate}")
-		fi
-	done
-}
-
-remove_gpu_from_csv() {
-	local gpu_csv="$1"
-	local remove_gpu="$2"
-	local parts=()
-	local kept=()
-	local value=""
-
-	IFS=',' read -r -a parts <<< "${gpu_csv}"
-	for value in "${parts[@]}"; do
-		if [[ -z "${value}" || "${value}" == "${remove_gpu}" ]]; then
-			continue
-		fi
-		kept+=("${value}")
-	done
-	(
-		IFS=,
-		printf '%s\n' "${kept[*]}"
-	)
-}
 
 should_dispatch_next_cycle() {
 	local remaining_seconds="$1"
@@ -294,7 +218,7 @@ run_cycle_process() {
 			"(exit=${run_status})" >>"${stdout_log}"
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
-		run_double_descent_plot \
+		intronmodel_run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
@@ -403,7 +327,7 @@ dispatch_cycle() {
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(
-			normalize_json_object_file \
+			intronmodel_normalize_json_object_file \
 				"${PYTHON_BIN}" \
 				"${search_space_path}" 2>&1
 		)"; then
@@ -761,10 +685,10 @@ else
 			if [[ ${#released_gpu_ids[@]} -eq 0 ]]; then
 				continue
 			fi
-			append_unique_gpu_ids available_gpu_ids "${released_gpu_ids[@]}"
+			intronmodel_append_unique_values available_gpu_ids "${released_gpu_ids[@]}"
 			unset "pid_in_quick_phase[${pid}]"
 			for released_gpu_id in "${released_gpu_ids[@]}"; do
-				pid_to_owned_gpu_csv["${pid}"]="$(remove_gpu_from_csv \
+				pid_to_owned_gpu_csv["${pid}"]="$(intronmodel_remove_value_from_csv \
 					"${pid_to_owned_gpu_csv[$pid]:-}" \
 					"${released_gpu_id}")"
 			done
@@ -836,7 +760,7 @@ else
 			owned_gpu_csv="${pid_to_owned_gpu_csv[$pid]:-}"
 			if [[ -n "${owned_gpu_csv}" ]]; then
 				IFS=',' read -r -a owned_gpu_ids <<< "${owned_gpu_csv}"
-				append_unique_gpu_ids available_gpu_ids "${owned_gpu_ids[@]}"
+				intronmodel_append_unique_values available_gpu_ids "${owned_gpu_ids[@]}"
 			fi
 			cycle_index="${pid_to_cycle[$pid]:-0}"
 			cycle_duration_seconds=$((SECONDS - ${pid_to_start_seconds[$pid]:-${SECONDS}}))
@@ -896,7 +820,7 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 	final_plot_species=("Hsap" "Dmel")
 	for final_species in "${final_plot_species[@]}"; do
 		for final_target in "${TARGET_ORDER[@]}"; do
-			run_double_descent_plot \
+			intronmodel_run_double_descent_plot \
 				"${PYTHON_BIN}" \
 				"${PROJECT_ROOT}" \
 				"${final_species}" \

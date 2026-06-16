@@ -22,8 +22,6 @@ def test_resolve_pair_arch_params_prefers_branch_overrides() -> None:
         residual_channels="32,64,96",
         donor_residual_channels="48,80,128,160",
         acceptor_residual_channels=None,
-        max_pool_size=2,
-        pool_every=2,
         head_type="gap",
         fc_hidden=192,
     )
@@ -54,8 +52,6 @@ def test_pair_organic_resdil_cnn_forward_onehot() -> None:
             dilations=[1, 2, 4],
             residual_channels=[16, 32, 48],
         ),
-        max_pool_size=2,
-        pool_every=2,
         head_type="gap",
         fc_hidden=64,
     )
@@ -90,8 +86,6 @@ def test_pair_organic_resdil_cnn_supports_token_input() -> None:
             dilations=[1, 2, 4],
             residual_channels=[8, 16, 16],
         ),
-        max_pool_size=2,
-        pool_every=2,
         head_type="center",
         fc_hidden=48,
     )
@@ -148,8 +142,6 @@ def test_train_pair_model_forwards_model_args(
         residual_channels="16,32,48",
         donor_residual_channels=None,
         acceptor_residual_channels=None,
-        max_pool_size=2,
-        pool_every=2,
         head_type="gap",
         fc_hidden=64,
     )

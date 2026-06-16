@@ -201,8 +201,6 @@ class PairOrganicArchParams:
 
     donor: OrganicBranchLayout
     acceptor: OrganicBranchLayout
-    max_pool_size: int
-    pool_every: int
     head_type: str
     fc_hidden: int
 
@@ -299,14 +297,6 @@ def _resolve_pair_arch_params(
         arg_name="--residual_channels",
     )
 
-    max_pool_size = _coerce_positive_int(
-        getattr(model_args, "max_pool_size", 2),
-        arg_name="--max_pool_size",
-    )
-    pool_every = _coerce_positive_int(
-        getattr(model_args, "pool_every", 2),
-        arg_name="--pool_every",
-    )
     head_type = normalize_cnn_head_type(
         getattr(model_args, "head_type", "gap"),
         arg_name="--head_type",
@@ -337,8 +327,6 @@ def _resolve_pair_arch_params(
     return PairOrganicArchParams(
         donor=donor,
         acceptor=acceptor,
-        max_pool_size=max_pool_size,
-        pool_every=pool_every,
         head_type=head_type,
         fc_hidden=fc_hidden,
     )
@@ -361,10 +349,6 @@ class ResidualDilatedBlock(nn.Module):
         Hidden bottleneck width inside the block.
     dropout : float
         Dropout probability applied between the two convolutions.
-    max_pool_size : int
-        Max-pooling width applied when ``apply_pool`` is ``True``.
-    apply_pool : bool
-        Whether to apply pooling after the residual merge.
     """
 
     def __init__(
@@ -376,8 +360,6 @@ class ResidualDilatedBlock(nn.Module):
         dilation: int,
         residual_channels: int,
         dropout: float,
-        max_pool_size: int,
-        apply_pool: bool,
     ) -> None:
         super().__init__()
         if kernel_size <= 0 or kernel_size % 2 == 0:
@@ -388,8 +370,6 @@ class ResidualDilatedBlock(nn.Module):
             raise ValueError("residual_channels must be positive.")
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("dropout must satisfy 0 <= dropout < 1.")
-        if max_pool_size <= 0:
-            raise ValueError("max_pool_size must be positive.")
 
         padding = ((kernel_size - 1) // 2) * dilation
         self.conv1 = nn.Conv1d(
@@ -415,11 +395,6 @@ class ResidualDilatedBlock(nn.Module):
             self.projection = nn.Identity()
         else:
             self.projection = nn.Conv1d(in_channels, out_channels, kernel_size=1)
-        self.pool: Optional[nn.MaxPool1d]
-        if apply_pool and max_pool_size > 1:
-            self.pool = nn.MaxPool1d(max_pool_size)
-        else:
-            self.pool = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the block to one feature map.
@@ -442,8 +417,6 @@ class ResidualDilatedBlock(nn.Module):
         out = self.conv2(out)
         out = self.norm2(out)
         out = self.activation(out + residual)
-        if self.pool is not None:
-            out = self.pool(out)
         return out
 
 
@@ -455,14 +428,10 @@ class ResidualDilatedBranchEncoder(nn.Module):
         *,
         in_channels: int,
         layout: OrganicBranchLayout,
-        max_pool_size: int,
-        pool_every: int,
         head_type: str,
         dropout: float,
     ) -> None:
         super().__init__()
-        if pool_every <= 0:
-            raise ValueError("pool_every must be positive.")
         if not layout.channels:
             raise ValueError("layout.channels must contain at least one block.")
         self.head_type = normalize_cnn_head_type(head_type, arg_name="head_type")
@@ -483,7 +452,6 @@ class ResidualDilatedBranchEncoder(nn.Module):
                 strict=True,
             )
         ):
-            apply_pool = (index + 1) % pool_every == 0
             self.blocks.append(
                 ResidualDilatedBlock(
                     in_channels=current_in_channels,
@@ -492,8 +460,6 @@ class ResidualDilatedBranchEncoder(nn.Module):
                     dilation=dilation,
                     residual_channels=residual_channels,
                     dropout=dropout,
-                    max_pool_size=max_pool_size,
-                    apply_pool=apply_pool,
                 )
             )
             current_in_channels = channel
@@ -547,16 +513,12 @@ class PairOrganicResDilCNN(nn.Module):
         self.donor_encoder = ResidualDilatedBranchEncoder(
             in_channels=branch_in_channels,
             layout=arch_params.donor,
-            max_pool_size=arch_params.max_pool_size,
-            pool_every=arch_params.pool_every,
             head_type=arch_params.head_type,
             dropout=dropout,
         )
         self.acceptor_encoder = ResidualDilatedBranchEncoder(
             in_channels=branch_in_channels,
             layout=arch_params.acceptor,
-            max_pool_size=arch_params.max_pool_size,
-            pool_every=arch_params.pool_every,
             head_type=arch_params.head_type,
             dropout=dropout,
         )
@@ -1157,8 +1119,6 @@ def train_pair_model(
                                 "acceptor_residual_channels": list(
                                     arch_params.acceptor.residual_channels
                                 ),
-                                "max_pool_size": arch_params.max_pool_size,
-                                "pool_every": arch_params.pool_every,
                                 "head_type": arch_params.head_type,
                                 "dropout": train_params.dropout,
                                 "fc_hidden": arch_params.fc_hidden,
@@ -1291,8 +1251,6 @@ def train_pair_model(
                 "acceptor_residual_channels": list(
                     arch_params.acceptor.residual_channels
                 ),
-                "max_pool_size": arch_params.max_pool_size,
-                "pool_every": arch_params.pool_every,
                 "head_type": arch_params.head_type,
                 "fc_hidden": arch_params.fc_hidden,
                 "compile_enabled": compile_enabled_attempt,
@@ -1637,12 +1595,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help="Acceptor-branch override for --residual_channels.",
-    )
-    parser.add_argument(
-        "--pool_every",
-        type=int,
-        default=2,
-        help="Apply max-pooling after every N residual blocks.",
     )
 
 

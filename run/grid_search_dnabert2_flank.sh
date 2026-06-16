@@ -11,16 +11,16 @@ fi
 # CONFIG (edit here)
 # --------------------------
 
-SPECIES="Dmel, Hsap, Mmus"
+SPECIES="Athal"
 
 # "donor", "acceptor", or "both"
 TARGET="donor"
-INTRONMODEL_AUTO_TMUX="${INTRONMODEL_AUTO_TMUX:-on}"
+INTRONMODEL_AUTO_TMUX="${INTRONMODEL_AUTO_TMUX:-off}"
 # Set to a single value to run a 1x1 grid for quick test draws.
 INTRONMODEL_GRID_UPSTREAM_VALS="20, 40, 60, 80, 100"
 INTRONMODEL_GRID_DOWNSTREAM_VALS="20, 40, 60, 80, 100"
 # GPU IDs to use (comma-separated), or "auto"
-GPU_IDS="4,5,6,7"
+GPU_IDS="auto"
 FULL_EPOCHS="3"
 BASE_SEED="1337"
 BATCH_SIZE="64"

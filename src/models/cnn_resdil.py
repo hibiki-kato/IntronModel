@@ -183,7 +183,6 @@ class TaskTrainParams:
     loss_name: str
     conv_channels: Optional[Sequence[int]]
     kernel_sizes: Sequence[int]
-    max_pool_size: int
     head_type: str
     dropout: float
     fc_hidden: int
@@ -356,7 +355,6 @@ def _resolve_task_train_params(
         loss_name=str(_override_or_default("loss", model_args.loss)),
         conv_channels=resolved_conv_channels,
         kernel_sizes=list(resolved_kernel_sizes),
-        max_pool_size=int(model_args.max_pool_size),
         head_type=_normalize_cnn_head_type(
             getattr(model_args, "head_type", "gap"),
             arg_name="--head_type",
@@ -501,7 +499,6 @@ class ResDilSpliceCNN(nn.Module):
         in_channels: int = 4,
         conv_channels: Optional[Sequence[int]] = None,
         kernel_size: int | Sequence[int] = 7,
-        max_pool_size: int = 2,
         head_type: str = "gap",
         dropout: float = 0.3,
         fc_hidden: int = 128,
@@ -530,8 +527,6 @@ class ResDilSpliceCNN(nn.Module):
                 raise ValueError("kernel_size list values must be positive.")
         if any(value % 2 == 0 for value in kernel_sizes):
             raise ValueError("kernel_size values must be odd for symmetric padding.")
-        if max_pool_size <= 0:
-            raise ValueError("max_pool_size must be positive.")
         resolved_head_type = _normalize_cnn_head_type(
             head_type,
             arg_name="head_type",
@@ -551,7 +546,6 @@ class ResDilSpliceCNN(nn.Module):
 
         dilation_pattern = (1, 2, 4, 8)
         blocks: list[nn.Module] = []
-        pools: list[nn.Module] = []
         prev_channels = channels[0]
         for idx, out_channels in enumerate(channels):
             dilation = dilation_pattern[idx % len(dilation_pattern)]
@@ -565,13 +559,8 @@ class ResDilSpliceCNN(nn.Module):
                     dropout=dropout,
                 )
             )
-            if max_pool_size > 1:
-                pools.append(nn.MaxPool1d(kernel_size=max_pool_size))
-            else:
-                pools.append(nn.Identity())
             prev_channels = out_channels
         self.blocks = nn.ModuleList(blocks)
-        self.pools = nn.ModuleList(pools)
 
         self.readout = CnnFeatureReadout(
             output_channels=prev_channels,
@@ -587,9 +576,8 @@ class ResDilSpliceCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
-        for block, pool in zip(self.blocks, self.pools):
+        for block in self.blocks:
             x = block(x)
-            x = pool(x)
         x = self.readout(x)
         return self.fc(x)[:, 0]
 
@@ -714,7 +702,6 @@ def train_task_model(
     lightweight: bool = False,
     conv_channels: Optional[Sequence[int]] = None,
     kernel_sizes: Optional[Sequence[int]] = None,
-    max_pool_size: int = 2,
     head_type: str = "gap",
     dropout: float = 0.3,
     fc_hidden: int = 128,
@@ -780,9 +767,6 @@ def train_task_model(
         Convolution channels.
     kernel_sizes : Sequence[int] | None, default=None
         Convolution kernel sizes. A single size is broadcast to all layers.
-    max_pool_size : int, default=2
-        Max-pooling width after each residual block. Use ``1`` to disable
-        pooling.
     head_type : str, default="gap"
         CNN readout mode. ``"gap"`` uses global average pooling and
         ``"center"`` reads the center position after the block stack.
@@ -859,8 +843,6 @@ def train_task_model(
     """
     if kernel_sizes is not None and len(kernel_sizes) == 0:
         raise ValueError("--kernel_sizes must not be empty.")
-    if max_pool_size <= 0:
-        raise ValueError("--max_pool_size must be positive.")
     head_type = _normalize_cnn_head_type(head_type, arg_name="--head_type")
     if fc_hidden <= 0:
         raise ValueError("--fc_hidden must be positive.")
@@ -1047,7 +1029,6 @@ def train_task_model(
                 in_channels=4,
                 conv_channels=conv_channels,
                 kernel_size=resolved_kernel_sizes,
-                max_pool_size=max_pool_size,
                 head_type=head_type,
                 dropout=dropout,
                 fc_hidden=fc_hidden,
@@ -1253,7 +1234,6 @@ def train_task_model(
                             "model_config": {
                                 "conv_channels": list(conv_channels),
                                 "kernel_sizes": list(resolved_kernel_sizes),
-                                "max_pool_size": int(max_pool_size),
                                 "head_type": head_type,
                                 "dropout": dropout,
                                 "fc_hidden": fc_hidden,
@@ -1350,7 +1330,6 @@ def train_task_model(
                 "asym_alpha_pos": loss_meta["asym_alpha_pos"],
                 "conv_channels": list(conv_channels),
                 "kernel_sizes": list(resolved_kernel_sizes),
-                "max_pool_size": int(max_pool_size),
                 "head_type": head_type,
                 "dropout": dropout,
                 "fc_hidden": fc_hidden,
@@ -1434,7 +1413,6 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
     model_config = ckpt.get("model_config", {})
     conv_channels = model_config.get("conv_channels")
     kernel_sizes = model_config.get("kernel_sizes")
-    max_pool_size = int(model_config.get("max_pool_size", 2))
     head_type = _normalize_cnn_head_type(
         model_config.get("head_type", "gap"),
         arg_name="checkpoint head_type",
@@ -1456,7 +1434,6 @@ def load_task_model(checkpoint_path: str, device: str) -> Tuple[nn.Module, Dict]
         in_channels=4,
         conv_channels=conv_channels,
         kernel_size=kernel_sizes,
-        max_pool_size=max_pool_size,
         head_type=head_type,
         dropout=dropout,
         fc_hidden=fc_hidden,
@@ -1658,12 +1635,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=7,
         help="Legacy scalar kernel size fallback when --kernel_sizes is unset.",
-    )
-    parser.add_argument(
-        "--max_pool_size",
-        type=int,
-        default=2,
-        help="Max-pooling width after each residual block. Use 1 to disable pooling.",
     )
     parser.add_argument(
         "--head_type",
@@ -2206,7 +2177,6 @@ def train(
             lightweight=model_args.lightweight,
             conv_channels=resolved.conv_channels,
             kernel_sizes=resolved.kernel_sizes,
-            max_pool_size=resolved.max_pool_size,
             head_type=resolved.head_type,
             dropout=resolved.dropout,
             fc_hidden=resolved.fc_hidden,
@@ -2265,7 +2235,6 @@ def train(
                 None if params.conv_channels is None else list(params.conv_channels)
             ),
             "kernel_sizes": list(params.kernel_sizes),
-            "max_pool_size": params.max_pool_size,
             "head_type": params.head_type,
             "dropout": params.dropout,
             "fc_hidden": params.fc_hidden,
@@ -2309,7 +2278,6 @@ def train(
         "kernel_sizes": (
             None if shared_kernel_sizes is None else list(shared_kernel_sizes)
         ),
-        "max_pool_size": int(model_args.max_pool_size),
         "head_type": _normalize_cnn_head_type(
             getattr(model_args, "head_type", "gap"),
             arg_name="--head_type",

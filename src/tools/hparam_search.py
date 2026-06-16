@@ -4299,28 +4299,6 @@ def _stringify_int_list(values: list[int]) -> str:
     return ",".join(str(value) for value in values)
 
 
-def _resolve_max_pool_size(
-    *,
-    sampled_params: dict[str, Scalar],
-    base_args: dict[str, ArgValue],
-) -> int:
-    """Resolve CNN max-pooling width with backward-compatible fallback."""
-    raw = sampled_params.get("max_pool_size")
-    if raw is None:
-        raw = base_args.get("max_pool_size")
-    if raw is not None:
-        resolved = _to_positive_int(raw)
-        if resolved is not None:
-            return resolved
-
-    legacy_raw = sampled_params.get("use_max_pool")
-    if legacy_raw is None:
-        legacy_raw = base_args.get("use_max_pool")
-    if legacy_raw is not None:
-        return 2 if _to_bool(legacy_raw) else 1
-    return 2
-
-
 def _resolve_conv_stride(
     *,
     sampled_params: dict[str, Scalar],
@@ -4373,7 +4351,6 @@ def _apply_cnn_length_schedule(
     length: int,
     kernel_sizes: Sequence[int],
     conv_stride: int,
-    max_pool_size: int,
 ) -> int:
     """Apply one CNN stack schedule and return the resulting length."""
     current = length
@@ -4383,10 +4360,6 @@ def _apply_cnn_length_schedule(
         current = _conv_output_length(current, kernel_size, conv_stride)
         if current <= 0:
             return 0
-        if max_pool_size > 1:
-            current = current // max_pool_size
-            if current <= 0:
-                return 0
     return current
 
 
@@ -4413,7 +4386,6 @@ def _resolve_cnn_effective_input_length(
 def _apply_cnn_resdil_length_schedule(
     length: int,
     kernel_sizes: Sequence[int],
-    max_pool_size: int,
 ) -> int:
     """Apply one ``cnn_resdil`` stack schedule and return the resulting length."""
     current = length
@@ -4424,10 +4396,6 @@ def _apply_cnn_resdil_length_schedule(
     for kernel_size in kernel_sizes:
         if kernel_size <= 0 or kernel_size % 2 == 0:
             return 0
-        if max_pool_size > 1:
-            current = current // max_pool_size
-            if current <= 0:
-                return 0
     return current
 
 
@@ -4435,19 +4403,11 @@ def _apply_cnn_v3_pool_schedule(
     length: int,
     *,
     depth: int,
-    max_pool_size: int,
-    pool_every: int,
 ) -> int:
-    """Apply the pooling schedule used by ``cnn_v3`` and return output length."""
-    if length <= 0 or depth <= 0 or max_pool_size <= 0 or pool_every <= 0:
+    """Apply the schedule used by ``cnn_v3`` and return output length."""
+    if length <= 0 or depth <= 0:
         return 0
-    current = length
-    for index in range(depth):
-        if max_pool_size > 1 and ((index + 1) % pool_every == 0):
-            current = current // max_pool_size
-            if current <= 0:
-                return 0
-    return current
+    return length
 
 
 def _is_valid_cnn_architecture(
@@ -4465,12 +4425,6 @@ def _is_valid_cnn_architecture(
     if validation_model_name == "":
         return True
 
-    max_pool_size = _resolve_max_pool_size(
-        sampled_params=sampled_params,
-        base_args=base_args,
-    )
-    if max_pool_size <= 0:
-        return False
     conv_stride = _resolve_conv_stride(
         sampled_params=sampled_params,
         base_args=base_args,
@@ -4540,7 +4494,6 @@ def _is_valid_cnn_architecture(
                     _apply_cnn_resdil_length_schedule(
                         donor_len,
                         kernel_sizes,
-                        max_pool_size,
                     )
                     <= 0
                 ):
@@ -4550,7 +4503,6 @@ def _is_valid_cnn_architecture(
                     _apply_cnn_resdil_length_schedule(
                         acceptor_len,
                         kernel_sizes,
-                        max_pool_size,
                     )
                     <= 0
                 ):
@@ -4563,7 +4515,6 @@ def _is_valid_cnn_architecture(
                     donor_len,
                     kernel_sizes,
                     conv_stride,
-                    max_pool_size,
                 )
                 <= 0
             ):
@@ -4574,7 +4525,6 @@ def _is_valid_cnn_architecture(
                     acceptor_len,
                     kernel_sizes,
                     conv_stride,
-                    max_pool_size,
                 )
                 <= 0
             ):
@@ -4582,13 +4532,6 @@ def _is_valid_cnn_architecture(
         return True
 
     if validation_model_name == "cnn_v3":
-        pool_every_raw = sampled_params.get("pool_every")
-        if pool_every_raw is None:
-            pool_every_raw = base_args.get("pool_every", 2)
-        pool_every = _to_positive_int(pool_every_raw)
-        if pool_every is None or pool_every <= 0:
-            return False
-
         donor_conv_channels_raw = sampled_params.get("donor_conv_channels")
         if donor_conv_channels_raw is None:
             donor_conv_channels_raw = base_args.get("donor_conv_channels")
@@ -4704,30 +4647,14 @@ def _is_valid_cnn_architecture(
                 window_len=donor_len,
                 input_mode=input_mode,
             )
-            if (
-                _apply_cnn_v3_pool_schedule(
-                    donor_len,
-                    depth=donor_depth,
-                    max_pool_size=max_pool_size,
-                    pool_every=pool_every,
-                )
-                <= 0
-            ):
+            if _apply_cnn_v3_pool_schedule(donor_len, depth=donor_depth) <= 0:
                 return False
         if acceptor_len is not None:
             acceptor_len = _resolve_cnn_effective_input_length(
                 window_len=acceptor_len,
                 input_mode=input_mode,
             )
-            if (
-                _apply_cnn_v3_pool_schedule(
-                    acceptor_len,
-                    depth=acceptor_depth,
-                    max_pool_size=max_pool_size,
-                    pool_every=pool_every,
-                )
-                <= 0
-            ):
+            if _apply_cnn_v3_pool_schedule(acceptor_len, depth=acceptor_depth) <= 0:
                 return False
         return True
 
@@ -4829,7 +4756,6 @@ def _is_valid_cnn_architecture(
                     shared_len,
                     donor_kernel_sizes,
                     conv_stride,
-                    max_pool_size,
                 )
                 > 0
             )
@@ -4839,7 +4765,6 @@ def _is_valid_cnn_architecture(
             shared_len,
             donor_kernel_sizes[:split_index],
             conv_stride,
-            max_pool_size,
         )
         if prefix_length <= 0:
             return False
@@ -4848,7 +4773,6 @@ def _is_valid_cnn_architecture(
                 prefix_length,
                 donor_kernel_sizes[split_index:],
                 conv_stride,
-                max_pool_size,
             )
             > 0
         )
@@ -4859,7 +4783,6 @@ def _is_valid_cnn_architecture(
                 donor_len,
                 donor_kernel_sizes,
                 conv_stride,
-                max_pool_size,
             )
             <= 0
         ):
@@ -4870,7 +4793,6 @@ def _is_valid_cnn_architecture(
                 acceptor_len,
                 acceptor_kernel_sizes,
                 conv_stride,
-                max_pool_size,
             )
             <= 0
         ):
@@ -5016,28 +4938,15 @@ def _materialize_cnn_architecture_params(
             conv_stride_raw = base_args.get("conv_stride")
         explicit_conv_stride = _to_positive_int(conv_stride_raw)
 
-        max_pool_raw = out.get("max_pool_size")
-        if max_pool_raw is None:
-            max_pool_raw = base_args.get("max_pool_size")
-        explicit_max_pool = _to_positive_int(max_pool_raw)
-
         stride_candidate_pool = _resolve_candidate_pool(
             sampled_params=out,
             base_args=base_args,
             key="conv_stride_candidates",
         )
-        pool_candidate_pool = _resolve_candidate_pool(
-            sampled_params=out,
-            base_args=base_args,
-            key="max_pool_candidates",
-        )
         stride_controlled = (
             explicit_conv_stride is not None or stride_candidate_pool is not None
         )
-        pool_controlled = (
-            explicit_max_pool is not None or pool_candidate_pool is not None
-        )
-        if (not stride_controlled) and (not pool_controlled):
+        if not stride_controlled:
             return
 
         if explicit_conv_stride is not None:
@@ -5047,15 +4956,6 @@ def _materialize_cnn_architecture_params(
         else:
             stride_candidates = [
                 _resolve_conv_stride(sampled_params=out, base_args=base_args)
-            ]
-
-        if explicit_max_pool is not None:
-            pool_candidates = [explicit_max_pool]
-        elif pool_candidate_pool is not None:
-            pool_candidates = pool_candidate_pool
-        else:
-            pool_candidates = [
-                _resolve_max_pool_size(sampled_params=out, base_args=base_args)
             ]
 
         kernel_raw = out.get("kernel_sizes")
@@ -5125,40 +5025,32 @@ def _materialize_cnn_architecture_params(
             if acceptor_len is not None:
                 lengths_to_check.append(acceptor_len)
 
-        valid_pairs: list[tuple[int, int]] = []
+        valid_strides: list[int] = []
         for stride in stride_candidates:
-            for max_pool in pool_candidates:
-                if not lengths_to_check:
-                    valid_pairs.append((stride, max_pool))
-                    continue
-                is_valid = True
-                for input_len in lengths_to_check:
-                    output_len = _apply_cnn_length_schedule(
-                        input_len,
-                        kernel_sizes,
-                        stride,
-                        max_pool,
-                    )
-                    if output_len <= 0:
-                        is_valid = False
-                        break
-                if is_valid:
-                    valid_pairs.append((stride, max_pool))
+            if not lengths_to_check:
+                valid_strides.append(stride)
+                continue
+            is_valid = True
+            for input_len in lengths_to_check:
+                output_len = _apply_cnn_length_schedule(
+                    input_len,
+                    kernel_sizes,
+                    stride,
+                )
+                if output_len <= 0:
+                    is_valid = False
+                    break
+            if is_valid:
+                valid_strides.append(stride)
 
         chosen_stride: int
-        chosen_max_pool: int
-        if valid_pairs:
-            chosen_stride, chosen_max_pool = valid_pairs[
-                rng.randrange(len(valid_pairs))
-            ]
+        if valid_strides:
+            chosen_stride = valid_strides[rng.randrange(len(valid_strides))]
         else:
             chosen_stride = min(stride_candidates)
-            chosen_max_pool = min(pool_candidates)
 
         if stride_controlled and explicit_conv_stride is None:
             out["conv_stride"] = chosen_stride
-        if pool_controlled and explicit_max_pool is None:
-            out["max_pool_size"] = chosen_max_pool
 
     def _materialize_stride_and_pool_for_pair_models(
         *,
@@ -5169,28 +5061,15 @@ def _materialize_cnn_architecture_params(
             conv_stride_raw = base_args.get("conv_stride")
         explicit_conv_stride = _to_positive_int(conv_stride_raw)
 
-        max_pool_raw = out.get("max_pool_size")
-        if max_pool_raw is None:
-            max_pool_raw = base_args.get("max_pool_size")
-        explicit_max_pool = _to_positive_int(max_pool_raw)
-
         stride_candidate_pool = _resolve_candidate_pool(
             sampled_params=out,
             base_args=base_args,
             key="conv_stride_candidates",
         )
-        pool_candidate_pool = _resolve_candidate_pool(
-            sampled_params=out,
-            base_args=base_args,
-            key="max_pool_candidates",
-        )
         stride_controlled = (
             explicit_conv_stride is not None or stride_candidate_pool is not None
         )
-        pool_controlled = (
-            explicit_max_pool is not None or pool_candidate_pool is not None
-        )
-        if (not stride_controlled) and (not pool_controlled):
+        if not stride_controlled:
             return
 
         if explicit_conv_stride is not None:
@@ -5202,42 +5081,25 @@ def _materialize_cnn_architecture_params(
                 _resolve_conv_stride(sampled_params=out, base_args=base_args)
             ]
 
-        if explicit_max_pool is not None:
-            pool_candidates = [explicit_max_pool]
-        elif pool_candidate_pool is not None:
-            pool_candidates = pool_candidate_pool
-        else:
-            pool_candidates = [
-                _resolve_max_pool_size(sampled_params=out, base_args=base_args)
-            ]
-
-        valid_pairs: list[tuple[int, int]] = []
+        valid_strides: list[int] = []
         for stride in stride_candidates:
-            for max_pool in pool_candidates:
-                candidate_params = dict(out)
-                candidate_params["conv_stride"] = stride
-                candidate_params["max_pool_size"] = max_pool
-                if _is_valid_cnn_architecture(
-                    model_name=validation_model_name,
-                    sampled_params=candidate_params,
-                    base_args=base_args,
-                ):
-                    valid_pairs.append((stride, max_pool))
+            candidate_params = dict(out)
+            candidate_params["conv_stride"] = stride
+            if _is_valid_cnn_architecture(
+                model_name=validation_model_name,
+                sampled_params=candidate_params,
+                base_args=base_args,
+            ):
+                valid_strides.append(stride)
 
         chosen_stride: int
-        chosen_max_pool: int
-        if valid_pairs:
-            chosen_stride, chosen_max_pool = valid_pairs[
-                rng.randrange(len(valid_pairs))
-            ]
+        if valid_strides:
+            chosen_stride = valid_strides[rng.randrange(len(valid_strides))]
         else:
             chosen_stride = min(stride_candidates)
-            chosen_max_pool = min(pool_candidates)
 
         if stride_controlled and explicit_conv_stride is None:
             out["conv_stride"] = chosen_stride
-        if pool_controlled and explicit_max_pool is None:
-            out["max_pool_size"] = chosen_max_pool
 
     def _materialize_cnn_v3_branches() -> None:
         def _get_config_value(*keys: str, default: object) -> object:

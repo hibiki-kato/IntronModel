@@ -50,6 +50,7 @@ htmlcov/
 *.log
 conda-lock.yml
 sync.sh
+tempCodeRunnerFile.*
 
 # Analysis cache artifacts
 analysis/outputs/cache/*

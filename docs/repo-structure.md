@@ -1,86 +1,103 @@
 # Repository Structure
 
-## Primary Runtime Paths
+## Read This First
 
-- `src/run_model.py`: single public CLI for train/infer/transcript/eval pipeline
-- `src/models/registry.py`: model registration and contract validation
-- `src/models/`: unified model modules currently in registry
-  - `cnn.py`
-  - `cnn_pair.py`
-  - `cnn_resdil.py`
-  - `tcn.py`
+- `README.md`: quick start and active model list.
+- `docs/model-integration-contract.md`: model API contract.
+- `docs/data-policy.md`: what belongs in Git vs local storage.
+- `docs/legacy-model-status.md`: retired or partially integrated model status.
+
+## Active Runtime
+
+- `src/run_model.py`: public train/infer/transcript/eval CLI.
+- `src/models/registry.py`: model names, aliases, and capability contract.
+- `src/models/`: active model implementations:
   - `bert.py`
-  - `dnabert.py` (used by `dnabert`, `dnabert2`, `dnabert6` keys)
+  - `bilstm_pair.py`
+  - `cnn.py`
+  - `cnn_v2.py`
+  - `cnn_v3.py`
+  - `cnn_v3_meta.py`
+  - `cnn_pair_v3.py`
+  - `cnn_resdil.py`
+  - `dnabert.py`
+  - `markov_xgboost.py`
   - `reservoir.py`
-  - `reservoir_legacy.py`
-- `src/util/`: shared preprocessing, naming, and transcript aggregation
-  utilities
-- `src/evaluate_scores.py`: evaluation text generation and plotting
+  - `spliceformer_sc.py`
+  - `tcn.py`
+- `src/models/cnn_common.py`: shared CNN helpers.
+- `src/util/`: shared preprocessing, path, checkpoint, tuning, and scoring helpers.
+- `src/tools/`: larger CLIs for tuning, scanning, plotting, and data builds.
+- `src/scripts/`: reference-data setup scripts.
 
-## Wrapper Scripts (Root)
+## Active Wrappers
 
-Unified pipeline wrappers (config-only):
+Run wrappers are config-only. Edit the top `CONFIG (edit here)` block, then run
+the script without CLI arguments.
+
+Training/inference:
 
 - `run/run_cnn_v2.sh`
 - `run/run_cnn_pair_v2.sh`
-- `archive/run_isolated_mmus_rna60_pipeline.sh`
+- `run/run_cnn_v3.sh`
+- `run/run_cnn_pair_v3.sh`
+- `run/run_dnabert.sh`
+- `run/run_dnabert_pair.sh`
+- `run/run_spliceformer_sc.sh`
 
-Archived wrappers:
+Grid/tuning:
 
-- `archive/run/bert/run_bert.sh`
-- `archive/run/bert/tune_bert.sh`
-- `archive/run/bert/tune_bert_time.sh`
-- `archive/run/bilstm_pair/run_bilstm_pair.sh`
-- `archive/run/bilstm_pair/tune_bilstm_pair_time.sh`
-- `archive/run/cnn/run_cnn_resdil.sh`
-- `archive/run/cnn/tune_cnn_resdil.sh`
-- `archive/run/cnn/tune_cnn_resdil_time.sh`
-- `archive/run/dnabert/run_dnabert.sh`
-- `archive/run/dnabert/run_dnabert_pair.sh`
-- `archive/run/dnabert/tune_dnabert.sh`
-- `archive/run/dnabert/tune_dnabert_time.sh`
-- `archive/run/dnabert/tune_dnabert_pair.sh`
-- `archive/run/dnabert/tune_dnabert_pair_time.sh`
-- `archive/run/markov_xgboost/run_markov_xgboost.sh`
-- `archive/run/markov_xgboost/tune_markov_xgboost.sh`
-- `archive/run/reservoir/run_reservoir.sh`
-- `archive/run/reservoir/tune_reservoir.sh`
-- `archive/run/reservoir/tune_reservoir_time.sh`
-- `archive/run/tcn/run_tcn.sh`
-- `archive/run/tcn/tune_tcn.sh`
-- `archive/run/tcn/tune_tcn_time.sh`
-
-Active tuning wrappers:
-
+- `run/grid_search_cnn_v2_flank.sh`
+- `run/grid_search_dnabert2_flank.sh`
 - `run/tune_cnn_v2_time.sh`
 - `run/tune_cnn_pair_v2_time.sh`
+- `run/tune_cnn_v3_time.sh`
+- `run/tune_cnn_pair_v3_time.sh`
+- `run/tune_dnabert_time.sh`
+- `run/tune_dnabert_pair_time.sh`
 
-Utilities:
+Data and evaluation:
 
 - `run/make_test_data.sh`
 - `run/make_intron_training_data.sh`
 - `run/make_trimmed_pair_data.sh`
 - `run/make_labeled_intron_eval_data.sh`
+- `run/make_mixed_pair_neg_data.sh`
+- `run/make_random_intron_and_trans_scores.sh`
+- `run/make_unique_intron_assets.sh`
 - `run/eval_trans_score.sh`
-- `run/plot_eval.sh`
+- `run/eval_intron_pr_auc.sh`
+- `run/scan_score_test_suite.sh`
+- `run/scan_score_test_suite_integrated.sh`
+- `run/scan_splice_candidates.sh`
+- `run/share_eval_to_chirag.sh`
 
-## Source Tooling and Data Scripts
+Shared shell helpers live in `run/lib/`:
 
-- `src/scripts/`: data provisioning and lockfile update helpers
-- `src/tools/`: Python tooling (doc figure generation, tuning runner, scans)
+- `run/lib/common.sh`: path, conda, model, GPU, tuning, and checkpoint helpers.
+- `run/lib/wrapper_runtime.sh`: small wrapper-runtime helpers for args,
+  `src/run_model.py` execution, and species/GPU dispatch.
+- `run/lib/tuned_config.sh`: tuned-config extraction helpers.
 
-## Legacy or Non-Integrated Modules
-
-These files are still present but are not wired to `run_model.py` registry:
-
-- `src/models/bert_drosophila.py`
-- `src/models/cnn_v2.py`
-- `src/models/reservoir_rc.py`
+Add shared wrapper behavior there before copying helper functions into another
+wrapper.
 
 ## Data and Artifacts
 
-- `data/` is externalized from Git tracking.
-- `model/` stores local checkpoints (`*.pt`) and pretrained snapshots.
-- Runtime path overrides: `INTRONMODEL_DATA_ROOT`,
-  `INTRONMODEL_MODEL_ROOT`.
-- Only minimal deterministic fixtures should be kept under `tests/fixtures/`.
+- `data/`: local datasets, grid outputs, and generated analysis data.
+- `model/`: checkpoints and pretrained model snapshots.
+- `score_test_suite/`: small retained evaluation suite and expected outputs.
+- `analysis/outputs/`, `docs/_build/`, `temp/`, `__pycache__/`, `.pytest_cache/`:
+  generated local artifacts. Keep them out of source changes.
+- `archive/`: retired scripts, historical outputs, and migration snapshots.
+- `sub_repo/`: third-party or external source checkouts.
+
+## Cleanup Rule
+
+Prefer direct paths:
+
+- wrapper -> shared shell helper/Python CLI -> `src/run_model.py`
+- Python tool -> shared `src/util/` helper -> model/data code
+
+Avoid adding new wrapper-only logic when existing `run/lib/` or `src/util/`
+helpers can express it without runtime overhead.

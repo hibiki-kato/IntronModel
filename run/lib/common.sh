@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+_INTRONMODEL_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${_INTRONMODEL_COMMON_DIR}/wrapper_runtime.sh"
+
 _intronmodel_source_conda_sh() {
 	local conda_sh_path="$1"
 	if [[ -z "${conda_sh_path}" || ! -f "${conda_sh_path}" ]]; then
@@ -1123,7 +1127,6 @@ intronmodel_resolve_parallel_slots() {
 	fi
 	printf '%s\n' "${resolved}"
 }
-
 
 intronmodel_collect_gpu_release_ids() {
 	local py_bin="$1"

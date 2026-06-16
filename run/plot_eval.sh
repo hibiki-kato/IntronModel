@@ -62,7 +62,7 @@ set_defaults_for_species() {
 		DEFAULT_X_MIN="10.0"
 		DEFAULT_X_MAX="19.0"
 		DEFAULT_Y_MIN="26.0"
-		DEFAULT_Y_MAX="36 .0"
+		DEFAULT_Y_MAX="36.0"
 		;;
 	*)
 		if [[ -z "${X_MIN}" || -z "${X_MAX}" || -z "${Y_MIN}" || -z "${Y_MAX}" ]]; then

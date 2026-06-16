@@ -17,13 +17,11 @@ def test_build_run_args_accepts_cnn_kernel_size_overrides() -> None:
     )
     env = {
         "MODEL": "cnn",
-        "MAX_POOL_SIZE": "1",
         "KERNEL_SIZES": "11,9,7",
         "DONOR_KERNEL_SIZES": "13,11",
         "ACCEPTOR_KERNEL_SIZES": "9,7,5",
     }
-    args = _build_run_args(spec, env)
-    assert "--max_pool_size" not in args
+    args = _build_run_args(spec, env, tuned_config_paths={})
     assert "--kernel_sizes" in args
     assert "11,9,7" in args
     assert "--donor_kernel_sizes" in args
@@ -32,7 +30,7 @@ def test_build_run_args_accepts_cnn_kernel_size_overrides() -> None:
     assert "9,7,5" in args
 
 
-def test_stem_params_include_cnn_max_pool_flag() -> None:
+def test_stem_params_include_cnn_arch_flags() -> None:
     params = _stem_params(
         "cnn",
         {
@@ -53,7 +51,6 @@ def test_stem_params_include_cnn_max_pool_flag() -> None:
             "TRAIN_TARGET": "both",
             "CONV_CHANNELS": "64,128,256",
             "KERNEL_SIZES": "7,7,7",
-            "MAX_POOL_SIZE": "1",
             "CONV_STRIDE": "2",
             "HEAD_TYPE": "center",
             "DROPOUT": "0.3",
@@ -61,33 +58,30 @@ def test_stem_params_include_cnn_max_pool_flag() -> None:
         },
     )
 
-    assert params["max_pool_size"] == 1
     assert params["conv_stride"] == 2
     assert params["head_type"] == "center"
 
 
-def test_build_run_args_includes_cnn_max_pool_flag_when_required() -> None:
+def test_build_run_args_includes_cnn_arch_flags_when_required() -> None:
     spec = WrapperSpec(
         script_name="unit.sh",
         model_env_name="cnn",
         supports_tuned_hparams=False,
         tuned_key_map={},
         stem_param_builder="cnn",
-        required_arg_keys=("MAX_POOL_SIZE", "CONV_STRIDE", "HEAD_TYPE"),
+        required_arg_keys=("CONV_STRIDE", "HEAD_TYPE"),
         per_task_override_keys=(),
     )
     args = _build_run_args(
         spec,
         {
             "MODEL": "cnn",
-            "MAX_POOL_SIZE": "1",
             "CONV_STRIDE": "2",
             "HEAD_TYPE": "center",
         },
+        tuned_config_paths={},
     )
 
-    assert "--max_pool_size" in args
-    assert args[args.index("--max_pool_size") + 1] == "1"
     assert "--conv_stride" in args
     assert args[args.index("--conv_stride") + 1] == "2"
     assert "--head_type" in args
@@ -114,6 +108,7 @@ def test_build_run_args_forwards_infer_runtime_overrides() -> None:
             "INFER_COMPILE": "0",
             "INFER_COMPILE_MODE": "auto",
         },
+        tuned_config_paths={},
     )
 
     assert "--infer_batch_size" in args

@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+
+if ! declare -F intronmodel_is_active_public_model >/dev/null 2>&1; then
+	_TUNED_CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	# shellcheck source=/dev/null
+	source "${_TUNED_CONFIG_DIR}/common.sh"
+fi
+
+intronmodel_normalize_use_tuned_mode() {
+	local raw_mode="$1"
+	local script_name="$2"
+	local normalized
+	normalized="$(echo "${raw_mode}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	case "${normalized}" in
+		off | auto | required)
+			printf '%s\n' "${normalized}"
+			;;
+		*)
+			echo "[${script_name}] USE_TUNED_HPARAMS must be off|auto|required." >&2
+			return 1
+			;;
+	esac
+}
+
+
+intronmodel_resolve_tuned_target() {
+	local configured_target="$1"
+	local default_target="$2"
+	local normalized
+	normalized="$(echo "${configured_target}" | tr '[:upper:]' '[:lower:]' | xargs)"
+	if [[ -n "${normalized}" && "${normalized}" != "auto" ]]; then
+		printf '%s\n' "${normalized}"
+		return 0
+	fi
+	printf '%s\n' "${default_target}"
+}
+
+
+intronmodel_resolve_tuned_config_path() {
+	local data_root="$1"
+	local species="$2"
+	local tuned_model_name="$3"
+	local tuned_target="$4"
+	local explicit_path="$5"
+	local shared_path="$6"
+	local best_config_filename="${7:-best_config.json}"
+
+	if [[ -n "${explicit_path}" ]]; then
+		printf '%s\n' "${explicit_path}"
+		return 0
+	fi
+
+	local task_path="${data_root}/${species}/tuning/${tuned_model_name}/${tuned_target}/${best_config_filename}"
+	if [[ -f "${task_path}" ]]; then
+		printf '%s\n' "${task_path}"
+		return 0
+	fi
+
+	local use_task_only_configs="0"
+	if [[ -n "${tuned_model_name}" ]]; then
+		use_task_only_configs="$(
+			intronmodel_is_active_public_model \
+				"tuned_config.sh" \
+				"${tuned_model_name}"
+		)"
+	fi
+
+	if [[ "${use_task_only_configs}" != "1" && -n "${shared_path}" ]]; then
+		local shared_candidate="${shared_path}"
+		if [[ -f "${shared_candidate}" ]]; then
+			printf '%s\n' "${shared_candidate}"
+			return 0
+		fi
+	fi
+
+	if [[ "${use_task_only_configs}" != "1" && "${best_config_filename}" == "best_config.json" ]]; then
+		local legacy_path="${data_root}/${species}/tuning/${tuned_model_name}/best_config.json"
+		if [[ -f "${legacy_path}" ]]; then
+			printf '%s\n' "${legacy_path}"
+			return 0
+		fi
+	fi
+
+	return 0
+}
+
+
+intronmodel_load_tuned_overrides() {
+	local config_path="$1"
+	python3 - "${config_path}" <<'PY'
+from __future__ import annotations
+
+import json
+import math
+import sys
+from pathlib import Path
+
+
+def _scalar_to_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Non-finite float value in tuned config.")
+        return format(value, ".15g")
+    return str(value)
+
+
+def _mask_to_sequence_transform(value: object) -> str:
+    if isinstance(value, bool):
+        normalized = "on" if value else "off"
+    else:
+        normalized = str(value).strip().lower()
+    if normalized in {"on", "1", "true", "yes"}:
+        return "mask_outside_intron_n"
+    if normalized in {"off", "0", "false", "no"}:
+        return "none"
+    raise ValueError("mask must be on or off.")
+
+
+def _site_length_to_flanks(site_type: str, length_value: object) -> tuple[int, int] | None:
+    if not isinstance(length_value, int):
+        return None
+    if length_value <= 0:
+        raise ValueError(f"{site_type}_len must be positive.")
+    edge_span = 5 if length_value > 5 else max(1, length_value - 1)
+    if site_type == "donor":
+        return edge_span, length_value - edge_span
+    return length_value - edge_span, edge_span
+
+
+def _normalize_site_window_args(
+    raw: object,
+    *,
+    prefer_flanks: bool,
+) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized = dict(raw)
+    if not prefer_flanks:
+        return normalized
+    donor_flanks = _site_length_to_flanks("donor", normalized.get("donor_len"))
+    if donor_flanks is not None:
+        normalized.setdefault("donor_upstream", donor_flanks[0])
+        normalized.setdefault("donor_downstream", donor_flanks[1])
+    acceptor_flanks = _site_length_to_flanks(
+        "acceptor",
+        normalized.get("acceptor_len"),
+    )
+    if acceptor_flanks is not None:
+        normalized.setdefault("acceptor_upstream", acceptor_flanks[0])
+        normalized.setdefault("acceptor_downstream", acceptor_flanks[1])
+    normalized.pop("donor_len", None)
+    normalized.pop("acceptor_len", None)
+    return normalized
+
+
+config_path = Path(sys.argv[1]).resolve()
+payload = json.loads(config_path.read_text(encoding="utf-8"))
+if not isinstance(payload, dict):
+    raise ValueError("best_config payload must be an object.")
+status = str(payload.get("status", "")).strip().lower()
+if status != "ok":
+    raise ValueError(f"Expected status='ok', got: {status or '<missing>'}")
+
+context = payload.get("hparam_context")
+fixed_run_args = None
+if isinstance(context, dict):
+    fixed_run_args = context.get("fixed_run_args")
+model_name_value = ""
+if isinstance(fixed_run_args, dict):
+    raw_model_name = fixed_run_args.get("model")
+    if isinstance(raw_model_name, str):
+        model_name_value = raw_model_name.strip().lower()
+sampled_params = payload.get("sampled_params")
+prefer_flanks = model_name_value == "cnn_v2"
+fixed_run_args = _normalize_site_window_args(
+    fixed_run_args,
+    prefer_flanks=prefer_flanks,
+)
+sampled_params = _normalize_site_window_args(
+    sampled_params,
+    prefer_flanks=prefer_flanks,
+)
+if not isinstance(sampled_params, dict):
+    raise ValueError("sampled_params is missing or invalid.")
+pair_mode_value = None
+if isinstance(fixed_run_args, dict):
+    pair_mode_value = fixed_run_args.get("pair_mode")
+if pair_mode_value is None and isinstance(sampled_params, dict):
+    pair_mode_value = sampled_params.get("pair_mode")
+train_target_value = None
+if isinstance(fixed_run_args, dict):
+    train_target_value = fixed_run_args.get("train_target")
+if train_target_value is None and isinstance(sampled_params, dict):
+    train_target_value = sampled_params.get("train_target")
+independent_mode = (
+    isinstance(pair_mode_value, str)
+    and pair_mode_value.strip().lower() == "independent"
+)
+train_target = (
+    train_target_value.strip().lower()
+    if isinstance(train_target_value, str)
+    else ""
+)
+suppressed_fixed_keys = set(sampled_params)
+if "mask" in sampled_params or "sequence_transform" in sampled_params:
+    suppressed_fixed_keys.update({"mask", "sequence_transform"})
+if independent_mode:
+    if train_target == "donor":
+        for key in (
+            "acceptor_len",
+            "acceptor_upstream",
+            "acceptor_downstream",
+        ):
+            fixed_run_args.pop(key, None)
+            sampled_params.pop(key, None)
+    elif train_target == "acceptor":
+        for key in (
+            "donor_len",
+            "donor_upstream",
+            "donor_downstream",
+        ):
+            fixed_run_args.pop(key, None)
+            sampled_params.pop(key, None)
+if isinstance(fixed_run_args, dict):
+    for key in sorted(fixed_run_args):
+        if key == "script_name":
+            continue
+        if key in suppressed_fixed_keys:
+            continue
+        if independent_mode and key in {"mask", "sequence_transform"}:
+            continue
+        value = fixed_run_args[key]
+        if value is None:
+            continue
+        print(f"{key}\t{_scalar_to_text(value)}")
+sequence_transform_value = sampled_params.pop("sequence_transform", None)
+mask_value = sampled_params.pop("mask", None)
+if independent_mode:
+    print("sequence_transform\tnone")
+elif mask_value is not None:
+    print(f"sequence_transform\t{_mask_to_sequence_transform(mask_value)}")
+elif sequence_transform_value is not None:
+    print(
+        "sequence_transform\t"
+        f"{_scalar_to_text(sequence_transform_value)}"
+    )
+for key in sorted(sampled_params):
+    value = sampled_params[key]
+    if value is None:
+        continue
+    print(f"{key}\t{_scalar_to_text(value)}")
+PY
+}

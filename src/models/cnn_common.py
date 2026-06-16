@@ -402,9 +402,6 @@ class CnnGapEncoder(nn.Module):
         Convolution kernel size.
     dropout : float, default=0.3
         Dropout rate in convolution blocks.
-    max_pool_size : int, default=2
-        Max-pooling width applied after each convolution block. Use ``1`` to
-        skip pooling.
     conv_stride : int, default=1
         Shared stride used by all convolution layers.
     head_type : str, default="gap"
@@ -422,7 +419,6 @@ class CnnGapEncoder(nn.Module):
         conv_channels: Optional[Sequence[int]] = None,
         kernel_size: int | Sequence[int] = 7,
         dropout: float = 0.3,
-        max_pool_size: int = 2,
         conv_stride: int = 1,
         head_type: str = "gap",
     ) -> None:
@@ -452,8 +448,6 @@ class CnnGapEncoder(nn.Module):
                 kernel_sizes = kernel_sizes[: len(channel_list)]
             if any(value <= 0 for value in kernel_sizes):
                 raise ValueError("kernel_size list values must be positive.")
-        if max_pool_size <= 0:
-            raise ValueError("max_pool_size must be positive.")
         if conv_stride <= 0:
             raise ValueError("conv_stride must be positive.")
 
@@ -473,8 +467,6 @@ class CnnGapEncoder(nn.Module):
                     nn.ReLU(inplace=True),
                 ]
             )
-            if max_pool_size > 1:
-                layers.append(nn.MaxPool1d(max_pool_size))
             layers.append(nn.Dropout(dropout))
             prev_ch = ch
 
@@ -513,7 +505,6 @@ class BasicSpliceCNN(nn.Module):
         kernel_size: int | Sequence[int] = 7,
         dropout: float = 0.3,
         fc_hidden: int = 128,
-        max_pool_size: int = 2,
         conv_stride: int = 1,
         head_type: str = "gap",
     ) -> None:
@@ -523,7 +514,6 @@ class BasicSpliceCNN(nn.Module):
             conv_channels=conv_channels,
             kernel_size=kernel_size,
             dropout=dropout,
-            max_pool_size=max_pool_size,
             conv_stride=conv_stride,
             head_type=head_type,
         )

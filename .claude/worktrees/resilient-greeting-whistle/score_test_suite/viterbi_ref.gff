@@ -1,0 +1,47 @@
+##gff-version 3
+# gffread v0.12.7
+# gffread rna-NM_130502.3/rna-NM_130502.3.gtf cds-NP_001259088.1/cds-NP_001259088.1.gtf cds-NP_477286.2/cds-NP_477286.2.gtf cds-NP_525044.1/cds-NP_525044.1.gtf cds-NP_569892.1/cds-NP_569892.1.gtf cds-NP_569901.1/cds-NP_569901.1.gtf
+NC_004354.4	RefSeq	transcript	1	1661	.	+	.	ID=rna-NM_080305.4;geneID=rna-NM_080305.4;gene_name=Cyp4ae1
+NC_004354.4	RefSeq	CDS	1	166	.	+	0	Parent=rna-NM_080305.4
+NC_004354.4	RefSeq	CDS	221	674	.	+	2	Parent=rna-NM_080305.4
+NC_004354.4	RefSeq	CDS	730	1262	.	+	1	Parent=rna-NM_080305.4
+NC_004354.4	RefSeq	CDS	1324	1661	.	+	2	Parent=rna-NM_080305.4
+NC_004354.4	RefSeq	transcript	1	2928	.	+	.	ID=rna-NM_130502.3;geneID=rna-NM_130502.3;gene_name=tw
+NC_004354.4	RefSeq	CDS	1	110	.	+	0	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	186	269	.	+	1	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	330	414	.	+	1	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	484	588	.	+	0	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	643	751	.	+	0	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	813	1594	.	+	2	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	1665	1905	.	+	0	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	1970	2118	.	+	2	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	2182	2620	.	+	0	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	CDS	2735	2928	.	+	2	Parent=rna-NM_130502.3
+NC_004354.4	RefSeq	transcript	1	3248	.	+	.	ID=rna-NM_057938.5;geneID=rna-NM_057938.5;gene_name=dor
+NC_004354.4	RefSeq	CDS	1	289	.	+	0	Parent=rna-NM_057938.5
+NC_004354.4	RefSeq	CDS	352	1010	.	+	2	Parent=rna-NM_057938.5
+NC_004354.4	RefSeq	CDS	1065	2490	.	+	0	Parent=rna-NM_057938.5
+NC_004354.4	RefSeq	CDS	2552	2703	.	+	2	Parent=rna-NM_057938.5
+NC_004354.4	RefSeq	CDS	2766	3248	.	+	0	Parent=rna-NM_057938.5
+NC_004354.4	RefSeq	transcript	1	3304	.	+	.	ID=rna-NM_130536.2;geneID=rna-NM_130536.2;gene_name=CG14625
+NC_004354.4	RefSeq	CDS	1	54	.	+	0	Parent=rna-NM_130536.2
+NC_004354.4	RefSeq	CDS	1008	1230	.	+	0	Parent=rna-NM_130536.2
+NC_004354.4	RefSeq	CDS	1311	3304	.	+	2	Parent=rna-NM_130536.2
+NC_004354.4	RefSeq	transcript	1	6412	.	+	.	ID=rna-NM_001272159.1;geneID=rna-NM_001272159.1;gene_name=G9a
+NC_004354.4	RefSeq	CDS	1	747	.	+	0	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	1533	3389	.	+	0	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	3445	3686	.	+	0	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	3777	4144	.	+	1	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	4201	4442	.	+	2	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	4502	4914	.	+	0	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	4974	5511	.	+	1	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	5581	5954	.	+	0	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	CDS	6220	6412	.	+	1	Parent=rna-NM_001272159.1
+NC_004354.4	RefSeq	transcript	1	6702	.	+	.	ID=rna-NM_130545.3;geneID=rna-NM_130545.3;gene_name=fs(1)N
+NC_004354.4	RefSeq	CDS	1	141	.	+	0	Parent=rna-NM_130545.3
+NC_004354.4	RefSeq	CDS	200	2236	.	+	0	Parent=rna-NM_130545.3
+NC_004354.4	RefSeq	CDS	2295	2424	.	+	0	Parent=rna-NM_130545.3
+NC_004354.4	RefSeq	CDS	2482	2612	.	+	2	Parent=rna-NM_130545.3
+NC_004354.4	RefSeq	CDS	2671	4441	.	+	0	Parent=rna-NM_130545.3
+NC_004354.4	RefSeq	CDS	4496	4704	.	+	2	Parent=rna-NM_130545.3
+NC_004354.4	RefSeq	CDS	4765	6702	.	+	0	Parent=rna-NM_130545.3

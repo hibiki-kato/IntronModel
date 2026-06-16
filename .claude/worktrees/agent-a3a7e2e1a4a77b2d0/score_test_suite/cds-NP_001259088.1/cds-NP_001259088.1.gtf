@@ -1,0 +1,10 @@
+NC_004354.4	RefSeq	transcript	1	6412	.	+	.	transcript_id "rna-NM_001272159.1"; gene_id "rna-NM_001272159.1"; gene_name "G9a"
+NC_004354.4	RefSeq	CDS	1	747	.	+	0	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	1533	3389	.	+	0	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	3445	3686	.	+	0	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	3777	4144	.	+	1	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	4201	4442	.	+	2	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	4502	4914	.	+	0	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	4974	5511	.	+	1	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	5581	5954	.	+	0	transcript_id "rna-NM_001272159.1"; gene_name "G9a";
+NC_004354.4	RefSeq	CDS	6220	6412	.	+	1	transcript_id "rna-NM_001272159.1"; gene_name "G9a";

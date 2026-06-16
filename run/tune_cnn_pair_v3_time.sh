@@ -65,8 +65,6 @@ GUIDED_RANDOM_FRACTION="0.20"
 GUIDED_MUTATION_RATE="0.35"
 REINFORCE_TEMPERATURE="0.75"
 SEARCH_SPACE_FILE="auto"
-MAX_POOL_SIZE="2"
-POOL_EVERY="2"
 HEAD_TYPE="gap"
 
 # Species scheduling order for repeated short cycles.
@@ -160,14 +158,6 @@ DEFAULT_SEARCH_SPACE_JSON_PAIR="$(cat <<'JSON'
 		"max": 0.25,
 		"scale": "linear"
 	},
-	"max_pool_size": {
-		"type": "categorical",
-		"values": [1, 2, 3]
-	},
-	"pool_every": {
-		"type": "categorical",
-		"values": [1, 2, 3]
-	},
 	"head_type": {"type": "categorical", "values": ["gap", "center"]},
   "loss": {
     "type": "categorical",
@@ -233,83 +223,8 @@ resolve_search_space_file() {
 		"${candidates[@]}"
 }
 
-normalize_json_object_file() {
-	local python_bin="$1"
-	local json_path="$2"
 
-	"${python_bin}" - "${json_path}" <<'PY'
-from __future__ import annotations
 
-import json
-import os
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-payload = json.loads(path.read_text(encoding="utf-8"))
-if not isinstance(payload, dict):
-    raise ValueError("Search-space file must contain a JSON object.")
-print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
-PY
-}
-
-run_double_descent_plot() {
-	local python_bin="$1"
-	local project_root="$2"
-	local species_name="$3"
-	local model_name="$4"
-
-	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
-		--project_root "${project_root}" \
-		--species "${species_name}" \
-		--target "pair" \
-		--model "${model_name}" || true
-}
-
-append_unique_gpu_ids() {
-	local array_name="$1"
-	shift || true
-	local -n target_ref="${array_name}"
-	local candidate=""
-	local existing=""
-	local found=0
-
-	for candidate in "$@"; do
-		if [[ -z "${candidate}" ]]; then
-			continue
-		fi
-		found=0
-		for existing in "${target_ref[@]}"; do
-			if [[ "${existing}" == "${candidate}" ]]; then
-				found=1
-				break
-			fi
-		done
-		if [[ "${found}" -eq 0 ]]; then
-			target_ref+=("${candidate}")
-		fi
-	done
-}
-
-remove_gpu_from_csv() {
-	local gpu_csv="$1"
-	local remove_gpu="$2"
-	local parts=()
-	local kept=()
-	local value=""
-
-	IFS=',' read -r -a parts <<< "${gpu_csv}"
-	for value in "${parts[@]}"; do
-		if [[ -z "${value}" || "${value}" == "${remove_gpu}" ]]; then
-			continue
-		fi
-		kept+=("${value}")
-	done
-	(
-		IFS=,
-		printf '%s\n' "${kept[*]}"
-	)
-}
 
 should_dispatch_next_cycle() {
 	local remaining_seconds="$1"
@@ -384,7 +299,7 @@ run_cycle_process() {
 			"(exit=${run_status})" >>"${stdout_log}"
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
-		run_double_descent_plot \
+		intronmodel_run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
@@ -487,7 +402,7 @@ dispatch_cycle() {
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(
-			normalize_json_object_file \
+			intronmodel_normalize_json_object_file \
 				"${PYTHON_BIN}" \
 				"${search_space_path}" 2>&1
 		)"; then
@@ -539,8 +454,6 @@ dispatch_cycle() {
     "val_frac": ${VAL_FRAC},
 	"input_mode": "onehot",
 	"pair_mode": "pair",
-	"max_pool_size": ${MAX_POOL_SIZE},
-	"pool_every": ${POOL_EVERY},
 	"head_type": "${HEAD_TYPE}",
 	"embedding_dim": 32,
     "bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
@@ -648,8 +561,6 @@ write_cycle_template_config() {
     "val_frac": ${VAL_FRAC},
     "input_mode": "onehot",
     "pair_mode": "pair",
-    "max_pool_size": ${MAX_POOL_SIZE},
-    "pool_every": ${POOL_EVERY},
     "head_type": "${HEAD_TYPE}",
     "embedding_dim": 32,
     "bpe_pretrained_model_name": "zhihan1996/DNABERT-2-117M",
@@ -865,7 +776,8 @@ PARALLEL_SLOT_COUNT="$(
 		"${MAX_PARALLEL_TRIALS}" \
 		"${#GPU_ID_LIST[@]}"
 )"
-scheduler_root="$(mktemp -d "${TMPDIR:-/tmp}/${TUNING_MODEL_NAME}_scheduler_XXXXXX")"
+mkdir -p "${PROJECT_ROOT}/temp"
+scheduler_root="$(mktemp -d "${PROJECT_ROOT}/temp/${TUNING_MODEL_NAME}_scheduler_XXXXXX")"
 cleanup_scheduler_root() {
 	if [[ -n "${scheduler_root:-}" && -d "${scheduler_root}" ]]; then
 		rm -rf "${scheduler_root}"
@@ -911,7 +823,7 @@ for base_seed in "${SEED_VALUES[@]}"; do
 		)"; then
 			search_space_path="${search_space_resolved}"
 			if ! target_space_json="$(
-				normalize_json_object_file \
+				intronmodel_normalize_json_object_file \
 					"${PYTHON_BIN}" \
 					"${search_space_path}" 2>&1
 			)"; then
@@ -1039,7 +951,7 @@ fi
 if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 	final_plot_species=("Hsap" "Dmel")
 	for final_species in "${final_plot_species[@]}"; do
-		run_double_descent_plot \
+		intronmodel_run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${final_species}" \

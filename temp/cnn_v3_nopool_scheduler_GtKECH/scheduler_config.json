@@ -1,0 +1,16 @@
+{
+  "script_name": "tune_cnn_v3_nopool_time.sh",
+  "project_root": ".",
+  "data_root": "data",
+  "model_root": "model",
+  "python_bin": "python3",
+  "hparam_search_path": "src/tools/hparam_search.py",
+  "time_budget_minutes": 30,
+  "timeout_grace_seconds": 30,
+  "selected_gpu_ids": [
+    "0"
+  ],
+  "parallel_slot_count": 1,
+  "start_epoch": "2026-05-27T18:50:18Z",
+  "jobs_file": "temp/cnn_v3_nopool_scheduler_GtKECH/jobs.jsonl"
+}

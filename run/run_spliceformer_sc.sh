@@ -105,23 +105,11 @@ intronmodel_init_paths "${BASH_SOURCE[0]}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 append_arg_if_set() {
-	local flag="$1"
-	local value="$2"
-	if [[ -n "${value}" ]]; then
-		args+=("--${flag}" "${value}")
-	fi
+	intronmodel_append_arg_if_set args "$@"
 }
 
 append_flag_if_truthy() {
-	local flag="$1"
-	local value="$2"
-	local normalized
-	normalized="$(echo "${value}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	case "${normalized}" in
-		1 | true | on | yes)
-			args+=("--${flag}")
-			;;
-	esac
+	intronmodel_append_flag_if_truthy args "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -137,7 +125,6 @@ fi
 
 run_train_once() {
 	local assigned_gpu_id="${1-}"
-	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 	args=(
 		--model "${MODEL}"
@@ -194,14 +181,7 @@ run_train_once() {
 	append_flag_if_truthy "continue_train" "${CONTINUE_TRAINING}"
 
 	echo "[spliceformer_sc.sh] training on species_list=${SPECIES_LIST:-${TRAINING_SPECIES}}"
-	if [[ -n "${assigned_gpu_id}" ]]; then
-		CUDA_VISIBLE_DEVICES="${assigned_gpu_id}" \
-			PYTHONPATH="${pythonpath}" \
-			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-	else
-		PYTHONPATH="${pythonpath}" \
-			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-	fi
+	intronmodel_run_model_with_optional_gpu "${PROJECT_ROOT}" "${assigned_gpu_id}" args
 }
 
 # ---------------------------------------------------------------------------
@@ -211,7 +191,6 @@ run_train_once() {
 run_infer_species() {
 	local species="$1"
 	local assigned_gpu_id="${2-}"
-	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 	args=(
 		--model "${MODEL}"
@@ -254,14 +233,7 @@ run_infer_species() {
 	append_arg_if_set "ref_gff" "${REF_GFF_PATH}"
 
 	echo "[spliceformer_sc.sh] infer species=${species}"
-	if [[ -n "${assigned_gpu_id}" ]]; then
-		CUDA_VISIBLE_DEVICES="${assigned_gpu_id}" \
-			PYTHONPATH="${pythonpath}" \
-			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-	else
-		PYTHONPATH="${pythonpath}" \
-			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-	fi
+	intronmodel_run_model_with_optional_gpu "${PROJECT_ROOT}" "${assigned_gpu_id}" args
 }
 
 # ---------------------------------------------------------------------------

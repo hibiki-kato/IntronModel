@@ -1,0 +1,10 @@
+##gff-version 3
+# gffread v0.12.7
+# gffread -F
+NC_004354.4	HMM	transcript	1	424	.	.	.	ID=rna-NM_130502.3.fa.0
+NC_004354.4	HMM	CDS	1	110	2557.45	.	0	Parent=rna-NM_130502.3.fa.0;state=E0
+NC_004354.4	HMM	CDS	330	424	2557.44	.	1	Parent=rna-NM_130502.3.fa.0;state=E0
+NC_004354.4	HMM	transcript	716	2927	.	.	.	ID=rna-NM_130502.3.fa.1
+NC_004354.4	HMM	CDS	716	1900	2557.44	.	0	Parent=rna-NM_130502.3.fa.1;state=E1
+NC_004354.4	HMM	CDS	2047	2620	2557.44	.	0	Parent=rna-NM_130502.3.fa.1;state=E0
+NC_004354.4	HMM	CDS	2735	2927	2557.44	.	2	Parent=rna-NM_130502.3.fa.1;state=E0

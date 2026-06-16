@@ -148,30 +148,6 @@ def test_build_parser_defaults_intron_score_op_to_plus() -> None:
     assert args.intron_score_op == "+"
 
 
-def test_build_parser_accepts_cnn_v3_task_specific_pool_every() -> None:
-    """cnn_v3 parser should accept task-specific residual pooling overrides."""
-    parser = run_model._build_parser(
-        selected_model="cnn_v3",
-        skip_model_import_error=True,
-    )
-
-    args = parser.parse_args(
-        [
-            "--model",
-            "cnn_v3",
-            "--pool_every",
-            "2",
-            "--donor_pool_every",
-            "1",
-            "--acceptor_pool_every",
-            "3",
-        ]
-    )
-
-    assert args.pool_every == 2
-    assert args.donor_pool_every == 1
-    assert args.acceptor_pool_every == 3
-
 
 def test_run_pipeline_train_only_skips_infer_and_eval(
     tmp_path: Path,

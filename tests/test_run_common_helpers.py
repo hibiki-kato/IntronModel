@@ -443,3 +443,68 @@ def test_common_resolve_synth_tuning_model_name_switches_by_mode() -> None:
         "dnabert2_pair",
         "dnabert2_pair_synth",
     ]
+
+
+def test_wrapper_runtime_append_helpers_preserve_argument_boundaries() -> None:
+    run = _run_common_shell(
+        'args=()\n'
+        'intronmodel_append_arg_if_set args label "value with spaces"\n'
+        'intronmodel_append_arg_if_set args empty ""\n'
+        'intronmodel_append_flag_if_truthy args use_feature " YES "\n'
+        'intronmodel_append_flag_if_truthy args skip_feature "no"\n'
+        'printf "<%s>\\n" "${args[@]}"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip().splitlines() == [
+        "<--label>",
+        "<value with spaces>",
+        "<--use_feature>",
+    ]
+
+
+def test_wrapper_runtime_species_jobs_reports_first_failure() -> None:
+    run = _run_common_shell(
+        'seen=()\n'
+        'runner() {\n'
+        '  seen+=("$1:$2")\n'
+        '  [[ "$1" != "bad" ]]\n'
+        '}\n'
+        'species=(good bad later)\n'
+        'gpus=(0)\n'
+        'intronmodel_run_species_jobs test_wrapper species gpus 1 runner\n'
+        'code=$?\n'
+        'printf "code=%s\\n" "${code}"\n'
+        'printf "%s\\n" "${seen[@]}"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip().splitlines() == [
+        "code=1",
+        "good:0",
+        "bad:0",
+    ]
+
+
+def test_wrapper_runtime_tuning_helpers_normalize_and_dedupe(
+    tmp_path: Path,
+) -> None:
+    search_space = tmp_path / "search_space.json"
+    search_space.write_text('{"b": 2, "a": 1}\n', encoding="utf-8")
+
+    run = _run_common_shell(
+        'PY_BIN="$(intronmodel_resolve_python_bin test_common.sh)"\n'
+        f'intronmodel_normalize_json_object_file '
+        f'"${{PY_BIN}}" {shlex.quote(str(search_space))}\n'
+        'values=(0 1)\n'
+        'intronmodel_append_unique_values values 1 2 "" 0 3\n'
+        'printf "%s\\n" "${values[*]}"\n'
+        'intronmodel_remove_value_from_csv "0,1,2,3" "2"\n'
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip().splitlines() == [
+        '{"b":2,"a":1}',
+        "0 1 2 3",
+        "0,1,3",
+    ]

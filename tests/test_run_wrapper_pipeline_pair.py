@@ -95,27 +95,24 @@ def test_build_run_args_forwards_pair_fusion_mode() -> None:
     assert "early" in args
 
 
-def test_build_run_args_forwards_pair_max_pool_flag() -> None:
+def test_build_run_args_forwards_pair_arch_flags() -> None:
     spec = WrapperSpec(
         script_name="unit.sh",
         model_env_name="cnn_pair",
         supports_tuned_hparams=False,
         tuned_key_map={},
         stem_param_builder="cnn",
-        required_arg_keys=("MAX_POOL_SIZE", "CONV_STRIDE", "HEAD_TYPE"),
+        required_arg_keys=("CONV_STRIDE", "HEAD_TYPE"),
         per_task_override_keys=(),
     )
     env = {
         "MODEL": "cnn_pair",
-        "MAX_POOL_SIZE": "1",
         "CONV_STRIDE": "2",
         "HEAD_TYPE": "center",
     }
 
     args = _build_run_args(spec, env, tuned_config_paths={})
 
-    assert "--max_pool_size" in args
-    assert args[args.index("--max_pool_size") + 1] == "1"
     assert "--conv_stride" in args
     assert args[args.index("--conv_stride") + 1] == "2"
     assert "--head_type" in args
@@ -157,7 +154,7 @@ def test_build_run_args_forwards_dnabert_infer_runtime_overrides() -> None:
     assert args[args.index("--infer_compile_mode") + 1] == "on"
 
 
-def test_stem_params_include_pair_max_pool_flag() -> None:
+def test_stem_params_include_pair_arch_flags() -> None:
     params = _stem_params(
         "cnn_pair",
         {
@@ -177,7 +174,6 @@ def test_stem_params_include_pair_max_pool_flag() -> None:
             "TRAIN_TARGET": "pair",
             "CONV_CHANNELS": "64,128,256",
             "KERNEL_SIZES": "7,7,7",
-            "MAX_POOL_SIZE": "1",
             "CONV_STRIDE": "2",
             "HEAD_TYPE": "center",
             "DROPOUT": "0.3",
@@ -185,7 +181,6 @@ def test_stem_params_include_pair_max_pool_flag() -> None:
         },
     )
 
-    assert params["max_pool_size"] == 1
     assert params["conv_stride"] == 2
     assert params["head_type"] == "center"
 

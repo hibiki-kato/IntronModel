@@ -33,8 +33,6 @@ LR="5e-4"
 LOSS="focal"
 CONV_CHANNELS="64,128,256"
 KERNEL_SIZES="7,7,7"
-MAX_POOL_SIZE="2"
-POOL_EVERY="2"
 HEAD_TYPE="gap"
 BLOCK_DILATIONS="1,2,4,8"
 RESIDUAL_CHANNELS="32,64,96,128"
@@ -97,32 +95,14 @@ intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
-intronmodel_abort_parallel_run() {
-	trap - INT TERM HUP
-	kill -TERM 0 2>/dev/null || true
-	exit 130
-}
-
 trap 'intronmodel_abort_parallel_run' INT TERM HUP
 
 append_arg_if_set() {
-	local flag="$1"
-	local value="$2"
-	if [[ -n "${value}" ]]; then
-		args+=("--${flag}" "${value}")
-	fi
+	intronmodel_append_arg_if_set args "$@"
 }
 
 append_flag_if_truthy() {
-	local flag="$1"
-	local value="$2"
-	local normalized
-	normalized="$(echo "${value}" | tr '[:upper:]' '[:lower:]' | xargs)"
-	case "${normalized}" in
-		1 | true | on | yes)
-			args+=("--${flag}")
-			;;
-	esac
+	intronmodel_append_flag_if_truthy args "$@"
 }
 
 
@@ -141,8 +121,8 @@ tuned_key_scope() {
 	local tuned_key="$1"
 	case "${tuned_key}" in
 		batch_size | lr | loss | conv_channels | kernel_size | kernel_sizes \
-		|max_pool_size | conv_stride | head_type | dropout | fc_hidden \
-		|block_dilations | residual_channels | pool_every \
+		|conv_stride | head_type | dropout | fc_hidden \
+		|block_dilations | residual_channels \
 		|weight_decay | eta_min_ratio | val_frac | grad_clip \
 		|pos_weight_cap | focal_gamma | focal_alpha_pos | f1_lambda \
 		|asym_gamma_pos | asym_gamma_neg | asym_alpha_pos)
@@ -253,7 +233,6 @@ run_species_once() {
 	local species="$1"
 	local assigned_gpu_id="${2-}"
 
-	local pythonpath="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 	local donor_tuned_args=()
 	local acceptor_tuned_args=()
 	local donor_tuned_config_path=""
@@ -291,8 +270,6 @@ run_species_once() {
 		--seed "${SEED}"
 		--conv_channels "${CONV_CHANNELS}"
 		--kernel_sizes "${KERNEL_SIZES}"
-		--max_pool_size "${MAX_POOL_SIZE}"
-		--pool_every "${POOL_EVERY}"
 		--head_type "${HEAD_TYPE}"
 		--block_dilations "${BLOCK_DILATIONS}"
 		--residual_channels "${RESIDUAL_CHANNELS}"
@@ -355,14 +332,7 @@ run_species_once() {
 	fi
 
 	echo "[cnn_v3.sh] species=${species} mode=independent tasks=donor,acceptor"
-	if [[ -n "${assigned_gpu_id}" ]]; then
-		CUDA_VISIBLE_DEVICES="${assigned_gpu_id}" \
-			PYTHONPATH="${pythonpath}" \
-			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-	else
-		PYTHONPATH="${pythonpath}" \
-			python3 "${PROJECT_ROOT}/src/run_model.py" "${args[@]}"
-	fi
+	intronmodel_run_model_with_optional_gpu "${PROJECT_ROOT}" "${assigned_gpu_id}" args
 }
 
 USE_TUNED_HPARAMS_MODE="$(
@@ -379,75 +349,9 @@ PARALLEL_SLOT_COUNT="$(
 		"${MAX_PARALLEL_TRIALS}" \
 		"${#GPU_ID_LIST[@]}"
 )"
-if [[ ${#SPECIES_LIST_RESOLVED[@]} -eq 0 ]]; then
-	echo "[cnn_v3.sh] SPECIES resolved to an empty list." >&2
-	exit 1
-fi
-if [[ ${#SPECIES_LIST_RESOLVED[@]} -le 1 || ${#GPU_ID_LIST[@]} -le 1 || ${PARALLEL_SLOT_COUNT} -le 1 ]]; then
-	serial_gpu_id=""
-	if [[ ${#GPU_ID_LIST[@]} -gt 0 ]]; then
-		serial_gpu_id="${GPU_ID_LIST[0]}"
-	fi
-	for species_raw in "${SPECIES_LIST_RESOLVED[@]}"; do
-		species="$(echo "${species_raw}" | xargs)"
-		if [[ -z "${species}" ]]; then
-			continue
-		fi
-		run_species_once "${species}" "${serial_gpu_id}"
-	done
-else
-	selected_gpu_ids=("${GPU_ID_LIST[@]:0:${PARALLEL_SLOT_COUNT}}")
-	gpu_csv="$(IFS=,; echo "${selected_gpu_ids[*]}")"
-	echo "[cnn_v3.sh] species-parallel run across GPUs: ${gpu_csv}"
-	declare -A pid_to_species=()
-	declare -A pid_to_gpu=()
-	available_gpu_ids=("${selected_gpu_ids[@]}")
-	pending_species=("${SPECIES_LIST_RESOLVED[@]}")
-	running_count=0
-	stop_submitting=0
-	first_error_code=0
-	while [[ ${#pending_species[@]} -gt 0 || ${running_count} -gt 0 ]]; do
-		while [[ ${#pending_species[@]} -gt 0 && ${#available_gpu_ids[@]} -gt 0 && ${stop_submitting} -eq 0 ]]; do
-			species_raw="${pending_species[0]}"
-			pending_species=("${pending_species[@]:1}")
-			species="$(echo "${species_raw}" | xargs)"
-			if [[ -z "${species}" ]]; then
-				continue
-			fi
-			gpu_id="${available_gpu_ids[0]}"
-			available_gpu_ids=("${available_gpu_ids[@]:1}")
-			echo "[cnn_v3.sh] species dispatch: ${species} -> gpu=${gpu_id}"
-			run_species_once "${species}" "${gpu_id}" &
-			pid=$!
-			pid_to_species["${pid}"]="${species}"
-			pid_to_gpu["${pid}"]="${gpu_id}"
-			running_count=$((running_count + 1))
-		done
-
-		if [[ ${running_count} -eq 0 ]]; then
-			break
-		fi
-
-		if wait -n -p completed_pid; then
-			completed_code=0
-		else
-			completed_code=$?
-		fi
-		completed_species="${pid_to_species[$completed_pid]:-}"
-		completed_gpu="${pid_to_gpu[$completed_pid]:-}"
-		unset "pid_to_species[${completed_pid}]"
-		unset "pid_to_gpu[${completed_pid}]"
-		if [[ -n "${completed_gpu}" ]]; then
-			available_gpu_ids+=("${completed_gpu}")
-		fi
-		running_count=$((running_count - 1))
-		if [[ -n "${completed_species}" ]]; then
-			echo "[cnn_v3.sh] species complete: ${completed_species} gpu=${completed_gpu} exit=${completed_code}"
-		fi
-		if [[ ${completed_code} -ne 0 && ${first_error_code} -eq 0 ]]; then
-			first_error_code="${completed_code}"
-			stop_submitting=1
-		fi
-	done
-	exit "${first_error_code}"
-fi
+intronmodel_run_species_jobs \
+	"cnn_v3.sh" \
+	SPECIES_LIST_RESOLVED \
+	GPU_ID_LIST \
+	"${PARALLEL_SLOT_COUNT}" \
+	run_species_once

@@ -5322,10 +5322,6 @@ def test_build_trial_params_materializes_cnn_v2_stride_pool_with_constraints(
                 "type": "categorical",
                 "values": ["1,2"],
             },
-            "max_pool_candidates": {
-                "type": "categorical",
-                "values": ["2,4"],
-            },
         }
     )
     config = hparam_search.SearchConfig(
@@ -5366,10 +5362,8 @@ def test_build_trial_params_materializes_cnn_v2_stride_pool_with_constraints(
     )
 
     for row in params:
-        assert row["conv_stride"] == 1
-        assert row["max_pool_size"] == 2
+        assert "conv_stride" in row
         assert "conv_stride_candidates" not in row
-        assert "max_pool_candidates" not in row
         assert "channel_order" not in row
         assert "kernel_order" not in row
 
@@ -5461,10 +5455,6 @@ def test_build_trial_params_materializes_stride_pool_without_arch_helper_keys(
                 "type": "categorical",
                 "values": ["1,2"],
             },
-            "max_pool_candidates": {
-                "type": "categorical",
-                "values": ["2,4"],
-            },
         }
     )
     config = hparam_search.SearchConfig(
@@ -5504,70 +5494,13 @@ def test_build_trial_params_materializes_stride_pool_without_arch_helper_keys(
         seed_offset=0,
     )
 
-    assert params == [
-        {
-            "batch_size": 256,
-            "conv_channels": "64,128,256",
-            "kernel_sizes": "7,7,7",
-            "conv_stride": 1,
-            "max_pool_size": 2,
-        }
-    ]
+    assert len(params) == 1
+    assert params[0]["batch_size"] == 256
+    assert params[0]["conv_channels"] == "64,128,256"
+    assert params[0]["kernel_sizes"] == "7,7,7"
+    assert "conv_stride" in params[0]
+    assert "conv_stride_candidates" not in params[0]
 
-
-def test_build_trial_params_rejects_invalid_cnn_resdil_pool_schedule(
-    tmp_path: Path,
-) -> None:
-    search_space = hparam_search._validate_search_space(
-        {
-            "batch_size": {"type": "categorical", "values": [256]},
-            "conv_channels": {
-                "type": "categorical",
-                "values": ["64,128,256"],
-            },
-            "kernel_sizes": {
-                "type": "categorical",
-                "values": ["7,7,7"],
-            },
-            "max_pool_size": {"type": "categorical", "values": [2]},
-        }
-    )
-    config = hparam_search.SearchConfig(
-        project_root=tmp_path,
-        species="Dmel",
-        output_dir=tmp_path / "out",
-        quick_trials=1,
-        quick_epochs=1,
-        top_k=1,
-        full_epochs=1,
-        base_seed=23,
-        gpu_ids_setting="auto",
-        max_parallel_trials_setting="auto",
-        min_batch_size=64,
-        max_oom_retries=1,
-        max_model_params=None,
-        objective_metric="mean_pr_auc",
-        global_best_config_path=None,
-        seed_best_config_path=None,
-        base_args={
-            "model": "cnn_resdil",
-            "species": "Dmel",
-            "batch_size": 256,
-            "donor_len": 3,
-            "acceptor_len": 3,
-        },
-        quick_overrides={},
-        full_overrides={},
-        search_space=search_space,
-    )
-
-    with pytest.raises(ValueError, match="valid architecture"):
-        _ = hparam_search.build_trial_params(
-            config=config,
-            phase="quick",
-            count=1,
-            seed_offset=0,
-        )
 
 
 @pytest.mark.parametrize("fusion_mode", ["early", "mid"])
@@ -5741,10 +5674,6 @@ def test_build_trial_params_materializes_cnn_pair_v2_stride_pool_candidates(
                 "type": "categorical",
                 "values": ["1,2"],
             },
-            "max_pool_candidates": {
-                "type": "categorical",
-                "values": ["2,4"],
-            },
         }
     )
     config = hparam_search.SearchConfig(
@@ -5788,8 +5717,7 @@ def test_build_trial_params_materializes_cnn_pair_v2_stride_pool_candidates(
     for row in params:
         assert row["input_mode"] == "onehot"
         assert row["fusion_mode"] == "late"
-        assert row["conv_stride"] == 1
-        assert row["max_pool_size"] == 2
+        assert "conv_stride" in row
         assert "donor_conv_channels" in row
         assert "acceptor_conv_channels" in row
         assert "donor_kernel_sizes" in row
@@ -5798,385 +5726,6 @@ def test_build_trial_params_materializes_cnn_pair_v2_stride_pool_candidates(
         assert "channel_candidates" not in row
         assert "kernel_candidates" not in row
         assert "conv_stride_candidates" not in row
-        assert "max_pool_candidates" not in row
-
-
-def test_build_trial_params_resamples_invalid_cnn_pool_shape(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_space = hparam_search._validate_search_space(
-        {
-            "batch_size": {"type": "categorical", "values": [256]},
-            "conv_channels": {
-                "type": "categorical",
-                "values": ["64,128,256"],
-            },
-            "kernel_sizes": {
-                "type": "categorical",
-                "values": ["7,7,7"],
-            },
-            "max_pool_size": {"type": "categorical", "values": [2, 4]},
-        }
-    )
-    config = hparam_search.SearchConfig(
-        project_root=tmp_path,
-        species="Dmel",
-        output_dir=tmp_path / "out",
-        quick_trials=1,
-        quick_epochs=1,
-        top_k=1,
-        full_epochs=1,
-        base_seed=11,
-        gpu_ids_setting="auto",
-        max_parallel_trials_setting="auto",
-        min_batch_size=64,
-        max_oom_retries=1,
-        max_model_params=None,
-        objective_metric="mean_pr_auc",
-        global_best_config_path=None,
-        seed_best_config_path=None,
-        base_args={
-            "model": "cnn",
-            "species": "Dmel",
-            "batch_size": 256,
-            "donor_len": 8,
-            "acceptor_len": 8,
-        },
-        quick_overrides={},
-        full_overrides={},
-        search_space=search_space,
-    )
-
-    sampled_rows = iter(
-        [
-            {
-                "batch_size": 256,
-                "conv_channels": "64,128,256",
-                "kernel_sizes": "7,7,7",
-                "max_pool_size": 4,
-            },
-            {
-                "batch_size": 256,
-                "conv_channels": "64,128,256",
-                "kernel_sizes": "7,7,7",
-                "max_pool_size": 2,
-            },
-        ]
-    )
-    call_count = {"value": 0}
-
-    def _fake_sample(
-        _search_space: dict[str, hparam_search.SearchDimension],
-        _rng: object,
-    ) -> dict[str, hparam_search.Scalar]:
-        call_count["value"] += 1
-        return next(sampled_rows)
-
-    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
-
-    params = hparam_search.build_trial_params(
-        config=config,
-        phase="quick",
-        count=1,
-        seed_offset=0,
-    )
-
-    assert call_count["value"] == 2
-    assert params == [
-        {
-            "batch_size": 256,
-            "conv_channels": "64,128,256",
-            "kernel_sizes": "7,7,7",
-            "max_pool_size": 2,
-        }
-    ]
-
-
-def test_build_trial_params_resamples_invalid_cnn_v2_pool_shape(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_space = hparam_search._validate_search_space(
-        {
-            "batch_size": {"type": "categorical", "values": [256]},
-            "conv_channels": {
-                "type": "categorical",
-                "values": ["64,128,256"],
-            },
-            "kernel_sizes": {
-                "type": "categorical",
-                "values": ["7,7,7"],
-            },
-            "max_pool_size": {"type": "categorical", "values": [2, 4]},
-        }
-    )
-    config = hparam_search.SearchConfig(
-        project_root=tmp_path,
-        species="Dmel",
-        output_dir=tmp_path / "out",
-        quick_trials=1,
-        quick_epochs=1,
-        top_k=1,
-        full_epochs=1,
-        base_seed=11,
-        gpu_ids_setting="auto",
-        max_parallel_trials_setting="auto",
-        min_batch_size=64,
-        max_oom_retries=1,
-        max_model_params=None,
-        objective_metric="mean_pr_auc",
-        global_best_config_path=None,
-        seed_best_config_path=None,
-        base_args={
-            "model": "cnn_v2",
-            "species": "Dmel",
-            "batch_size": 256,
-            "donor_len": 8,
-            "acceptor_len": 8,
-            "pair_mode": "independent",
-            "input_mode": "onehot",
-        },
-        quick_overrides={},
-        full_overrides={},
-        search_space=search_space,
-    )
-
-    sampled_rows = iter(
-        [
-            {
-                "batch_size": 256,
-                "conv_channels": "64,128,256",
-                "kernel_sizes": "7,7,7",
-                "max_pool_size": 4,
-            },
-            {
-                "batch_size": 256,
-                "conv_channels": "64,128,256",
-                "kernel_sizes": "7,7,7",
-                "max_pool_size": 2,
-            },
-        ]
-    )
-    call_count = {"value": 0}
-
-    def _fake_sample(
-        _search_space: dict[str, hparam_search.SearchDimension],
-        _rng: object,
-    ) -> dict[str, hparam_search.Scalar]:
-        call_count["value"] += 1
-        return next(sampled_rows)
-
-    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
-
-    params = hparam_search.build_trial_params(
-        config=config,
-        phase="quick",
-        count=1,
-        seed_offset=0,
-    )
-
-    assert call_count["value"] == 2
-    assert params == [
-        {
-            "batch_size": 256,
-            "conv_channels": "64,128,256",
-            "kernel_sizes": "7,7,7",
-            "max_pool_size": 2,
-        }
-    ]
-
-
-def test_build_trial_params_resamples_invalid_cnn_pair_v2_onehot_pool_shape(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_space = hparam_search._validate_search_space(
-        {
-            "batch_size": {"type": "categorical", "values": [256]},
-            "conv_channels": {
-                "type": "categorical",
-                "values": ["64,128,256"],
-            },
-            "kernel_sizes": {
-                "type": "categorical",
-                "values": ["7,7,7"],
-            },
-            "max_pool_size": {"type": "categorical", "values": [2, 4]},
-        }
-    )
-    config = hparam_search.SearchConfig(
-        project_root=tmp_path,
-        species="Dmel",
-        output_dir=tmp_path / "out",
-        quick_trials=1,
-        quick_epochs=1,
-        top_k=1,
-        full_epochs=1,
-        base_seed=11,
-        gpu_ids_setting="auto",
-        max_parallel_trials_setting="auto",
-        min_batch_size=64,
-        max_oom_retries=1,
-        max_model_params=None,
-        objective_metric="pair_pr_auc",
-        global_best_config_path=None,
-        seed_best_config_path=None,
-        base_args={
-            "model": "cnn_pair_v2",
-            "species": "Dmel",
-            "batch_size": 256,
-            "donor_len": 8,
-            "acceptor_len": 8,
-            "input_mode": "onehot",
-            "pair_mode": "pair",
-        },
-        quick_overrides={},
-        full_overrides={},
-        search_space=search_space,
-    )
-
-    sampled_rows = iter(
-        [
-            {
-                "batch_size": 256,
-                "conv_channels": "64,128,256",
-                "kernel_sizes": "7,7,7",
-                "max_pool_size": 4,
-            },
-            {
-                "batch_size": 256,
-                "conv_channels": "64,128,256",
-                "kernel_sizes": "7,7,7",
-                "max_pool_size": 2,
-            },
-        ]
-    )
-    call_count = {"value": 0}
-
-    def _fake_sample(
-        _search_space: dict[str, hparam_search.SearchDimension],
-        _rng: object,
-    ) -> dict[str, hparam_search.Scalar]:
-        call_count["value"] += 1
-        return next(sampled_rows)
-
-    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
-
-    params = hparam_search.build_trial_params(
-        config=config,
-        phase="quick",
-        count=1,
-        seed_offset=0,
-    )
-
-    assert call_count["value"] == 2
-    assert params == [
-        {
-            "batch_size": 256,
-            "conv_channels": "64,128,256",
-            "kernel_sizes": "7,7,7",
-            "max_pool_size": 2,
-        }
-    ]
-
-
-def test_build_trial_params_resamples_invalid_cnn_pair_v2_kmer3_pool_shape(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_space = hparam_search._validate_search_space(
-        {
-            "batch_size": {"type": "categorical", "values": [256]},
-            "input_mode": {"type": "categorical", "values": ["kmer3"]},
-            "conv_channels": {
-                "type": "categorical",
-                "values": ["64,128,256,256"],
-            },
-            "kernel_sizes": {
-                "type": "categorical",
-                "values": ["7,7,7,7"],
-            },
-            "max_pool_size": {"type": "categorical", "values": [4, 2]},
-        }
-    )
-    config = hparam_search.SearchConfig(
-        project_root=tmp_path,
-        species="Dmel",
-        output_dir=tmp_path / "out",
-        quick_trials=1,
-        quick_epochs=1,
-        top_k=1,
-        full_epochs=1,
-        base_seed=11,
-        gpu_ids_setting="auto",
-        max_parallel_trials_setting="auto",
-        min_batch_size=64,
-        max_oom_retries=1,
-        max_model_params=None,
-        objective_metric="pair_pr_auc",
-        global_best_config_path=None,
-        seed_best_config_path=None,
-        base_args={
-            "model": "cnn_pair_v2",
-            "species": "Dmel",
-            "batch_size": 256,
-            "donor_len": 100,
-            "acceptor_len": 100,
-            "input_mode": "kmer3",
-            "pair_mode": "pair",
-        },
-        quick_overrides={},
-        full_overrides={},
-        search_space=search_space,
-    )
-
-    sampled_rows = iter(
-        [
-            {
-                "batch_size": 256,
-                "input_mode": "kmer3",
-                "conv_channels": "64,128,256,256",
-                "kernel_sizes": "7,7,7,7",
-                "max_pool_size": 4,
-            },
-            {
-                "batch_size": 256,
-                "input_mode": "kmer3",
-                "conv_channels": "64,128,256,256",
-                "kernel_sizes": "7,7,7,7",
-                "max_pool_size": 2,
-            },
-        ]
-    )
-    call_count = {"value": 0}
-
-    def _fake_sample(
-        _search_space: dict[str, hparam_search.SearchDimension],
-        _rng: object,
-    ) -> dict[str, hparam_search.Scalar]:
-        call_count["value"] += 1
-        return next(sampled_rows)
-
-    monkeypatch.setattr(hparam_search, "_sample_trial_params_with_rng", _fake_sample)
-
-    params = hparam_search.build_trial_params(
-        config=config,
-        phase="quick",
-        count=1,
-        seed_offset=0,
-    )
-
-    assert call_count["value"] == 2
-    assert params == [
-        {
-            "batch_size": 256,
-            "input_mode": "kmer3",
-            "conv_channels": "64,128,256,256",
-            "kernel_sizes": "7,7,7,7",
-            "max_pool_size": 2,
-        }
-    ]
 
 
 def test_build_trial_params_resamples_invalid_pair_fusion_lengths(

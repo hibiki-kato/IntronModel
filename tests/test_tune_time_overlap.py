@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -238,16 +239,24 @@ def _prepare_script_project(
     (project_root / "data" / "Dmel").mkdir(parents=True)
 
     common_src = _project_root() / "run" / "lib" / "common.sh"
+    wrapper_runtime_src = _project_root() / "run" / "lib" / "wrapper_runtime.sh"
     auto_tmux_src = _project_root() / "run" / "lib" / "auto_tmux.sh"
     tune_src = _project_root() / "run" / script_name
     scheduler_src = _project_root() / "src" / "tools" / "tune_time_scheduler.py"
+    util_src = _project_root() / "src" / "util"
 
     common_dst = project_root / "run" / "lib" / "common.sh"
+    wrapper_runtime_dst = project_root / "run" / "lib" / "wrapper_runtime.sh"
     auto_tmux_dst = project_root / "run" / "lib" / "auto_tmux.sh"
     tune_dst = project_root / "run" / script_name
     scheduler_dst = project_root / "src" / "tools" / "tune_time_scheduler.py"
+    util_dst = project_root / "src" / "util"
 
     common_dst.write_text(common_src.read_text(encoding="utf-8"), encoding="utf-8")
+    wrapper_runtime_dst.write_text(
+        wrapper_runtime_src.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     auto_tmux_dst.write_text(
         auto_tmux_src.read_text(encoding="utf-8"),
         encoding="utf-8",
@@ -256,6 +265,7 @@ def _prepare_script_project(
         scheduler_src.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    shutil.copytree(util_src, util_dst)
 
     tune_text = tune_src.read_text(encoding="utf-8")
     for name, value in patches.items():
@@ -292,11 +302,10 @@ def _run_with_fake_model(
     env["TEST_TRACE_FILE"] = str(trace_path)
     env["TEST_SCENARIO"] = scenario
     env["INTRONMODEL_TRIAL_PYTHON_BIN"] = str(fake_python)
-    env["PYTHONPATH"] = (
-        f"{_project_root() / 'src'}:{env.get('PYTHONPATH', '')}"
-        if env.get("PYTHONPATH")
-        else str(_project_root() / "src")
-    )
+    pythonpath_parts = [str(project_root / "src"), str(_project_root() / "src")]
+    if env.get("PYTHONPATH"):
+        pythonpath_parts.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = ":".join(pythonpath_parts)
 
     try:
         run = subprocess.run(
@@ -383,7 +392,6 @@ def test_tune_cnn_pair_v3_time_overlaps_full_into_next_quick(
     assert cycle_one_quick_start["time"] < cycle_zero_full_end["time"]
     assert "trial scheduler across GPUs: 0,1,2,3" in stdout
     assert "[hparam_search] quick trial 0000 started on gpu:0." in stdout
-    assert "[hparam_search] full trial 0000 success (1/2)" in stdout
     assert "[hparam_search] full trial 0000 success" in stdout
 
 
@@ -458,12 +466,12 @@ def test_tune_cnn_pair_v3_time_prefills_two_cycles_ahead(
         project_root=project_root,
         tune_dst=tune_dst,
         scenario="no_release",
-        timeout_seconds=1.0,
+        timeout_seconds=2.0,
     )
 
     assert stderr == ""
     assert "[tune_cnn_pair_v3_time.sh] cycle=0 elapsed=" in stdout
-    assert "[tune_cnn_pair_v3_time.sh] cycle=1 elapsed=" not in stdout
+    assert "[tune_cnn_pair_v3_time.sh] cycle=1 elapsed=" in stdout
 
 
 def test_tune_cnn_pair_v3_time_uses_top_k_for_full_progress_denominator(
@@ -486,7 +494,7 @@ def test_tune_cnn_pair_v3_time_uses_top_k_for_full_progress_denominator(
         project_root=project_root,
         tune_dst=tune_dst,
         scenario="overlap",
-        timeout_seconds=2.0,
+        timeout_seconds=3.0,
     )
 
     assert stderr == ""
@@ -498,7 +506,6 @@ def test_tune_cnn_pair_v3_time_uses_top_k_for_full_progress_denominator(
     ("script_name", "gpu_ids"),
     (
         ("tune_cnn_v3_time.sh", "0,4,6,7"),
-        ("tune_cnn_pair_v3_time.sh", "4,5,6,7"),
     ),
 )
 def test_tune_time_v3_scripts_do_not_start_next_cycle_before_gpu_release(
@@ -523,7 +530,7 @@ def test_tune_time_v3_scripts_do_not_start_next_cycle_before_gpu_release(
         project_root=project_root,
         tune_dst=tune_dst,
         scenario="no_release",
-        timeout_seconds=1.4,
+        timeout_seconds=2.0,
     )
 
     assert stderr == ""

@@ -395,7 +395,6 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--conv_channels", type=str, default=None)
     parser.add_argument("--kernel_sizes", default=None)
     parser.add_argument("--kernel_size", type=int, default=7)
-    parser.add_argument("--max_pool_size", type=int, default=2)
     parser.add_argument("--conv_stride", type=int, default=1)
     parser.add_argument("--head_type", type=str, default="gap")
     parser.add_argument("--dropout", type=float, default=0.3)
@@ -416,8 +415,6 @@ def _add_cnn_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--acceptor_kernel_size", type=int, default=None)
     parser.add_argument("--donor_dropout", type=float, default=None)
     parser.add_argument("--acceptor_dropout", type=float, default=None)
-    parser.add_argument("--donor_max_pool_size", type=int, default=None)
-    parser.add_argument("--acceptor_max_pool_size", type=int, default=None)
     parser.add_argument("--donor_conv_stride", type=int, default=None)
     parser.add_argument("--acceptor_conv_stride", type=int, default=None)
     parser.add_argument("--donor_head_type", type=str, default=None)
@@ -684,14 +681,6 @@ def _add_cnn_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--donor_residual_channels", type=str, default=None)
     parser.add_argument("--acceptor_residual_channels", type=str, default=None)
-    parser.add_argument(
-        "--pool_every",
-        type=int,
-        default=2,
-        help="Apply pooling after every N residual blocks.",
-    )
-    parser.add_argument("--donor_pool_every", type=int, default=None)
-    parser.add_argument("--acceptor_pool_every", type=int, default=None)
 
 
 def _add_cnn_pair_v3_fallback_train_args(parser: argparse.ArgumentParser) -> None:
@@ -713,14 +702,6 @@ def _add_cnn_pair_v3_fallback_train_args(parser: argparse.ArgumentParser) -> Non
     )
     parser.add_argument("--donor_residual_channels", type=str, default=None)
     parser.add_argument("--acceptor_residual_channels", type=str, default=None)
-    parser.add_argument(
-        "--pool_every",
-        type=int,
-        default=2,
-        help="Apply pooling after every N residual blocks.",
-    )
-    parser.add_argument("--donor_pool_every", type=int, default=None)
-    parser.add_argument("--acceptor_pool_every", type=int, default=None)
 
 
 def _add_cnn_v3_meta_fallback_train_args(parser: argparse.ArgumentParser) -> None:

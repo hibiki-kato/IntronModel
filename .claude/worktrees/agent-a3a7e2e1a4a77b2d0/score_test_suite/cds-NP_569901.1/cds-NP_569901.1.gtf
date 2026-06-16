@@ -1,0 +1,8 @@
+NC_004354.4	RefSeq	transcript	1	6702	.	+	.	transcript_id "rna-NM_130545.3"; gene_id "rna-NM_130545.3"; gene_name "fs(1)N"
+NC_004354.4	RefSeq	CDS	1	141	.	+	0	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";
+NC_004354.4	RefSeq	CDS	200	2236	.	+	0	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";
+NC_004354.4	RefSeq	CDS	2295	2424	.	+	0	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";
+NC_004354.4	RefSeq	CDS	2482	2612	.	+	2	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";
+NC_004354.4	RefSeq	CDS	2671	4441	.	+	0	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";
+NC_004354.4	RefSeq	CDS	4496	4704	.	+	2	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";
+NC_004354.4	RefSeq	CDS	4765	6702	.	+	0	transcript_id "rna-NM_130545.3"; gene_name "fs(1)N";

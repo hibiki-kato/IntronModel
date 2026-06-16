@@ -210,39 +210,6 @@ resolve_search_space_file() {
 		"${candidates[@]}"
 }
 
-normalize_json_object_file() {
-	local python_bin="$1"
-	local json_path="$2"
-
-	"${python_bin}" - "${json_path}" <<'PY'
-from __future__ import annotations
-
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-payload = json.loads(path.read_text(encoding="utf-8"))
-if not isinstance(payload, dict):
-    raise ValueError("Search-space file must contain a JSON object.")
-print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
-PY
-}
-
-run_double_descent_plot() {
-	local python_bin="$1"
-	local project_root="$2"
-	local species_name="$3"
-	local target_name="$4"
-	local model_name="$5"
-
-	"${python_bin}" "${project_root}/src/tools/plot_tuning_double_descent.py" \
-		--project_root "${project_root}" \
-		--species "${species_name}" \
-		--target "${target_name}" \
-		--model "${model_name}" || true
-}
-
 if ! [[ "${TIME_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
 	|| [[ "${TIME_BUDGET_MINUTES}" -le 0 ]]; then
 	echo "[tune_dnabert_pair_time.sh] TIME_BUDGET_MINUTES must be a positive integer." >&2
@@ -533,7 +500,7 @@ while true; do
 	)"; then
 		search_space_path="${search_space_resolved}"
 		if ! target_space_json="$(
-			normalize_json_object_file \
+			intronmodel_normalize_json_object_file \
 				"${PYTHON_BIN}" \
 				"${search_space_path}" 2>&1
 		)"; then
@@ -642,7 +609,7 @@ JSON
 			"species=${species} target=${target}" >&2
 	fi
 	if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
-		run_double_descent_plot \
+		intronmodel_run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${species}" \
@@ -679,7 +646,7 @@ if [[ "${UPDATE_DOUBLE_DESCENT_PLOT}" == "1" ]]; then
 		fi
 	done
 	for final_species in "${final_plot_species[@]}"; do
-		run_double_descent_plot \
+		intronmodel_run_double_descent_plot \
 			"${PYTHON_BIN}" \
 			"${PROJECT_ROOT}" \
 			"${final_species}" \

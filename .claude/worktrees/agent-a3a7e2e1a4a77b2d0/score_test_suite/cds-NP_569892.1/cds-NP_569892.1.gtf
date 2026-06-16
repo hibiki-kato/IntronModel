@@ -1,0 +1,4 @@
+NC_004354.4	RefSeq	transcript	1	3304	.	+	.	transcript_id "rna-NM_130536.2"; gene_id "rna-NM_130536.2"; gene_name "CG14625"
+NC_004354.4	RefSeq	CDS	1	54	.	+	0	transcript_id "rna-NM_130536.2"; gene_name "CG14625";
+NC_004354.4	RefSeq	CDS	1008	1230	.	+	0	transcript_id "rna-NM_130536.2"; gene_name "CG14625";
+NC_004354.4	RefSeq	CDS	1311	3304	.	+	2	transcript_id "rna-NM_130536.2"; gene_name "CG14625";

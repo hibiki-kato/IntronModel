@@ -86,8 +86,6 @@ class TaskOrganicArchParams:
     """Resolved residual-dilated architecture for one site classifier."""
 
     layout: OrganicBranchLayout
-    max_pool_size: int
-    pool_every: int
     head_type: str
     fc_hidden: int
 
@@ -189,14 +187,6 @@ def _resolve_task_arch_params(
         default_values=_default_residual_channels(branch_channels),
     )
 
-    max_pool_size = _coerce_positive_int(
-        _override_or_default("max_pool_size", getattr(model_args, "max_pool_size", 2)),
-        arg_name=f"--{prefix}max_pool_size",
-    )
-    pool_every = _coerce_positive_int(
-        _override_or_default("pool_every", getattr(model_args, "pool_every", 2)),
-        arg_name=f"--{prefix}pool_every",
-    )
     head_type = cnn._normalize_cnn_head_type(
         _override_or_default("head_type", getattr(model_args, "head_type", "gap")),
         arg_name=f"--{prefix}head_type",
@@ -212,8 +202,6 @@ def _resolve_task_arch_params(
             dilations=dilations,
             residual_channels=residual_channels,
         ),
-        max_pool_size=max_pool_size,
-        pool_every=pool_every,
         head_type=head_type,
         fc_hidden=fc_hidden,
     )
@@ -234,8 +222,6 @@ class OrganicSiteCNN(nn.Module):
         self.encoder = ResidualDilatedBranchEncoder(
             in_channels=4,
             layout=arch_params.layout,
-            max_pool_size=arch_params.max_pool_size,
-            pool_every=arch_params.pool_every,
             head_type=arch_params.head_type,
             dropout=dropout,
         )
@@ -710,8 +696,6 @@ def train_task_model(
                                 "residual_channels": list(
                                     arch_params.layout.residual_channels
                                 ),
-                                "max_pool_size": arch_params.max_pool_size,
-                                "pool_every": arch_params.pool_every,
                                 "head_type": arch_params.head_type,
                                 "dropout": task_params.dropout,
                                 "fc_hidden": arch_params.fc_hidden,
@@ -812,8 +796,6 @@ def train_task_model(
                 "kernel_sizes": list(arch_params.layout.kernel_sizes),
                 "block_dilations": list(arch_params.layout.dilations),
                 "residual_channels": list(arch_params.layout.residual_channels),
-                "max_pool_size": arch_params.max_pool_size,
-                "pool_every": arch_params.pool_every,
                 "head_type": arch_params.head_type,
                 "fc_hidden": arch_params.fc_hidden,
                 "dropout": task_params.dropout,
@@ -1076,24 +1058,6 @@ def add_train_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--donor_residual_channels", type=str, default=None)
     parser.add_argument("--acceptor_residual_channels", type=str, default=None)
-    parser.add_argument(
-        "--pool_every",
-        type=int,
-        default=2,
-        help="Apply max-pooling after every N residual blocks.",
-    )
-    parser.add_argument(
-        "--donor_pool_every",
-        type=int,
-        default=None,
-        help="Donor-only override for --pool_every.",
-    )
-    parser.add_argument(
-        "--acceptor_pool_every",
-        type=int,
-        default=None,
-        help="Acceptor-only override for --pool_every.",
-    )
 
 
 def add_infer_args(parser: argparse.ArgumentParser) -> None:
@@ -1276,8 +1240,6 @@ def train(
             getattr(model_args, "residual_channels", None),
             arg_name="--residual_channels",
         ),
-        "max_pool_size": int(model_args.max_pool_size),
-        "pool_every": int(model_args.pool_every),
         "head_type": cnn._normalize_cnn_head_type(
             model_args.head_type,
             arg_name="--head_type",

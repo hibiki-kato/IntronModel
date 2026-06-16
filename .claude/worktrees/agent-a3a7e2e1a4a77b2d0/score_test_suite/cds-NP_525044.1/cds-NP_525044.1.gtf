@@ -1,0 +1,5 @@
+NC_004354.4	RefSeq	transcript	1	1661	.	+	.	transcript_id "rna-NM_080305.4"; gene_id "rna-NM_080305.4"; gene_name "Cyp4ae1"
+NC_004354.4	RefSeq	CDS	1	166	.	+	0	transcript_id "rna-NM_080305.4"; gene_name "Cyp4ae1";
+NC_004354.4	RefSeq	CDS	221	674	.	+	2	transcript_id "rna-NM_080305.4"; gene_name "Cyp4ae1";
+NC_004354.4	RefSeq	CDS	730	1262	.	+	1	transcript_id "rna-NM_080305.4"; gene_name "Cyp4ae1";
+NC_004354.4	RefSeq	CDS	1324	1661	.	+	2	transcript_id "rna-NM_080305.4"; gene_name "Cyp4ae1";

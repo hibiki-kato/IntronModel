@@ -661,18 +661,9 @@ def _stem_params(builder: str, env: Mapping[str, str]) -> dict[str, object]:
         if builder in {"cnn", "cnn_pair", "cnn_resdil"}:
             base["head_type"] = _require_env(env, "HEAD_TYPE")
         if builder in {"cnn", "cnn_pair"}:
-            base["max_pool_size"] = _as_int(
-                _require_env(env, "MAX_POOL_SIZE"),
-                "MAX_POOL_SIZE",
-            )
             base["conv_stride"] = _as_int(
                 _require_env(env, "CONV_STRIDE"),
                 "CONV_STRIDE",
-            )
-        elif builder == "cnn_resdil":
-            base["max_pool_size"] = _as_int(
-                _require_env(env, "MAX_POOL_SIZE"),
-                "MAX_POOL_SIZE",
             )
         if builder in {"cnn", "cnn_pair", "cnn_resdil"}:
             kernel_sizes_raw = _require_env(env, "KERNEL_SIZES").strip()
@@ -2263,7 +2254,6 @@ SPECS: dict[str, WrapperSpec] = {
             "loss": "LOSS",
             "conv_channels": "CONV_CHANNELS",
             "kernel_sizes": "KERNEL_SIZES",
-            "max_pool_size": "MAX_POOL_SIZE",
             "conv_stride": "CONV_STRIDE",
             "head_type": "HEAD_TYPE",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
@@ -2298,7 +2288,6 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
-            "MAX_POOL_SIZE",
             "CONV_STRIDE",
             "HEAD_TYPE",
             "DROPOUT",
@@ -2367,7 +2356,6 @@ SPECS: dict[str, WrapperSpec] = {
             "kernel_sizes": "KERNEL_SIZES",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
-            "max_pool_size": "MAX_POOL_SIZE",
             "conv_stride": "CONV_STRIDE",
             "head_type": "HEAD_TYPE",
             "fusion_mode": "FUSION_MODE",
@@ -2400,7 +2388,6 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
-            "MAX_POOL_SIZE",
             "CONV_STRIDE",
             "HEAD_TYPE",
             "FUSION_MODE",
@@ -2523,7 +2510,6 @@ SPECS: dict[str, WrapperSpec] = {
             "loss": "LOSS",
             "conv_channels": "CONV_CHANNELS",
             "kernel_sizes": "KERNEL_SIZES",
-            "max_pool_size": "MAX_POOL_SIZE",
             "head_type": "HEAD_TYPE",
             "donor_kernel_sizes": "DONOR_KERNEL_SIZES",
             "acceptor_kernel_sizes": "ACCEPTOR_KERNEL_SIZES",
@@ -2555,7 +2541,6 @@ SPECS: dict[str, WrapperSpec] = {
             "LOSS",
             "CONV_CHANNELS",
             "KERNEL_SIZES",
-            "MAX_POOL_SIZE",
             "HEAD_TYPE",
             "DROPOUT",
             "FC_HIDDEN",

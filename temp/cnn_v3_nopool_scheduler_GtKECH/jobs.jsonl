@@ -1,0 +1,2 @@
+{"species": "Hsap", "target_name": "acceptor", "seed": 1337, "tuning_model_name": "cnn_v3_nopool", "template_config_path": "temp/cnn_v3_nopool_scheduler_GtKECH/Hsap_acceptor_seed1337.template.json", "output_parent_dir": "data/Hsap/tuning/cnn_v3_nopool/acceptor", "plot_target_name": "acceptor"}
+{"species": "Hsap", "target_name": "donor", "seed": 1337, "tuning_model_name": "cnn_v3_nopool", "template_config_path": "temp/cnn_v3_nopool_scheduler_GtKECH/Hsap_donor_seed1337.template.json", "output_parent_dir": "data/Hsap/tuning/cnn_v3_nopool/donor", "plot_target_name": "donor"}
