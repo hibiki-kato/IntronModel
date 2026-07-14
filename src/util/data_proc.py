@@ -624,6 +624,57 @@ def list_available_train_lengths(train_dir: str) -> List[int]:
     return sorted(pos_lengths & neg_lengths)
 
 
+def _required_train_window_length(
+    donor_len: Optional[int],
+    acceptor_len: Optional[int],
+    donor_upstream: Optional[int] = None,
+    donor_downstream: Optional[int] = None,
+    acceptor_upstream: Optional[int] = None,
+    acceptor_downstream: Optional[int] = None,
+) -> Optional[int]:
+    """Return the largest requested site window length, if one was specified."""
+    requested = [length for length in (donor_len, acceptor_len) if length is not None]
+    if donor_upstream is not None and donor_downstream is not None:
+        requested.append(donor_upstream + donor_downstream)
+    if acceptor_upstream is not None and acceptor_downstream is not None:
+        requested.append(acceptor_upstream + acceptor_downstream)
+    return max(requested) if requested else None
+
+
+def _first_site_sequence_length(path: str) -> Optional[int]:
+    """Return the first DEBUG site-sequence length from one processed ERR file."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 3 and fields[0] == "DEBUG":
+                    return len(fields[2])
+    except OSError:
+        return None
+    return None
+
+
+def _infer_processed_site_flank_paths(
+    processed_dir: str,
+    required_len: Optional[int],
+) -> Optional[Tuple[str, str, int]]:
+    """Resolve generated 100-nt-per-side data when a full 200-nt window is requested."""
+    if required_len is None:
+        return None
+    pos_path = os.path.join(processed_dir, "site_flank100.coding.err")
+    neg_path = os.path.join(processed_dir, "site_flank100.neg.err")
+    if not (os.path.isfile(pos_path) and os.path.isfile(neg_path)):
+        return None
+    pos_len = _first_site_sequence_length(pos_path)
+    neg_len = _first_site_sequence_length(neg_path)
+    if pos_len is None or neg_len is None:
+        return None
+    available_len = min(pos_len, neg_len)
+    if available_len < required_len:
+        return None
+    return pos_path, neg_path, available_len
+
+
 def infer_default_train_paths(
     train_dir: str,
     donor_len: Optional[int],
@@ -640,13 +691,15 @@ def infer_default_train_paths(
             f"{train_dir}. Expected <N>bp.err and <N>bp.neg.err."
         )
 
-    requested = [x for x in [donor_len, acceptor_len] if x is not None]
-    if donor_upstream is not None and donor_downstream is not None:
-        requested.append(donor_upstream + donor_downstream)
-    if acceptor_upstream is not None and acceptor_downstream is not None:
-        requested.append(acceptor_upstream + acceptor_downstream)
-    if requested:
-        required_len = max(requested)
+    required_len = _required_train_window_length(
+        donor_len=donor_len,
+        acceptor_len=acceptor_len,
+        donor_upstream=donor_upstream,
+        donor_downstream=donor_downstream,
+        acceptor_upstream=acceptor_upstream,
+        acceptor_downstream=acceptor_downstream,
+    )
+    if required_len is not None:
         candidates = [x for x in available if x >= required_len]
         if not candidates:
             raise ValueError(
@@ -680,15 +733,31 @@ def resolve_train_paths(
     default_neg = None
 
     if train_pos_path is None or train_neg_path is None:
-        default_pos, default_neg, inferred_train_len = infer_default_train_paths(
-            train_dir=dirs["raw"],
-            donor_len=donor_len,
-            acceptor_len=acceptor_len,
-            donor_upstream=donor_upstream,
-            donor_downstream=donor_downstream,
-            acceptor_upstream=acceptor_upstream,
-            acceptor_downstream=acceptor_downstream,
-        )
+        try:
+            default_pos, default_neg, inferred_train_len = infer_default_train_paths(
+                train_dir=dirs["raw"],
+                donor_len=donor_len,
+                acceptor_len=acceptor_len,
+                donor_upstream=donor_upstream,
+                donor_downstream=donor_downstream,
+                acceptor_upstream=acceptor_upstream,
+                acceptor_downstream=acceptor_downstream,
+            )
+        except ValueError as raw_error:
+            required_len = _required_train_window_length(
+                donor_len=donor_len,
+                acceptor_len=acceptor_len,
+                donor_upstream=donor_upstream,
+                donor_downstream=donor_downstream,
+                acceptor_upstream=acceptor_upstream,
+                acceptor_downstream=acceptor_downstream,
+            )
+            processed_paths = _infer_processed_site_flank_paths(
+                dirs["processed"], required_len
+            )
+            if processed_paths is None:
+                raise raw_error
+            default_pos, default_neg, inferred_train_len = processed_paths
 
     pos_path = train_pos_path or default_pos
     neg_path = train_neg_path or default_neg

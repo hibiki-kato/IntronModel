@@ -102,3 +102,35 @@ def test_resolve_train_paths_uses_four_flank_required_length(
     assert Path(pos_path) == species_root / "150bp.err"
     assert Path(neg_path) == species_root / "150bp.neg.err"
     assert inferred_len == 150
+
+
+def test_resolve_train_paths_falls_back_to_processed_full_flanks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("INTRONMODEL_DATA_ROOT", str(tmp_path))
+    raw_dir = tmp_path / "Dmel" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "100bp.err").write_text("DEBUG donor AAAA +\n", encoding="utf-8")
+    (raw_dir / "100bp.neg.err").write_text("DEBUG donor CCCC +\n", encoding="utf-8")
+    processed_dir = tmp_path / "Dmel" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    sequence = "A" * 200
+    (processed_dir / "site_flank100.coding.err").write_text(
+        f"DEBUG donor {sequence} +\n", encoding="utf-8"
+    )
+    (processed_dir / "site_flank100.neg.err").write_text(
+        f"DEBUG donor {sequence} +\n", encoding="utf-8"
+    )
+
+    pos_path, neg_path, inferred_len = data_proc.resolve_train_paths(
+        species="Dmel",
+        train_pos_path=None,
+        train_neg_path=None,
+        donor_len=200,
+        acceptor_len=200,
+    )
+
+    assert Path(pos_path) == processed_dir / "site_flank100.coding.err"
+    assert Path(neg_path) == processed_dir / "site_flank100.neg.err"
+    assert inferred_len == 200
