@@ -900,8 +900,28 @@ def _resolve_explicit_test_request_context(
     donor_downstream: Optional[int],
     acceptor_upstream: Optional[int],
     acceptor_downstream: Optional[int],
+    source_upstream: int,
+    source_downstream: int,
 ) -> tuple[Optional[int], Optional[int]]:
     """Resolve requested upstream/downstream context for explicit-window TSV rows."""
+    requested_len = donor_len if site_type == "donor" else acceptor_len
+    if (
+        requested_len is not None
+        and requested_len == source_upstream + source_downstream
+        and (
+            (site_type == "donor" and donor_upstream is None and donor_downstream is None)
+            or (
+                site_type == "acceptor"
+                and acceptor_upstream is None
+                and acceptor_downstream is None
+            )
+        )
+    ):
+        # An explicit TSV already supplies exactly the requested window.
+        # Preserve its splice-site alignment instead of applying the legacy
+        # 5-bp-exon convention used by shorter historical CNN windows.
+        return source_upstream, source_downstream
+
     if site_type == "donor":
         if donor_upstream is not None or donor_downstream is not None:
             return donor_upstream, donor_downstream
@@ -997,6 +1017,8 @@ def _reshape_or_pad_test_site_sequence(
             donor_downstream=donor_downstream,
             acceptor_upstream=acceptor_upstream,
             acceptor_downstream=acceptor_downstream,
+            source_upstream=source_upstream,
+            source_downstream=source_downstream,
         )
         return _reshape_explicit_test_site_sequence(
             seq=seq,

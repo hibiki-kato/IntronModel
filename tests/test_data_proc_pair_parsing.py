@@ -663,3 +663,32 @@ def test_read_test_site_rows_maps_explicit_context_to_legacy_model_windows(
         },
     ]
     assert skipped_short == 0
+
+
+def test_read_test_site_rows_preserves_matching_explicit_context(
+    tmp_path: Path,
+) -> None:
+    """A 200nt request must retain the explicit 100/100 splice alignment."""
+    tsv_path = tmp_path / "transcripts.unique.tsv"
+    donor_seq = ("A" * 100) + ("GT" + ("C" * 98))
+    acceptor_seq = (("G" * 98) + "AG") + ("T" * 100)
+    _write_text(
+        tsv_path,
+        "\n".join(
+            [
+                "transcript_id\tsite_type\tintron_index\tupstream_bp\tdownstream_bp\tseq",
+                f"tx1\tdonor\t1\t100\t100\t{donor_seq}",
+                f"tx1\tacceptor\t1\t100\t100\t{acceptor_seq}",
+                "",
+            ]
+        ),
+    )
+
+    rows, skipped_short = read_test_site_rows(
+        test_tsv=str(tsv_path), donor_len=200, acceptor_len=200
+    )
+
+    assert [row["seq"] for row in rows] == [donor_seq, acceptor_seq]
+    assert rows[0]["seq"][100:102] == "GT"
+    assert rows[1]["seq"][98:100] == "AG"
+    assert skipped_short == 0
