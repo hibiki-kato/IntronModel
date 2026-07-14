@@ -8,7 +8,8 @@ import torch.nn.functional as F
 
 from dev.IntronModel.src.models import cnn_v3, cnn_v4
 from dev.IntronModel.src.models.cnn_pair_v3 import OrganicBranchLayout
-from dev.IntronModel.src.models.registry import available_models
+from dev.IntronModel.src.models.registry import available_models, load_model_module
+from dev.IntronModel.src.run_model import _build_checkpoint_paths
 
 
 def _arch() -> cnn_v3.TaskOrganicArchParams:
@@ -68,3 +69,18 @@ def test_resolve_task_deformable_params_prefers_task_override() -> None:
 
 def test_cnn_v4_is_registered() -> None:
     assert "cnn_v4" in available_models()
+
+
+def test_cnn_v4_registry_loads_common_model_contract() -> None:
+    module = load_model_module("cnn_v4")
+    assert callable(module.train)
+    assert callable(module.infer_site)
+
+
+def test_checkpoint_paths_are_species_local() -> None:
+    hsap = _build_checkpoint_paths("Hsap", "cnn_v4_unit")
+    dmel = _build_checkpoint_paths("Dmel", "cnn_v4_unit")
+
+    assert hsap["donor"] != dmel["donor"]
+    assert "/Hsap/donor/" in hsap["donor"]
+    assert "/Dmel/donor/" in dmel["donor"]
