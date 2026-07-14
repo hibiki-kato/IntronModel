@@ -84,3 +84,36 @@ def test_checkpoint_paths_are_species_local() -> None:
     assert hsap["donor"] != dmel["donor"]
     assert "/Hsap/donor/" in hsap["donor"]
     assert "/Dmel/donor/" in dmel["donor"]
+
+
+def test_cnn_v4_checkpoint_round_trip(tmp_path: Path) -> None:
+    params = cnn_v4.GroupedDeformableParams(groups=2, kernel_size=3)
+    model = cnn_v4.OrganicSiteCNN(arch_params=_arch(), dropout=0.1, deformable_params=params)
+    model.eval()
+    checkpoint_path = tmp_path / "Hsap_donor.pt"
+    torch.save(
+        {
+            "task": "donor",
+            "window_len": 31,
+            "model_config": {
+                "site_arch": "organic_resdil_grouped_deformable",
+                "conv_channels": [8, 8],
+                "kernel_sizes": [3, 3],
+                "block_dilations": [1, 1],
+                "residual_channels": [4, 4],
+                "head_type": "gap",
+                "dropout": 0.1,
+                "fc_hidden": 8,
+                "deformable_groups": 2,
+                "deformable_kernel_size": 3,
+            },
+            "model_state": model.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    loaded, payload = cnn_v4.load_task_model(str(checkpoint_path), "cpu")
+    x = torch.randn(2, 4, 31)
+
+    assert payload["window_len"] == 31
+    assert torch.allclose(model(x), loaded(x))
