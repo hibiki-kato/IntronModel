@@ -117,3 +117,49 @@ def test_cnn_v4_checkpoint_round_trip(tmp_path: Path) -> None:
 
     assert payload["window_len"] == 31
     assert torch.allclose(model(x), loaded(x))
+
+
+def test_train_decorates_species_local_checkpoint_as_cnn_v4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint_path = tmp_path / "model" / "Hsap" / "donor" / "cnn_v4.pt"
+    model_args = argparse.Namespace(
+        conv_channels="8,8", donor_conv_channels=None, acceptor_conv_channels=None,
+        kernel_sizes="3,3", donor_kernel_sizes=None, acceptor_kernel_sizes=None,
+        block_dilations="1,1", donor_block_dilations=None, acceptor_block_dilations=None,
+        residual_channels="4,4", donor_residual_channels=None, acceptor_residual_channels=None,
+        head_type="gap", donor_head_type=None, acceptor_head_type=None, fc_hidden=8,
+        donor_fc_hidden=None, acceptor_fc_hidden=None, deformable_groups=2,
+        donor_deformable_groups=None, acceptor_deformable_groups=None,
+        deformable_kernel_size=3, donor_deformable_kernel_size=None,
+        acceptor_deformable_kernel_size=None,
+    )
+
+    def fake_v3_train(common_args: object, received_args: argparse.Namespace) -> dict[str, object]:
+        del common_args
+        arch = cnn_v3._resolve_task_arch_params("donor", received_args)
+        model = cnn_v3.OrganicSiteCNN(arch_params=arch, dropout=0.1)
+        checkpoint_path.parent.mkdir(parents=True)
+        torch.save(
+            {
+                "task": "donor",
+                "model_config": {
+                    "site_arch": "organic_resdil",
+                    "conv_channels": [8, 8], "kernel_sizes": [3, 3],
+                    "block_dilations": [1, 1], "residual_channels": [4, 4],
+                    "head_type": "gap", "dropout": 0.1, "fc_hidden": 8,
+                },
+                "model_state": model.state_dict(),
+            },
+            checkpoint_path,
+        )
+        return {"model": "cnn_v3", "donor": {"checkpoint": str(checkpoint_path)}}
+
+    monkeypatch.setattr(cnn_v3, "train", fake_v3_train)
+    summary = cnn_v4.train(argparse.Namespace(species="Hsap"), model_args)
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+    assert summary["model"] == "cnn_v4"
+    assert payload["model_config"]["site_arch"] == "organic_resdil_grouped_deformable"
+    assert payload["model_config"]["deformable_groups"] == 2
+    assert "/Hsap/donor/" in str(checkpoint_path)
