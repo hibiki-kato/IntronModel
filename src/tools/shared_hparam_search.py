@@ -33,6 +33,7 @@ class SharedSearchConfig:
     data_root: Path
     output_dir: Path
     species: tuple[str, ...]
+    publish_best: bool
     task: str
     trials: int
     epochs: int
@@ -74,6 +75,9 @@ def load_config(path: Path) -> SharedSearchConfig:
     species = tuple(str(value).strip() for value in species_raw)
     if any(not value for value in species) or len(set(species)) != len(species):
         raise ValueError("species entries must be non-empty and unique.")
+    publish_best = raw.get("publish_best", True)
+    if not isinstance(publish_best, bool):
+        raise ValueError("publish_best must be a boolean.")
     task = str(raw.get("task", "")).strip().lower()
     if task not in {"donor", "acceptor"}:
         raise ValueError("task must be donor or acceptor.")
@@ -96,6 +100,7 @@ def load_config(path: Path) -> SharedSearchConfig:
         data_root=data_root,
         output_dir=output_dir,
         species=species,
+        publish_best=publish_best,
         task=task,
         trials=trials,
         epochs=epochs,
@@ -201,8 +206,7 @@ def run_search(
         print(f"[shared_hparam_search] trial={trial_id} status={row['status']} "
               f"objective={row.get('objective_score')}", flush=True)
     (config.output_dir / "trials.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
-    best_path = shared_best_config_path(config.data_root, config.task)
-    best_path.parent.mkdir(parents=True, exist_ok=True)
+    run_best_path = config.output_dir / "best_config.json"
     payload: dict[str, object] = {
         "status": "ok" if best_row is not None else "no_successful_trial",
         "model": "cnn_v4",
@@ -211,15 +215,21 @@ def run_search(
         "aggregation": "mean",
         "species": list(config.species),
         "provenance": {"search_output_dir": str(config.output_dir), "trials": config.trials,
-                       "seed": config.seed},
+                       "seed": config.seed, "published_to_shared_path": config.publish_best},
     }
     if best_row is not None:
         payload.update({"trial_id": best_row["trial_id"], "objective_score": best_row["objective_score"],
                         "sampled_params": best_row["sampled_params"], "species_trials": best_row["species_trials"],
                         "hparam_context": {"fixed_run_args": {"model": "cnn_v4", "train_target": config.task},
                                            "shared_across_species": list(config.species)}})
-    best_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(f"[shared_hparam_search] best_config={best_path}", flush=True)
+    run_best_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    if config.publish_best:
+        best_path = shared_best_config_path(config.data_root, config.task)
+        best_path.parent.mkdir(parents=True, exist_ok=True)
+        best_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"[shared_hparam_search] published_best_config={best_path}", flush=True)
+    else:
+        print(f"[shared_hparam_search] run_best_config={run_best_path} (not published)", flush=True)
     return 0 if best_row is not None else 1
 
 

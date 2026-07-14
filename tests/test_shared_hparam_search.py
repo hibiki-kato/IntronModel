@@ -14,6 +14,7 @@ def _config(tmp_path: Path) -> shared_hparam_search.SharedSearchConfig:
         data_root=tmp_path / "data",
         output_dir=tmp_path / "output",
         species=("Hsap", "Dmel"),
+        publish_best=True,
         task="donor",
         trials=2,
         epochs=1,
@@ -65,3 +66,19 @@ def test_run_search_does_not_publish_partial_species_trial(tmp_path: Path) -> No
     assert shared_hparam_search.run_search(config, species_runner=fake_runner) == 1
     payload = json.loads(shared_hparam_search.shared_best_config_path(tmp_path / "data", "donor").read_text())
     assert payload["status"] == "no_successful_trial"
+
+
+def test_run_search_can_keep_a_single_species_smoke_result_run_local(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config = shared_hparam_search.SharedSearchConfig(
+        **{**config.__dict__, "species": ("Dmel",), "publish_best": False}
+    )
+
+    def fake_runner(**kwargs: object) -> dict[str, object]:
+        return {"species": str(kwargs["species"]), "status": "success", "objective_score": 0.7}
+
+    assert shared_hparam_search.run_search(config, species_runner=fake_runner) == 0
+    run_payload = json.loads((config.output_dir / "best_config.json").read_text())
+    assert run_payload["species"] == ["Dmel"]
+    assert run_payload["provenance"]["published_to_shared_path"] is False
+    assert not shared_hparam_search.shared_best_config_path(tmp_path / "data", "donor").exists()

@@ -10,7 +10,13 @@ fi
 # CONFIG (edit here)
 # --------------------------
 INTRONMODEL_AUTO_TMUX="on"
-JOB_ORDER=("Hsap" "Dmel" "Mmus" "Athal")
+# The cohort used to rank one species-independent architecture/hparam set.
+# Quick smoke search: TUNING_SPECIES=("Dmel")
+# Production shared search: TUNING_SPECIES=("Hsap" "Dmel" "Mmus" "Athal")
+TUNING_SPECIES=("Hsap" "Dmel" "Mmus" "Athal")
+# Set to 0 for an exploratory cohort: retain its run-local best_config.json,
+# without replacing data/tuning/cnn_v4_shared/<task>/best_config.json.
+PUBLISH_BEST="1"
 TARGET_ORDER=("donor" "acceptor")
 TRIALS="24"
 EPOCHS="12"
@@ -57,6 +63,22 @@ if [[ ! "${TRIALS}" =~ ^[1-9][0-9]*$ || ! "${EPOCHS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "[tune_cnn_v4_time.sh] TRIALS and EPOCHS must be positive integers." >&2
     exit 1
 fi
+if [[ ! "${PUBLISH_BEST}" =~ ^[01]$ ]]; then
+    echo "[tune_cnn_v4_time.sh] PUBLISH_BEST must be 0 or 1." >&2
+    exit 1
+fi
+if [[ ${#TUNING_SPECIES[@]} -eq 0 ]]; then
+    echo "[tune_cnn_v4_time.sh] TUNING_SPECIES must contain at least one species." >&2
+    exit 1
+fi
+declare -A seen_tuning_species=()
+for species in "${TUNING_SPECIES[@]}"; do
+    if [[ -z "${species}" || -n "${seen_tuning_species[${species}]+x}" ]]; then
+        echo "[tune_cnn_v4_time.sh] TUNING_SPECIES entries must be non-empty and unique." >&2
+        exit 1
+    fi
+    seen_tuning_species["${species}"]=1
+done
 
 for task in "${TARGET_ORDER[@]}"; do
     if [[ "${task}" != "donor" && "${task}" != "acceptor" ]]; then
@@ -71,7 +93,7 @@ for task in "${TARGET_ORDER[@]}"; do
         "${DEFAULT_SEARCH_SPACE_JSON}" "${DEVICE}" "${BATCH_SIZE}" "${MIN_BATCH_SIZE}" \
         "${DONOR_LEN}" "${ACCEPTOR_LEN}" "${VAL_FRAC}" "${LOSS}" "${USE_AMP}" \
         "${AMP_DTYPE}" "${COMPILE_MODE}" "${TRAIN_POS_PATH}" "${TRAIN_NEG_PATH}" \
-        "${JOB_ORDER[@]}" <<'PYCONFIG'
+        "${PUBLISH_BEST}" "${TUNING_SPECIES[@]}" <<'PYCONFIG'
 from __future__ import annotations
 import json
 import sys
@@ -85,7 +107,8 @@ device, batch_size, min_batch_size = sys.argv[11:14]
 donor_len, acceptor_len, val_frac, loss = sys.argv[14:18]
 use_amp, amp_dtype, compile_mode = sys.argv[18:21]
 train_pos_path, train_neg_path = sys.argv[21:23]
-species = sys.argv[23:]
+publish_best = bool(int(sys.argv[23]))
+species = sys.argv[24:]
 base_args = {
     "model": "cnn_v4",
     "device": device,
@@ -109,6 +132,7 @@ config_path.write_text(json.dumps({
     "data_root": data_root,
     "output_dir": output_dir,
     "species": species,
+    "publish_best": publish_best,
     "task": task,
     "trials": trials,
     "epochs": epochs,
