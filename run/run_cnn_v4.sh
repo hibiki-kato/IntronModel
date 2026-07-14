@@ -95,6 +95,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 source "${SCRIPT_DIR}/lib/tuned_config.sh"
 intronmodel_activate_conda "intronmodel"
 intronmodel_init_paths "${BASH_SOURCE[0]}"
+export PYTHONPATH="${PROJECT_ROOT}/../..:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 intronmodel_enable_auto_tmux "${PROJECT_ROOT}" "$0" "${BASH_SOURCE[0]##*/}"
 
 trap 'intronmodel_abort_parallel_run' INT TERM HUP
