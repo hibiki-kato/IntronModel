@@ -1,0 +1,47 @@
+{
+  "status": "ok",
+  "model": "cnn_v4",
+  "config_version": "cnn_v4.0",
+  "configuration_kind": "untuned_baseline",
+  "task": "donor",
+  "objective_metric": "not_tuned",
+  "objective_score": null,
+  "aggregation": "not_applicable",
+  "species": [],
+  "sampled_params": {
+    "batch_size": 512,
+    "lr": 0.0005,
+    "loss": "focal",
+    "conv_channels": "64,128,256",
+    "kernel_sizes": "7,7,7",
+    "head_type": "gap",
+    "dropout": 0.3,
+    "fc_hidden": 128,
+    "block_dilations": "1,2,4",
+    "residual_channels": "32,64,96",
+    "deformable_groups": 2,
+    "deformable_kernel_size": 3,
+    "weight_decay": 0.01,
+    "eta_min_ratio": 0.01,
+    "val_frac": 0.2,
+    "grad_clip": 5.0,
+    "pos_weight_cap": 20.0,
+    "focal_gamma": 2.0
+  },
+  "hparam_context": {
+    "fixed_run_args": {
+      "model": "cnn_v4",
+      "pair_mode": "independent",
+      "train_target": "donor",
+      "donor_len": 200,
+      "acceptor_len": 200
+    },
+    "shared_across_species": []
+  },
+  "provenance": {
+    "source": "hand-authored initial cnn_v4 configuration",
+    "tuned": false,
+    "input_context": "site_flank100: 100 nt upstream + 100 nt downstream",
+    "replaces": null
+  }
+}

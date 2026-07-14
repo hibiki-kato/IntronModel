@@ -17,8 +17,9 @@ INTRONMODEL_AUTO_TMUX="on"
 DEVICE="auto"
 GPU_IDS="auto"            # auto: detect visible GPUs for species parallel.
 MAX_PARALLEL_TRIALS="auto"  # auto: use one concurrent species per GPU id.
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
+# site_flank100 stores 100 nt on each side of the splice site (200 nt total).
+DONOR_LEN="200"
+ACCEPTOR_LEN="200"
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 TEST_TSV_PATH=""

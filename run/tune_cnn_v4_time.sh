@@ -25,8 +25,9 @@ OBJECTIVE_METRIC="max_f1"  # pr_auc | roc_auc | max_f1
 DEVICE="auto"
 BATCH_SIZE="512"
 MIN_BATCH_SIZE="64"
-DONOR_LEN="100"
-ACCEPTOR_LEN="100"
+# site_flank100 stores 100 nt on each side of the splice site (200 nt total).
+DONOR_LEN="200"
+ACCEPTOR_LEN="200"
 TRAIN_POS_PATH=""
 TRAIN_NEG_PATH=""
 VAL_FRAC="0.2"
